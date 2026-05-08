@@ -196,6 +196,11 @@ def test_hr_report_data_totals_groups_and_employee_rows():
         "payroll_records": 2,
         "gross_salary": 5000.0,
         "bonuses": 200.0,
+        "total_outstanding_loans": 0.0,
+        "total_loan_deductions": 0.0,
+        "total_day_deduction_days": 0.0,
+        "total_day_deductions": 0.0,
+        "total_manual_deductions": 0.0,
         "deductions": 150.0,
         "net_salary": 5050.0,
         "paid_salary": 3150.0,
@@ -228,11 +233,19 @@ def test_hr_report_data_totals_groups_and_employee_rows():
     assert employees["Mona Field"]["days_worked"] == 20
     assert employees["Mona Field"]["working_days"] == 22
     assert employees["Mona Field"]["bonuses"] == 200.0
+    assert employees["Mona Field"]["outstanding_loan_balance"] == 0.0
+    assert employees["Mona Field"]["loan_deductions"] == 0.0
+    assert employees["Mona Field"]["day_deduction_days"] == 0.0
+    assert employees["Mona Field"]["day_deductions"] == 0.0
+    assert employees["Mona Field"]["manual_deductions"] == 0.0
+    assert employees["Mona Field"]["total_deductions"] == 50.0
     assert employees["Mona Field"]["deductions"] == 50.0
     assert employees["Mona Field"]["net_salary"] == 3150.0
     assert employees["Mona Field"]["paid"] is True
     assert employees["Ali Admin"]["paid"] is False
     assert employees["Omar Seasonal"]["payroll_period"] == "—"
+    assert data["loans"] == []
+    assert data["deduction_history"] == []
     assert data["total_rows"] == 3
 
 
@@ -267,7 +280,7 @@ def test_hr_export_returns_xlsx_with_expected_sheets():
         workbook = openpyxl.load_workbook(io.BytesIO(run(read_streaming_response(response))), data_only=True)
 
     assert response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    assert workbook.sheetnames == ["HR Summary", "By Department", "By Farm", "Employees"]
+    assert workbook.sheetnames == ["HR Summary", "By Department", "By Farm", "Employees", "Loan History", "Deductions"]
 
 
 def test_hr_report_api_requires_hr_tab_permission():

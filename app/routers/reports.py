@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, inspect, literal, or_, select
 from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
+from types import SimpleNamespace
 from typing import Optional
 import io
 import re
@@ -255,6 +256,29 @@ def _num(value) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+async def _schema_has_columns(db: AsyncSession, required: dict[str, set[str]]) -> bool:
+    def inspect_schema(sync_session):
+        inspector = inspect(sync_session.get_bind())
+        table_names = set(inspector.get_table_names())
+        for table_name, column_names in required.items():
+            if table_name not in table_names:
+                return False
+            existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+            if column_names - existing_columns:
+                return False
+        return True
+
+    try:
+        if hasattr(db, "run_sync"):
+            return await db.run_sync(inspect_schema)
+        sync_session = getattr(db, "session", None)
+        if sync_session is not None:
+            return inspect_schema(sync_session)
+    except Exception:
+        return False
+    return False
 
 
 def _transaction_sort_value(value) -> datetime:
@@ -1916,13 +1940,64 @@ async def _build_hr_report(
         attendance_res = await db.execute(attendance_stmt)
         attendance_records = attendance_res.scalars().all()
 
+    payroll_deduction_columns_available = await _schema_has_columns(db, {
+        "payroll": {
+            "loan_deductions",
+            "day_deduction_days",
+            "day_deductions",
+            "manual_deductions",
+        },
+    })
+    hr_ledger_tables_available = await _schema_has_columns(db, {
+        "employee_loans": {"id", "employee_id", "loan_date", "amount", "description", "status"},
+        "employee_loan_repayments": {"id", "loan_id", "amount"},
+        "employee_payroll_deductions": {
+            "id",
+            "employee_id",
+            "payroll_id",
+            "period",
+            "type",
+            "days",
+            "daily_rate",
+            "amount",
+            "note",
+            "created_at",
+        },
+    })
+
     payroll_records = []
     if periods and (not has_employee_filter or filtered_employee_ids):
-        payroll_stmt = select(Payroll).where(Payroll.period.in_(periods))
+        payroll_columns = [
+            Payroll.id,
+            Payroll.employee_id,
+            Payroll.period,
+            Payroll.base_salary,
+            Payroll.bonuses,
+            Payroll.deductions,
+            Payroll.net_salary,
+            Payroll.paid,
+            Payroll.days_worked,
+            Payroll.working_days,
+        ]
+        if payroll_deduction_columns_available:
+            payroll_columns.extend([
+                Payroll.loan_deductions,
+                Payroll.day_deduction_days,
+                Payroll.day_deductions,
+                Payroll.manual_deductions,
+            ])
+        else:
+            payroll_columns.extend([
+                literal(0).label("loan_deductions"),
+                literal(0).label("day_deduction_days"),
+                literal(0).label("day_deductions"),
+                literal(0).label("manual_deductions"),
+            ])
+        payroll_stmt = select(*payroll_columns).where(Payroll.period.in_(periods))
         if has_employee_filter:
             payroll_stmt = payroll_stmt.where(Payroll.employee_id.in_(filtered_employee_ids))
         payroll_res = await db.execute(payroll_stmt)
-        payroll_records = payroll_res.scalars().all()
+        payroll_records = [SimpleNamespace(**dict(row._mapping)) for row in payroll_res.all()]
 
     active_ids = {employee.id for employee in employee_map.values() if employee.is_active}
     attendance_employee_ids = {record.employee_id for record in attendance_records}
@@ -1933,7 +2008,7 @@ async def _build_hr_report(
     loan_balance_by_employee = defaultdict(float)
     loan_history = []
     deduction_history = []
-    if included_ids:
+    if included_ids and hr_ledger_tables_available:
         loans_res = await db.execute(
             select(EmployeeLoan)
             .where(EmployeeLoan.employee_id.in_(included_ids))
