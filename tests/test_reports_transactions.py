@@ -70,7 +70,7 @@ def make_linked_product_expense(
     receipt = SimpleNamespace(
         id=9,
         ref_number="REC-00009",
-        product=SimpleNamespace(id=3, sku="SKU-PROD", name="Olive Oil"),
+        product=SimpleNamespace(id=3, sku="SKU-PROD", name="Olive Oil", category="Oils"),
         user=user,
         receive_date=business_date,
         qty=Decimal("5"),
@@ -109,6 +109,7 @@ def test_transactions_expense_source_includes_receipt_linked_products_expense():
     assert data["rows"][0]["transaction_type"] == "Expense"
     assert data["rows"][0]["reference"] == "EXP-00042"
     assert data["rows"][0]["product"] == "Products"
+    assert data["rows"][0]["product_category"] == "—"
     assert data["rows"][0]["money_effect"] == -123.45
     assert "_sort_date" not in data["rows"][0]
 
@@ -141,6 +142,7 @@ def test_transactions_all_sources_counts_receipt_linked_expense_once_as_receive(
     assert data["rows"][0]["source"] == "Receive"
     assert data["rows"][0]["transaction_type"] == "Stock Receipt"
     assert data["rows"][0]["reference"] == "REC-00009"
+    assert data["rows"][0]["product_category"] == "Oils"
     assert data["rows"][0]["money_effect"] == -123.45
     assert [row["source"] for row in data["rows"]] == ["Receive"]
     assert "_sort_date" not in data["rows"][0]
@@ -254,6 +256,9 @@ def test_transactions_export_uses_fixed_receive_date():
     workbook = openpyxl.load_workbook(io.BytesIO(run(read_streaming_response(response))), data_only=True)
     sheet = workbook["Transactions"]
     exported_rows = list(sheet.iter_rows(values_only=True))
+    headers = next(row for row in exported_rows if row[0] == "Date")
     receipt_row = next(row for row in exported_rows if row[1] == "REC-00009")
 
+    assert "Product Category" in headers
     assert receipt_row[0] == "2024-02-10"
+    assert receipt_row[9] == "Oils"

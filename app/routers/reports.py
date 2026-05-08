@@ -14,7 +14,7 @@ from app.core.permissions import require_permission
 from app.database import get_async_session
 from app.core.navigation import render_app_header
 from app.models.product import Product
-from app.models.invoice import Invoice
+from app.models.invoice import Invoice, InvoiceItem
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund
 from app.models.inventory import StockMove
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
@@ -256,6 +256,11 @@ def _num(value) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _product_category(product) -> str:
+    category = getattr(product, "category", None)
+    return category or "â€”"
 
 
 async def _schema_has_columns(db: AsyncSession, required: dict[str, set[str]]) -> bool:
@@ -1629,10 +1634,11 @@ async def _build_transactions_report(
         pos_res = await db.execute(
             select(Invoice)
             .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to)
-            .options(selectinload(Invoice.items), selectinload(Invoice.user), selectinload(Invoice.customer))
+            .options(selectinload(Invoice.items).selectinload(InvoiceItem.product), selectinload(Invoice.user), selectinload(Invoice.customer))
         )
         for inv in pos_res.scalars().all():
             for item in inv.items:
+                product = getattr(item, "product", None)
                 rows.append({
                     "date": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
                     "_sort_date": _transaction_sort_value(inv.created_at),
@@ -1643,6 +1649,7 @@ async def _build_transactions_report(
                     "counterparty_name": inv.customer.name if inv.customer else "Walk-in",
                     "sku": item.sku or "—",
                     "product": item.name or "—",
+                    "product_category": _product_category(product),
                     "qty": _num(item.qty),
                     "unit_price": _num(item.unit_price),
                     "money_effect": _num(item.total),
@@ -1662,7 +1669,7 @@ async def _build_transactions_report(
         )
         for inv in b2b_res.scalars().all():
             for item in inv.items:
-                product = item.product
+                product = getattr(item, "product", None)
                 rows.append({
                     "date": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
                     "_sort_date": _transaction_sort_value(inv.created_at),
@@ -1673,6 +1680,7 @@ async def _build_transactions_report(
                     "counterparty_name": inv.client.name if inv.client else "—",
                     "sku": product.sku if product else "—",
                     "product": product.name if product else "—",
+                    "product_category": _product_category(product),
                     "qty": _num(item.qty),
                     "unit_price": _num(item.unit_price),
                     "money_effect": _num(item.total),
@@ -1694,6 +1702,7 @@ async def _build_transactions_report(
                 "counterparty_name": payment["client"],
                 "sku": "—",
                 "product": "Consignment client payment",
+                "product_category": "—",
                 "qty": 0.0,
                 "unit_price": payment["amount"],
                 "money_effect": payment["amount"],
@@ -1713,7 +1722,7 @@ async def _build_transactions_report(
         )
         for refund in refund_res.scalars().all():
             for item in refund.items:
-                product = item.product
+                product = getattr(item, "product", None)
                 rows.append({
                     "date": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "—",
                     "_sort_date": _transaction_sort_value(refund.created_at),
@@ -1724,6 +1733,7 @@ async def _build_transactions_report(
                     "counterparty_name": refund.customer.name if refund.customer else "—",
                     "sku": product.sku if product else "—",
                     "product": product.name if product else "—",
+                    "product_category": _product_category(product),
                     "qty": _num(item.qty),
                     "unit_price": _num(item.unit_price),
                     "money_effect": -_num(item.total),
@@ -1742,7 +1752,7 @@ async def _build_transactions_report(
             .options(selectinload(ProductReceipt.product), selectinload(ProductReceipt.user), selectinload(ProductReceipt.expense))
         )
         for rec in rec_res.scalars().all():
-            product = rec.product
+            product = getattr(rec, "product", None)
             rows.append({
                 "date": rec.receive_date.isoformat() if rec.receive_date else "—",
                 "_sort_date": _transaction_sort_value(rec.receive_date),
@@ -1753,6 +1763,7 @@ async def _build_transactions_report(
                 "counterparty_name": rec.supplier_ref or "—",
                 "sku": product.sku if product else "—",
                 "product": product.name if product else "—",
+                "product_category": _product_category(product),
                 "qty": _num(rec.qty),
                 "unit_price": _num(rec.unit_cost),
                 "money_effect": -_num(rec.total_cost),
@@ -1788,6 +1799,7 @@ async def _build_transactions_report(
                 "counterparty_name": exp.vendor or "—",
                 "sku": "—",
                 "product": exp.category.name if exp.category else "Expense",
+                "product_category": "—",
                 "qty": 0.0,
                 "unit_price": _num(exp.amount),
                 "money_effect": -_num(exp.amount),
@@ -1845,8 +1857,8 @@ async def export_transactions(date_from: str = None, date_to: str = None, source
         {
             "sheet_name": "Transactions",
             "report_title": "Transaction Detail",
-            "headers": ["Date","Reference","Transaction Type","Source","Counterparty Type","Counterparty","Performed By","SKU","Product","Qty","Unit Price","Money Effect","Stock Effect","Direction","Payment Method","Status","Notes"],
-            "rows": [[r["date"], r["reference"], r["transaction_type"], r["source"], r["counterparty_type"], r["counterparty_name"], r["user_name"], r["sku"], r["product"], r["qty"], r["unit_price"], r["money_effect"], r["stock_effect"], r["direction"], r["payment_method"], r["status"], r["notes"]] for r in data["rows"]],
+            "headers": ["Date","Reference","Transaction Type","Source","Counterparty Type","Counterparty","Performed By","SKU","Product","Product Category","Qty","Unit Price","Money Effect","Stock Effect","Direction","Payment Method","Status","Notes"],
+            "rows": [[r["date"], r["reference"], r["transaction_type"], r["source"], r["counterparty_type"], r["counterparty_name"], r["user_name"], r["sku"], r["product"], r["product_category"], r["qty"], r["unit_price"], r["money_effect"], r["stock_effect"], r["direction"], r["payment_method"], r["status"], r["notes"]] for r in data["rows"]],
             "metadata": [("Date Range", f"{d_from.strftime('%Y-%m-%d')} to {d_to.strftime('%Y-%m-%d')}"), ("Source Filter", source or "All"), ("Rows Exported", data["total_rows"])],
             "column_formats": {"Date": "datetime", "Qty": "qty", "Unit Price": "money", "Money Effect": "money", "Stock Effect": "qty"},
             "wrap_columns": {"Notes"},
@@ -2632,7 +2644,7 @@ td.mono{font-family:var(--mono);}
             <table>
                 <thead><tr>
                     <th>Date</th><th>Invoice #</th><th>Source</th><th>Customer</th><th>By</th>
-                    <th>SKU</th><th>Product</th><th>QTY</th><th>Unit Price</th>
+                    <th>SKU</th><th>Product</th><th>Product Category</th><th>QTY</th><th>Unit Price</th>
                     <th>Line Total</th><th>Discount</th><th>Disc %</th>
                     <th>Payment</th><th>Inv. Total</th><th>Status</th>
                 </tr></thead>
@@ -3169,7 +3181,7 @@ async function loadTransactions(){
     }
     const txTableHead = document.querySelector("#tx-body")?.closest("table")?.querySelector("thead tr");
     if (txTableHead) {
-        txTableHead.innerHTML = "<th>Date</th><th>Reference</th><th>Type</th><th>Source</th><th>Counterparty Type</th><th>Counterparty</th><th>By</th><th>SKU</th><th>Product</th><th>Qty</th><th>Unit Price</th><th>Money Effect</th><th>Stock Effect</th><th>Direction</th><th>Payment</th><th>Status</th>";
+        txTableHead.innerHTML = "<th>Date</th><th>Reference</th><th>Type</th><th>Source</th><th>Counterparty Type</th><th>Counterparty</th><th>By</th><th>SKU</th><th>Product</th><th>Product Category</th><th>Qty</th><th>Unit Price</th><th>Money Effect</th><th>Stock Effect</th><th>Direction</th><th>Payment</th><th>Status</th>";
     }
     setPrintDates("ph-tx-dates", r.from, r.to);
     document.getElementById("tx-body").innerHTML = data.rows.length
@@ -3183,6 +3195,7 @@ async function loadTransactions(){
             <td style="font-size:12px;color:var(--muted)">${r.user_name}</td>
             <td class="mono" style="font-size:11px;color:var(--muted)">${r.sku}</td>
             <td>${r.product}${r.notes?`<br><span style="font-size:10px;color:var(--muted)">${r.notes}</span>`:""}</td>
+            <td>${r.product_category || "—"}</td>
             <td class="mono">${r.qty.toFixed(2)}</td>
             <td class="mono">${r.unit_price.toFixed(2)}</td>
             <td class="mono" style="color:${r.money_effect>=0?"var(--green)":"var(--danger)"};font-weight:700">${r.money_effect.toFixed(2)}</td>
@@ -3191,7 +3204,7 @@ async function loadTransactions(){
             <td>${r.payment_method}</td>
             <td>${r.status}</td>
         </tr>`).join("")
-        : `<tr><td colspan="16" style="text-align:center;color:var(--muted);padding:40px">No transactions in this period</td></tr>`;
+        : `<tr><td colspan="17" style="text-align:center;color:var(--muted);padding:40px">No transactions in this period</td></tr>`;
     return;
 
     document.getElementById("tx-count").innerText   = data.total_rows;
