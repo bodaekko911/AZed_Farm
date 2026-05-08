@@ -108,6 +108,21 @@ def _client_discount_pct(client: B2BClient) -> float:
     return float(client.discount_pct or 0)
 
 
+def _b2b_num(value) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _date_key(value) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    return datetime.min
+
+
 async def _load_client_payment_activity(
     db: AsyncSession,
     *,
@@ -969,6 +984,132 @@ async def get_stats(db: AsyncSession = Depends(get_async_session)):
         "active_consign":    r4.scalar() or 0,
     }
 
+
+@router.get("/api/client-analysis", dependencies=[Depends(require_permission("tab_b2b_clients"))])
+async def get_client_analysis(db: AsyncSession = Depends(get_async_session)):
+    clients_res = await db.execute(
+        select(B2BClient)
+        .where(B2BClient.is_active == True)
+        .options(selectinload(B2BClient.invoices))
+        .order_by(B2BClient.name)
+    )
+    clients = clients_res.scalars().all()
+
+    refunds_res = await db.execute(
+        select(
+            B2BRefund.client_id,
+            func.coalesce(func.sum(B2BRefund.total), 0).label("refund_total"),
+        )
+        .group_by(B2BRefund.client_id)
+    )
+    refunds_by_client = {
+        client_id: _b2b_num(refund_total)
+        for client_id, refund_total in refunds_res.all()
+    }
+
+    today = date.today()
+    client_rows = []
+    terms_breakdown = {}
+    for client in clients:
+        invoices = list(client.invoices or [])
+        invoice_count = len(invoices)
+        gross_sales = sum(_b2b_num(invoice.total) for invoice in invoices)
+        paid_amount = sum(_b2b_num(invoice.amount_paid) for invoice in invoices)
+        invoice_outstanding = sum(
+            max(_b2b_num(invoice.total) - _b2b_num(invoice.amount_paid), 0.0)
+            for invoice in invoices
+            if (invoice.status or "").lower() in {"unpaid", "partial"} or _b2b_num(invoice.total) > _b2b_num(invoice.amount_paid)
+        )
+        refund_total = refunds_by_client.get(client.id, 0.0)
+        outstanding = max(invoice_outstanding - refund_total, 0.0)
+        net_sales = gross_sales - refund_total
+        average_invoice = gross_sales / invoice_count if invoice_count else 0.0
+        payment_rate = (paid_amount / gross_sales * 100) if gross_sales > 0 else 0.0
+        last_invoice = max((_date_key(invoice.created_at) for invoice in invoices), default=datetime.min)
+        last_invoice_label = last_invoice.strftime("%Y-%m-%d") if last_invoice != datetime.min else "—"
+        days_since_last_invoice = (today - last_invoice.date()).days if last_invoice != datetime.min else None
+        credit_limit = _b2b_num(client.credit_limit)
+        credit_used_pct = (outstanding / credit_limit * 100) if credit_limit > 0 else None
+        terms = client.payment_terms or "cash"
+        terms_bucket = terms_breakdown.setdefault(terms, {"clients": 0, "gross_sales": 0.0, "outstanding": 0.0})
+        terms_bucket["clients"] += 1
+        terms_bucket["gross_sales"] += gross_sales
+        terms_bucket["outstanding"] += outstanding
+
+        if outstanding > 0 and credit_limit > 0 and outstanding > credit_limit:
+            risk_level = "over_limit"
+        elif outstanding > 0 and days_since_last_invoice is not None and days_since_last_invoice >= 45:
+            risk_level = "stale_outstanding"
+        elif outstanding > 0:
+            risk_level = "collect"
+        elif invoice_count == 0:
+            risk_level = "new"
+        elif days_since_last_invoice is not None and days_since_last_invoice >= 60:
+            risk_level = "quiet"
+        else:
+            risk_level = "healthy"
+
+        client_rows.append({
+            "id": client.id,
+            "name": client.name,
+            "contact_person": client.contact_person or "—",
+            "phone": client.phone or "—",
+            "payment_terms": terms,
+            "invoice_count": invoice_count,
+            "gross_sales": round(gross_sales, 2),
+            "refunds": round(refund_total, 2),
+            "net_sales": round(net_sales, 2),
+            "paid_amount": round(paid_amount, 2),
+            "outstanding": round(outstanding, 2),
+            "average_invoice": round(average_invoice, 2),
+            "payment_rate": round(payment_rate, 1),
+            "credit_limit": round(credit_limit, 2),
+            "credit_used_pct": round(credit_used_pct, 1) if credit_used_pct is not None else None,
+            "last_invoice": last_invoice_label,
+            "days_since_last_invoice": days_since_last_invoice,
+            "risk_level": risk_level,
+        })
+
+    total_gross = sum(row["gross_sales"] for row in client_rows)
+    total_refunds = sum(row["refunds"] for row in client_rows)
+    total_net = sum(row["net_sales"] for row in client_rows)
+    total_paid = sum(row["paid_amount"] for row in client_rows)
+    total_outstanding = sum(row["outstanding"] for row in client_rows)
+    top_client = max(client_rows, key=lambda row: row["net_sales"], default=None)
+    summary = {
+        "active_clients": len(client_rows),
+        "clients_with_sales": sum(1 for row in client_rows if row["invoice_count"] > 0),
+        "gross_sales": round(total_gross, 2),
+        "refunds": round(total_refunds, 2),
+        "net_sales": round(total_net, 2),
+        "paid_amount": round(total_paid, 2),
+        "outstanding": round(total_outstanding, 2),
+        "payment_rate": round((total_paid / total_gross * 100) if total_gross > 0 else 0.0, 1),
+        "at_risk_clients": sum(1 for row in client_rows if row["risk_level"] in {"over_limit", "stale_outstanding", "collect"}),
+        "top_client": top_client["name"] if top_client else "—",
+        "top_client_net_sales": top_client["net_sales"] if top_client else 0.0,
+    }
+    return {
+        "summary": summary,
+        "clients": sorted(client_rows, key=lambda row: row["net_sales"], reverse=True),
+        "top_clients": sorted(client_rows, key=lambda row: row["net_sales"], reverse=True)[:5],
+        "collection_watch": sorted(
+            [row for row in client_rows if row["outstanding"] > 0],
+            key=lambda row: row["outstanding"],
+            reverse=True,
+        )[:5],
+        "terms_breakdown": [
+            {
+                "payment_terms": terms,
+                "clients": data["clients"],
+                "gross_sales": round(data["gross_sales"], 2),
+                "outstanding": round(data["outstanding"], 2),
+            }
+            for terms, data in sorted(terms_breakdown.items())
+        ],
+    }
+
+
 @router.get("/api/products-list")
 async def products_list(client_id: int = None, db: AsyncSession = Depends(get_async_session)):
     _r = await db.execute(select(Product).where(Product.is_active == True).order_by(Product.name))
@@ -1442,6 +1583,27 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;pa
 .stat-value.warn  {color:var(--warn);}
 .stat-value.danger{color:var(--danger);}
 .stat-value.teal  {color:var(--teal);}
+.analysis-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;}
+.analysis-layout{display:grid;grid-template-columns:1.15fr .85fr;gap:14px;}
+.analysis-panel{background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;}
+.analysis-panel-head{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:12px;}
+.analysis-title{font-size:14px;font-weight:800;color:var(--text);}
+.analysis-sub{font-size:12px;color:var(--muted);margin-top:2px;}
+.analysis-list{display:flex;flex-direction:column;}
+.analysis-row{display:grid;grid-template-columns:minmax(130px,1fr) 96px 82px;gap:10px;align-items:center;padding:12px 16px;border-top:1px solid var(--border);}
+.analysis-row:first-child{border-top:none;}
+.analysis-client{min-width:0;}
+.analysis-client strong{display:block;color:var(--text);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.analysis-client span{display:block;color:var(--muted);font-size:11px;margin-top:2px;}
+.bar-track{height:7px;background:var(--card2);border-radius:999px;overflow:hidden;}
+.bar-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,var(--blue),var(--teal));}
+.risk-pill{display:inline-flex;padding:2px 8px;border-radius:999px;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.6px;}
+.risk-healthy{background:rgba(0,255,157,.1);color:var(--green);}
+.risk-new{background:rgba(77,159,255,.1);color:var(--blue);}
+.risk-quiet{background:rgba(255,181,71,.1);color:var(--warn);}
+.risk-collect,.risk-stale_outstanding{background:rgba(255,181,71,.12);color:var(--warn);}
+.risk-over_limit{background:rgba(255,77,109,.12);color:var(--danger);}
+@media(max-width:900px){.analysis-layout{grid-template-columns:1fr;}.analysis-row{grid-template-columns:1fr 80px;}.analysis-row .bar-track{display:none;}}
 .tabs{display:flex;gap:4px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:4px;flex-wrap:wrap;}
 .tab{padding:8px 18px;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;border:none;background:transparent;color:var(--muted);transition:all .2s;font-family:var(--sans);}
 .tab.active{background:var(--card2);color:var(--text);}
@@ -1560,6 +1722,7 @@ td.name{color:var(--text);font-weight:600;}
         <div class="tabs">
             <button class="tab active" id="tab-clients"    onclick="switchTab('clients')">Clients</button>
             <button class="tab"        id="tab-invoices"  onclick="switchTab('invoices')">Invoices</button>
+            <button class="tab"        id="tab-analysis"  onclick="switchTab('analysis')">Client Analysis</button>
             <button class="tab"        id="tab-refunds"   onclick="switchTab('refunds')">Client Refund</button>
             <button class="tab"        id="tab-pricelists" onclick="switchTab('pricelists')">&#127991; Price Lists</button>
         </div>
@@ -1582,6 +1745,58 @@ td.name{color:var(--text);font-weight:600;}
                 <thead><tr><th>Business</th><th>Contact</th><th>Phone</th><th>Default Terms</th><th>Discount %</th><th>Outstanding</th><th>Actions</th></tr></thead>
                 <tbody id="clients-body"><tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr></tbody>
             </table>
+        </div>
+    </div>
+
+    <!-- CLIENT ANALYSIS -->
+    <div id="section-analysis" style="display:none">
+        <div class="analysis-grid" style="margin-bottom:14px">
+            <div class="stat-card blue"><div class="stat-label">Net B2B Sales</div><div class="stat-value blue" id="ana-net-sales">—</div></div>
+            <div class="stat-card warn"><div class="stat-label">Outstanding</div><div class="stat-value warn" id="ana-outstanding">—</div></div>
+            <div class="stat-card teal"><div class="stat-label">Payment Rate</div><div class="stat-value teal" id="ana-payment-rate">—</div></div>
+            <div class="stat-card danger"><div class="stat-label">At-Risk Clients</div><div class="stat-value danger" id="ana-risk-count">—</div></div>
+        </div>
+
+        <div class="analysis-layout" style="margin-bottom:14px">
+            <div class="analysis-panel">
+                <div class="analysis-panel-head">
+                    <div><div class="analysis-title">Top Clients</div><div class="analysis-sub">Ranked by net sales after refunds</div></div>
+                </div>
+                <div class="analysis-list" id="analysis-top-clients"></div>
+            </div>
+            <div class="analysis-panel">
+                <div class="analysis-panel-head">
+                    <div><div class="analysis-title">Collection Watch</div><div class="analysis-sub">Largest unpaid balances</div></div>
+                </div>
+                <div class="analysis-list" id="analysis-collection-watch"></div>
+            </div>
+        </div>
+
+        <div class="table-wrap">
+            <div style="padding:16px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                <div>
+                    <div class="modal-title" style="margin-bottom:2px">Client Performance</div>
+                    <div class="modal-sub">Sales, collections, outstanding balance, credit usage, and recency by client.</div>
+                </div>
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                    <div class="search-box" style="min-width:220px;flex:0 1 260px">
+                        <input id="analysis-search" placeholder="Search clients..." oninput="renderClientAnalysis()">
+                    </div>
+                    <select id="analysis-sort" onchange="renderClientAnalysis()" style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:9px 12px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none">
+                        <option value="net_sales">Net sales</option>
+                        <option value="outstanding">Outstanding</option>
+                        <option value="invoice_count">Invoice count</option>
+                        <option value="payment_rate">Payment rate</option>
+                        <option value="last_invoice">Last invoice</option>
+                    </select>
+                </div>
+            </div>
+            <div style="overflow-x:auto">
+                <table>
+                    <thead><tr><th>Client</th><th>Terms</th><th>Invoices</th><th>Gross</th><th>Refunds</th><th>Net Sales</th><th>Paid</th><th>Outstanding</th><th>Payment Rate</th><th>Avg Invoice</th><th>Credit Used</th><th>Last Invoice</th><th>Status</th></tr></thead>
+                    <tbody id="analysis-body"><tr><td colspan="13" style="text-align:center;color:var(--muted);padding:40px">Open this tab to load client analysis.</td></tr></tbody>
+                </table>
+            </div>
         </div>
     </div>
 
@@ -1915,6 +2130,8 @@ async function logout(){
       if(!hasPermission("tab_b2b_clients", u)){
           let el = document.getElementById("tab-clients");
           if(el) el.style.display = "none";
+          let analysisEl = document.getElementById("tab-analysis");
+          if(analysisEl) analysisEl.style.display = "none";
       }
     if(!hasPermission("tab_b2b_invoices", u)){
           let el = document.getElementById("tab-invoices");
@@ -1934,6 +2151,7 @@ let refundProducts = [];
 let allClients    = [];
 let allInvoices   = [];
 let allRefunds    = [];
+let clientAnalysis = null;
 let selectedType  = "cash";
 let editingClientId  = null;
 let editingInvoiceId = null;
@@ -1973,12 +2191,13 @@ async function loadStats(){
 function switchTab(tab){
     const required = {
         clients: "tab_b2b_clients",
+        analysis: "tab_b2b_clients",
         invoices: "tab_b2b_invoices",
         refunds: "tab_b2b_invoices",
         consignments: "tab_b2b_consignment",
     };
     if(required[tab] && !hasPermission(required[tab])) return;
-    ["clients","invoices","refunds","consignments","pricelists"].forEach(t=>{
+    ["clients","analysis","invoices","refunds","consignments","pricelists"].forEach(t=>{
         let el = document.getElementById("section-"+t);
         if(el) el.style.display = t===tab?"":"none";
         let tb = document.getElementById("tab-"+t);
@@ -1986,9 +2205,126 @@ function switchTab(tab){
     });
     document.getElementById("btn-add-client").style.display  = tab==="clients"    ?"":"none";
     document.getElementById("btn-new-invoice").style.display = tab==="invoices"   ?"":"none";
+    if(tab==="analysis")   loadClientAnalysis();
     if(tab==="invoices")   loadInvoices();
     if(tab==="refunds")    prepareRefundTab();
     if(tab==="pricelists") initPriceListTab();
+}
+
+/* ── CLIENT ANALYSIS ── */
+function escHtml(value){
+    return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch]));
+}
+
+function fmtMoney(value){
+    return (Number(value) || 0).toFixed(2);
+}
+
+function riskLabel(risk){
+    return {
+        healthy: "Healthy",
+        new: "New",
+        quiet: "Quiet",
+        collect: "Collect",
+        stale_outstanding: "Stale",
+        over_limit: "Over limit",
+    }[risk] || "Review";
+}
+
+function termsLabel(type){
+    return {
+        cash: "Cash",
+        full_payment: "Full Payment",
+        consignment: "Consignment",
+    }[type] || type || "—";
+}
+
+async function loadClientAnalysis(){
+    const body = document.getElementById("analysis-body");
+    if(body) body.innerHTML = `<tr><td colspan="13" style="text-align:center;color:var(--muted);padding:40px">Loading client analysis...</td></tr>`;
+    try {
+        const res = await fetch("/b2b/api/client-analysis");
+        if(!res.ok) throw new Error(`API Error: ${res.status}`);
+        clientAnalysis = await res.json();
+        renderClientAnalysis();
+    } catch(err) {
+        console.error(err);
+        if(body) body.innerHTML = `<tr><td colspan="13" style="text-align:center;color:var(--danger);padding:40px">Error loading client analysis.</td></tr>`;
+    }
+}
+
+function renderAnalysisList(targetId, rows, valueKey, emptyText){
+    const el = document.getElementById(targetId);
+    if(!el) return;
+    if(!rows || !rows.length){
+        el.innerHTML = `<div style="padding:18px;color:var(--muted);font-size:13px">${emptyText}</div>`;
+        return;
+    }
+    const maxValue = Math.max(...rows.map(row => Number(row[valueKey]) || 0), 1);
+    el.innerHTML = rows.map(row => {
+        const value = Number(row[valueKey]) || 0;
+        const width = Math.max(4, Math.round((value / maxValue) * 100));
+        return `<div class="analysis-row">
+            <div class="analysis-client">
+                <strong>${escHtml(row.name)}</strong>
+                <span>${escHtml(termsLabel(row.payment_terms))} · ${row.invoice_count} invoices</span>
+            </div>
+            <div class="bar-track"><div class="bar-fill" style="width:${width}%"></div></div>
+            <div style="font-family:var(--mono);font-weight:700;color:${valueKey==="outstanding"?"var(--warn)":"var(--blue)"};text-align:right">${fmtMoney(value)}</div>
+        </div>`;
+    }).join("");
+}
+
+function renderClientAnalysis(){
+    if(!clientAnalysis) return;
+    const summary = clientAnalysis.summary || {};
+    document.getElementById("ana-net-sales").innerText = fmtMoney(summary.net_sales);
+    document.getElementById("ana-outstanding").innerText = fmtMoney(summary.outstanding);
+    document.getElementById("ana-payment-rate").innerText = `${(Number(summary.payment_rate) || 0).toFixed(1)}%`;
+    document.getElementById("ana-risk-count").innerText = summary.at_risk_clients || 0;
+
+    renderAnalysisList("analysis-top-clients", clientAnalysis.top_clients || [], "net_sales", "No B2B sales yet.");
+    renderAnalysisList("analysis-collection-watch", clientAnalysis.collection_watch || [], "outstanding", "No outstanding balances.");
+
+    const q = (document.getElementById("analysis-search")?.value || "").trim().toLowerCase();
+    const sort = document.getElementById("analysis-sort")?.value || "net_sales";
+    let rows = [...(clientAnalysis.clients || [])].filter(row => {
+        if(!q) return true;
+        return [row.name, row.contact_person, row.phone, row.payment_terms].some(value => String(value || "").toLowerCase().includes(q));
+    });
+    rows.sort((a,b) => {
+        if(sort === "last_invoice"){
+            return (a.days_since_last_invoice ?? 999999) - (b.days_since_last_invoice ?? 999999);
+        }
+        return (Number(b[sort]) || 0) - (Number(a[sort]) || 0);
+    });
+
+    const body = document.getElementById("analysis-body");
+    if(!rows.length){
+        body.innerHTML = `<tr><td colspan="13" style="text-align:center;color:var(--muted);padding:40px">No clients match this analysis filter.</td></tr>`;
+        return;
+    }
+    body.innerHTML = rows.map(row => {
+        const creditUsed = row.credit_used_pct === null || row.credit_used_pct === undefined ? "—" : `${Number(row.credit_used_pct).toFixed(1)}%`;
+        const last = row.days_since_last_invoice === null || row.days_since_last_invoice === undefined
+            ? "—"
+            : `${escHtml(row.last_invoice)}<br><span style="font-size:11px;color:var(--muted)">${row.days_since_last_invoice} days ago</span>`;
+        return `<tr>
+            <td class="name">${escHtml(row.name)}<br><span style="font-size:11px;color:var(--muted)">${escHtml(row.contact_person)}</span></td>
+            <td><span class="badge badge-${escHtml(row.payment_terms)}">${escHtml(termsLabel(row.payment_terms))}</span></td>
+            <td style="font-family:var(--mono)">${row.invoice_count}</td>
+            <td style="font-family:var(--mono)">${fmtMoney(row.gross_sales)}</td>
+            <td style="font-family:var(--mono);color:${row.refunds>0?"var(--danger)":"var(--muted)"}">${row.refunds>0?fmtMoney(row.refunds):"—"}</td>
+            <td style="font-family:var(--mono);font-weight:700;color:var(--blue)">${fmtMoney(row.net_sales)}</td>
+            <td style="font-family:var(--mono);color:var(--green)">${fmtMoney(row.paid_amount)}</td>
+            <td style="font-family:var(--mono);color:${row.outstanding>0?"var(--warn)":"var(--muted)"}">${row.outstanding>0?fmtMoney(row.outstanding):"—"}</td>
+            <td style="font-family:var(--mono);color:${row.payment_rate>=80?"var(--green)":row.payment_rate>=50?"var(--warn)":"var(--danger)"}">${Number(row.payment_rate).toFixed(1)}%</td>
+            <td style="font-family:var(--mono)">${fmtMoney(row.average_invoice)}</td>
+            <td style="font-family:var(--mono);color:${row.credit_used_pct>100?"var(--danger)":"var(--muted)"}">${creditUsed}</td>
+            <td style="font-size:12px;color:var(--sub)">${last}</td>
+            <td><span class="risk-pill risk-${escHtml(row.risk_level)}">${escHtml(riskLabel(row.risk_level))}</span></td>
+        </tr>`;
+    }).join("");
 }
 
 /* ── CLIENTS ── */
