@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 
 class ClientCreate(BaseModel):
@@ -56,3 +56,66 @@ class ClientRefundCreate(BaseModel):
     client_id: int
     notes:     Optional[str] = Field(None, max_length=500)
     items:     List[RefundItemCreate]
+
+
+class TopProduct(BaseModel):
+    product_id: int
+    name: str
+    total_qty: float
+
+class PurchaseTrend(BaseModel):
+    month: str
+    volume: float
+
+class ClientAnalysisRow(BaseModel):
+    id: int
+    name: str
+    contact_person: str
+    phone: str
+    payment_terms: str
+    invoice_count: int
+    gross_sales: float
+    refunds: float
+    net_sales: float
+    paid_amount: float
+    outstanding: float
+    average_invoice: float
+    payment_rate: float
+    credit_limit: float
+    credit_used_pct: Optional[float]
+    last_invoice: str
+    days_since_last_invoice: Optional[int]
+    risk_level: str
+    # New analysis fields
+    ltv: float
+    total_outstanding: float
+    average_order_value: float
+    return_rate: float
+    purchase_trends: List[PurchaseTrend]
+    top_products: List[TopProduct]
+
+class ClientAnalysisSummary(BaseModel):
+    active_clients: int
+    clients_with_sales: int
+    gross_sales: float
+    refunds: float
+    net_sales: float
+    paid_amount: float
+    outstanding: float
+    payment_rate: float
+    at_risk_clients: int
+    top_client: str
+    top_client_net_sales: float
+
+class TermsBreakdownRow(BaseModel):
+    payment_terms: str
+    clients: int
+    gross_sales: float
+    outstanding: float
+
+class ClientAnalysisResponse(BaseModel):
+    summary: ClientAnalysisSummary
+    clients: List[ClientAnalysisRow]
+    top_clients: List[ClientAnalysisRow]
+    collection_watch: List[ClientAnalysisRow]
+    terms_breakdown: List[TermsBreakdownRow]

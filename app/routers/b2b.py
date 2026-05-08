@@ -87,6 +87,7 @@ from app.services.b2b_shared import (
     seed_deferred_revenue as _seed_deferred_revenue,
     next_b2b_number   as _next_b2b_number,
     next_cons_number  as _next_cons_number,
+    get_b2b_client_top_products as _get_b2b_client_top_products,
 )
 
 async def _next_refund_number(db: AsyncSession) -> str:
@@ -1006,8 +1007,12 @@ async def get_client_analysis(db: AsyncSession = Depends(get_async_session)):
         client_id: _b2b_num(refund_total)
         for client_id, refund_total in refunds_res.all()
     }
+    
+    top_products_by_client = await _get_b2b_client_top_products(db)
 
     today = date.today()
+    six_months_ago = datetime.now(timezone.utc) - timedelta(days=180)
+    
     client_rows = []
     terms_breakdown = {}
     for client in clients:
@@ -1049,6 +1054,17 @@ async def get_client_analysis(db: AsyncSession = Depends(get_async_session)):
         else:
             risk_level = "healthy"
 
+        # Compute new analysis fields
+        return_rate = (refund_total / gross_sales * 100) if gross_sales > 0 else 0.0
+        
+        trends = {}
+        for inv in invoices:
+            inv_date = _date_key(inv.created_at)
+            if inv_date >= six_months_ago.replace(tzinfo=None):
+                month_str = inv_date.strftime("%Y-%m")
+                trends[month_str] = trends.get(month_str, 0.0) + _b2b_num(inv.total)
+        purchase_trends = [{"month": m, "volume": round(v, 2)} for m, v in sorted(trends.items())]
+
         client_rows.append({
             "id": client.id,
             "name": client.name,
@@ -1068,6 +1084,13 @@ async def get_client_analysis(db: AsyncSession = Depends(get_async_session)):
             "last_invoice": last_invoice_label,
             "days_since_last_invoice": days_since_last_invoice,
             "risk_level": risk_level,
+            # New fields
+            "ltv": round(net_sales, 2),
+            "total_outstanding": round(outstanding, 2),
+            "average_order_value": round(average_invoice, 2),
+            "return_rate": round(return_rate, 2),
+            "purchase_trends": purchase_trends,
+            "top_products": top_products_by_client.get(client.id, []),
         })
 
     total_gross = sum(row["gross_sales"] for row in client_rows)

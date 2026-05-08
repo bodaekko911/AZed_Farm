@@ -63,3 +63,43 @@ async def next_cons_number(db: AsyncSession) -> str:
     _r = await db.execute(select(sa_func.max(Consignment.id)))
     max_id = _r.scalar() or 0
     return f"CONS-{str(max_id + 1).zfill(4)}"
+
+
+async def get_b2b_client_top_products(db: AsyncSession) -> dict:
+    """
+    Returns the top 5 products purchased by each client.
+    Returns: {client_id: [{"product_id": int, "name": str, "total_qty": float}, ...]}
+    """
+    from app.models.b2b import B2BInvoice, B2BInvoiceItem
+    from app.models.product import Product
+
+    query = (
+        select(
+            B2BInvoice.client_id,
+            Product.id.label("product_id"),
+            Product.name.label("product_name"),
+            sa_func.sum(B2BInvoiceItem.qty).label("total_qty")
+        )
+        .select_from(B2BInvoice)
+        .join(B2BInvoiceItem, B2BInvoice.id == B2BInvoiceItem.invoice_id)
+        .join(Product, B2BInvoiceItem.product_id == Product.id)
+        .group_by(B2BInvoice.client_id, Product.id, Product.name)
+    )
+    result = await db.execute(query)
+
+    client_products = {}
+    for client_id, product_id, product_name, total_qty in result.all():
+        if client_id not in client_products:
+            client_products[client_id] = []
+        client_products[client_id].append({
+            "product_id": product_id,
+            "name": product_name,
+            "total_qty": float(total_qty)
+        })
+
+    # Sort by total_qty descending and take top 5 for each client
+    for client_id in client_products:
+        client_products[client_id].sort(key=lambda x: x["total_qty"], reverse=True)
+        client_products[client_id] = client_products[client_id][:5]
+
+    return client_products

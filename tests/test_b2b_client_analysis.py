@@ -10,7 +10,8 @@ from tests.env_defaults import apply_test_environment_defaults
 apply_test_environment_defaults()
 
 from app.database import Base
-from app.models.b2b import B2BClient, B2BInvoice, B2BRefund
+from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund
+from app.models.product import Product
 from app.models.user import User
 from app.routers.b2b import get_client_analysis
 
@@ -41,6 +42,8 @@ def make_session():
             User.__table__,
             B2BClient.__table__,
             B2BInvoice.__table__,
+            B2BInvoiceItem.__table__,
+            Product.__table__,
             B2BRefund.__table__,
         ],
     )
