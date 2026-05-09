@@ -85,6 +85,7 @@
     document.documentElement.dataset.theme = nextTheme;
     document.documentElement.setAttribute("data-theme", nextTheme);
     document.documentElement.style.colorScheme = nextTheme;
+    document.documentElement.classList.toggle(LIGHT, nextTheme === LIGHT);
     if (document.body) {
       document.body.dataset.theme = nextTheme;
       document.body.setAttribute("data-theme", nextTheme);

@@ -152,11 +152,17 @@ def app_nav_script() -> str:
       window.location.href = "/";
     },
     toggleTheme: function(){
+      if(window.__appTheme && typeof window.__appTheme.toggle === "function") return window.__appTheme.toggle();
       if(typeof window.toggleMode === "function") return window.toggleMode();
       if(typeof window.toggleTheme === "function") return window.toggleTheme();
       var next = document.body.classList.contains("light") ? "dark" : "light";
       document.body.classList.toggle("light", next === "light");
+      document.body.dataset.theme = next;
+      document.body.setAttribute("data-theme", next);
       document.documentElement.dataset.theme = next;
+      document.documentElement.setAttribute("data-theme", next);
+      document.documentElement.style.colorScheme = next;
+      document.documentElement.classList.toggle("light", next === "light");
       localStorage.setItem("colorMode", next);
     }
   };

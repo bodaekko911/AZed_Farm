@@ -40,6 +40,25 @@
   };
   var appliedTheme = "dark";
 
+  function installLogoThemeStyle() {
+    if (document.getElementById("app-logo-theme-style")) return;
+    var style = document.createElement("style");
+    style.id = "app-logo-theme-style";
+    style.textContent = [
+      ':where(.navbar-brand,.logo,.app-nav-brand) > img[src="/static/ERP_logo.png"]{transition:filter .18s ease;}',
+      'html[data-theme="light"] :where(.navbar-brand,.logo,.app-nav-brand) > img[src="/static/ERP_logo.png"],',
+      'body.light :where(.navbar-brand,.logo,.app-nav-brand) > img[src="/static/ERP_logo.png"]{filter:invert(1) hue-rotate(180deg);}',
+      'html[data-theme="dark"] :where(.navbar-brand,.logo,.app-nav-brand) > img[src="/static/ERP_logo.png"]{filter:none;}'
+    ].join("");
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function syncRootTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    document.documentElement.style.colorScheme = theme;
+    document.documentElement.classList.toggle("light", theme === "light");
+  }
+
   function syncBodyTheme(theme) {
     if (!document.body) return;
     document.body.dataset.theme = theme;
@@ -59,19 +78,18 @@
     }
     var theme = stored === "light" ? "light" : "dark";
     appliedTheme = theme;
-    document.documentElement.setAttribute("data-theme", theme);
-    document.documentElement.style.colorScheme = theme;
+    installLogoThemeStyle();
+    syncRootTheme(theme);
     window.__appThemePalette = palettes[theme];
-    if (theme === "light") {
-      document.documentElement.classList.add("light");
-    }
   } catch (_) {
-    document.documentElement.setAttribute("data-theme", "dark");
-    document.documentElement.style.colorScheme = "dark";
+    installLogoThemeStyle();
+    syncRootTheme("dark");
     window.__appThemePalette = palettes.dark;
   }
   syncBodyTheme(appliedTheme);
   document.addEventListener("DOMContentLoaded", function () {
-    syncBodyTheme(document.documentElement.getAttribute("data-theme") || appliedTheme);
+    var theme = document.documentElement.getAttribute("data-theme") || appliedTheme;
+    syncRootTheme(theme);
+    syncBodyTheme(theme);
   });
 })();

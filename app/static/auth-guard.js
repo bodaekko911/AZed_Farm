@@ -82,7 +82,11 @@
 
         document.documentElement.dataset.theme = nextTheme;
         document.documentElement.setAttribute('data-theme', nextTheme);
+        document.documentElement.style.colorScheme = nextTheme;
+        document.documentElement.classList.toggle('light', nextTheme === 'light');
         if (document.body) {
+            document.body.dataset.theme = nextTheme;
+            document.body.setAttribute('data-theme', nextTheme);
             document.body.classList.toggle('light', nextTheme === 'light');
         }
 
@@ -130,6 +134,21 @@
         if (keys.indexOf(event.key || '') === -1) return;
         _ensureTheme({ persist: true, dispatch: true });
     });
+}());
+
+(function () {
+    if (window.__appThemeModeButtonBound) return;
+    window.__appThemeModeButtonBound = true;
+
+    document.addEventListener('click', function (event) {
+        var trigger = event.target && event.target.closest && event.target.closest('#mode-btn');
+        if (!trigger || !document.contains(trigger)) return;
+        if (!window.__appTheme || typeof window.__appTheme.toggle !== 'function') return;
+
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        window.__appTheme.toggle();
+    }, true);
 }());
 
 // Must match ACCESS_TOKEN_EXPIRE_MINUTES - 2 in server config (30 - 2 = 28).
