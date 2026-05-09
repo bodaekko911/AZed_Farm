@@ -250,7 +250,7 @@ tbody td{padding:12px 14px;font-size:13px;vertical-align:top}
 
 <header class="topbar">
     <a href="/home" class="logo navbar-brand">
-        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 42px; width: auto; object-fit: contain; margin: 0; padding: 0;">
+        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
     </a>
     <div class="topbar-right">
         <button class="mode-btn" id="mode-btn" onclick="toggleMode()">&#127769;</button>

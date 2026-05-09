@@ -90,7 +90,7 @@ def _render_group(user: User, permissions: set[str], group: dict, active_permiss
 def app_nav_styles() -> str:
     return """
 <style>
-.app-nav{grid-column:1/-1;position:sticky;top:0;z-index:300;display:flex;align-items:center;gap:12px;min-height:64px;padding:10px 24px;background:rgba(10,13,24,.94);backdrop-filter:blur(20px);border-bottom:1px solid var(--border,rgba(255,255,255,.08));color:var(--text,#f0f4ff);}
+.app-nav{grid-column:1/-1;position:sticky;top:0;z-index:300;display:flex;align-items:center;gap:12px;min-height:64px;padding:8px 24px;background:rgba(10,13,24,.94);backdrop-filter:blur(20px);border-bottom:1px solid var(--border,rgba(255,255,255,.08));color:var(--text,#f0f4ff);}
 body.light .app-nav,[data-theme="light"] .app-nav{background:rgba(255,255,255,.94);}
 .app-nav-brand{display:flex;align-items:center;gap:9px;min-width:max-content;text-decoration:none;font-size:17px;font-weight:900;color:var(--text,#f0f4ff);}
 .app-nav-brand img{flex:0 0 auto}.app-nav-brand span{background:linear-gradient(135deg,var(--accent,#00E5FF),var(--blue,#38bdf8));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
@@ -122,7 +122,7 @@ body[data-theme="light"] .app-nav-brand img{filter:invert(1) hue-rotate(180deg);
 .account-item:hover{background:var(--card2,#151c30);color:var(--text,#f0f4ff);}
 .account-item.danger:hover{color:#c97a7a;}
 .app-nav .mode-btn{flex:0 0 auto}.app-nav .account-menu{position:relative}.app-nav .account-dropdown{z-index:600}
-@media(max-width:900px){.app-nav{flex-wrap:wrap;padding:10px 14px}.app-nav-mobile-toggle{display:flex}.app-nav-main{display:none;order:3;flex-basis:100%;flex-direction:column;align-items:stretch;gap:6px;padding-top:8px}.app-nav.open .app-nav-main{display:flex}.app-nav-group{width:100%}.app-nav-group summary{justify-content:space-between;padding:12px 13px;background:rgba(255,255,255,.04)}.app-nav-menu{position:static;box-shadow:none;margin-top:6px;width:100%}.app-nav-actions{margin-left:auto}.app-nav .user-name{display:none}}
+@media(max-width:900px){.app-nav{flex-wrap:wrap;padding:8px 14px}.app-nav-mobile-toggle{display:flex}.app-nav-main{display:none;order:3;flex-basis:100%;flex-direction:column;align-items:stretch;gap:6px;padding-top:8px}.app-nav.open .app-nav-main{display:flex}.app-nav-group{width:100%}.app-nav-group summary{justify-content:space-between;padding:12px 13px;background:rgba(255,255,255,.04)}.app-nav-menu{position:static;box-shadow:none;margin-top:6px;width:100%}.app-nav-actions{margin-left:auto}.app-nav .user-name{display:none}}
 @media(max-width:520px){.app-nav{gap:8px}.app-nav-brand span{max-width:116px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.app-nav-actions{gap:6px}.app-nav .user-pill{padding:6px 9px}.app-nav .menu-caret{display:none}}
 </style>
 """
@@ -199,7 +199,7 @@ def render_app_header(user: User, active_permission: str | None = None) -> str:
 {app_nav_styles()}
 <nav class="app-nav" id="app-nav" aria-label="Primary navigation">
   <a href="/home" class="app-nav-brand navbar-brand">
-    <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 42px; width: auto; object-fit: contain; margin: 0; padding: 0;">
+    <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
   </a>
   <button class="app-nav-mobile-toggle" type="button" aria-label="Toggle navigation" onclick="document.getElementById('app-nav').classList.toggle('open')">&#9776;</button>
   <div class="app-nav-main">{groups}</div>
