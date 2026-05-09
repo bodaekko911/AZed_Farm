@@ -249,10 +249,20 @@ tbody td{padding:12px 14px;font-size:13px;vertical-align:top}
 <body>
 
 <header class="topbar">
-    <a href="/home" class="logo navbar-brand">
-        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:22px;width:22px;object-fit:contain;">
-        <span class="logo-text">AZed ERP</span>
-    </a>
+    <a href="/" class="logo" style="text-decoration: none; display: flex; align-items: center;">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 40" width="240" height="60">
+        <style>
+            .azed-text { font-family: 'Outfit', sans-serif; font-weight: 900; font-size: 32px; fill: currentColor; }
+            .azed-z { fill: #00E5FF; } 
+            .azed-erp { font-family: 'Outfit', sans-serif; font-weight: 600; font-size: 16px; fill: #94A3B8; }
+        </style>
+        <text x="5" y="32" class="azed-text">A</text>
+        <text x="29" y="32" class="azed-text azed-z" font-style="italic">Z</text>
+        <text x="52" y="32" class="azed-text">ed</text>
+        <text x="100" y="32" class="azed-erp">ERP</text>
+        <path d="M 145 20 L 153 20 M 150 17 L 154 20 L 150 23" stroke="#00E5FF" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+</a>
     <div class="topbar-right">
         <button class="mode-btn" id="mode-btn" onclick="toggleMode()">&#127769;</button>
         <a href="/home" class="back-btn">&#8592; Home</a>

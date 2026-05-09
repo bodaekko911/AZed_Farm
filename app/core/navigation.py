@@ -192,10 +192,20 @@ def render_app_header(user: User, active_permission: str | None = None) -> str:
     return f"""
 {app_nav_styles()}
 <nav class="app-nav" id="app-nav" aria-label="Primary navigation">
-  <a href="/home" class="app-nav-brand navbar-brand">
-    <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:22px;width:22px;object-fit:contain;">
-    <span>AZed ERP</span>
-  </a>
+  <a href="/" class="logo" style="text-decoration: none; display: flex; align-items: center;">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 40" width="240" height="60">
+        <style>
+            .azed-text { font-family: 'Outfit', sans-serif; font-weight: 900; font-size: 32px; fill: currentColor; }
+            .azed-z { fill: #00E5FF; } 
+            .azed-erp { font-family: 'Outfit', sans-serif; font-weight: 600; font-size: 16px; fill: #94A3B8; }
+        </style>
+        <text x="5" y="32" class="azed-text">A</text>
+        <text x="29" y="32" class="azed-text azed-z" font-style="italic">Z</text>
+        <text x="52" y="32" class="azed-text">ed</text>
+        <text x="100" y="32" class="azed-erp">ERP</text>
+        <path d="M 145 20 L 153 20 M 150 17 L 154 20 L 150 23" stroke="#00E5FF" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+</a>
   <button class="app-nav-mobile-toggle" type="button" aria-label="Toggle navigation" onclick="document.getElementById('app-nav').classList.toggle('open')">&#9776;</button>
   <div class="app-nav-main">{groups}</div>
   <div class="app-nav-actions topbar-right">
