@@ -40,6 +40,51 @@
   };
   var appliedTheme = "dark";
 
+  function installDashboardPaletteStyle() {
+    if (document.getElementById("app-dashboard-palette-style")) return;
+
+    var darkVars = [
+      "--bg:#0B1120",
+      "--surface:#1E293B",
+      "--surface-raised:#334155",
+      "--card:#1E293B",
+      "--card2:#334155",
+      "--border:#334155",
+      "--border2:#475569",
+      "--border-strong:#475569",
+      "--text:#F8FAFC",
+      "--text-sub:#cbd5e1",
+      "--text-muted:#94A3B8",
+      "--sub:#cbd5e1",
+      "--muted:#94A3B8",
+      "--accent:#00E5FF",
+      "--accent-soft:rgba(0,229,255,.14)",
+      "--blue:#38bdf8",
+      "--green:#22c55e",
+      "--green2:#22c55e",
+      "--positive:#22c55e",
+      "--negative:#f87171",
+      "--danger:#f87171",
+      "--rose:#fb7185",
+      "--rose2:#fb7185",
+      "--warn:#f59e0b",
+      "--warning:#f59e0b",
+      "--amber:#f59e0b",
+      "--amber2:#d97706",
+      "--orange:#fb923c",
+      "--teal:#2dd4bf",
+      "--purple:#a855f7",
+      "--lime:#84cc16"
+    ];
+
+    var style = document.createElement("style");
+    style.id = "app-dashboard-palette-style";
+    style.textContent = 'html[data-theme="dark"],body[data-theme="dark"]{' +
+      darkVars.map(function (item) { return item + " !important;"; }).join("") +
+      "}";
+    (document.head || document.documentElement).appendChild(style);
+  }
+
   function installLogoThemeStyle() {
     if (document.getElementById("app-logo-theme-style")) return;
     var style = document.createElement("style");
@@ -78,10 +123,12 @@
     }
     var theme = stored === "light" ? "light" : "dark";
     appliedTheme = theme;
+    installDashboardPaletteStyle();
     installLogoThemeStyle();
     syncRootTheme(theme);
     window.__appThemePalette = palettes[theme];
   } catch (_) {
+    installDashboardPaletteStyle();
     installLogoThemeStyle();
     syncRootTheme("dark");
     window.__appThemePalette = palettes.dark;
