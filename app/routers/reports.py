@@ -261,7 +261,7 @@ def _num(value) -> float:
 
 def _product_category(product) -> str:
     category = getattr(product, "category", None)
-    return category or "â€”"
+    return category or "—"
 
 
 async def _schema_has_columns(db: AsyncSession, required: dict[str, set[str]]) -> bool:
@@ -473,16 +473,16 @@ async def _build_sales_report(
         daily[day_key]["gross_sales"] += total
         daily[day_key]["cash_collected"] += collected
         for item in inv.items:
-            item_name = item.name or "â€”"
+            item_name = item.name or "—"
             product_sales[item_name]["qty"] += _num(item.qty)
             product_sales[item_name]["revenue"] += _num(item.total)
         pos_records.append({
             "invoice_number": inv.invoice_number or f"POS-{inv.id}",
-            "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "â€”",
+            "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
             "customer": inv.customer.name if inv.customer else "Walk-in",
-            "user_name": inv.user.name if inv.user else "â€”",
-            "payment": inv.payment_method or "â€”",
-            "status": inv.status or "â€”",
+            "user_name": inv.user.name if inv.user else "—",
+            "payment": inv.payment_method or "—",
+            "status": inv.status or "—",
             "items": [{"name": it.name, "qty": _num(it.qty), "unit_price": _num(it.unit_price), "total": _num(it.total)} for it in inv.items],
             "total": total,
             "cash_collected": collected,
@@ -504,7 +504,7 @@ async def _build_sales_report(
         daily[day_key]["cash_collected"] += collected
         items_data = []
         for it in inv.items:
-            product_name = it.product.name if it.product else "â€”"
+            product_name = it.product.name if it.product else "—"
             item_qty = _num(it.qty)
             item_total = _num(it.total)
             items_data.append({"name": product_name, "qty": item_qty, "unit_price": _num(it.unit_price), "total": item_total})
@@ -512,11 +512,11 @@ async def _build_sales_report(
             product_sales[product_name]["revenue"] += item_total
         b2b_records.append({
             "invoice_number": inv.invoice_number,
-            "client": inv.client.name if inv.client else "â€”",
-            "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "â€”",
-            "user_name": inv.user.name if inv.user else "â€”",
+            "client": inv.client.name if inv.client else "—",
+            "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
+            "user_name": inv.user.name if inv.user else "—",
             "invoice_type": inv.invoice_type,
-            "status": inv.status or "â€”",
+            "status": inv.status or "—",
             "items": items_data,
             "total": total,
             "amount_paid": amount_paid,
@@ -542,11 +542,11 @@ async def _build_sales_report(
         refund_records.append({
             "refund_number": refund.refund_number,
             "source": "Retail",
-            "counterparty": refund.customer.name if refund.customer else "â€”",
-            "datetime": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "â€”",
-            "processed_by": refund.user.name if refund.user else "â€”",
-            "reason": refund.reason or "â€”",
-            "refund_method": refund.refund_method or "â€”",
+            "counterparty": refund.customer.name if refund.customer else "—",
+            "datetime": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "—",
+            "processed_by": refund.user.name if refund.user else "—",
+            "reason": refund.reason or "—",
+            "refund_method": refund.refund_method or "—",
             "total": refund_total,
         })
     for refund in sorted(b2b_refunds, key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
@@ -558,10 +558,10 @@ async def _build_sales_report(
         refund_records.append({
             "refund_number": refund.refund_number,
             "source": "B2B",
-            "counterparty": refund.client.name if refund.client else "â€”",
-            "datetime": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "â€”",
-            "processed_by": refund.user.name if refund.user else "â€”",
-            "reason": refund.notes or "â€”",
+            "counterparty": refund.client.name if refund.client else "—",
+            "datetime": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "—",
+            "processed_by": refund.user.name if refund.user else "—",
+            "reason": refund.notes or "—",
             "refund_method": "cash",
             "total": refund_total,
         })
@@ -3457,8 +3457,8 @@ async function loadInventory(){
             <label>To</label><input type="date" id="inv-to">
             <div class="filter-sep"></div>
             <button class="btn btn-lime" onclick="loadInventory()">Apply</button>
-            <button class="btn btn-excel" onclick="exportSection('inventory')">â¬‡ Excel</button>
-            <button class="btn btn-print" onclick="window.print()">ðŸ–¨ Print</button>`;
+            <button class="btn btn-excel" onclick="exportSection('inventory')">⬇ Excel</button>
+            <button class="btn btn-print" onclick="window.print()">🖨 Print</button>`;
         document.getElementById("inv-mode").value = mode;
         document.getElementById("inv-from").value = from || monthStart();
         document.getElementById("inv-to").value = to || today();
