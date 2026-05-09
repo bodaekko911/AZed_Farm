@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 from sqlalchemy.sql import func as sa_func
 
+from app.core.product_types import is_stock_tracked_product
 from app.models.b2b import (
     B2BClient, B2BClientPrice, B2BInvoice, B2BInvoiceItem,
     Consignment, ConsignmentItem,
@@ -736,7 +737,7 @@ async def import_b2b_sales(
                     total=line_total,
                 ))
 
-                if mode == "with_stock_adjustment":
+                if mode == "with_stock_adjustment" and is_stock_tracked_product(product):
                     before = float(product.stock)
                     after  = before - qty
                     product.stock = after

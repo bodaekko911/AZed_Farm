@@ -160,16 +160,18 @@ def test_import_products_keeps_extended_item_types() -> None:
             ["2001", "Fresh Basil", "fresh"],
             ["2002", "Paper Tray", "packing"],
             ["2003", "Citric Acid", "ingredient"],
+            ["2004", "Installation", "service"],
         ],
     )
 
     payload = asyncio.run(import_data.import_products(upload, fake_db))
 
     assert payload["ok"] is True
-    assert payload["created"] == 3
+    assert payload["created"] == 4
     assert next(product for product in fake_db.products if product.sku == "2001").item_type == "fresh"
     assert next(product for product in fake_db.products if product.sku == "2002").item_type == "packing"
     assert next(product for product in fake_db.products if product.sku == "2003").item_type == "ingredient"
+    assert next(product for product in fake_db.products if product.sku == "2004").item_type == "service"
 
 
 def test_import_stock_updates_product_and_records_adjustment() -> None:
@@ -204,6 +206,37 @@ def test_import_stock_updates_product_and_records_adjustment() -> None:
     assert float(move.qty_before) == 3
     assert float(move.qty_after) == 11
     assert float(move.qty) == 8
+
+
+def test_import_stock_skips_service_products() -> None:
+    service = Product(
+        id=1,
+        sku="SVC-1",
+        name="Installation",
+        unit="pcs",
+        cost=0,
+        price=100,
+        stock=0,
+        min_stock=0,
+        item_type="service",
+        is_active=True,
+    )
+    fake_db = FakeImportSession(products=[service])
+    upload = _upload_workbook(
+        "stock.xlsx",
+        [
+            ["SKU", "Stock"],
+            ["SVC-1", 11],
+        ],
+    )
+
+    payload = asyncio.run(import_data.import_stock(upload, fake_db))
+
+    assert payload["ok"] is True
+    assert payload["updated"] == 0
+    assert payload["skipped_services"] == ["SVC-1"]
+    assert float(service.stock) == 0
+    assert fake_db.stock_moves == []
 
 
 def test_import_customers_skips_duplicate_phone_and_adds_new_customer() -> None:

@@ -12,6 +12,7 @@ from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.core.navigation import render_app_header
+from app.core.product_types import is_stock_tracked_product, stock_tracked_product_condition
 from app.models.product import Product
 from app.models.user import User
 from app.models.inventory import LocationStock, StockLocation, StockMove, StockTransfer
@@ -110,7 +111,10 @@ async def get_stock(
     db: AsyncSession = Depends(get_async_session),
 ):
     low_stock_threshold = func.coalesce(Product.reorder_level, Product.min_stock)
-    stmt = select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
+    stmt = select(Product).where(
+        or_(Product.is_active.is_(True), Product.is_active.is_(None)),
+        stock_tracked_product_condition(Product),
+    )
     if q:
         stmt = stmt.where(
             Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%")
@@ -155,7 +159,11 @@ async def get_low_stock_products(
     stmt = (
         select(Product)
         .options(selectinload(Product.preferred_supplier))
-        .where(or_(Product.is_active.is_(True), Product.is_active.is_(None)), Product.stock <= low_stock_threshold)
+        .where(
+            or_(Product.is_active.is_(True), Product.is_active.is_(None)),
+            stock_tracked_product_condition(Product),
+            Product.stock <= low_stock_threshold,
+        )
     )
     if q:
         stmt = stmt.where(Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%"))
@@ -185,7 +193,11 @@ async def create_low_stock_draft_purchases(
     result = await db.execute(
         select(Product)
         .options(selectinload(Product.preferred_supplier))
-        .where(or_(Product.is_active.is_(True), Product.is_active.is_(None)), Product.id.in_(product_ids))
+        .where(
+            or_(Product.is_active.is_(True), Product.is_active.is_(None)),
+            stock_tracked_product_condition(Product),
+            Product.id.in_(product_ids),
+        )
     )
     products = result.scalars().all()
     found_ids = {product.id for product in products}
@@ -567,6 +579,8 @@ async def adjust_stock(data: StockAdjustment, db: AsyncSession = Depends(get_asy
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
+    if not is_stock_tracked_product(product):
+        raise HTTPException(status_code=400, detail="Service products do not track stock")
 
     before = float(product.stock or 0)
     after  = before + data.qty
@@ -657,11 +671,11 @@ async def get_summary(db: AsyncSession = Depends(get_async_session)):
     r1 = await db.execute(select(func.count(Product.id)).where(active_filter))
     total_products = r1.scalar() or 0
     r2 = await db.execute(select(func.count(Product.id)).where(
-        active_filter, Product.stock <= low_stock_threshold
+        active_filter, stock_tracked_product_condition(Product), Product.stock <= low_stock_threshold
     ))
     low_stock = r2.scalar() or 0
     r3 = await db.execute(select(func.count(Product.id)).where(
-        active_filter, Product.stock <= 0
+        active_filter, stock_tracked_product_condition(Product), Product.stock <= 0
     ))
     out_of_stock = r3.scalar() or 0
     r4 = await db.execute(select(func.count(StockMove.id)))

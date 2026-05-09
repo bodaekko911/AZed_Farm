@@ -15,6 +15,7 @@ from app.services.barcode_service import normalize_barcode_value
 from app.services.location_inventory_service import sync_product_stock_to_default_location
 from app.core.log import record
 from app.core.permissions import has_permission
+from app.core.product_types import is_stock_tracked_product
 
 
 async def post_journal(
@@ -82,7 +83,7 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int, us
             product = product_map.get(normalize_barcode_value(item.sku))
             if not product:
                 raise HTTPException(status_code=404, detail=f"Product not found: {item.sku}")
-            if product.stock < item.qty:
+            if is_stock_tracked_product(product) and product.stock < item.qty:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Not enough stock for {product.name}. Available: {float(product.stock)}",
@@ -150,28 +151,29 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int, us
                 unit_price=sell_price,
                 total=round(line_total, 2),
             ))
-            before = float(product.stock)
-            after = before - qty
-            _, location_stock = await sync_product_stock_to_default_location(db, product=product)
-            location_before = float(location_stock.qty)
-            location_after = location_before - qty
-            if location_after < 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Not enough stock for {product.name}. Available: {location_before}",
-                )
-            location_stock.qty = location_after
-            product.stock = after
-            db.add(StockMove(
-                product_id=product.id,
-                type="out",
-                qty=-qty,
-                qty_before=before,
-                qty_after=after,
-                ref_type="invoice",
-                ref_id=invoice.id,
-                note=f"Sale - {invoice.invoice_number}",
-            ))
+            if is_stock_tracked_product(product):
+                before = float(product.stock)
+                after = before - qty
+                _, location_stock = await sync_product_stock_to_default_location(db, product=product)
+                location_before = float(location_stock.qty)
+                location_after = location_before - qty
+                if location_after < 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Not enough stock for {product.name}. Available: {location_before}",
+                    )
+                location_stock.qty = location_after
+                product.stock = after
+                db.add(StockMove(
+                    product_id=product.id,
+                    type="out",
+                    qty=-qty,
+                    qty_before=before,
+                    qty_after=after,
+                    ref_type="invoice",
+                    ref_id=invoice.id,
+                    note=f"Sale - {invoice.invoice_number}",
+                ))
 
         if not is_settle_later:
             acc_code = "1000"

@@ -13,6 +13,7 @@ import re
 from app.core.permissions import require_permission
 from app.database import get_async_session
 from app.core.navigation import render_app_header
+from app.core.product_types import is_stock_tracked_product
 from app.models.product import Product
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund
@@ -999,11 +1000,12 @@ async def _build_inventory_report(
     dead_stock_cutoff = datetime.now(timezone.utc) - timedelta(days=90)
     dead_stock_count = 0
     for product in products:
+        stock_tracked = is_stock_tracked_product(product)
         threshold = _num(product.reorder_level if product.reorder_level is not None else product.min_stock if product.min_stock is not None else 5)
         last_move_res = await db.execute(select(func.max(StockMove.created_at)).where(StockMove.product_id == product.id))
         last_move_at = last_move_res.scalar()
-        is_dead_stock = _num(product.stock) > 0 and (last_move_at is None or last_move_at < dead_stock_cutoff)
-        low_stock = _num(product.stock) <= threshold
+        is_dead_stock = stock_tracked and _num(product.stock) > 0 and (last_move_at is None or last_move_at < dead_stock_cutoff)
+        low_stock = stock_tracked and _num(product.stock) <= threshold
         if is_dead_stock:
             dead_stock_count += 1
         rows.append({
@@ -1013,7 +1015,7 @@ async def _build_inventory_report(
             "stock": _num(product.stock),
             "unit": product.unit,
             "price": _num(product.price),
-            "value": round(_num(product.stock) * _num(product.price), 2),
+            "value": round(_num(product.stock) * _num(product.price), 2) if stock_tracked else 0.0,
             "threshold": round(threshold, 2),
             "reorder_qty": round(_num(product.reorder_qty), 2),
             "low_stock": low_stock,

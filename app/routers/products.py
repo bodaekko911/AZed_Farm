@@ -13,6 +13,11 @@ from app.models.supplier import Supplier
 from app.models.user import User
 from app.core.log import record
 from app.core.navigation import render_app_header
+from app.core.product_types import (
+    is_stock_tracked_product,
+    normalize_item_type,
+    stock_tracked_product_condition,
+)
 from app.schemas.product import ProductCreate, ProductUpdate
 from app.services.location_inventory_service import (
     ensure_default_stock_location,
@@ -26,17 +31,6 @@ router = APIRouter(
     tags=["Products"],
     dependencies=[Depends(require_permission("page_products"))],
 )
-
-ITEM_TYPE_OPTIONS = [
-    ("finished", "Finished Product"),
-    ("raw", "Raw Material"),
-    ("fresh", "Fresh"),
-    ("packing", "Packing"),
-    ("ingredient", "Ingredient"),
-]
-
-ITEM_TYPE_LABELS = {value: label for value, label in ITEM_TYPE_OPTIONS}
-
 
 # ── API ────────────────────────────────────────────────
 @router.get("/api/next-sku")
@@ -89,10 +83,11 @@ async def get_products(
         )
     if low_stock:
         conditions.append(Product.stock <= low_stock_threshold)
+        conditions.append(stock_tracked_product_condition(Product))
     if category:
         conditions.append(Product.category == category)
     if item_type:
-        conditions.append(Product.item_type == item_type)
+        conditions.append(Product.item_type == normalize_item_type(item_type))
 
     cnt_result = await db.execute(
         select(func.count()).select_from(Product).where(*conditions)
@@ -119,9 +114,10 @@ async def get_products(
                 "preferred_supplier_id": p.preferred_supplier_id,
                 "unit":      p.unit,
                 "category":  p.category or "—",
-                "item_type": p.item_type or "finished",
+                "item_type": normalize_item_type(p.item_type),
                 "is_active": True if p.is_active is None else p.is_active,
-                "low":       float(p.stock or 0) <= float(
+                "stock_tracked": is_stock_tracked_product(p),
+                "low":       is_stock_tracked_product(p) and float(p.stock or 0) <= float(
                     p.reorder_level if p.reorder_level is not None else (p.min_stock or 0)
                 ),
             }
@@ -139,7 +135,8 @@ async def add_product(data: ProductCreate, db: AsyncSession = Depends(get_async_
         supplier_result = await db.execute(select(Supplier).where(Supplier.id == data.preferred_supplier_id))
         if supplier_result.scalar_one_or_none() is None:
             raise HTTPException(status_code=404, detail="Preferred supplier not found")
-    initial_stock = quantize_qty(data.stock)
+    item_type = normalize_item_type(data.item_type)
+    initial_stock = Decimal("0.000") if item_type == "service" else quantize_qty(data.stock)
     p = Product(
         sku=data.sku, name=data.name, price=data.price,
         cost=data.cost, stock=initial_stock, min_stock=data.min_stock,
@@ -148,7 +145,7 @@ async def add_product(data: ProductCreate, db: AsyncSession = Depends(get_async_
         unit=data.unit, is_active=True,
     )
     if hasattr(p, 'category'):  p.category  = data.category
-    if hasattr(p, 'item_type'): p.item_type = data.item_type
+    if hasattr(p, 'item_type'): p.item_type = item_type
     db.add(p)
     await db.flush()
     if initial_stock > 0:
@@ -192,11 +189,18 @@ async def edit_product(product_id: int, data: ProductUpdate, db: AsyncSession = 
             raise HTTPException(status_code=404, detail="Preferred supplier not found")
     changes = data.model_dump(exclude_unset=True)
     stock_value = changes.pop("stock", None)
+    if "item_type" in changes:
+        changes["item_type"] = normalize_item_type(changes["item_type"])
     stock_before = quantize_qty(p.stock)
     for k, v in changes.items():
         if hasattr(p, k):
             setattr(p, k, v)
-    if stock_value is not None:
+    if not is_stock_tracked_product(p):
+        p.stock = Decimal("0.000")
+        if stock_before != 0:
+            _, location_stock = await sync_product_stock_to_default_location(db, product=p)
+            location_stock.qty = Decimal("0.000")
+    elif stock_value is not None:
         stock_after = quantize_qty(stock_value)
         stock_delta = quantize_qty(stock_after - stock_before)
         if stock_delta != 0:
@@ -331,6 +335,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
 .badge-fresh   {background:rgba(45,212,191,.1);color:var(--teal);}
 .badge-packing {background:rgba(77,159,255,.1);color:var(--blue);}
 .badge-ingredient{background:rgba(255,181,71,.12);color:var(--warn);}
+.badge-service {background:rgba(168,85,247,.12);color:var(--purple);}
 .badge-low     {background:rgba(255,181,71,.1);color:var(--warn);}
 .pagination{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-top:1px solid var(--border);font-size:13px;color:var(--muted);}
 .page-btns{display:flex;gap:6px;}
@@ -410,6 +415,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
                 <option value="fresh">Fresh</option>
                 <option value="packing">Packing</option>
                 <option value="ingredient">Ingredient</option>
+                <option value="service">Service</option>
             </select>
         </div>
         <div class="table-wrap">
@@ -488,12 +494,13 @@ tr:hover td{background:rgba(255,255,255,.02);}
             <!-- Item Type -->
             <div class="fld">
                 <label>Item Type</label>
-                <select id="f-item-type">
+                <select id="f-item-type" onchange="syncServiceStockFields()">
                     <option value="finished">Finished Product</option>
                     <option value="raw">Raw Material</option>
                     <option value="fresh">Fresh</option>
                     <option value="packing">Packing</option>
                     <option value="ingredient">Ingredient</option>
+                    <option value="service">Service</option>
                 </select>
             </div>
 
@@ -622,6 +629,7 @@ const ITEM_TYPE_LABELS = {
     fresh: "Fresh",
     packing: "Packing",
     ingredient: "Ingredient",
+    service: "Service",
 };
 
 function escapeJsString(value){
@@ -753,20 +761,25 @@ async function loadProducts(){
         return;
     }
 
-    document.getElementById("table-body").innerHTML = products.map(p=>`<tr>
+    document.getElementById("table-body").innerHTML = products.map(p=>{
+        const isService = p.item_type === "service";
+        const stockText = isService ? "Service" : p.stock.toFixed(0);
+        const stockColor = isService ? "var(--muted)" : (p.stock<=0 ? "var(--danger)" : p.low ? "var(--warn)" : "var(--text)");
+        return `<tr>
         <td class="sku">${p.sku}</td>
         <td class="name">${p.name}</td>
         <td style="font-size:12px;color:var(--sub)">${p.category}</td>
         <td><span class="badge badge-${p.item_type}">${getItemTypeLabel(p.item_type)}</span></td>
         <td class="mono">${p.price.toFixed(2)}</td>
         <td class="mono" style="color:var(--muted)">${p.cost>0?p.cost.toFixed(2):"—"}</td>
-        <td class="mono" style="color:${p.stock<=0?"var(--danger)":p.low?"var(--warn)":"var(--text)"};font-weight:700">${p.stock.toFixed(0)}</td>
+        <td class="mono" style="color:${stockColor};font-weight:700">${stockText}</td>
         <td style="font-size:12px;color:var(--muted)">${p.unit}</td>
         <td style="display:flex;gap:6px">
             <button class="action-btn" onclick="openEditModal(${p.id},'${escapeJsString(p.sku)}','${escapeJsString(p.name)}',${p.price},${p.cost},${p.stock},${p.min_stock},'${escapeJsString(p.unit)}','${escapeJsString(p.category==="—"?"":p.category)}','${escapeJsString(p.item_type)}')">Edit</button>
             <button class="action-btn danger" onclick="deleteProduct(${p.id},'${escapeJsString(p.name)}')">Delete</button>
         </td>
-    </tr>`).join("");
+    </tr>`;
+    }).join("");
     applyProductActionPermissions(currentUser);
 }
 
@@ -776,6 +789,18 @@ function prevPage(){ if(page>0){ page--; loadProducts(); } }
 function nextPage(){ if((page+1)*pageSize<totalItems){ page++; loadProducts(); } }
 function getItemTypeLabel(itemType){
     return ITEM_TYPE_LABELS[itemType] || itemType || "Finished Product";
+}
+
+function syncServiceStockFields(){
+    const isService = document.getElementById("f-item-type").value === "service";
+    const stockInput = document.getElementById("f-stock");
+    const minStockInput = document.getElementById("f-min-stock");
+    stockInput.disabled = isService;
+    minStockInput.disabled = isService;
+    if(isService){
+        stockInput.value = "0";
+        minStockInput.value = "0";
+    }
 }
 
 /* ── SKU AUTO-GENERATE ── */
@@ -799,6 +824,7 @@ async function openAddModal(){
     document.getElementById("f-unit").value    = "gram";
     document.getElementById("f-category").value = "";
     document.getElementById("f-item-type").value = "finished";
+    syncServiceStockFields();
     // Auto-fill SKU
     let skuData = await (await fetch("/products/api/next-sku")).json();
     document.getElementById("f-sku").value = skuData.sku;
@@ -818,6 +844,7 @@ function openEditModal(id,sku,name,price,cost,stock,min_stock,unit,category,item
     document.getElementById("f-unit").value            = unit;
     document.getElementById("f-category").value        = category||"";
     document.getElementById("f-item-type").value       = item_type||"finished";
+    syncServiceStockFields();
     document.getElementById("modal").classList.add("open");
 }
 
@@ -836,6 +863,10 @@ async function saveProduct(){
     let unit     = document.getElementById("f-unit").value;
     let category = document.getElementById("f-category").value||null;
     let itemType = document.getElementById("f-item-type").value;
+    if(itemType === "service"){
+        stock = 0;
+        minStock = 0;
+    }
 
     if(!sku)  { showToast("SKU is required"); return; }
     if(!name) { showToast("Product name is required"); return; }

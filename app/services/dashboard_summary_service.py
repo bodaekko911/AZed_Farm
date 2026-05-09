@@ -23,6 +23,7 @@ from sqlalchemy.sql.sqltypes import Date as SQLDate
 from app.core.config import settings
 from app.core.log import logger
 from app.core.permissions import has_permission
+from app.core.product_types import stock_tracked_product_condition
 from app.core.time_utils import now_local
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund, B2BRefundItem
 from app.models.accounting import Account, Journal, JournalEntry
@@ -462,9 +463,20 @@ async def _build_numbers(db: AsyncSession, rng: dict[str, Any], user: User, erro
     clients_owe_value = _safe_float(clients_owe_result.scalar())
     overdue_count = _safe_int(overdue_result.scalar())
 
-    out_result = await db.execute(select(func.count(Product.id)).where(Product.is_active == True, Product.stock <= 0))
+    out_result = await db.execute(
+        select(func.count(Product.id)).where(
+            Product.is_active == True,
+            stock_tracked_product_condition(Product),
+            Product.stock <= 0,
+        )
+    )
     low_result = await db.execute(
-        select(func.count(Product.id)).where(Product.is_active == True, Product.stock > 0, Product.stock <= 5)
+        select(func.count(Product.id)).where(
+            Product.is_active == True,
+            stock_tracked_product_condition(Product),
+            Product.stock > 0,
+            Product.stock <= 5,
+        )
     )
     out_count = _safe_int(out_result.scalar())
     low_count = _safe_int(low_result.scalar())
@@ -849,7 +861,13 @@ async def _insight_stockout(
             return None
 
         out_rows = await db.execute(
-            select(Product.id, Product.name).where(Product.is_active == True, Product.stock <= 0).order_by(Product.name.asc())
+            select(Product.id, Product.name)
+            .where(
+                Product.is_active == True,
+                stock_tracked_product_condition(Product),
+                Product.stock <= 0,
+            )
+            .order_by(Product.name.asc())
         )
         products = list(out_rows.all())
         if not products:

@@ -820,14 +820,19 @@ function renderProducts(list, emptyMessage="No products found"){
         return;
     }
     nr.style.display="none";
-    document.getElementById("grid").innerHTML = list.map(p=>`
+    document.getElementById("grid").innerHTML = list.map(p=>{
+        const isService = p.stock_tracked === false || p.item_type === "service";
+        const stockText = isService ? "Service" : `Stock: ${parseFloat(p.stock).toFixed(0)}`;
+        const stockColor = isService ? "var(--muted)" : (p.stock>0 ? "#445066" : "#ff4d6d");
+        return `
         <div class="product" data-sku="${p.sku}"
              onclick="addWithRipple(event,'${p.sku}','${p.name.replace(/'/g,"\\'")}',${p.price})">
             <div class="p-name">${p.name}</div>
             <div class="p-sku">${p.sku}</div>
             <div class="p-price">${parseFloat(p.price).toFixed(2)}</div>
-            <div class="p-stock" style="color:${p.stock>0?'#445066':'#ff4d6d'}">Stock: ${parseFloat(p.stock).toFixed(0)}</div>
-        </div>`).join("");
+            <div class="p-stock" style="color:${stockColor}">${stockText}</div>
+        </div>`;
+    }).join("");
 }
 
 function renderCategories(){

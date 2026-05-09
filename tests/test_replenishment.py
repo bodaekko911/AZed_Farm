@@ -111,6 +111,27 @@ def test_low_stock_metadata_uses_shortage_when_reorder_qty_is_smaller() -> None:
     assert payload["suggested_reorder_qty"] == 4.0
 
 
+def test_service_products_are_not_low_stock_alerts() -> None:
+    product = Product(
+        id=3,
+        sku="SVC-1",
+        name="Installation",
+        stock=0,
+        min_stock=5,
+        reorder_level=5,
+        reorder_qty=10,
+        unit="pcs",
+        item_type="service",
+    )
+
+    payload = serialize_low_stock_product(product)
+
+    assert payload["alert_state"] == "ok"
+    assert payload["alert_active"] is False
+    assert payload["suggested_reorder_qty"] == 0.0
+    assert payload["draft_purchase_eligible"] is False
+
+
 def test_draft_purchase_generation_groups_by_supplier_and_is_idempotent() -> None:
     supplier = Supplier(id=3, name="Dairy Co")
     product_one = Product(

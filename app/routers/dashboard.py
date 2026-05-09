@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.permissions import require_permission
+from app.core.product_types import is_stock_tracked_product
 from app.core.security import get_current_user
 from app.database import get_async_session
 from app.models.invoice import Invoice, InvoiceItem
@@ -183,12 +184,13 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
         try:
             r = await db.execute(select(Product).where(Product.is_active == True))
             all_products   = r.scalars().all()
-            out_of_stock   = [p for p in all_products if float(p.stock or 0) <= 0]
-            low_stock_list = [p for p in all_products if 0 < float(p.stock or 0) <= float(p.min_stock or 5)]
+            stock_products = [p for p in all_products if is_stock_tracked_product(p)]
+            out_of_stock   = [p for p in stock_products if float(p.stock or 0) <= 0]
+            low_stock_list = [p for p in stock_products if 0 < float(p.stock or 0) <= float(p.min_stock or 5)]
             total_products     = len(all_products)
             out_of_stock_count = len(out_of_stock)
             low_stock_count    = len(low_stock_list)
-            stock_value        = sum(float(p.stock or 0) * float(p.price or 0) for p in all_products)
+            stock_value        = sum(float(p.stock or 0) * float(p.price or 0) for p in stock_products)
         except Exception:
             logger.error("dashboard_data: inventory section failed", exc_info=True)
             _errors.append({"section": "inventory", "reason": "query failed"})

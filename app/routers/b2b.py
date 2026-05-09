@@ -13,6 +13,7 @@ from app.database import get_async_session
 from app.core.permissions import get_current_user, require_action, require_admin, require_permission
 from app.core.log import record
 from app.core.navigation import render_app_header
+from app.core.product_types import is_stock_tracked_product, normalize_item_type
 from app.core.templates import templates
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, Consignment, ConsignmentItem, B2BRefund, B2BRefundItem, B2BClientPrice
 from app.models.product import Product
@@ -198,7 +199,7 @@ async def _reverse_invoice_stock(invoice, db: AsyncSession):
     for item in invoice.items:
         _r = await db.execute(select(Product).where(Product.id == item.product_id))
         product = _r.scalar_one_or_none()
-        if product:
+        if product and is_stock_tracked_product(product):
             before = float(product.stock)
             after  = before + float(item.qty)
             product.stock = after
@@ -236,6 +237,8 @@ async def _reverse_refund_effects(refund, db: AsyncSession, current_user: User):
     for item in refund.items:
         product = item.product
         if not product:
+            continue
+        if not is_stock_tracked_product(product):
             continue
         before = float(product.stock)
         after = before - float(item.qty)
@@ -437,7 +440,7 @@ async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_asy
         product = _r.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
-        if float(product.stock) < item.qty:
+        if is_stock_tracked_product(product) and float(product.stock) < item.qty:
             raise HTTPException(status_code=400,
                 detail=f"Not enough stock for '{product.name}'. Available: {float(product.stock)}")
 
@@ -470,15 +473,16 @@ async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_asy
             qty=item.qty, unit_price=item.unit_price,
             total=round(item.qty * item.unit_price, 2),
         ))
-        before = float(product.stock); after = before - item.qty
-        product.stock = after
-        db.add(StockMove(
-            product_id=product.id, type="out", qty=-item.qty,
-            user_id=current_user.id,
-            qty_before=before, qty_after=after,
-            ref_type="b2b", ref_id=invoice.id,
-            note=f"B2B {invoice_number} ({invoice_type})",
-        ))
+        if is_stock_tracked_product(product):
+            before = float(product.stock); after = before - item.qty
+            product.stock = after
+            db.add(StockMove(
+                product_id=product.id, type="out", qty=-item.qty,
+                user_id=current_user.id,
+                qty_before=before, qty_after=after,
+                ref_type="b2b", ref_id=invoice.id,
+                note=f"B2B {invoice_number} ({invoice_type})",
+            ))
 
     # ── ACCOUNTING ──────────────────────────────────────
     if invoice_type == "cash":
@@ -565,7 +569,7 @@ async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = 
         product = _r.scalar_one_or_none()
         if not product:
             raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
-        if float(product.stock) < item.qty:
+        if is_stock_tracked_product(product) and float(product.stock) < item.qty:
             raise HTTPException(status_code=400,
                 detail=f"Not enough stock for '{product.name}'. Available: {float(product.stock)}")
 
@@ -599,15 +603,16 @@ async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = 
             qty=item.qty, unit_price=item.unit_price,
             total=round(item.qty * item.unit_price, 2),
         ))
-        before = float(product.stock); after = before - item.qty
-        product.stock = after
-        db.add(StockMove(
-            product_id=product.id, type="out", qty=-item.qty,
-            user_id=current_user.id,
-            qty_before=before, qty_after=after,
-            ref_type="b2b", ref_id=invoice.id,
-            note=f"B2B {invoice.invoice_number} (edited)",
-        ))
+        if is_stock_tracked_product(product):
+            before = float(product.stock); after = before - item.qty
+            product.stock = after
+            db.add(StockMove(
+                product_id=product.id, type="out", qty=-item.qty,
+                user_id=current_user.id,
+                qty_before=before, qty_after=after,
+                ref_type="b2b", ref_id=invoice.id,
+                note=f"B2B {invoice.invoice_number} (edited)",
+            ))
 
     if invoice_type == "cash":
         await _post_journal(db, f"B2B Cash Sale (edited) - {invoice.invoice_number}", "b2b", [
@@ -791,7 +796,7 @@ async def settle_consignment(cons_id: int, data: ConsignmentSettle, db: AsyncSes
                 detail=f"Total exceeds pending for {ci.product.name}. Pending: {pending:.2f}")
         ci.qty_sold     = Decimal(str(float(ci.qty_sold)     + qty_sold))
         ci.qty_returned = Decimal(str(float(ci.qty_returned) + qty_returned))
-        if qty_returned > 0:
+        if qty_returned > 0 and is_stock_tracked_product(ci.product):
             product = ci.product
             before  = float(product.stock); after = before + qty_returned
             product.stock = after
@@ -929,16 +934,17 @@ async def create_client_refund(data: ClientRefundCreate, db: AsyncSession = Depe
             unit_price=item.unit_price,
             total=line_total,
         ))
-        before = float(product.stock)
-        after  = before + item.qty
-        product.stock = after
-        db.add(StockMove(
-            product_id=product.id, type="in", qty=float(item.qty),
-            user_id=current_user.id,
-            qty_before=before, qty_after=after,
-            ref_type="b2b_refund", ref_id=refund.id,
-            note=f"B2B refund {refund_number} - {client.name}",
-        ))
+        if is_stock_tracked_product(product):
+            before = float(product.stock)
+            after  = before + item.qty
+            product.stock = after
+            db.add(StockMove(
+                product_id=product.id, type="in", qty=float(item.qty),
+                user_id=current_user.id,
+                qty_before=before, qty_after=after,
+                ref_type="b2b_refund", ref_id=refund.id,
+                note=f"B2B refund {refund_number} - {client.name}",
+            ))
 
     client.outstanding = Decimal(str(max(0, float(client.outstanding) - total)))
 
@@ -1151,6 +1157,8 @@ async def products_list(client_id: int = None, db: AsyncSession = Depends(get_as
             "default_price": float(p.price),
             "has_custom":    p.id in custom,
             "stock":         float(p.stock),
+            "item_type":     normalize_item_type(p.item_type),
+            "stock_tracked":  is_stock_tracked_product(p),
             "unit":          p.unit,
         }
         for p in products
@@ -1251,6 +1259,8 @@ async def refund_products(client_id: int, db: AsyncSession = Depends(get_async_s
             "sku":   p.sku,
             "price": latest_prices.get(p.id, float(p.price)),
             "stock": float(p.stock),
+            "item_type": normalize_item_type(p.item_type),
+            "stock_tracked": is_stock_tracked_product(p),
             "unit":  p.unit,
         }
         for p in products
@@ -2529,6 +2539,18 @@ function productLabel(product){
     return `${product.sku} — ${product.name}`;
 }
 
+function isServiceProduct(product){
+    return product && (product.stock_tracked === false || product.item_type === "service");
+}
+
+function stockShortLabel(product){
+    return isServiceProduct(product) ? "service" : `stk ${product.stock.toFixed(0)} ${product.unit}`;
+}
+
+function stockHintLabel(product){
+    return isServiceProduct(product) ? "service" : `stock: ${product.stock.toFixed(0)} ${product.unit}`;
+}
+
 function productMatches(products, query){
     let q = (query || "").trim().toLowerCase();
     if(!q) return products.slice(0, 8);
@@ -2574,7 +2596,7 @@ function attachProductDropdown(inputEl, hiddenEl, hintEl, getProducts, accent, o
                     </div>
                     <div style="text-align:right;flex-shrink:0">
                         <div style="font-family:var(--mono);font-size:13px;font-weight:700;color:${priceColor}">${p.price.toFixed(2)}</div>
-                        <div style="font-size:10px;color:var(--muted);margin-top:1px">stk ${p.stock.toFixed(0)} ${p.unit}</div>
+                        <div style="font-size:10px;color:var(--muted);margin-top:1px">${stockShortLabel(p)}</div>
                     </div>
                 </div>
             </button>`;
@@ -2603,7 +2625,7 @@ function attachProductDropdown(inputEl, hiddenEl, hintEl, getProducts, accent, o
     function pick(p){
         inputEl.value = productLabel(p);
         hiddenEl.value = p.id;
-        hintEl.innerText = `stock: ${p.stock.toFixed(0)} ${p.unit}`;
+        hintEl.innerText = stockHintLabel(p);
         inputEl.style.borderColor = accent;
         onPick(p);
         hideBox();
@@ -2660,7 +2682,7 @@ function addInvItem(selectedId=null, qty=1, price=null){
         if(p){
             searchInp.value = productLabel(p);
             hiddenId.value  = p.id;
-            stockHint.innerText = `stock: ${p.stock.toFixed(0)} ${p.unit}`;
+            stockHint.innerText = stockHintLabel(p);
             searchInp.style.borderColor = "rgba(0,255,157,.4)";
         }
     }
@@ -2779,7 +2801,7 @@ function addRefundItem(selectedId=null, qty=1, price=null){
         if(p){
             searchInp.value = productLabel(p);
             hiddenId.value  = p.id;
-            stockHint.innerText = `stock: ${p.stock.toFixed(0)} ${p.unit}`;
+            stockHint.innerText = stockHintLabel(p);
             searchInp.style.borderColor = "rgba(255,181,71,.45)";
         }
     }

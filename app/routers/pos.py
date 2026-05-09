@@ -10,6 +10,7 @@ from app.core.log import logger
 from app.core.permissions import ensure_action_permission, require_action, require_permission
 from app.core.security import get_current_user
 from app.core.navigation import render_app_header
+from app.core.product_types import is_stock_tracked_product, normalize_item_type
 from app.models.product import Product
 from app.models.customer import Customer
 from app.models.invoice import Invoice
@@ -37,6 +38,8 @@ async def products_cache(db: AsyncSession = Depends(get_async_session)):
             "category": p.category or "",
             "price": float(p.price or 0),
             "stock": float(p.stock or 0),
+            "item_type": normalize_item_type(p.item_type),
+            "stock_tracked": is_stock_tracked_product(p),
         }
         for p in products
     ]
@@ -52,7 +55,15 @@ async def search_products(
         exact_match = await find_product_by_barcode(db, normalized_query)
         if exact_match is not None:
             return [
-                {"sku": exact_match.sku, "name": exact_match.name, "category": exact_match.category or "", "price": float(exact_match.price), "stock": float(exact_match.stock)}
+                {
+                    "sku": exact_match.sku,
+                    "name": exact_match.name,
+                    "category": exact_match.category or "",
+                    "price": float(exact_match.price),
+                    "stock": float(exact_match.stock),
+                    "item_type": normalize_item_type(exact_match.item_type),
+                    "stock_tracked": is_stock_tracked_product(exact_match),
+                }
             ]
 
     _r = await db.execute(
@@ -71,6 +82,8 @@ async def search_products(
             "category": p.category or "",
             "price": float(p.price or 0),
             "stock": float(p.stock or 0),
+            "item_type": normalize_item_type(p.item_type),
+            "stock_tracked": is_stock_tracked_product(p),
         }
         for p in results
     ]
@@ -109,6 +122,8 @@ async def barcode_lookup(
             "name": product.name,
             "price": float(product.price),
             "stock": float(product.stock),
+            "item_type": normalize_item_type(product.item_type),
+            "stock_tracked": is_stock_tracked_product(product),
         },
     }
 
@@ -1180,14 +1195,19 @@ function renderProducts(list, emptyMessage="No products found"){
         return;
     }
     nr.style.display="none";
-    document.getElementById("grid").innerHTML = list.map(p=>`
+    document.getElementById("grid").innerHTML = list.map(p=>{
+        const isService = p.stock_tracked === false || p.item_type === "service";
+        const stockText = isService ? "Service" : `Stock: ${parseFloat(p.stock).toFixed(0)}`;
+        const stockColor = isService ? "var(--muted)" : (p.stock>0 ? "#445066" : "#ff4d6d");
+        return `
         <div class="product" data-sku="${p.sku}"
              onclick="addWithRipple(event,'${p.sku}','${p.name.replace(/'/g,"\\'")}',${p.price})">
             <div class="p-name">${p.name}</div>
             <div class="p-sku">${p.sku}</div>
             <div class="p-price">${parseFloat(p.price).toFixed(2)}</div>
-            <div class="p-stock" style="color:${p.stock>0?'#445066':'#ff4d6d'}">Stock: ${parseFloat(p.stock).toFixed(0)}</div>
-        </div>`).join("");
+            <div class="p-stock" style="color:${stockColor}">${stockText}</div>
+        </div>`;
+    }).join("");
 }
 
 function renderCategories(){

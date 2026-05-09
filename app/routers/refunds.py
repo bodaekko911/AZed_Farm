@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.log import record
 from app.core.permissions import get_current_user, require_action
+from app.core.product_types import is_stock_tracked_product
 from app.database import get_async_session
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.customer import Customer
@@ -261,20 +262,21 @@ async def create_refund(
             unit_price=float(invoice_item.unit_price),
             total=round(line_total, 2),
         ))
-        before = float(product.stock)
-        after = before + qty
-        product.stock = after
-        db.add(StockMove(
-            product_id=product.id,
-            type="in",
-            qty=qty,
-            qty_before=before,
-            qty_after=after,
-            ref_type="retail_refund",
-            ref_id=refund.id,
-            note=f"Retail refund {refund_number} - {invoice.invoice_number}",
-            user_id=current_user.id,
-        ))
+        if is_stock_tracked_product(product):
+            before = float(product.stock)
+            after = before + qty
+            product.stock = after
+            db.add(StockMove(
+                product_id=product.id,
+                type="in",
+                qty=qty,
+                qty_before=before,
+                qty_after=after,
+                ref_type="retail_refund",
+                ref_id=refund.id,
+                note=f"Retail refund {refund_number} - {invoice.invoice_number}",
+                user_id=current_user.id,
+            ))
 
     await _post_journal(
         db=db,

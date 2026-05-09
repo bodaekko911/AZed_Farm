@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.product_types import stock_tracked_product_condition
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.b2b import B2BClient, B2BInvoice, Consignment
 from app.models.expense import Expense, ExpenseCategory
@@ -303,7 +304,7 @@ async def _rule_stockout_risk(db: AsyncSession, today: date) -> InsightCard | No
 
     prod_r = await db.execute(
         select(Product.id, Product.name, Product.stock)
-        .where(Product.is_active == True, Product.stock > 0)
+        .where(Product.is_active == True, stock_tracked_product_condition(Product), Product.stock > 0)
     )
     best_name, best_days = None, float("inf")
     for p in prod_r:

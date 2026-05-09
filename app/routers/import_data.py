@@ -8,6 +8,7 @@ from sqlalchemy import delete, select
 import openpyxl, io
 
 from app.core.permissions import require_permission
+from app.core.product_types import is_stock_tracked_product
 from app.core.security import get_current_user
 from app.database import get_async_session
 from app.core.navigation import render_app_header
@@ -52,6 +53,10 @@ ITEM_TYPE_ALIASES = {
     "packaging": "packing",
     "ingredient": "ingredient",
     "ingredients": "ingredient",
+    "service": "service",
+    "services": "service",
+    "labor": "service",
+    "labour": "service",
 }
 
 
@@ -196,6 +201,7 @@ async def import_stock(file: UploadFile = File(...), db: AsyncSession = Depends(
 
     updated   = 0
     not_found = []
+    skipped_services = []
 
     for row in range(2, ws.max_row + 1):
         sku_raw   = ws.cell(row, col_sku).value   if col_sku  else None
@@ -221,6 +227,9 @@ async def import_stock(file: UploadFile = File(...), db: AsyncSession = Depends(
             product = _r.scalar_one_or_none()
 
         if product:
+            if not is_stock_tracked_product(product):
+                skipped_services.append(product.sku or product.name)
+                continue
             before = float(product.stock)
             product.stock = new_stock
             db.add(StockMove(
@@ -240,8 +249,11 @@ async def import_stock(file: UploadFile = File(...), db: AsyncSession = Depends(
         await db.rollback()
         return {"error": str(e)}
 
+    message = f"Done: {updated} updated" + (f", {len(not_found)} not found" if not_found else "")
+    if skipped_services:
+        message += f", {len(skipped_services)} services skipped"
     return {"ok": True, "updated": updated, "not_found": not_found[:30],
-            "message": f"Done: {updated} updated" + (f", {len(not_found)} not found" if not_found else "")}
+            "skipped_services": skipped_services[:30], "message": message}
 
 
 # ── CUSTOMERS ──────────────────────────────────────────

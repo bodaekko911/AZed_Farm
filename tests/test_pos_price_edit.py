@@ -12,6 +12,7 @@ apply_test_environment_defaults()
 
 from app.schemas.invoice import InvoiceCreate, InvoiceItemCreate
 from app.services import pos_service
+from app.models.inventory import StockMove
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +178,23 @@ def test_no_permission_catalog_price_passes() -> None:
     )
     result, _ = _invoke(data, _make_user("cashier"), extra_results=[[product]])
     assert result["total"] == pytest.approx(10.00)
+
+
+def test_service_product_sells_without_stock_move() -> None:
+    product = _make_product(price=25.00, stock=0)
+    product.item_type = "service"
+    data = InvoiceCreate(
+        customer_id=None,
+        items=[InvoiceItemCreate(sku="OLV-500", qty=3)],
+        discount_percent=0,
+        payment_method="cash",
+    )
+
+    result, fake_db = _invoke(data, _make_user("cashier"), extra_results=[[product]])
+
+    assert result["total"] == pytest.approx(75.00)
+    assert product.stock == 0
+    assert not any(isinstance(obj, StockMove) for obj in fake_db.added)
 
 
 # ---------------------------------------------------------------------------

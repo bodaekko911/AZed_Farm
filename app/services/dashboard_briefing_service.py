@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.product_types import stock_tracked_product_condition
 from app.core.time_utils import now_local
 from app.models.b2b import B2BClient, B2BInvoice, Consignment
 from app.models.expense import Expense, ExpenseCategory
@@ -216,6 +217,7 @@ async def detect_out_of_stock_recent(db: AsyncSession, *, today: date) -> dict[s
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .where(
             Product.is_active == True,
+            stock_tracked_product_condition(Product),
             Product.stock <= 0,
             Invoice.created_at >= utc_s,
             Invoice.created_at <= utc_e,
@@ -250,6 +252,7 @@ async def detect_low_stock(db: AsyncSession, *, today: date) -> dict[str, Any] |
         .join(Invoice, Invoice.id == InvoiceItem.invoice_id)
         .where(
             Product.is_active == True,
+            stock_tracked_product_condition(Product),
             Product.stock > 0,
             Product.stock <= 5,
             Invoice.created_at >= utc_s,

@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.product_types import is_stock_tracked_product
 from app.models.product import Product
 from app.models.supplier import Purchase, PurchaseItem
 
@@ -35,10 +36,14 @@ def reorder_threshold(product: Product) -> Decimal:
 
 
 def is_low_stock(product: Product) -> bool:
+    if not is_stock_tracked_product(product):
+        return False
     return _qty(getattr(product, "stock", 0)) <= reorder_threshold(product)
 
 
 def suggested_reorder_qty(product: Product) -> Decimal:
+    if not is_stock_tracked_product(product):
+        return _qty(0)
     current_stock = _qty(getattr(product, "stock", 0))
     threshold = reorder_threshold(product)
     if current_stock > threshold:
