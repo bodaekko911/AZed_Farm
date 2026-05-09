@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import HTMLResponse
@@ -6,6 +7,7 @@ from sqlalchemy import or_, select, func
 
 from app.core.log import ActivityLog
 from app.core.permissions import require_admin
+from app.core.time_utils import utc_bounds
 from app.database import get_async_session
 
 router = APIRouter(prefix="/audit-log", tags=["Audit Log"])
@@ -18,8 +20,8 @@ async def audit_log_data(
     module:     Optional[str] = None,
     action:     Optional[str] = None,
     user_name:  Optional[str] = None,
-    date_from:  Optional[str] = None,
-    date_to:    Optional[str] = None,
+    date_from:  Optional[date] = None,
+    date_to:    Optional[date] = None,
     search:     Optional[str] = None,
     page:       int = Query(1, ge=1),
     page_size:  int = Query(50, ge=1, le=500),
@@ -30,8 +32,12 @@ async def audit_log_data(
     if module:    conditions.append(ActivityLog.module    == module)
     if action:    conditions.append(ActivityLog.action    == action)
     if user_name: conditions.append(ActivityLog.user_name == user_name)
-    if date_from: conditions.append(ActivityLog.created_at >= date_from)
-    if date_to:   conditions.append(ActivityLog.created_at <= date_to + " 23:59:59")
+    if date_from:
+        start_utc, _ = utc_bounds(date_from, date_from)
+        conditions.append(ActivityLog.created_at >= start_utc)
+    if date_to:
+        _, end_utc = utc_bounds(date_to, date_to)
+        conditions.append(ActivityLog.created_at <= end_utc)
     if search:
         like = f"%{search}%"
         conditions.append(or_(
