@@ -85,6 +85,46 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
+  function installDashboardBackgroundStyle() {
+    if (document.getElementById("app-dashboard-background-style")) return;
+    var style = document.createElement("style");
+    style.id = "app-dashboard-background-style";
+    style.textContent = [
+      ".app-bg-layer{position:fixed;inset:0;z-index:0;overflow:hidden;transform:translateZ(0);pointer-events:none;}",
+      ".app-bg-orb{position:absolute;border-radius:50%;filter:blur(80px);opacity:.18;animation:appBgOrbFloat 18s ease-in-out infinite alternate;}",
+      ".app-bg-orb:nth-child(1){width:700px;height:500px;top:-10%;left:-15%;background:radial-gradient(circle,#00E5FF,transparent 70%);animation-duration:20s;}",
+      ".app-bg-orb:nth-child(2){width:500px;height:600px;top:30%;right:-10%;background:radial-gradient(circle,#38bdf8,transparent 70%);animation-duration:25s;animation-delay:-8s;}",
+      ".app-bg-orb:nth-child(3){width:400px;height:400px;bottom:-10%;left:30%;background:radial-gradient(circle,#64748b,transparent 70%);animation-duration:22s;animation-delay:-4s;}",
+      ".app-bg-grain{position:fixed;inset:0;z-index:1;background-image:url(\"data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E\");pointer-events:none;opacity:.4;}",
+      "html[data-theme=\"light\"] .app-bg-orb{opacity:.08;}",
+      "html[data-theme=\"light\"] .app-bg-grain{opacity:.15;}",
+      "body>:where(:not(.app-bg-layer):not(.app-bg-grain):not(.bg-layer):not(.bg-grain):not(script):not(style)){position:relative;z-index:2;}",
+      "@keyframes appBgOrbFloat{0%{transform:translate(0,0);}33%{transform:translate(30px,-20px);}66%{transform:translate(-20px,30px);}100%{transform:translate(10px,10px);}}",
+      "@media print{.app-bg-layer,.app-bg-grain{display:none!important;}}"
+    ].join("");
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function mountDashboardBackground() {
+    if (!document.body) return;
+    if (document.querySelector(".bg-layer,.app-bg-layer")) return;
+
+    var layer = document.createElement("div");
+    layer.className = "app-bg-layer";
+    layer.setAttribute("aria-hidden", "true");
+    for (var i = 0; i < 3; i += 1) {
+      var orb = document.createElement("div");
+      orb.className = "app-bg-orb";
+      layer.appendChild(orb);
+    }
+
+    var grain = document.createElement("div");
+    grain.className = "app-bg-grain";
+    grain.setAttribute("aria-hidden", "true");
+    document.body.insertBefore(grain, document.body.firstChild);
+    document.body.insertBefore(layer, grain);
+  }
+
   function installLogoThemeStyle() {
     if (document.getElementById("app-logo-theme-style")) return;
     var style = document.createElement("style");
@@ -124,11 +164,13 @@
     var theme = stored === "light" ? "light" : "dark";
     appliedTheme = theme;
     installDashboardPaletteStyle();
+    installDashboardBackgroundStyle();
     installLogoThemeStyle();
     syncRootTheme(theme);
     window.__appThemePalette = palettes[theme];
   } catch (_) {
     installDashboardPaletteStyle();
+    installDashboardBackgroundStyle();
     installLogoThemeStyle();
     syncRootTheme("dark");
     window.__appThemePalette = palettes.dark;
@@ -138,5 +180,6 @@
     var theme = document.documentElement.getAttribute("data-theme") || appliedTheme;
     syncRootTheme(theme);
     syncBodyTheme(theme);
+    mountDashboardBackground();
   });
 })();
