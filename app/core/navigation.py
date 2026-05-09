@@ -91,9 +91,10 @@ def app_nav_styles() -> str:
     return """
 <style>
 .app-nav{grid-column:1/-1;position:sticky;top:0;z-index:300;display:flex;align-items:center;gap:12px;min-height:64px;padding:10px 24px;background:rgba(10,13,24,.94);backdrop-filter:blur(20px);border-bottom:1px solid var(--border,rgba(255,255,255,.08));color:var(--text,#f0f4ff);}
-body.light .app-nav,[data-theme="light"] .app-nav{background:rgba(244,245,239,.94);}
+body.light .app-nav,[data-theme="light"] .app-nav{background:rgba(255,255,255,.94);}
 .app-nav-brand{display:flex;align-items:center;gap:9px;min-width:max-content;text-decoration:none;font-size:17px;font-weight:900;color:var(--text,#f0f4ff);}
-.app-nav-brand svg{flex:0 0 auto}.app-nav-brand span{background:linear-gradient(135deg,var(--green,#00ff9d),var(--blue,#4d9fff));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+.app-nav-brand img{flex:0 0 auto}.app-nav-brand span{background:linear-gradient(135deg,var(--accent,#00E5FF),var(--blue,#38bdf8));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+body[data-theme="light"] .app-nav-brand img{filter:invert(1) hue-rotate(180deg);}
 .app-nav-main{display:flex;align-items:center;gap:6px;flex:1;min-width:0;}
 .app-nav-group{position:relative}.app-nav-group summary{list-style:none;display:flex;align-items:center;gap:7px;padding:8px 12px;border-radius:8px;color:var(--sub,#8899bb);font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;transition:background .16s,color .16s;}
 .app-nav-group summary::-webkit-details-marker{display:none}.app-nav-group summary:after{content:"";width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg) translateY(-2px);opacity:.75;}
@@ -191,9 +192,9 @@ def render_app_header(user: User, active_permission: str | None = None) -> str:
     return f"""
 {app_nav_styles()}
 <nav class="app-nav" id="app-nav" aria-label="Primary navigation">
-  <a href="/home" class="app-nav-brand">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/></svg>
-    <span>Thunder ERP</span>
+  <a href="/home" class="app-nav-brand navbar-brand">
+    <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:22px;width:22px;object-fit:contain;">
+    <span>AZed ERP</span>
   </a>
   <button class="app-nav-mobile-toggle" type="button" aria-label="Toggle navigation" onclick="document.getElementById('app-nav').classList.toggle('open')">&#9776;</button>
   <div class="app-nav-main">{groups}</div>

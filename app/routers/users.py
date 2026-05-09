@@ -270,7 +270,7 @@ def password_ui(_=Depends(get_current_user)):
 <meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Change Password — Thunder ERP</title>
+<title>Change Password — AZed ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -330,9 +330,9 @@ body.light nav{background:rgba(244,245,239,.92)}
 </head>
 <body>
 <nav>
-    <a href="/home" class="logo">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/></svg>
-        <span class="logo-txt">Thunder ERP</span>
+    <a href="/home" class="logo navbar-brand">
+        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:22px;width:22px;object-fit:contain;">
+        <span class="logo-txt">AZed ERP</span>
     </a>
     <span class="nav-spacer"></span>
     <div class="topbar-right">
@@ -505,7 +505,7 @@ def users_ui(current_user: User = Depends(core_require_admin)):
 <meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Users — Thunder ERP</title>
+<title>Users — AZed ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root{

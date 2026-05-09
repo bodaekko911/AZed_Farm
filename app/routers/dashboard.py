@@ -432,7 +432,7 @@ def dashboard_ui():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard – Thunder ERP</title>
+<title>Dashboard – AZed ERP</title>
 <script src="/static/theme-init.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -451,11 +451,9 @@ def dashboard_ui():
 <div class="bg-grain"></div>
 <div id="loading"><div class="spinner"></div></div>
 <nav class="top-nav" aria-label="Primary">
-  <a href="/home" class="logo">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"></polygon>
-    </svg>
-    <span class="logo-text">Thunder ERP</span>
+  <a href="/home" class="logo navbar-brand">
+    <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:22px;width:22px;object-fit:contain;">
+    <span class="logo-text">AZed ERP</span>
   </a>
   <div class="nav-links">
     <a href="/dashboard" class="nav-link active">Dashboard</a>

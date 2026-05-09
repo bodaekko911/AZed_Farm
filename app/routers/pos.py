@@ -319,7 +319,7 @@ def pos_service_worker():
     from fastapi.responses import Response
     js = r"""
 const CACHE = 'pos-v1';
-const PRECACHE = ['/pos', '/products-cache', '/customers', '/static/Logo.png'];
+const PRECACHE = ['/pos', '/products-cache', '/customers', '/static/Logo.png', '/static/ERP_logo.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(PRECACHE)));
@@ -338,7 +338,7 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
-  const cacheable = ['/pos', '/products-cache', '/customers', '/static/Logo.png'];
+  const cacheable = ['/pos', '/products-cache', '/customers', '/static/Logo.png', '/static/ERP_logo.png'];
   if (!cacheable.some(p => url.pathname === p || url.pathname.startsWith(p))) return;
   e.respondWith(
     fetch(e.request).then(res => {
@@ -363,7 +363,7 @@ def pos_ui(current_user: User = Depends(require_permission("page_pos"))):
 <meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>POS — Thunder ERP</title>
+<title>POS — AZed ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -592,11 +592,9 @@ body.light .toast{background:var(--card);}
 
 <!-- TOPBAR -->
 <div id="topbar">
-    <a href="/home" class="logo">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/>
-        </svg>
-        Thunder ERP
+    <a href="/home" class="logo navbar-brand">
+        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:22px;width:22px;object-fit:contain;">
+        AZed ERP
     </a>
 
     <div class="tb-field" id="barcode_wrap">
@@ -1087,7 +1085,7 @@ function normalizeBarcodeValue(value){
     return String(value || "")
         .normalize("NFKC")
         .replace(/[\u200B\uFEFF]/g, "")
-        .replace(/\s+/g, "")
+        .replace(/\\s+/g, "")
         .trim()
         .toLowerCase();
 }

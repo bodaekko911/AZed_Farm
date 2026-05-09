@@ -60,6 +60,9 @@ function setTheme(theme) {
     return;
   }
   document.documentElement.dataset.theme = theme;
+  document.documentElement.setAttribute("data-theme", theme);
+  document.body.dataset.theme = theme;
+  document.body.setAttribute("data-theme", theme);
   document.body.classList.toggle("light", theme === "light");
   localStorage.setItem("colorMode", theme);
   document.getElementById("mode-btn").innerHTML = theme === "light" ? "&#9728;&#65039;" : "&#127769;";
@@ -81,7 +84,25 @@ function initTheme() {
 function refreshThemeUi() {
   const theme = window.__appTheme ? window.__appTheme.get() : (document.documentElement.dataset.theme || "dark");
   document.getElementById("mode-btn").innerHTML = theme === "light" ? "&#9728;&#65039;" : "&#127769;";
-  if (salesChart) salesChart.update("none");
+  if (salesChart && dashboardData) renderChart();
+}
+
+function readCssVar(name, fallback) {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function getChartPalette() {
+  const themePalette = window.__appTheme?.palette?.() || window.__appThemePalette || {};
+  return {
+    primary: themePalette.chartPrimary || themePalette.accent || readCssVar("--accent", "#00E5FF"),
+    secondary: themePalette.chartSecondary || readCssVar("--blue", "#38bdf8"),
+    negative: themePalette.chartNegative || readCssVar("--negative", "#f87171"),
+    text: themePalette.textSub || readCssVar("--text-sub", "#cbd5e1"),
+    muted: themePalette.textMuted || readCssVar("--text-muted", "#94A3B8"),
+    border: themePalette.border || readCssVar("--border", "#334155"),
+    surface: themePalette.surface || readCssVar("--surface", "#1E293B"),
+  };
 }
 
 function updateRangeButtons() {
@@ -353,13 +374,13 @@ function renderChart() {
     <tr><th>Date</th><th>POS</th><th>B2B</th><th>Refunds</th><th>Orders</th></tr>
     ${buckets.map((bucket) => `<tr><td>${bucket.date}</td><td>${formatMoneyPrecise(bucket.pos)}</td><td>${formatMoneyPrecise(bucket.b2b)}</td><td>${formatMoneyPrecise(bucket.refunds)}</td><td>${bucket.orders}</td></tr>`).join("")}
   `);
-  const accentColor = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+  const chartPalette = getChartPalette();
   const chartData = {
     labels: chartLabels(buckets),
     datasets: [
-      { label: "POS", data: buckets.map((b) => b.pos), backgroundColor: accentColor, stack: "sales" },
-      { label: "B2B", data: buckets.map((b) => b.b2b), backgroundColor: "#3b5f8a", stack: "sales" },
-      { label: "Refunds", data: buckets.map((b) => b.refunds), backgroundColor: "#b54040", stack: "sales" },
+      { label: "POS", data: buckets.map((b) => b.pos), backgroundColor: chartPalette.primary, stack: "sales" },
+      { label: "B2B", data: buckets.map((b) => b.b2b), backgroundColor: chartPalette.secondary, stack: "sales" },
+      { label: "Refunds", data: buckets.map((b) => b.refunds), backgroundColor: chartPalette.negative, stack: "sales" },
     ],
   };
   const tooltipAfterBody = (items) => {
@@ -376,12 +397,34 @@ function renderChart() {
         animation: false,
         interaction: { mode: "index", intersect: false },
         plugins: {
-          legend: { display: true, position: "top", align: "end" },
-          tooltip: { callbacks: { afterBody: tooltipAfterBody } },
+          legend: {
+            display: true,
+            position: "top",
+            align: "end",
+            labels: { color: chartPalette.text },
+          },
+          tooltip: {
+            backgroundColor: chartPalette.surface,
+            borderColor: chartPalette.border,
+            borderWidth: 1,
+            titleColor: chartPalette.text,
+            bodyColor: chartPalette.text,
+            callbacks: { afterBody: tooltipAfterBody },
+          },
         },
         scales: {
-          x: { stacked: true, grid: { display: false } },
-          y: { stacked: true, grid: { display: false }, ticks: { display: false }, border: { display: false } },
+          x: {
+            stacked: true,
+            ticks: { color: chartPalette.muted },
+            grid: { display: false },
+            border: { color: chartPalette.border },
+          },
+          y: {
+            stacked: true,
+            grid: { color: chartPalette.border },
+            ticks: { display: false, color: chartPalette.muted },
+            border: { display: false },
+          },
         },
       },
     });
@@ -394,6 +437,15 @@ function renderChart() {
       dataset.backgroundColor = chartData.datasets[i].backgroundColor;
     }
   });
+  salesChart.options.plugins.legend.labels.color = chartPalette.text;
+  salesChart.options.plugins.tooltip.backgroundColor = chartPalette.surface;
+  salesChart.options.plugins.tooltip.borderColor = chartPalette.border;
+  salesChart.options.plugins.tooltip.titleColor = chartPalette.text;
+  salesChart.options.plugins.tooltip.bodyColor = chartPalette.text;
+  salesChart.options.scales.x.ticks.color = chartPalette.muted;
+  salesChart.options.scales.x.border.color = chartPalette.border;
+  salesChart.options.scales.y.grid.color = chartPalette.border;
+  salesChart.options.scales.y.ticks.color = chartPalette.muted;
   salesChart.options.plugins.tooltip.callbacks.afterBody = tooltipAfterBody;
   salesChart.update("none");
 }

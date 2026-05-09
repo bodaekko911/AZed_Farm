@@ -96,7 +96,7 @@ def audit_log_ui():
 <meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Audit Log — Thunder ERP</title>
+<title>Audit Log — AZed ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -249,11 +249,9 @@ tbody td{padding:12px 14px;font-size:13px;vertical-align:top}
 <body>
 
 <header class="topbar">
-    <a href="/home" class="logo">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/>
-        </svg>
-        <span class="logo-text">Thunder ERP</span>
+    <a href="/home" class="logo navbar-brand">
+        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:22px;width:22px;object-fit:contain;">
+        <span class="logo-text">AZed ERP</span>
     </a>
     <div class="topbar-right">
         <button class="mode-btn" id="mode-btn" onclick="toggleMode()">&#127769;</button>

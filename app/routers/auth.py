@@ -52,15 +52,25 @@ def login_page():
 <head>
     <meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
-    <title>ERP Login</title>
+    <title>AZed ERP Login</title>
     <style>
         :root {
-            --card: rgba(15, 20, 36, 0.88);
-            --border: rgba(255,255,255,0.08);
-            --text: #ffffff;
-            --sub: #8899bb;
-            --muted: #445066;
-            --accent: #00ff9d;
+            --card: rgba(30, 41, 59, 0.88);
+            --border: #334155;
+            --text: #F8FAFC;
+            --sub: #cbd5e1;
+            --muted: #94A3B8;
+            --accent: #00E5FF;
+            --accent-soft: rgba(0, 229, 255, 0.14);
+        }
+        [data-theme="light"] {
+            --card: rgba(255, 255, 255, 0.92);
+            --border: #e2e8f0;
+            --text: #0f172a;
+            --sub: #334155;
+            --muted: #64748b;
+            --accent: #00B8D4;
+            --accent-soft: rgba(0, 184, 212, 0.12);
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -85,6 +95,13 @@ def login_page():
             position: relative;
             backdrop-filter: blur(8px);
             box-shadow: 0 24px 60px rgba(0,0,0,0.35);
+        }
+        .login-logo {
+            display: block;
+            width: 82px;
+            height: 82px;
+            object-fit: contain;
+            margin: 0 auto 20px;
         }
         h2 {
             color: var(--accent);
@@ -117,15 +134,16 @@ def login_page():
             outline: none;
         }
         input:focus {
-            border-color: rgba(0,255,157,0.4);
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
         }
         button {
             width: 100%;
             padding: 14px;
-            background: linear-gradient(135deg, #00ff9d, #00d4ff);
+            background: linear-gradient(135deg, var(--accent), #38bdf8);
             border: none;
             border-radius: 10px;
-            color: #021a10;
+            color: #0B1120;
             font-size: 15px;
             font-weight: 800;
             cursor: pointer;
@@ -161,7 +179,8 @@ def login_page():
 </head>
 <body>
     <div class="box">
-        <h2>Welcome Back</h2>
+        <img src="/static/ERP_logo.png" alt="AZed ERP" class="login-logo">
+        <h2>AZed ERP</h2>
         <p>Sign in to your ERP system</p>
 
         <div id="session-msg"></div>

@@ -353,11 +353,9 @@ body {
 <div class="page">
 
     <header class="topbar">
-        <a href="/home" class="logo">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/>
-            </svg>
-            <span class="logo-text">Thunder ERP</span>
+        <a href="/home" class="logo navbar-brand">
+            <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:22px;width:22px;object-fit:contain;">
+            <span class="logo-text">AZed ERP</span>
         </a>
         <div class="topbar-right">
             <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle light/dark mode">&#127769;</button>

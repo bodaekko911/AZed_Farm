@@ -387,7 +387,7 @@ def refunds_ui():
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script src="/static/theme.js"></script>
-<title>Retail Refunds — Thunder ERP</title>
+<title>Retail Refunds — AZed ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -740,11 +740,9 @@ nav {
 <body>
 
 <nav>
-    <a href="/home" class="logo">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <polygon points="13,2 4,14 11,14 11,22 20,10 13,10" fill="#f59e0b"/>
-        </svg>
-        Thunder ERP
+    <a href="/home" class="logo navbar-brand">
+        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:22px;width:22px;object-fit:contain;">
+        AZed ERP
     </a>
     <a href="/pos" class="nav-back">
         <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
