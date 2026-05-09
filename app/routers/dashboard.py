@@ -190,7 +190,7 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             total_products     = len(all_products)
             out_of_stock_count = len(out_of_stock)
             low_stock_count    = len(low_stock_list)
-            stock_value        = sum(float(p.stock or 0) * float(p.price or 0) for p in stock_products)
+            stock_value        = sum(float(p.stock or 0) * float(p.cost or 0) for p in stock_products)
         except Exception:
             logger.error("dashboard_data: inventory section failed", exc_info=True)
             _errors.append({"section": "inventory", "reason": "query failed"})

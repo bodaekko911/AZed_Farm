@@ -72,6 +72,7 @@ class _NullStockProductDB:
                 sku="BP001",
                 stock=None,
                 price=None,
+                cost=None,
                 min_stock=None,
                 is_active=True,
             )
@@ -141,12 +142,12 @@ def test_null_price_stock_product_does_not_crash():
 
 def test_null_price_stock_arithmetic_directly():
     prods = [
-        SimpleNamespace(stock=None, price=5.0, min_stock=2.0),
-        SimpleNamespace(stock=3.0, price=None, min_stock=2.0),
-        SimpleNamespace(stock=2.0, price=7.0, min_stock=2.0),
+        SimpleNamespace(stock=None, price=5.0, cost=4.0, min_stock=2.0),
+        SimpleNamespace(stock=3.0, price=None, cost=None, min_stock=2.0),
+        SimpleNamespace(stock=2.0, price=7.0, cost=5.0, min_stock=2.0),
     ]
-    stock_value = sum(float(p.stock or 0) * float(p.price or 0) for p in prods)
-    assert stock_value == pytest.approx(14.0)
+    stock_value = sum(float(p.stock or 0) * float(p.cost or 0) for p in prods)
+    assert stock_value == pytest.approx(10.0)
     assert len([p for p in prods if float(p.stock or 0) <= 0]) == 1
 
 

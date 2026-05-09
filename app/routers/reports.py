@@ -1015,7 +1015,7 @@ async def _build_inventory_report(
             "stock": _num(product.stock),
             "unit": product.unit,
             "price": _num(product.price),
-            "value": round(_num(product.stock) * _num(product.price), 2) if stock_tracked else 0.0,
+            "value": round(_num(product.stock) * _num(product.cost), 2) if stock_tracked else 0.0,
             "threshold": round(threshold, 2),
             "reorder_qty": round(_num(product.reorder_qty), 2),
             "low_stock": low_stock,
