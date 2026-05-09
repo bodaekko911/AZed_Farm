@@ -193,8 +193,7 @@ def render_app_header(user: User, active_permission: str | None = None) -> str:
 {app_nav_styles()}
 <nav class="app-nav" id="app-nav" aria-label="Primary navigation">
   <a href="/home" class="app-nav-brand navbar-brand">
-    <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:55px; width:auto; object-fit:contain;">
-    <span>AZed ERP</span>
+    <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:75px; width:auto; object-fit:contain;">
   </a>
   <button class="app-nav-mobile-toggle" type="button" aria-label="Toggle navigation" onclick="document.getElementById('app-nav').classList.toggle('open')">&#9776;</button>
   <div class="app-nav-main">{groups}</div>

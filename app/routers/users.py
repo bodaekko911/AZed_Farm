@@ -331,8 +331,7 @@ body.light nav{background:rgba(244,245,239,.92)}
 <body>
 <nav>
     <a href="/home" class="logo navbar-brand">
-        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:22px;width:22px;object-fit:contain;">
-        <span class="logo-txt">AZed ERP</span>
+        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:75px; width:auto; object-fit:contain;">
     </a>
     <span class="nav-spacer"></span>
     <div class="topbar-right">

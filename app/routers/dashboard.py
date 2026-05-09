@@ -452,8 +452,7 @@ def dashboard_ui():
 <div id="loading"><div class="spinner"></div></div>
 <nav class="top-nav" aria-label="Primary">
   <a href="/home" class="logo navbar-brand">
-    <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:22px;width:22px;object-fit:contain;">
-    <span class="logo-text">AZed ERP</span>
+    <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:75px; width:auto; object-fit:contain;">
   </a>
   <div class="nav-links">
     <a href="/dashboard" class="nav-link active">Dashboard</a>

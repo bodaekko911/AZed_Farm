@@ -741,8 +741,7 @@ nav {
 
 <nav>
     <a href="/home" class="logo navbar-brand">
-        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:22px;width:22px;object-fit:contain;">
-        AZed ERP
+        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height:75px; width:auto; object-fit:contain;">
     </a>
     <a href="/pos" class="nav-back">
         <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
