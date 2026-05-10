@@ -150,11 +150,6 @@ a {
   width: 118px;
   height: auto;
   object-fit: contain;
-  mix-blend-mode: screen;
-}
-
-html[data-theme="light"] .brand img {
-  mix-blend-mode: multiply;
 }
 
 .brand span {
@@ -164,17 +159,6 @@ html[data-theme="light"] .brand img {
 html[data-theme="light"] .hero-logo,
 html[data-theme="light"] .modal-logo {
   filter: invert(1) hue-rotate(180deg);
-}
-
-.hero-logo,
-.modal-logo {
-  mix-blend-mode: screen;
-}
-
-html[data-theme="light"] .hero-logo,
-html[data-theme="light"] .modal-logo {
-  mix-blend-mode: multiply;
-  filter: none;
 }
 
 .nav-links,
