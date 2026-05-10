@@ -44,7 +44,6 @@ RUN mkdir -p /app/logs /app/app/static/uploads \
 
 USER appuser
 
-# EXPOSE is informational; gunicorn.conf.py honours $PORT for the real bind.
 EXPOSE 8000
 
-CMD ["gunicorn", "-c", "gunicorn.conf.py", "app.main:app"]
+CMD ["sh", "-c", "python -m alembic upgrade head && gunicorn -c gunicorn.conf.py app.main:app"]
