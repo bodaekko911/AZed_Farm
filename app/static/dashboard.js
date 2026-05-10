@@ -1563,15 +1563,13 @@ function renderProfitSummary() {
     el.innerHTML = `
       <div class="dashboard-upgrade-empty">
         <strong>Profit data is not ready yet.</strong>
-        <span>Keep sales and expenses updated to unlock gross profit, net profit, and margin tracking.</span>
+        <span>Keep sales and expenses updated to unlock operating profit and margin tracking.</span>
       </div>`;
     return;
   }
 
-  const grossProfit = Number(profit.gross_profit || 0);
   const operatingExpenses = Number(profit.operating_expenses || 0);
   const netProfit = revenue - operatingExpenses;
-  const grossMarginPct = revenue > 0 ? (grossProfit / revenue) * 100 : null;
   const netMarginPct = revenue > 0 ? (netProfit / revenue) * 100 : null;
   const opexPct = revenue > 0 ? (operatingExpenses / revenue) * 100 : 0;
   const delta = null;
@@ -1600,22 +1598,21 @@ function renderProfitSummary() {
 
       <div class="profit-mini-grid" aria-label="Profit key metrics">
         <div class="mini-kpi">
-          <span class="mini-kpi-label">Gross profit</span>
-          <strong class="mini-kpi-value ${grossProfit >= 0 ? "positive" : "negative"}">${signedMoney(grossProfit)}</strong>
+          <span class="mini-kpi-label">Revenue</span>
+          <strong class="mini-kpi-value positive">${formatMoney(revenue)}</strong>
         </div>
         <div class="mini-kpi">
-          <span class="mini-kpi-label">Gross margin</span>
-          <strong class="mini-kpi-value">${percentText(grossMarginPct)}</strong>
+          <span class="mini-kpi-label">Operating expenses</span>
+          <strong class="mini-kpi-value negative">-${formatMoney(operatingExpenses)}</strong>
         </div>
         <div class="mini-kpi">
-          <span class="mini-kpi-label">Net margin</span>
+          <span class="mini-kpi-label">Operating margin</span>
           <strong class="mini-kpi-value ${netProfit >= 0 ? "positive" : "negative"}">${percentText(netMarginPct)}</strong>
         </div>
       </div>
 
       <div class="profit-waterfall" aria-label="Profit breakdown">
         ${profitFlowRow("Revenue", revenue, 100, "revenue", 100)}
-        ${profitFlowRow("Gross profit", grossProfit, grossMarginPct, "gross", ratioOf(grossProfit, revenue))}
         ${profitFlowRow("Operating expenses", operatingExpenses, opexPct, "opex", ratioOf(operatingExpenses, revenue), true)}
         ${profitFlowRow("Operating profit", netProfit, netMarginPct, `net ${netProfit < 0 ? "negative" : ""}`, ratioOf(netProfit, revenue))}
       </div>
