@@ -153,7 +153,7 @@ async def carbon_dashboard(
     )
     targets = targets_q.scalars().all()
 
-    nav_html = await render_app_header(current_user, active_permission="page_carbon", db=db)
+    nav_html = render_app_header(current_user, "page_carbon")
 
     # Build log rows HTML
     log_rows = ""
@@ -364,7 +364,7 @@ async def log_emission_page(
     farms_q = await db.execute(select(Farm).where(Farm.is_active == 1).order_by(Farm.name))
     farms = farms_q.scalars().all()
 
-    nav_html = await render_app_header(current_user, active_permission="page_carbon", db=db)
+    nav_html = render_app_header(current_user, "page_carbon")
 
     factor_options = ""
     current_group  = ""
@@ -488,7 +488,7 @@ async def factors_page(
     )
     factors = factors_q.scalars().all()
 
-    nav_html = await render_app_header(current_user, active_permission="page_carbon", db=db)
+    nav_html = render_app_header(current_user, "page_carbon")
 
     rows = ""
     for f in factors:
@@ -635,7 +635,7 @@ async def api_create_log(
     db.add(lg)
     await db.commit()
     await db.refresh(lg)
-    await record(db, current_user.id, "carbon_log", "create", lg.id, f"{payload.quantity} × {factor.label} = {kg:.4f} kg CO₂e")
+    record(db, "Carbon", "create_log", f"{payload.quantity} × {factor.label} = {kg:.4f} kg CO₂e", user=current_user, ref_type="carbon_log", ref_id=lg.id)
     return {"id": lg.id, "kg_co2e": float(lg.kg_co2e)}
 
 
@@ -650,7 +650,7 @@ async def api_delete_log(
         raise HTTPException(404, "Log entry not found")
     await db.delete(lg)
     await db.commit()
-    await record(db, current_user.id, "carbon_log", "delete", log_id, "Deleted carbon log entry")
+    record(db, "Carbon", "delete_log", "Deleted carbon log entry", user=current_user, ref_type="carbon_log", ref_id=log_id)
 
 
 # ── API: Factors ──────────────────────────────────────────────────────────────
