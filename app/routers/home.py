@@ -259,6 +259,7 @@ body {
 .module-card:nth-child(8)  { animation-delay:.50s }
 .module-card:nth-child(9)  { animation-delay:.56s }
 .module-card:nth-child(10) { animation-delay:.62s }
+.module-card:nth-child(11) { animation-delay:.68s }
 
 .module-card::before {
     content: ''; position: absolute; inset: 0;
@@ -463,6 +464,18 @@ body {
                 </div>
                 <div class="card-footer">
                     <span class="card-tag">Operations</span>
+                    <span class="card-arrow">↗</span>
+                </div>
+            </a>
+
+            <a href="/carbon/" class="module-card c-teal" data-permission="page_carbon">
+                <div class="card-icon">🌿</div>
+                <div class="card-body">
+                    <div class="card-name">Carbon Footprint</div>
+                    <div class="card-desc">Track CO₂ emissions from transport, energy, and waste</div>
+                </div>
+                <div class="card-footer">
+                    <span class="card-tag">Sustainability</span>
                     <span class="card-arrow">↗</span>
                 </div>
             </a>
