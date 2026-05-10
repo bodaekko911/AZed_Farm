@@ -1414,21 +1414,39 @@ async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = No
     )
     accounts = acc_res.scalars().all()
 
+    from app.models.expense import Expense
+    from datetime import datetime, time, timezone
+    expense_res = await db.execute(select(Expense.journal_id, Expense.expense_date).where(Expense.journal_id.is_not(None)))
+    expense_dates = {row[0]: row[1] for row in expense_res.all()}
+
     def acc_entries(acc):
-        return [e for e in acc.entries
-                if e.journal and d_from <= e.journal.created_at <= d_to]
+        valid = []
+        for e in acc.entries:
+            if not e.journal:
+                continue
+            j_date = expense_dates.get(e.journal_id)
+            if j_date:
+                dt = datetime.combine(j_date, time.min, tzinfo=timezone.utc)
+                if d_from <= dt <= d_to:
+                    valid.append(e)
+            else:
+                if e.journal.created_at and d_from <= e.journal.created_at <= d_to:
+                    valid.append(e)
+        return valid
 
     def acc_movement(acc):
         entries = acc_entries(acc)
         return sum(float(e.credit) - float(e.debit) for e in entries)
 
     def entry_details(acc):
-        entries = sorted(acc_entries(acc), key=lambda e: e.journal.created_at, reverse=True)
+        entries = sorted(acc_entries(acc), key=lambda e: (expense_dates.get(e.journal_id) or (e.journal.created_at.date() if e.journal.created_at else datetime.min.date())), reverse=True)
         result = []
         for e in entries:
             j = e.journal
+            fallback = expense_dates.get(e.journal_id)
+            dt_str = fallback.strftime("%Y-%m-%d") if fallback else (j.created_at.strftime("%Y-%m-%d %H:%M") if j.created_at else "—")
             result.append({
-                "date": j.created_at.strftime("%Y-%m-%d %H:%M") if j.created_at else "—",
+                "date": dt_str,
                 "ref_type": j.ref_type or "manual",
                 "description": j.description or "—",
                 "debit": float(e.debit),
