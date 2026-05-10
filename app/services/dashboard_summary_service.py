@@ -587,30 +587,151 @@ async def _build_chart(db: AsyncSession, rng: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _top_products(db: AsyncSession, rng: dict[str, Any], metric: str) -> list[dict[str, Any]]:
-    order_expr = func.sum(InvoiceItem.total).desc() if metric == "revenue" else func.sum(InvoiceItem.qty).desc()
-    rows = await db.execute(
+    """
+    Return best-selling products for the dashboard.
+
+    Calculation rules:
+      - Count paid POS invoice items.
+      - Subtract POS refund items.
+      - Count paid B2B invoice items.
+      - Subtract B2B refund items.
+      - Group by product_id so renamed products do not split into duplicate rows.
+    """
+    utc_start = rng["utc_start"]
+    utc_end = rng["utc_end"]
+
+    product_totals: dict[int, dict[str, Any]] = {}
+
+    def add_product_row(
+        product_id: int | None,
+        name: str | None,
+        qty: Any,
+        revenue: Any,
+        multiplier: int = 1,
+    ) -> None:
+        if product_id is None:
+            return
+
+        product_id = int(product_id)
+
+        if product_id not in product_totals:
+            product_totals[product_id] = {
+                "id": product_id,
+                "name": name or "Unknown product",
+                "qty": 0.0,
+                "revenue": 0.0,
+            }
+
+        if name and product_totals[product_id]["name"] == "Unknown product":
+            product_totals[product_id]["name"] = name
+
+        product_totals[product_id]["qty"] += _safe_float(qty) * multiplier
+        product_totals[product_id]["revenue"] += _safe_float(revenue) * multiplier
+
+    # POS paid sales
+    pos_sales_rows = await db.execute(
         select(
-            InvoiceItem.name.label("name"),
+            InvoiceItem.product_id.label("product_id"),
+            Product.name.label("name"),
             func.coalesce(func.sum(InvoiceItem.qty), 0).label("qty"),
             func.coalesce(func.sum(InvoiceItem.total), 0).label("revenue"),
         )
         .join(Invoice, InvoiceItem.invoice_id == Invoice.id)
+        .join(Product, Product.id == InvoiceItem.product_id)
         .where(
-            Invoice.created_at >= rng["utc_start"],
-            Invoice.created_at <= rng["utc_end"],
+            Invoice.created_at >= utc_start,
+            Invoice.created_at <= utc_end,
             Invoice.status == "paid",
         )
-        .group_by(InvoiceItem.name)
-        .order_by(order_expr, InvoiceItem.name.asc())
-        .limit(8)
+        .group_by(InvoiceItem.product_id, Product.name)
     )
+
+    for row in pos_sales_rows.all():
+        add_product_row(row.product_id, row.name, row.qty, row.revenue, 1)
+
+    # POS refunds
+    pos_refund_rows = await db.execute(
+        select(
+            RetailRefundItem.product_id.label("product_id"),
+            Product.name.label("name"),
+            func.coalesce(func.sum(RetailRefundItem.qty), 0).label("qty"),
+            func.coalesce(func.sum(RetailRefundItem.total), 0).label("revenue"),
+        )
+        .join(RetailRefund, RetailRefundItem.refund_id == RetailRefund.id)
+        .join(Product, Product.id == RetailRefundItem.product_id)
+        .where(
+            RetailRefund.created_at >= utc_start,
+            RetailRefund.created_at <= utc_end,
+        )
+        .group_by(RetailRefundItem.product_id, Product.name)
+    )
+
+    for row in pos_refund_rows.all():
+        add_product_row(row.product_id, row.name, row.qty, row.revenue, -1)
+
+    # B2B paid sales
+    b2b_sales_rows = await db.execute(
+        select(
+            B2BInvoiceItem.product_id.label("product_id"),
+            Product.name.label("name"),
+            func.coalesce(func.sum(B2BInvoiceItem.qty), 0).label("qty"),
+            func.coalesce(func.sum(B2BInvoiceItem.total), 0).label("revenue"),
+        )
+        .join(B2BInvoice, B2BInvoiceItem.invoice_id == B2BInvoice.id)
+        .join(Product, Product.id == B2BInvoiceItem.product_id)
+        .where(
+            B2BInvoice.created_at >= utc_start,
+            B2BInvoice.created_at <= utc_end,
+            B2BInvoice.status == "paid",
+        )
+        .group_by(B2BInvoiceItem.product_id, Product.name)
+    )
+
+    for row in b2b_sales_rows.all():
+        add_product_row(row.product_id, row.name, row.qty, row.revenue, 1)
+
+    # B2B refunds
+    b2b_refund_rows = await db.execute(
+        select(
+            B2BRefundItem.product_id.label("product_id"),
+            Product.name.label("name"),
+            func.coalesce(func.sum(B2BRefundItem.qty), 0).label("qty"),
+            func.coalesce(func.sum(B2BRefundItem.total), 0).label("revenue"),
+        )
+        .join(B2BRefund, B2BRefundItem.refund_id == B2BRefund.id)
+        .join(Product, Product.id == B2BRefundItem.product_id)
+        .where(
+            B2BRefund.created_at >= utc_start,
+            B2BRefund.created_at <= utc_end,
+        )
+        .group_by(B2BRefundItem.product_id, Product.name)
+    )
+
+    for row in b2b_refund_rows.all():
+        add_product_row(row.product_id, row.name, row.qty, row.revenue, -1)
+
+    rows = [
+        product
+        for product in product_totals.values()
+        if _safe_float(product["qty"]) > 0 or _safe_float(product["revenue"]) > 0
+    ]
+
+    sort_key = "revenue" if metric == "revenue" else "qty"
+    rows.sort(
+        key=lambda product: (
+            -_safe_float(product[sort_key]),
+            str(product["name"]).lower(),
+        )
+    )
+
     return [
         {
-            "name": row.name,
-            "qty": round(_safe_float(row.qty), 2),
-            "revenue": round(_safe_float(row.revenue), 2),
+            "id": product["id"],
+            "name": product["name"],
+            "qty": round(_safe_float(product["qty"]), 2),
+            "revenue": round(_safe_float(product["revenue"]), 2),
         }
-        for row in rows.all()
+        for product in rows[:8]
     ]
 
 
