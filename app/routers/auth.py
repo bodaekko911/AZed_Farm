@@ -495,7 +495,7 @@ function togglePwd(){
 
 function safeUrl(u){
   var bs=String.fromCharCode(92);
-  return typeof u==='string'&&u.startsWith('/')&&!u.startsWith('//')&&u.indexOf(bs)<0&&u.indexOf('\r')<0&&u.indexOf('\n')<0;
+  return typeof u==='string'&&u.startsWith('/')&&!u.startsWith('//')&&u.indexOf(bs)<0&&u.indexOf(String.fromCharCode(13))<0&&u.indexOf(String.fromCharCode(10))<0;
 }
 
 async function doLogin(){
