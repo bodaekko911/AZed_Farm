@@ -96,8 +96,14 @@ class TargetCreate(BaseModel):
 def _date_range_defaults(date_from: Optional[str], date_to: Optional[str]):
     """Return (date, date) defaulting to current calendar month."""
     today = date.today()
-    d_from = date.fromisoformat(date_from) if date_from else today.replace(day=1)
-    d_to   = date.fromisoformat(date_to)   if date_to   else today
+    try:
+        d_from = date.fromisoformat(date_from) if date_from and date_from.strip() else today.replace(day=1)
+    except ValueError:
+        d_from = today.replace(day=1)
+    try:
+        d_to = date.fromisoformat(date_to) if date_to and date_to.strip() else today
+    except ValueError:
+        d_to = today
     return d_from, d_to
 
 
@@ -159,7 +165,7 @@ async def carbon_dashboard(
     log_rows = ""
     for lg in logs:
         farm_name  = lg.farm.name if lg.farm else "—"
-        user_name  = lg.user.full_name if lg.user else "—"
+        user_name  = lg.user.name if lg.user else "—"
         source_tag = f'<span class="badge badge-{lg.factor.source_type}">{lg.factor.source_type}</span>'
         log_rows += f"""
         <tr>
@@ -214,7 +220,7 @@ async def carbon_dashboard(
   <link rel="stylesheet" href="/static/dashboard.css">
   <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
   <style>
-    .carbon-grid {{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}}
+    .carbon-grid {{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:24px}}
     .carbon-card {{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:18px 20px}}
     .carbon-card .label {{font-size:.78rem;font-weight:700;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px}}
     .carbon-card .value {{font-size:1.85rem;font-weight:900;color:var(--text)}}
@@ -246,6 +252,7 @@ async def carbon_dashboard(
     .section-title{{font-size:1.05rem;font-weight:800;margin:28px 0 12px}}
     .btn-icon{{border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--text-muted);width:28px;height:28px;cursor:pointer;font-size:.85rem}}
     .btn-danger:hover{{border-color:var(--red);color:var(--red)}}
+    .hidden {{display:none !important}}
     @media(max-width:900px){{.carbon-grid{{grid-template-columns:repeat(2,1fr)}}}}
     @media(max-width:560px){{.carbon-grid{{grid-template-columns:1fr}}}}
   </style>
@@ -295,6 +302,11 @@ async def carbon_dashboard(
       <div class="value">{waste_val:,.1f}</div>
       <div class="unit">kg CO₂e</div>
     </div>
+    <div class="carbon-card prod">
+      <div class="label">Production</div>
+      <div class="value">{production_val:,.1f}</div>
+      <div class="unit">kg CO₂e</div>
+    </div>
   </div>
 
   <!-- Targets -->
@@ -340,7 +352,6 @@ async def carbon_dashboard(
     var t = localStorage.getItem("colorMode") === "light" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", t);
   }} catch(_) {{}}
-  document.querySelectorAll(".hidden"){{}}
 </script>
 </body>
 </html>"""
