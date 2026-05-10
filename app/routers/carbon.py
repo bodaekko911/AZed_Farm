@@ -29,20 +29,21 @@ API routes
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
-from typing import Optional, List
+from datetime import date, timedelta
+from html import escape
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select, and_
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.database import get_async_session
 from app.core.log import record
 from app.core.navigation import render_app_header
 from app.core.permissions import get_current_user, require_permission
+from app.database import get_async_session
 from app.models.carbon import CarbonEmissionFactor, CarbonLog, CarbonTarget
 from app.models.farm import Farm, FarmDelivery
 from app.models.user import User
@@ -58,67 +59,141 @@ router = APIRouter(
 
 class LogCreate(BaseModel):
     factor_id: int
-    log_date:  str          # ISO date string "YYYY-MM-DD"
-    quantity:  float
-    farm_id:   Optional[int] = None
-    ref_type:  Optional[str] = None
-    ref_id:    Optional[int] = None
-    notes:     Optional[str] = None
+    log_date: str          # ISO date string "YYYY-MM-DD"
+    quantity: float
+    farm_id: Optional[int] = None
+    ref_type: Optional[str] = None
+    ref_id: Optional[int] = None
+    notes: Optional[str] = None
 
 
 class FactorCreate(BaseModel):
-    source_type:             str
-    source_key:              str
-    label:                   str
+    source_type: str
+    source_key: str
+    label: str
     factor_kg_co2e_per_unit: float
-    unit:                    str
-    description:             Optional[str] = None
+    unit: str
+    description: Optional[str] = None
 
 
 class FactorUpdate(BaseModel):
-    label:                   Optional[str]   = None
+    label: Optional[str] = None
     factor_kg_co2e_per_unit: Optional[float] = None
-    unit:                    Optional[str]   = None
-    description:             Optional[str]   = None
-    is_active:               Optional[bool]  = None
+    unit: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class TargetCreate(BaseModel):
-    label:          str
-    period_start:   str   # "YYYY-MM-DD"
-    period_end:     str
+    label: str
+    period_start: str   # "YYYY-MM-DD"
+    period_end: str
     target_kg_co2e: float
-    notes:          Optional[str] = None
+    notes: Optional[str] = None
 
 
-# ── Helper ────────────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _date_range_defaults(date_from: Optional[str], date_to: Optional[str]):
+SOURCE_LABELS = {
+    "transport": "Transport",
+    "energy": "Energy",
+    "waste": "Waste / Spoilage",
+    "production": "Production",
+}
+
+SOURCE_ORDER = ["transport", "energy", "waste", "production"]
+
+SOURCE_ICONS = {
+    "transport": "🚚",
+    "energy": "⚡",
+    "waste": "♻️",
+    "production": "🏭",
+}
+
+
+def _date_range_defaults(date_from: Optional[str], date_to: Optional[str]) -> tuple[date, date]:
     """Return (date, date) defaulting to current calendar month."""
     today = date.today()
+    month_start = today.replace(day=1)
+
     try:
-        d_from = date.fromisoformat(date_from) if date_from and date_from.strip() else today.replace(day=1)
+        d_from = date.fromisoformat(date_from) if date_from and date_from.strip() else month_start
     except ValueError:
-        d_from = today.replace(day=1)
+        d_from = month_start
+
     try:
         d_to = date.fromisoformat(date_to) if date_to and date_to.strip() else today
     except ValueError:
         d_to = today
+
+    if d_from > d_to:
+        d_from, d_to = d_to, d_from
+
     return d_from, d_to
 
 
-# ── Page: Dashboard ───────────────────────────────────────────────────────────
+def _model_dump(model: BaseModel, **kwargs) -> dict:
+    """Pydantic v1/v2 compatible model dumping."""
+    if hasattr(model, "model_dump"):
+        return model.model_dump(**kwargs)
+    return model.dict(**kwargs)
 
-@router.get("/", response_class=HTMLResponse)
-async def carbon_dashboard(
-    date_from: Optional[str] = None,
-    date_to:   Optional[str] = None,
-    db:        AsyncSession  = Depends(get_async_session),
-    current_user: User       = Depends(get_current_user),
-):
-    d_from, d_to = _date_range_defaults(date_from, date_to)
 
-    # Totals by source_type
+def _as_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _fmt_kg(value) -> str:
+    kg = _as_float(value)
+    if abs(kg) >= 1000:
+        return f"{kg / 1000:,.2f} t"
+    if abs(kg) >= 10:
+        return f"{kg:,.1f} kg"
+    return f"{kg:,.3f} kg"
+
+
+def _fmt_number(value, digits: int = 1) -> str:
+    return f"{_as_float(value):,.{digits}f}"
+
+
+def _safe(value) -> str:
+    return escape(str(value)) if value is not None else ""
+
+
+def _source_label(source_type: str) -> str:
+    return SOURCE_LABELS.get(source_type, str(source_type or "Other").replace("_", " ").title())
+
+
+def _source_icon(source_type: str) -> str:
+    return SOURCE_ICONS.get(source_type, "•")
+
+
+def _badge_html(source_type: str) -> str:
+    cls = _safe(source_type or "other")
+    return f'<span class="carbon-badge carbon-badge-{cls}">{_safe(_source_label(source_type))}</span>'
+
+
+def _period_label(d_from: date, d_to: date) -> str:
+    if d_from == d_to:
+        return d_from.strftime("%d %b %Y")
+    if d_from.year == d_to.year:
+        return f"{d_from.strftime('%d %b')} → {d_to.strftime('%d %b %Y')}"
+    return f"{d_from.strftime('%d %b %Y')} → {d_to.strftime('%d %b %Y')}"
+
+
+def _quick_link(label: str, start: date, end: date, active_from: date, active_to: date) -> str:
+    active = start == active_from and end == active_to
+    cls = "quick-chip active" if active else "quick-chip"
+    return (
+        f'<a class="{cls}" href="/carbon/?date_from={start.isoformat()}&date_to={end.isoformat()}">'
+        f'{_safe(label)}</a>'
+    )
+
+
+async def _totals_by_source(db: AsyncSession, d_from: date, d_to: date) -> dict[str, float]:
     rows = await db.execute(
         select(
             CarbonEmissionFactor.source_type,
@@ -128,9 +203,48 @@ async def carbon_dashboard(
         .where(CarbonLog.log_date.between(d_from, d_to))
         .group_by(CarbonEmissionFactor.source_type)
     )
-    by_type = {r.source_type: float(r.total or 0) for r in rows}
+    return {r.source_type: _as_float(r.total) for r in rows}
 
+
+async def _entry_count(db: AsyncSession, d_from: date, d_to: date) -> int:
+    result = await db.execute(
+        select(func.count(CarbonLog.id)).where(CarbonLog.log_date.between(d_from, d_to))
+    )
+    return int(result.scalar_one() or 0)
+
+
+# ── Page: Dashboard ───────────────────────────────────────────────────────────
+
+@router.get("/", response_class=HTMLResponse)
+async def carbon_dashboard(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    d_from, d_to = _date_range_defaults(date_from, date_to)
+    today = date.today()
+    days_in_range = max((d_to - d_from).days + 1, 1)
+
+    by_type = await _totals_by_source(db, d_from, d_to)
     grand_total = sum(by_type.values())
+    entry_count = await _entry_count(db, d_from, d_to)
+    daily_average = grand_total / days_in_range if days_in_range else 0
+
+    previous_to = d_from - timedelta(days=1)
+    previous_from = previous_to - timedelta(days=days_in_range - 1)
+    previous_by_type = await _totals_by_source(db, previous_from, previous_to)
+    previous_total = sum(previous_by_type.values())
+    if previous_total > 0:
+        delta_pct = round(((grand_total - previous_total) / previous_total) * 100, 1)
+        delta_label = f"{delta_pct:+.1f}% vs previous {days_in_range} days"
+        delta_class = "bad" if delta_pct > 0 else "good"
+    elif grand_total > 0:
+        delta_label = "New activity vs previous period"
+        delta_class = "neutral"
+    else:
+        delta_label = "No emissions in this range"
+        delta_class = "neutral"
 
     # Latest 50 log entries
     logs_q = await db.execute(
@@ -152,7 +266,7 @@ async def carbon_dashboard(
         .where(
             and_(
                 CarbonTarget.period_start <= d_to,
-                CarbonTarget.period_end   >= d_from,
+                CarbonTarget.period_end >= d_from,
             )
         )
         .order_by(CarbonTarget.period_start)
@@ -161,55 +275,128 @@ async def carbon_dashboard(
 
     nav_html = render_app_header(current_user, "page_carbon")
 
-    # Build log rows HTML
+    all_source_types = [s for s in SOURCE_ORDER if s in by_type]
+    all_source_types.extend(sorted(s for s in by_type if s not in all_source_types))
+    for default_source in SOURCE_ORDER:
+        if default_source not in all_source_types:
+            all_source_types.append(default_source)
+
+    leading_source = max(by_type.items(), key=lambda item: item[1], default=("none", 0))
+    leading_source_label = _source_label(leading_source[0]) if leading_source[1] else "—"
+    leading_source_value = _fmt_kg(leading_source[1]) if leading_source[1] else "No source yet"
+
+    month_start = today.replace(day=1)
+    year_start = today.replace(month=1, day=1)
+    last_30_start = today - timedelta(days=29)
+    quick_links = "".join(
+        [
+            _quick_link("This month", month_start, today, d_from, d_to),
+            _quick_link("Last 30 days", last_30_start, today, d_from, d_to),
+            _quick_link("Year to date", year_start, today, d_from, d_to),
+        ]
+    )
+
+    transport_val = by_type.get("transport", 0)
+    energy_val = by_type.get("energy", 0)
+    waste_val = by_type.get("waste", 0)
+    production_val = by_type.get("production", 0)
+
+    breakdown_html = ""
+    for source_type in all_source_types:
+        value = by_type.get(source_type, 0)
+        pct = round(value / grand_total * 100, 1) if grand_total else 0
+        breakdown_html += f"""
+        <div class="breakdown-row">
+          <div class="breakdown-head">
+            <span class="breakdown-name"><span class="breakdown-icon">{_source_icon(source_type)}</span>{_safe(_source_label(source_type))}</span>
+            <span class="breakdown-value">{_fmt_kg(value)} · {pct}%</span>
+          </div>
+          <div class="breakdown-track"><div class="breakdown-fill source-{_safe(source_type)}" style="width:{pct}%"></div></div>
+        </div>"""
+
     log_rows = ""
     for lg in logs:
-        farm_name  = lg.farm.name if lg.farm else "—"
-        user_name  = lg.user.name if lg.user else "—"
-        source_tag = f'<span class="badge badge-{lg.factor.source_type}">{lg.factor.source_type}</span>'
+        factor = lg.factor
+        source_type = factor.source_type if factor else "other"
+        farm_name = lg.farm.name if lg.farm else "—"
+        user_name = lg.user.name if lg.user else "—"
+        ref_label = lg.ref_type or "manual"
+        notes = (lg.notes or "").strip()
+        notes_cell = f'<div class="log-notes">{_safe(notes)}</div>' if notes else ""
         log_rows += f"""
         <tr>
-          <td>{lg.log_date}</td>
-          <td>{source_tag}</td>
-          <td>{lg.factor.label}</td>
-          <td>{farm_name}</td>
-          <td class="num">{float(lg.quantity):,.2f} {lg.factor.unit}</td>
-          <td class="num co2"><strong>{float(lg.kg_co2e):,.3f}</strong> kg</td>
-          <td>{lg.ref_type or "manual"}</td>
+          <td><span class="date-pill">{_safe(lg.log_date)}</span></td>
+          <td>{_badge_html(source_type)}</td>
           <td>
+            <strong>{_safe(factor.label if factor else "Unknown factor")}</strong>
+            {notes_cell}
+          </td>
+          <td>{_safe(farm_name)}</td>
+          <td class="num">{_fmt_number(lg.quantity, 2)} {_safe(factor.unit if factor else "unit")}</td>
+          <td class="num co2"><strong>{_fmt_kg(lg.kg_co2e)}</strong></td>
+          <td><span class="ref-pill" title="Logged by {_safe(user_name)}">{_safe(ref_label)}</span></td>
+          <td class="actions-cell">
             <button class="btn-icon btn-danger"
                     hx-delete="/carbon/api/logs/{lg.id}"
                     hx-confirm="Delete this log entry?"
                     hx-target="closest tr"
-                    hx-swap="outerHTML">✕</button>
+                    hx-swap="outerHTML"
+                    aria-label="Delete log entry">✕</button>
           </td>
         </tr>"""
 
-    # Build target progress HTML
     target_html = ""
+    best_target_status = "No active target"
     for t in targets:
-        pct = min(100, round(grand_total / float(t.target_kg_co2e) * 100, 1)) if t.target_kg_co2e else 0
-        bar_class = "progress-ok" if pct < 80 else ("progress-warn" if pct < 100 else "progress-over")
+        target_value = _as_float(t.target_kg_co2e)
+        raw_pct = round(grand_total / target_value * 100, 1) if target_value else 0
+        visual_pct = min(100, raw_pct)
+        remaining = target_value - grand_total
+        bar_class = "progress-ok" if raw_pct < 80 else ("progress-warn" if raw_pct < 100 else "progress-over")
+        status_text = f"{_fmt_kg(max(remaining, 0))} remaining" if remaining >= 0 else f"{_fmt_kg(abs(remaining))} over target"
+        best_target_status = f"{raw_pct}% of target" if target_value else best_target_status
         target_html += f"""
         <div class="target-card">
           <div class="target-header">
-            <strong>{t.label}</strong>
-            <span class="target-dates">{t.period_start} → {t.period_end}</span>
+            <div>
+              <strong>{_safe(t.label)}</strong>
+              <span class="target-dates">{_safe(t.period_start)} → { _safe(t.period_end) }</span>
+            </div>
+            <button class="target-delete" type="button" data-target-id="{t.id}" aria-label="Delete target">Delete</button>
           </div>
-          <div class="target-progress">
-            <div class="progress-bar {bar_class}" style="width:{pct}%"></div>
+          <div class="progress-bar-track">
+            <div class="progress-bar {bar_class}" style="width:{visual_pct}%"></div>
           </div>
           <div class="target-stats">
-            <span>{grand_total:,.1f} kg CO₂e used</span>
-            <span>Target: {float(t.target_kg_co2e):,.0f} kg</span>
-            <span>{pct}%</span>
+            <span>{_fmt_kg(grand_total)} used</span>
+            <span>Target: {_fmt_kg(target_value)}</span>
+            <span>{raw_pct}%</span>
+            <span>{status_text}</span>
           </div>
+          {f'<p class="target-notes">{_safe(t.notes)}</p>' if t.notes else ''}
         </div>"""
 
-    transport_val  = by_type.get("transport",  0)
-    energy_val     = by_type.get("energy",     0)
-    waste_val      = by_type.get("waste",      0)
-    production_val = by_type.get("production", 0)
+    target_section = (
+        f'<div class="section-title-row"><h2>Reduction Targets</h2><span>{len(targets)} active in range</span></div>{target_html}'
+        if target_html
+        else """
+        <div class="empty-card compact">
+          <strong>No target for this period yet.</strong>
+          <span>Add a kg CO₂e target to track reduction progress for the selected date range.</span>
+        </div>
+        """
+    )
+
+    log_empty = """
+    <tr>
+      <td colspan="8">
+        <div class="empty-table-state">
+          <strong>No emissions logged for this period.</strong>
+          <span>Use “Log Emission” to record transport, electricity, diesel, waste, or production activity.</span>
+        </div>
+      </td>
+    </tr>
+    """
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -217,44 +404,124 @@ async def carbon_dashboard(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Carbon Footprint | AZed ERP</title>
+  <script src="/static/theme-init.js"></script>
   <link rel="stylesheet" href="/static/dashboard.css">
   <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
   <style>
-    .carbon-grid {{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:24px}}
-    .carbon-card {{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:18px 20px}}
-    .carbon-card .label {{font-size:.78rem;font-weight:700;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px}}
-    .carbon-card .value {{font-size:1.85rem;font-weight:900;color:var(--text)}}
-    .carbon-card .unit  {{font-size:.82rem;color:var(--text-muted);margin-top:2px}}
-    .carbon-card.total  {{border-top:4px solid var(--teal)}}
-    .carbon-card.transport {{border-top:4px solid var(--amber)}}
-    .carbon-card.energy    {{border-top:4px solid var(--red)}}
-    .carbon-card.waste     {{border-top:4px solid var(--green)}}
-    .carbon-card.prod      {{border-top:4px solid #a78bfa}}
-    .badge {{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.75rem;font-weight:700;text-transform:capitalize}}
-    .badge-transport{{background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber)}}
-    .badge-energy   {{background:color-mix(in srgb,var(--red)   18%,transparent);color:var(--red)}}
-    .badge-waste    {{background:color-mix(in srgb,var(--green)  18%,transparent);color:var(--green)}}
-    .badge-production{{background:color-mix(in srgb,#a78bfa     18%,transparent);color:#a78bfa}}
-    .num{{text-align:right}}
-    .co2{{color:var(--teal)}}
-    .target-card{{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:12px}}
-    .target-header{{display:flex;justify-content:space-between;margin-bottom:10px;font-size:.9rem}}
-    .target-dates{{color:var(--text-muted);font-size:.82rem}}
-    .progress-bar-track{{height:10px;background:var(--surface-strong);border-radius:999px;overflow:hidden;margin-bottom:8px}}
-    .progress-bar{{height:100%;border-radius:999px;transition:width .4s ease}}
-    .progress-ok  {{background:var(--teal)}}
-    .progress-warn{{background:var(--amber)}}
-    .progress-over{{background:var(--red)}}
-    .target-stats{{display:flex;gap:16px;font-size:.8rem;color:var(--text-muted)}}
-    .filter-bar{{display:flex;gap:10px;align-items:flex-end;margin-bottom:20px;flex-wrap:wrap}}
-    .filter-bar label{{font-size:.78rem;font-weight:700;text-transform:uppercase;color:var(--text-muted)}}
-    .filter-bar input{{min-height:38px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--text);padding:0 10px;font:inherit}}
-    .section-title{{font-size:1.05rem;font-weight:800;margin:28px 0 12px}}
-    .btn-icon{{border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--text-muted);width:28px;height:28px;cursor:pointer;font-size:.85rem}}
-    .btn-danger:hover{{border-color:var(--red);color:var(--red)}}
-    .hidden {{display:none !important}}
-    @media(max-width:900px){{.carbon-grid{{grid-template-columns:repeat(2,1fr)}}}}
-    @media(max-width:560px){{.carbon-grid{{grid-template-columns:1fr}}}}
+    :root {{
+      --carbon-line: var(--border, rgba(148, 163, 184, .24));
+      --carbon-line-strong: var(--border-strong, rgba(148, 163, 184, .34));
+      --carbon-card: color-mix(in srgb, var(--surface, #1E293B) 92%, transparent);
+      --carbon-card-strong: color-mix(in srgb, var(--surface-raised, #334155) 86%, transparent);
+      --carbon-muted: var(--text-muted, #94A3B8);
+      --carbon-sub: var(--text-sub, #cbd5e1);
+      --carbon-teal: var(--teal, #2dd4bf);
+      --carbon-green: var(--green, #22c55e);
+      --carbon-amber: var(--amber, #f59e0b);
+      --carbon-red: var(--negative, #f87171);
+      --carbon-purple: var(--purple, #a855f7);
+    }}
+    .main-content {{max-width:1320px;margin:0 auto;padding:30px 24px 46px;position:relative;z-index:2}}
+    .page-header {{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:22px;flex-wrap:wrap}}
+    .page-title {{margin:0;font-size:clamp(1.9rem,4vw,3rem);line-height:1.02;font-weight:950;letter-spacing:-.04em;color:var(--text)}}
+    .page-subtitle {{margin:8px 0 0;color:var(--carbon-sub);font-size:.98rem;max-width:760px}}
+    .page-actions {{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}}
+    .btn {{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:0 14px;border-radius:12px;border:1px solid var(--carbon-line-strong);font-weight:850;font-size:.9rem;cursor:pointer;text-decoration:none;transition:transform .16s ease,border-color .16s ease,background .16s ease,color .16s ease}}
+    .btn:hover {{transform:translateY(-1px);border-color:color-mix(in srgb,var(--accent) 48%,var(--carbon-line-strong))}}
+    .btn-primary {{background:linear-gradient(135deg,var(--carbon-teal),var(--accent));color:#04151a;border-color:transparent;box-shadow:0 14px 32px color-mix(in srgb,var(--accent) 20%,transparent)}}
+    .btn-secondary {{background:var(--carbon-card);color:var(--text)}}
+    .hero-panel {{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(320px,.9fr);gap:18px;margin-bottom:20px}}
+    .hero-card,.panel-card,.carbon-card,.target-card,.empty-card {{background:var(--carbon-card);border:1px solid var(--carbon-line);border-radius:18px;box-shadow:0 18px 46px rgba(0,0,0,.18);backdrop-filter:blur(14px)}}
+    .hero-card {{padding:24px;overflow:hidden;position:relative}}
+    .hero-card:after {{content:"";position:absolute;right:-70px;top:-100px;width:280px;height:280px;border-radius:50%;background:radial-gradient(circle,color-mix(in srgb,var(--carbon-teal) 28%,transparent),transparent 66%);pointer-events:none}}
+    .hero-eyebrow {{display:flex;align-items:center;gap:8px;color:var(--carbon-teal);font-size:.8rem;font-weight:900;letter-spacing:.08em;text-transform:uppercase;margin-bottom:10px}}
+    .hero-total {{font-size:clamp(2.4rem,6vw,4.8rem);font-weight:950;letter-spacing:-.07em;line-height:.96;color:var(--text);margin:0}}
+    .hero-total span {{font-size:1rem;letter-spacing:0;color:var(--carbon-muted);font-weight:800;margin-left:8px}}
+    .hero-meta {{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}}
+    .meta-pill,.quick-chip,.ref-pill,.date-pill {{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--carbon-line);background:color-mix(in srgb,var(--surface) 76%,transparent);border-radius:999px;padding:7px 10px;color:var(--carbon-sub);font-size:.82rem;font-weight:750}}
+    .meta-pill.good {{color:var(--carbon-green);border-color:color-mix(in srgb,var(--carbon-green) 36%,transparent)}}
+    .meta-pill.bad {{color:var(--carbon-red);border-color:color-mix(in srgb,var(--carbon-red) 36%,transparent)}}
+    .meta-pill.neutral {{color:var(--carbon-muted)}}
+    .quick-panel {{padding:18px}}
+    .quick-title {{font-weight:900;margin:0 0 12px;color:var(--text)}}
+    .quick-links {{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}}
+    .quick-chip {{padding:8px 11px;text-decoration:none}}
+    .quick-chip.active {{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 42%,transparent);color:var(--accent)}}
+    .filter-bar {{display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end}}
+    .filter-bar label,.field label {{display:block;font-size:.74rem;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:var(--carbon-muted);margin-bottom:5px}}
+    .filter-bar input,.field input,.field select,.field textarea {{width:100%;min-height:40px;border:1px solid var(--carbon-line-strong);border-radius:12px;background:color-mix(in srgb,var(--surface) 82%,transparent);color:var(--text);padding:0 12px;font:inherit}}
+    .carbon-grid {{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:18px}}
+    .carbon-card {{padding:17px 18px;position:relative;overflow:hidden}}
+    .carbon-card:before {{content:"";position:absolute;inset:0 0 auto;height:4px;background:var(--accent)}}
+    .carbon-card.transport:before {{background:var(--carbon-amber)}}
+    .carbon-card.energy:before {{background:var(--carbon-red)}}
+    .carbon-card.waste:before {{background:var(--carbon-green)}}
+    .carbon-card.prod:before {{background:var(--carbon-purple)}}
+    .carbon-card .label {{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:.74rem;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:var(--carbon-muted);margin-bottom:8px}}
+    .carbon-card .value {{font-size:1.75rem;font-weight:950;color:var(--text);letter-spacing:-.04em}}
+    .carbon-card .unit {{font-size:.82rem;color:var(--carbon-muted);margin-top:2px}}
+    .content-grid {{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:18px;margin-bottom:18px}}
+    .panel-card {{padding:18px}}
+    .section-title-row {{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}}
+    .section-title-row h2,.section-title {{margin:0;font-size:1.08rem;font-weight:950;color:var(--text)}}
+    .section-title-row span {{color:var(--carbon-muted);font-size:.84rem;font-weight:700}}
+    .insight-grid {{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}}
+    .insight-card {{border:1px solid var(--carbon-line);border-radius:14px;padding:14px;background:color-mix(in srgb,var(--surface) 74%,transparent)}}
+    .insight-label {{font-size:.72rem;font-weight:900;letter-spacing:.06em;text-transform:uppercase;color:var(--carbon-muted)}}
+    .insight-value {{font-size:1rem;font-weight:950;color:var(--text);margin-top:4px}}
+    .breakdown-list {{display:grid;gap:13px}}
+    .breakdown-head {{display:flex;justify-content:space-between;gap:12px;margin-bottom:7px;color:var(--carbon-sub);font-weight:800;font-size:.88rem}}
+    .breakdown-name {{display:flex;align-items:center;gap:8px}}
+    .breakdown-value {{color:var(--carbon-muted);white-space:nowrap}}
+    .breakdown-track,.progress-bar-track {{height:10px;background:color-mix(in srgb,var(--surface-raised) 62%,transparent);border-radius:999px;overflow:hidden;border:1px solid color-mix(in srgb,var(--carbon-line) 70%,transparent)}}
+    .breakdown-fill,.progress-bar {{height:100%;border-radius:999px;transition:width .35s ease}}
+    .source-transport {{background:var(--carbon-amber)}}
+    .source-energy {{background:var(--carbon-red)}}
+    .source-waste {{background:var(--carbon-green)}}
+    .source-production {{background:var(--carbon-purple)}}
+    .source-other {{background:var(--accent)}}
+    .target-card {{padding:16px;margin-bottom:12px}}
+    .target-header {{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px}}
+    .target-header strong {{display:block;color:var(--text);font-size:.98rem}}
+    .target-dates {{display:block;color:var(--carbon-muted);font-size:.8rem;margin-top:3px}}
+    .target-delete {{border:1px solid var(--carbon-line);background:transparent;color:var(--carbon-muted);border-radius:999px;padding:6px 10px;cursor:pointer;font-weight:800;font-size:.76rem}}
+    .target-delete:hover {{border-color:var(--carbon-red);color:var(--carbon-red)}}
+    .progress-ok {{background:var(--carbon-teal)}}
+    .progress-warn {{background:var(--carbon-amber)}}
+    .progress-over {{background:var(--carbon-red)}}
+    .target-stats {{display:flex;gap:12px;flex-wrap:wrap;font-size:.8rem;color:var(--carbon-muted);font-weight:750;margin-top:9px}}
+    .target-notes {{margin:10px 0 0;color:var(--carbon-sub);font-size:.86rem}}
+    .add-target-card {{padding:18px;margin-top:12px}}
+    .add-target-toggle {{border:1px dashed color-mix(in srgb,var(--carbon-teal) 48%,var(--carbon-line));background:color-mix(in srgb,var(--carbon-teal) 9%,transparent);color:var(--carbon-teal);width:100%;min-height:42px;border-radius:14px;font-weight:900;cursor:pointer}}
+    .target-form-grid {{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr auto;gap:10px;align-items:end;margin-top:12px}}
+    .hidden {{display:none!important}}
+    .table-card {{background:var(--carbon-card);border:1px solid var(--carbon-line);border-radius:18px;overflow:hidden;box-shadow:0 18px 46px rgba(0,0,0,.18)}}
+    .table-toolbar {{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 18px;border-bottom:1px solid var(--carbon-line)}}
+    .table-toolbar h2 {{margin:0;font-size:1.08rem;font-weight:950}}
+    .table-toolbar span {{color:var(--carbon-muted);font-size:.84rem;font-weight:700}}
+    .table-wrap {{overflow:auto}}
+    .data-table {{width:100%;border-collapse:separate;border-spacing:0;min-width:920px}}
+    .data-table th,.data-table td {{padding:13px 14px;border-bottom:1px solid var(--carbon-line);vertical-align:top;text-align:left}}
+    .data-table th {{font-size:.74rem;text-transform:uppercase;letter-spacing:.07em;color:var(--carbon-muted);background:color-mix(in srgb,var(--surface-raised) 48%,transparent);font-weight:950}}
+    .data-table tr:last-child td {{border-bottom:0}}
+    .data-table tbody tr:hover td {{background:color-mix(in srgb,var(--accent) 4%,transparent)}}
+    .num {{text-align:right!important;white-space:nowrap}}
+    .co2 {{color:var(--carbon-teal)}}
+    .actions-cell {{width:52px;text-align:center!important}}
+    .btn-icon {{border:1px solid var(--carbon-line);border-radius:10px;background:transparent;color:var(--carbon-muted);width:32px;height:32px;cursor:pointer;font-size:.86rem}}
+    .btn-danger:hover {{border-color:var(--carbon-red);color:var(--carbon-red)}}
+    .carbon-badge {{display:inline-flex;align-items:center;border-radius:999px;padding:5px 9px;font-size:.74rem;font-weight:900;text-transform:capitalize;border:1px solid transparent;white-space:nowrap}}
+    .carbon-badge-transport {{background:color-mix(in srgb,var(--carbon-amber) 14%,transparent);color:var(--carbon-amber);border-color:color-mix(in srgb,var(--carbon-amber) 30%,transparent)}}
+    .carbon-badge-energy {{background:color-mix(in srgb,var(--carbon-red) 14%,transparent);color:var(--carbon-red);border-color:color-mix(in srgb,var(--carbon-red) 30%,transparent)}}
+    .carbon-badge-waste {{background:color-mix(in srgb,var(--carbon-green) 14%,transparent);color:var(--carbon-green);border-color:color-mix(in srgb,var(--carbon-green) 30%,transparent)}}
+    .carbon-badge-production {{background:color-mix(in srgb,var(--carbon-purple) 14%,transparent);color:var(--carbon-purple);border-color:color-mix(in srgb,var(--carbon-purple) 30%,transparent)}}
+    .log-notes {{color:var(--carbon-muted);font-size:.8rem;font-weight:600;margin-top:3px;max-width:360px}}
+    .empty-card {{padding:18px;display:grid;gap:4px;color:var(--carbon-sub)}}
+    .empty-card.compact {{margin-bottom:12px}}
+    .empty-card strong,.empty-table-state strong {{color:var(--text)}}
+    .empty-table-state {{display:grid;justify-items:center;text-align:center;gap:5px;color:var(--carbon-muted);padding:30px 16px}}
+    @media(max-width:1080px){{.hero-panel,.content-grid{{grid-template-columns:1fr}}.carbon-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.target-form-grid{{grid-template-columns:1fr 1fr}}}}
+    @media(max-width:680px){{.main-content{{padding:22px 14px 36px}}.page-actions,.filter-bar,.carbon-grid,.insight-grid,.target-form-grid{{grid-template-columns:1fr;width:100%}}.filter-bar{{display:grid}}.carbon-grid{{display:grid}}.hero-meta{{display:grid}}.page-actions .btn{{width:100%}}}}
   </style>
 </head>
 <body>
@@ -263,95 +530,143 @@ async def carbon_dashboard(
   <div class="page-header">
     <div>
       <h1 class="page-title">Carbon Footprint</h1>
-      <p class="page-subtitle">Track CO₂-equivalent emissions from farm operations</p>
+      <p class="page-subtitle">Track CO₂-equivalent emissions from transport, energy, production, and waste across Habiba operations.</p>
     </div>
-    <div style="display:flex;gap:8px">
+    <div class="page-actions">
       <a href="/carbon/log" class="btn btn-primary">+ Log Emission</a>
       <a href="/carbon/factors" class="btn btn-secondary">Manage Factors</a>
     </div>
   </div>
 
-  <!-- Date filter -->
-  <form method="get" class="filter-bar">
-    <div><label>From</label><br>
-      <input type="date" name="date_from" value="{d_from.isoformat()}"></div>
-    <div><label>To</label><br>
-      <input type="date" name="date_to" value="{d_to.isoformat()}"></div>
-    <button type="submit" class="btn btn-secondary" style="align-self:flex-end">Apply</button>
-  </form>
-
-  <!-- Summary cards -->
-  <div class="carbon-grid">
-    <div class="carbon-card total">
-      <div class="label">Total Emissions</div>
-      <div class="value">{grand_total:,.1f}</div>
-      <div class="unit">kg CO₂e</div>
+  <section class="hero-panel" aria-label="Carbon overview">
+    <div class="hero-card">
+      <div class="hero-eyebrow">🌿 Carbon overview · {_safe(_period_label(d_from, d_to))}</div>
+      <p class="hero-total">{_fmt_number(grand_total, 1)}<span>kg CO₂e</span></p>
+      <div class="hero-meta">
+        <span class="meta-pill {delta_class}">{_safe(delta_label)}</span>
+        <span class="meta-pill">Daily avg: {_fmt_kg(daily_average)}</span>
+        <span class="meta-pill">Entries: {entry_count}</span>
+      </div>
     </div>
+    <div class="quick-panel panel-card">
+      <p class="quick-title">Date range</p>
+      <div class="quick-links">{quick_links}</div>
+      <form method="get" class="filter-bar">
+        <div><label>From</label><input type="date" name="date_from" value="{d_from.isoformat()}"></div>
+        <div><label>To</label><input type="date" name="date_to" value="{d_to.isoformat()}"></div>
+        <button type="submit" class="btn btn-secondary">Apply</button>
+      </form>
+    </div>
+  </section>
+
+  <section class="carbon-grid" aria-label="Carbon category totals">
     <div class="carbon-card transport">
-      <div class="label">Transport</div>
-      <div class="value">{transport_val:,.1f}</div>
+      <div class="label"><span>Transport</span><span>🚚</span></div>
+      <div class="value">{_fmt_number(transport_val, 1)}</div>
       <div class="unit">kg CO₂e</div>
     </div>
     <div class="carbon-card energy">
-      <div class="label">Energy</div>
-      <div class="value">{energy_val:,.1f}</div>
+      <div class="label"><span>Energy</span><span>⚡</span></div>
+      <div class="value">{_fmt_number(energy_val, 1)}</div>
       <div class="unit">kg CO₂e</div>
     </div>
     <div class="carbon-card waste">
-      <div class="label">Waste / Spoilage</div>
-      <div class="value">{waste_val:,.1f}</div>
+      <div class="label"><span>Waste / Spoilage</span><span>♻️</span></div>
+      <div class="value">{_fmt_number(waste_val, 1)}</div>
       <div class="unit">kg CO₂e</div>
     </div>
     <div class="carbon-card prod">
-      <div class="label">Production</div>
-      <div class="value">{production_val:,.1f}</div>
+      <div class="label"><span>Production</span><span>🏭</span></div>
+      <div class="value">{_fmt_number(production_val, 1)}</div>
       <div class="unit">kg CO₂e</div>
     </div>
-  </div>
+  </section>
 
-  <!-- Targets -->
-  {'<div class="section-title">Reduction Targets</div>' + target_html if target_html else ""}
-  <div style="margin-bottom:6px">
-    <a href="#" onclick="document.getElementById('targetForm').classList.toggle('hidden');return false"
-       style="font-size:.85rem;color:var(--teal)">+ Add target</a>
-  </div>
-  <div id="targetForm" class="hidden" style="background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:18px;margin-bottom:20px">
-    <form hx-post="/carbon/api/targets" hx-swap="none" onsubmit="location.reload()" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-      <div><label style="font-size:.78rem;font-weight:700;display:block;margin-bottom:4px">Label</label>
-        <input name="label" required style="min-height:36px;border:1px solid var(--line-strong);border-radius:6px;background:var(--bg);color:var(--text);padding:0 10px;font:inherit"></div>
-      <div><label style="font-size:.78rem;font-weight:700;display:block;margin-bottom:4px">Start</label>
-        <input type="date" name="period_start" required style="min-height:36px;border:1px solid var(--line-strong);border-radius:6px;background:var(--bg);color:var(--text);padding:0 10px;font:inherit"></div>
-      <div><label style="font-size:.78rem;font-weight:700;display:block;margin-bottom:4px">End</label>
-        <input type="date" name="period_end" required style="min-height:36px;border:1px solid var(--line-strong);border-radius:6px;background:var(--bg);color:var(--text);padding:0 10px;font:inherit"></div>
-      <div><label style="font-size:.78rem;font-weight:700;display:block;margin-bottom:4px">Target kg CO₂e</label>
-        <input type="number" name="target_kg_co2e" step="0.01" required style="width:140px;min-height:36px;border:1px solid var(--line-strong);border-radius:6px;background:var(--bg);color:var(--text);padding:0 10px;font:inherit"></div>
-      <button type="submit" class="btn btn-primary">Save Target</button>
-    </form>
-  </div>
+  <section class="content-grid">
+    <div class="panel-card">
+      <div class="section-title-row"><h2>Category Breakdown</h2><span>{_fmt_kg(grand_total)} total</span></div>
+      <div class="breakdown-list">{breakdown_html}</div>
+    </div>
+    <div class="panel-card">
+      <div class="section-title-row"><h2>Operating Insights</h2><span>Selected range</span></div>
+      <div class="insight-grid">
+        <div class="insight-card"><div class="insight-label">Highest source</div><div class="insight-value">{_safe(leading_source_label)}</div></div>
+        <div class="insight-card"><div class="insight-label">Highest source kg</div><div class="insight-value">{_safe(leading_source_value)}</div></div>
+        <div class="insight-card"><div class="insight-label">Target status</div><div class="insight-value">{_safe(best_target_status)}</div></div>
+      </div>
+    </div>
+  </section>
 
-  <!-- Log table -->
-  <div class="section-title">Emission Logs</div>
-  <div class="table-wrap">
-    <table class="data-table">
-      <thead>
-        <tr>
-          <th>Date</th><th>Category</th><th>Source</th><th>Farm</th>
-          <th class="num">Quantity</th><th class="num">kg CO₂e</th>
-          <th>Ref</th><th></th>
-        </tr>
-      </thead>
-      <tbody id="logBody">
-        {log_rows if log_rows else '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:32px">No emissions logged for this period.</td></tr>'}
-      </tbody>
-    </table>
-  </div>
+  <section class="panel-card" aria-label="Reduction targets">
+    <div class="section-title-row"><h2>Reduction Targets</h2><span>Progress uses selected range total</span></div>
+    {target_section}
+    <div class="add-target-card">
+      <button class="add-target-toggle" type="button" onclick="document.getElementById('targetForm').classList.toggle('hidden')">+ Add target</button>
+      <form id="targetForm" class="target-form-grid hidden">
+        <div class="field"><label>Label</label><input name="label" placeholder="e.g. May carbon budget" required></div>
+        <div class="field"><label>Start</label><input type="date" name="period_start" value="{d_from.isoformat()}" required></div>
+        <div class="field"><label>End</label><input type="date" name="period_end" value="{d_to.isoformat()}" required></div>
+        <div class="field"><label>Target kg CO₂e</label><input type="number" name="target_kg_co2e" step="0.01" min="0.01" required></div>
+        <button type="submit" class="btn btn-primary">Save</button>
+      </form>
+    </div>
+  </section>
+
+  <section class="table-card" aria-label="Emission logs">
+    <div class="table-toolbar">
+      <h2>Emission Logs</h2>
+      <span>Showing latest {len(logs)} of {entry_count} entries</span>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Date</th><th>Category</th><th>Source</th><th>Farm</th>
+            <th class="num">Quantity</th><th class="num">CO₂e</th>
+            <th>Ref</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="logBody">
+          {log_rows if log_rows else log_empty}
+        </tbody>
+      </table>
+    </div>
+  </section>
 </main>
 <script>
-  // Init theme from localStorage
-  try {{
-    var t = localStorage.getItem("colorMode") === "light" ? "light" : "dark";
-    document.documentElement.setAttribute("data-theme", t);
-  }} catch(_) {{}}
+  document.getElementById("targetForm").addEventListener("submit", async function (event) {{
+    event.preventDefault();
+    var form = event.currentTarget;
+    var data = Object.fromEntries(new FormData(form).entries());
+    data.target_kg_co2e = parseFloat(data.target_kg_co2e);
+
+    var response = await fetch("/carbon/api/targets", {{
+      method: "POST",
+      headers: {{"Content-Type": "application/json"}},
+      body: JSON.stringify(data)
+    }});
+
+    if (response.ok) {{
+      window.location.reload();
+      return;
+    }}
+
+    var error = await response.json().catch(function () {{ return {{detail: "Unknown error"}}; }});
+    alert("Could not save target: " + (error.detail || "Unknown error"));
+  }});
+
+  document.querySelectorAll(".target-delete").forEach(function (button) {{
+    button.addEventListener("click", async function () {{
+      if (!confirm("Delete this carbon target?")) return;
+      var targetId = button.getAttribute("data-target-id");
+      var response = await fetch("/carbon/api/targets/" + targetId, {{method: "DELETE"}});
+      if (response.ok) {{
+        window.location.reload();
+        return;
+      }}
+      alert("Could not delete target.");
+    }});
+  }});
 </script>
 </body>
 </html>"""
@@ -378,18 +693,25 @@ async def log_emission_page(
     nav_html = render_app_header(current_user, "page_carbon")
 
     factor_options = ""
-    current_group  = ""
+    current_group = ""
     for f in factors:
         if f.source_type != current_group:
             if current_group:
                 factor_options += "</optgroup>"
-            factor_options += f'<optgroup label="{f.source_type.title()}">'
+            factor_options += f'<optgroup label="{_safe(f.source_type.title())}">'
             current_group = f.source_type
-        factor_options += f'<option value="{f.id}" data-unit="{f.unit}" data-factor="{float(f.factor_kg_co2e_per_unit)}">{f.label} ({f.unit})</option>'
+        factor_options += (
+            f'<option value="{f.id}" data-unit="{_safe(f.unit)}" '
+            f'data-factor="{float(f.factor_kg_co2e_per_unit)}">'
+            f'{_safe(f.label)} ({_safe(f.unit)})</option>'
+        )
     if current_group:
         factor_options += "</optgroup>"
 
-    farm_options = "".join(f'<option value="{fm.id}">{fm.name}</option>' for fm in farms)
+    if not factor_options:
+        factor_options = '<option value="" disabled selected>No active emission factors</option>'
+
+    farm_options = "".join(f'<option value="{fm.id}">{_safe(fm.name)}</option>' for fm in farms)
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -397,14 +719,22 @@ async def log_emission_page(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Log Emission | Carbon | AZed ERP</title>
+  <script src="/static/theme-init.js"></script>
   <link rel="stylesheet" href="/static/dashboard.css">
   <style>
-    .form-card{{max-width:540px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:28px 28px 24px}}
+    .main-content {{max-width:920px;margin:0 auto;padding:30px 24px 46px;position:relative;z-index:2}}
+    .page-header {{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:22px;flex-wrap:wrap}}
+    .page-title {{margin:0;font-size:clamp(1.8rem,4vw,2.6rem);line-height:1.05;font-weight:950;letter-spacing:-.04em;color:var(--text)}}
+    .page-subtitle {{margin:8px 0 0;color:var(--text-sub);font-size:.98rem}}
+    .btn {{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:0 14px;border-radius:12px;border:1px solid var(--border-strong);font-weight:850;font-size:.9rem;cursor:pointer;text-decoration:none}}
+    .btn-primary {{background:linear-gradient(135deg,var(--teal,#2dd4bf),var(--accent));color:#04151a;border-color:transparent}}
+    .btn-secondary {{background:var(--surface);color:var(--text)}}
+    .form-card{{max-width:620px;background:color-mix(in srgb,var(--surface) 92%,transparent);border:1px solid var(--border);border-radius:18px;padding:28px 28px 24px;box-shadow:0 18px 46px rgba(0,0,0,.18)}}
     .field{{margin-bottom:18px}}
-    .field label{{display:block;margin-bottom:6px;font-size:.78rem;font-weight:700;text-transform:uppercase;color:var(--text-muted)}}
-    .field input,.field select,.field textarea{{width:100%;min-height:42px;border:1px solid var(--line-strong);border-radius:7px;background:var(--bg);color:var(--text);padding:0 12px;font:inherit}}
-    .field textarea{{padding:10px 12px;min-height:80px;resize:vertical}}
-    .co2-preview{{padding:12px 16px;background:color-mix(in srgb,var(--teal) 12%,transparent);border:1px solid color-mix(in srgb,var(--teal) 30%,transparent);border-radius:7px;font-weight:700;color:var(--teal);margin-bottom:18px;font-size:1.05rem}}
+    .field label{{display:block;margin-bottom:6px;font-size:.78rem;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted)}}
+    .field input,.field select,.field textarea{{width:100%;min-height:42px;border:1px solid var(--border-strong);border-radius:12px;background:var(--bg);color:var(--text);padding:0 12px;font:inherit}}
+    .field textarea{{padding:10px 12px;min-height:86px;resize:vertical}}
+    .co2-preview{{padding:13px 16px;background:color-mix(in srgb,var(--teal,#2dd4bf) 12%,transparent);border:1px solid color-mix(in srgb,var(--teal,#2dd4bf) 30%,transparent);border-radius:12px;font-weight:900;color:var(--teal,#2dd4bf);margin-bottom:18px;font-size:1.05rem}}
   </style>
 </head>
 <body>
@@ -450,14 +780,13 @@ async def log_emission_page(
   </div>
 </main>
 <script>
-  try {{ var t = localStorage.getItem("colorMode")==="light"?"light":"dark"; document.documentElement.setAttribute("data-theme",t); }} catch(_){{}}
-
   function updatePreview() {{
     var sel = document.getElementById("factorSel");
     var opt = sel.options[sel.selectedIndex];
-    var unit   = opt.dataset.unit   || "unit";
+    if (!opt) return;
+    var unit = opt.dataset.unit || "unit";
     var factor = parseFloat(opt.dataset.factor) || 0;
-    var qty    = parseFloat(document.getElementById("qtyInp").value) || 0;
+    var qty = parseFloat(document.getElementById("qtyInp").value) || 0;
     document.getElementById("unitLabel").textContent = unit;
     var co2 = (qty * factor).toFixed(3);
     document.getElementById("co2Preview").textContent = "CO₂e: " + co2 + " kg";
@@ -468,8 +797,11 @@ async def log_emission_page(
     e.preventDefault();
     var fd = new FormData(this);
     var body = Object.fromEntries(fd.entries());
+    body.factor_id = parseInt(body.factor_id, 10);
     body.quantity = parseFloat(body.quantity);
     if (body.farm_id === "") delete body.farm_id;
+    else body.farm_id = parseInt(body.farm_id, 10);
+
     var r = await fetch("/carbon/api/logs", {{
       method: "POST",
       headers: {{"Content-Type": "application/json"}},
@@ -477,7 +809,7 @@ async def log_emission_page(
     }});
     if (r.ok) {{ window.location.href = "/carbon/"; }}
     else {{
-      var err = await r.json();
+      var err = await r.json().catch(function () {{ return {{detail:"Unknown error"}}; }});
       alert("Error: " + (err.detail || "Unknown error"));
     }}
   }});
@@ -503,16 +835,19 @@ async def factors_page(
 
     rows = ""
     for f in factors:
-        active_badge = '<span style="color:var(--teal)">Active</span>' if f.is_active else '<span style="color:var(--text-muted)">Inactive</span>'
+        active_badge = '<span style="color:var(--teal,#2dd4bf)">Active</span>' if f.is_active else '<span style="color:var(--text-muted)">Inactive</span>'
         rows += f"""
         <tr>
-          <td><span class="badge badge-{f.source_type}">{f.source_type}</span></td>
-          <td>{f.source_key}</td>
-          <td>{f.label}</td>
+          <td>{_badge_html(f.source_type)}</td>
+          <td>{_safe(f.source_key)}</td>
+          <td>{_safe(f.label)}</td>
           <td class="num">{float(f.factor_kg_co2e_per_unit)}</td>
-          <td>{f.unit}</td>
+          <td>{_safe(f.unit)}</td>
           <td>{active_badge}</td>
         </tr>"""
+
+    if not rows:
+        rows = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:28px">No emission factors found.</td></tr>'
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -520,14 +855,26 @@ async def factors_page(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Emission Factors | Carbon | AZed ERP</title>
+  <script src="/static/theme-init.js"></script>
   <link rel="stylesheet" href="/static/dashboard.css">
   <style>
-    .badge {{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.75rem;font-weight:700;text-transform:capitalize}}
-    .badge-transport{{background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber)}}
-    .badge-energy   {{background:color-mix(in srgb,var(--red)   18%,transparent);color:var(--red)}}
-    .badge-waste    {{background:color-mix(in srgb,var(--green)  18%,transparent);color:var(--green)}}
-    .badge-production{{background:color-mix(in srgb,#a78bfa     18%,transparent);color:#a78bfa}}
+    .main-content {{max-width:1120px;margin:0 auto;padding:30px 24px 46px;position:relative;z-index:2}}
+    .page-header {{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:22px;flex-wrap:wrap}}
+    .page-title {{margin:0;font-size:clamp(1.8rem,4vw,2.6rem);line-height:1.05;font-weight:950;letter-spacing:-.04em;color:var(--text)}}
+    .page-subtitle {{margin:8px 0 0;color:var(--text-sub);font-size:.98rem}}
+    .btn {{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:0 14px;border-radius:12px;border:1px solid var(--border-strong);font-weight:850;font-size:.9rem;cursor:pointer;text-decoration:none}}
+    .btn-secondary {{background:var(--surface);color:var(--text)}}
+    .table-wrap {{overflow:auto;background:color-mix(in srgb,var(--surface) 92%,transparent);border:1px solid var(--border);border-radius:18px;box-shadow:0 18px 46px rgba(0,0,0,.18)}}
+    .data-table {{width:100%;border-collapse:separate;border-spacing:0;min-width:760px}}
+    .data-table th,.data-table td {{padding:13px 14px;border-bottom:1px solid var(--border);text-align:left}}
+    .data-table th {{font-size:.74rem;text-transform:uppercase;letter-spacing:.07em;color:var(--text-muted);background:color-mix(in srgb,var(--surface-raised) 48%,transparent);font-weight:950}}
+    .data-table tr:last-child td {{border-bottom:0}}
     .num{{text-align:right}}
+    .carbon-badge {{display:inline-flex;align-items:center;border-radius:999px;padding:5px 9px;font-size:.74rem;font-weight:900;text-transform:capitalize;border:1px solid transparent;white-space:nowrap}}
+    .carbon-badge-transport {{background:color-mix(in srgb,var(--amber,#f59e0b) 14%,transparent);color:var(--amber,#f59e0b);border-color:color-mix(in srgb,var(--amber,#f59e0b) 30%,transparent)}}
+    .carbon-badge-energy {{background:color-mix(in srgb,var(--negative,#f87171) 14%,transparent);color:var(--negative,#f87171);border-color:color-mix(in srgb,var(--negative,#f87171) 30%,transparent)}}
+    .carbon-badge-waste {{background:color-mix(in srgb,var(--green,#22c55e) 14%,transparent);color:var(--green,#22c55e);border-color:color-mix(in srgb,var(--green,#22c55e) 30%,transparent)}}
+    .carbon-badge-production {{background:color-mix(in srgb,var(--purple,#a855f7) 14%,transparent);color:var(--purple,#a855f7);border-color:color-mix(in srgb,var(--purple,#a855f7) 30%,transparent)}}
   </style>
 </head>
 <body>
@@ -549,9 +896,6 @@ async def factors_page(
     </table>
   </div>
 </main>
-<script>
-  try {{ var t = localStorage.getItem("colorMode")==="light"?"light":"dark"; document.documentElement.setAttribute("data-theme",t); }} catch(_){{}}
-</script>
 </body>
 </html>"""
     return HTMLResponse(html)
@@ -562,7 +906,7 @@ async def factors_page(
 @router.get("/api/summary")
 async def api_summary(
     date_from: Optional[str] = None,
-    date_to:   Optional[str] = None,
+    date_to: Optional[str] = None,
     db: AsyncSession = Depends(get_async_session),
 ):
     d_from, d_to = _date_range_defaults(date_from, date_to)
@@ -577,12 +921,16 @@ async def api_summary(
         .group_by(CarbonEmissionFactor.source_type)
     )
     by_type = [
-        {"source_type": r.source_type, "total_kg_co2e": float(r.total_kg_co2e or 0), "entry_count": r.entry_count}
+        {"source_type": r.source_type, "total_kg_co2e": _as_float(r.total_kg_co2e), "entry_count": r.entry_count}
         for r in rows
     ]
     grand = sum(r["total_kg_co2e"] for r in by_type)
-    return {"date_from": d_from.isoformat(), "date_to": d_to.isoformat(),
-            "grand_total_kg_co2e": grand, "by_source_type": by_type}
+    return {
+        "date_from": d_from.isoformat(),
+        "date_to": d_to.isoformat(),
+        "grand_total_kg_co2e": grand,
+        "by_source_type": by_type,
+    }
 
 
 # ── API: Logs ─────────────────────────────────────────────────────────────────
@@ -590,7 +938,7 @@ async def api_summary(
 @router.get("/api/logs")
 async def api_list_logs(
     date_from: Optional[str] = None,
-    date_to:   Optional[str] = None,
+    date_to: Optional[str] = None,
     limit: int = 100,
     db: AsyncSession = Depends(get_async_session),
 ):
@@ -605,17 +953,17 @@ async def api_list_logs(
     logs = q.scalars().all()
     return [
         {
-            "id":          lg.id,
-            "log_date":    lg.log_date.isoformat(),
-            "factor":      lg.factor.label,
+            "id": lg.id,
+            "log_date": lg.log_date.isoformat(),
+            "factor": lg.factor.label,
             "source_type": lg.factor.source_type,
-            "unit":        lg.factor.unit,
-            "quantity":    float(lg.quantity),
-            "kg_co2e":     float(lg.kg_co2e),
-            "farm":        lg.farm.name if lg.farm else None,
-            "ref_type":    lg.ref_type,
-            "ref_id":      lg.ref_id,
-            "notes":       lg.notes,
+            "unit": lg.factor.unit,
+            "quantity": _as_float(lg.quantity),
+            "kg_co2e": _as_float(lg.kg_co2e),
+            "farm": lg.farm.name if lg.farm else None,
+            "ref_type": lg.ref_type,
+            "ref_id": lg.ref_id,
+            "notes": lg.notes,
         }
         for lg in logs
     ]
@@ -630,13 +978,22 @@ async def api_create_log(
     factor = await db.get(CarbonEmissionFactor, payload.factor_id)
     if not factor:
         raise HTTPException(404, "Emission factor not found")
+    if not factor.is_active:
+        raise HTTPException(400, "Emission factor is inactive")
+    if payload.quantity <= 0:
+        raise HTTPException(400, "Quantity must be greater than zero")
+
+    try:
+        log_date = date.fromisoformat(payload.log_date)
+    except ValueError:
+        raise HTTPException(400, "Invalid log_date. Use YYYY-MM-DD") from None
 
     kg = float(factor.factor_kg_co2e_per_unit) * payload.quantity
     lg = CarbonLog(
         factor_id=payload.factor_id,
         farm_id=payload.farm_id,
         user_id=current_user.id,
-        log_date=date.fromisoformat(payload.log_date),
+        log_date=log_date,
         quantity=payload.quantity,
         kg_co2e=round(kg, 4),
         ref_type=payload.ref_type,
@@ -647,7 +1004,8 @@ async def api_create_log(
     await db.commit()
     await db.refresh(lg)
     record(db, "Carbon", "create_log", f"{payload.quantity} × {factor.label} = {kg:.4f} kg CO₂e", user=current_user, ref_type="carbon_log", ref_id=lg.id)
-    return {"id": lg.id, "kg_co2e": float(lg.kg_co2e)}
+    await db.commit()
+    return {"id": lg.id, "kg_co2e": _as_float(lg.kg_co2e)}
 
 
 @router.delete("/api/logs/{log_id}", status_code=204)
@@ -660,8 +1018,8 @@ async def api_delete_log(
     if not lg:
         raise HTTPException(404, "Log entry not found")
     await db.delete(lg)
-    await db.commit()
     record(db, "Carbon", "delete_log", "Deleted carbon log entry", user=current_user, ref_type="carbon_log", ref_id=log_id)
+    await db.commit()
 
 
 # ── API: Factors ──────────────────────────────────────────────────────────────
@@ -675,12 +1033,12 @@ async def api_list_factors(db: AsyncSession = Depends(get_async_session)):
     )
     return [
         {
-            "id":          f.id,
+            "id": f.id,
             "source_type": f.source_type,
-            "source_key":  f.source_key,
-            "label":       f.label,
+            "source_key": f.source_key,
+            "label": f.label,
             "factor_kg_co2e_per_unit": float(f.factor_kg_co2e_per_unit),
-            "unit":        f.unit,
+            "unit": f.unit,
             "description": f.description,
         }
         for f in q.scalars().all()
@@ -698,10 +1056,12 @@ async def api_create_factor(
     )
     if existing.scalar_one_or_none():
         raise HTTPException(400, f"Factor with source_key '{payload.source_key}' already exists")
-    f = CarbonEmissionFactor(**payload.dict())
+    f = CarbonEmissionFactor(**_model_dump(payload))
     db.add(f)
     await db.commit()
     await db.refresh(f)
+    record(db, "Carbon", "create_factor", f"Created emission factor {f.source_key}", user=current_user, ref_type="carbon_factor", ref_id=f.id)
+    await db.commit()
     return {"id": f.id}
 
 
@@ -715,8 +1075,9 @@ async def api_update_factor(
     f = await db.get(CarbonEmissionFactor, factor_id)
     if not f:
         raise HTTPException(404, "Factor not found")
-    for field, val in payload.dict(exclude_none=True).items():
+    for field, val in _model_dump(payload, exclude_none=True).items():
         setattr(f, field, val)
+    record(db, "Carbon", "update_factor", f"Updated emission factor {f.source_key}", user=current_user, ref_type="carbon_factor", ref_id=f.id)
     await db.commit()
     return {"ok": True}
 
@@ -728,12 +1089,12 @@ async def api_list_targets(db: AsyncSession = Depends(get_async_session)):
     q = await db.execute(select(CarbonTarget).order_by(CarbonTarget.period_start.desc()))
     return [
         {
-            "id":             t.id,
-            "label":          t.label,
-            "period_start":   t.period_start.isoformat(),
-            "period_end":     t.period_end.isoformat(),
-            "target_kg_co2e": float(t.target_kg_co2e),
-            "notes":          t.notes,
+            "id": t.id,
+            "label": t.label,
+            "period_start": t.period_start.isoformat(),
+            "period_end": t.period_end.isoformat(),
+            "target_kg_co2e": _as_float(t.target_kg_co2e),
+            "notes": t.notes,
         }
         for t in q.scalars().all()
     ]
@@ -745,16 +1106,29 @@ async def api_create_target(
     db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
+    try:
+        period_start = date.fromisoformat(payload.period_start)
+        period_end = date.fromisoformat(payload.period_end)
+    except ValueError:
+        raise HTTPException(400, "Invalid target period. Use YYYY-MM-DD") from None
+
+    if period_start > period_end:
+        raise HTTPException(400, "Target start date must be before end date")
+    if payload.target_kg_co2e <= 0:
+        raise HTTPException(400, "Target kg CO₂e must be greater than zero")
+
     t = CarbonTarget(
         label=payload.label,
-        period_start=date.fromisoformat(payload.period_start),
-        period_end=date.fromisoformat(payload.period_end),
+        period_start=period_start,
+        period_end=period_end,
         target_kg_co2e=payload.target_kg_co2e,
         notes=payload.notes,
     )
     db.add(t)
     await db.commit()
     await db.refresh(t)
+    record(db, "Carbon", "create_target", f"Created carbon target {t.label}", user=current_user, ref_type="carbon_target", ref_id=t.id)
+    await db.commit()
     return {"id": t.id}
 
 
@@ -768,6 +1142,7 @@ async def api_delete_target(
     if not t:
         raise HTTPException(404, "Target not found")
     await db.delete(t)
+    record(db, "Carbon", "delete_target", "Deleted carbon target", user=current_user, ref_type="carbon_target", ref_id=target_id)
     await db.commit()
 
 
@@ -786,17 +1161,23 @@ async def api_auto_log_farm_delivery(
     Pass the one-way distance in km and the vehicle type.
     The system uses the correct emission factor and logs the result.
     """
+    if distance_km <= 0:
+        raise HTTPException(400, "Distance must be greater than zero")
+
     delivery = await db.get(FarmDelivery, delivery_id)
     if not delivery:
         raise HTTPException(404, "Farm delivery not found")
 
     source_key = f"{vehicle_type}_km"
     factor_q = await db.execute(
-        select(CarbonEmissionFactor).where(CarbonEmissionFactor.source_key == source_key)
+        select(CarbonEmissionFactor).where(
+            CarbonEmissionFactor.source_key == source_key,
+            CarbonEmissionFactor.is_active == True,
+        )
     )
     factor = factor_q.scalar_one_or_none()
     if not factor:
-        raise HTTPException(404, f"No emission factor found for vehicle type '{vehicle_type}'")
+        raise HTTPException(404, f"No active emission factor found for vehicle type '{vehicle_type}'")
 
     kg = float(factor.factor_kg_co2e_per_unit) * distance_km
     lg = CarbonLog(
@@ -813,4 +1194,6 @@ async def api_auto_log_farm_delivery(
     db.add(lg)
     await db.commit()
     await db.refresh(lg)
-    return {"id": lg.id, "kg_co2e": float(lg.kg_co2e), "factor_used": factor.label}
+    record(db, "Carbon", "auto_log_farm_delivery", f"Auto-logged delivery {delivery.delivery_number}: {kg:.4f} kg CO₂e", user=current_user, ref_type="carbon_log", ref_id=lg.id)
+    await db.commit()
+    return {"id": lg.id, "kg_co2e": _as_float(lg.kg_co2e), "factor_used": factor.label}
