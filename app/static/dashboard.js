@@ -818,7 +818,6 @@ function injectDashboardUpgradeStyles() {
     }
 
     .profit-fill.revenue { background: linear-gradient(90deg, var(--accent), var(--blue)); }
-    .profit-fill.cogs { background: linear-gradient(90deg, var(--warning), color-mix(in srgb, var(--warning) 54%, transparent)); }
     .profit-fill.gross { background: linear-gradient(90deg, var(--positive), color-mix(in srgb, var(--positive) 54%, transparent)); }
     .profit-fill.opex { background: linear-gradient(90deg, var(--rose), var(--negative)); }
     .profit-fill.net { background: linear-gradient(90deg, var(--accent), var(--positive)); }
@@ -1564,7 +1563,7 @@ function renderProfitSummary() {
     el.innerHTML = `
       <div class="dashboard-upgrade-empty">
         <strong>Profit data is not ready yet.</strong>
-        <span>Add product costs and keep sales/expenses updated to unlock gross profit, net profit, and margin tracking.</span>
+        <span>Keep sales and expenses updated to unlock gross profit, net profit, and margin tracking.</span>
       </div>`;
     return;
   }
@@ -1572,10 +1571,8 @@ function renderProfitSummary() {
   const grossProfit = Number(profit.gross_profit || 0);
   const operatingExpenses = Number(profit.operating_expenses || 0);
   const netProfit = Number(profit.net_profit || 0);
-  const cogs = Math.max(0, revenue - grossProfit);
   const grossMarginPct = profit.gross_margin_pct;
   const netMarginPct = profit.net_margin_pct;
-  const cogsPct = revenue > 0 ? (cogs / revenue) * 100 : 0;
   const opexPct = revenue > 0 ? (operatingExpenses / revenue) * 100 : 0;
   const delta = profit.net_margin_delta_pts;
 
@@ -1618,7 +1615,6 @@ function renderProfitSummary() {
 
       <div class="profit-waterfall" aria-label="Profit breakdown">
         ${profitFlowRow("Revenue", revenue, 100, "revenue", 100)}
-        ${profitFlowRow("Cost of goods", cogs, cogsPct, "cogs", ratioOf(cogs, revenue), true)}
         ${profitFlowRow("Gross profit", grossProfit, grossMarginPct, "gross", ratioOf(grossProfit, revenue))}
         ${profitFlowRow("Operating expenses", operatingExpenses, opexPct, "opex", ratioOf(operatingExpenses, revenue), true)}
         ${profitFlowRow("Net profit", netProfit, netMarginPct, `net ${netProfit < 0 ? "negative" : ""}`, ratioOf(netProfit, revenue))}
@@ -1627,7 +1623,7 @@ function renderProfitSummary() {
       <div class="profit-final-row">
         <div>
           <span class="profit-final-title">Operating result</span>
-          <span class="profit-final-sub">Revenue minus product costs and operating expenses</span>
+          <span class="profit-final-sub">Gross profit minus operating expenses</span>
         </div>
         <strong class="profit-final-value ${netProfit >= 0 ? "positive" : "negative"}">${signedMoney(netProfit)}</strong>
       </div>
