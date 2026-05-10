@@ -86,7 +86,12 @@ def _normalize_sku(val) -> str:
             return str(int(val))
         except (ValueError, TypeError):
             pass
-    return str(val).strip()
+    s = str(val).strip()
+    if s.endswith('.0'):
+        s = s[:-2]
+    if s.isdigit():
+        return str(int(s))
+    return s
 
 
 def _find_col(headers: list[str], candidates: list[str]) -> Optional[int]:
@@ -256,7 +261,7 @@ async def import_sales(
 
     # ── Load existing products once (used in both dry-run and real) ─────────
     _all_p = await db.execute(
-        select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))
+        select(Product)
     )
     all_products = _all_p.scalars().all()
     products_by_norm_sku: dict[str, Product] = {
@@ -364,12 +369,10 @@ async def import_sales(
 
             norm_sku = normalize_barcode_value(raw_sku_str)
 
-            product = products_by_norm_sku.get(norm_sku) or newly_created_by_norm_sku.get(norm_sku)
-            if not product:
-                # Determine item name (first-seen wins for duplicate SKUs)
+            # Check for conflicting names for unknown SKUs (auto-created in this batch)
+            if not products_by_norm_sku.get(norm_sku):
                 raw_item_name = r["item"] or f"Imported {raw_sku_str}"
                 item_name = raw_item_name[:_NAME_MAX]
-
                 if norm_sku in sku_name_registry:
                     first_name = sku_name_registry[norm_sku]
                     if first_name.lower() != item_name.lower():
@@ -382,7 +385,11 @@ async def import_sales(
                     item_name = first_name
                 else:
                     sku_name_registry[norm_sku] = item_name
+            else:
+                item_name = r["item"] or f"Imported {raw_sku_str}"
 
+            product = products_by_norm_sku.get(norm_sku) or newly_created_by_norm_sku.get(norm_sku)
+            if not product:
                 price_val = float(r["price"])
                 cost_val  = (
                     round(price_val * default_cost_ratio, 4)

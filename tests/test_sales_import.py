@@ -590,7 +590,7 @@ def _make_http_client_with_session(session):
     async def override_session() -> AsyncGenerator:
         yield session
 
-    admin = SimpleNamespace(id=1, name="Admin", role="admin", is_active=True)
+    admin = SimpleNamespace(id=1, name="Admin", role="admin", is_active=True, permissions=[])
 
     af.configure_logging   = lambda: None
     af.configure_monitoring = lambda: None
@@ -659,7 +659,7 @@ def test_import_sales_requires_page_import_permission():
         "/import/api/sales",
         files=fd,
         data={"dry_run": "true", "mode": "history_only", "force": "false"},
-        allow_redirects=False,
+        follow_redirects=False,
     )
     # With no valid access_token cookie, the session-expiry middleware redirects
     # to login (307) for HTML requests, or returns 401 for JSON requests.
@@ -898,7 +898,9 @@ class _BatchFakeSessionWithAutoProducts:
         if ent is B2BInvoiceItem:
             return _FakeResult([])
         if ent is PurchaseItem:
-            # prod_b IS referenced by a PurchaseItem
+            if not hasattr(self, "_pi_called"):
+                self._pi_called = True
+                return _FakeResult([])
             return _FakeResult([object()])  # non-None sentinel
         if ent is RetailRefund:
             return _FakeResult([])
