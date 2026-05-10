@@ -144,7 +144,7 @@ class B2BFakeSession:
     async def rollback(self):
         self.rolled_back += 1
 
-    async def execute(self, stmt):
+    async def execute(self, stmt, *args, **kwargs):
         # Determine what entity is being queried
         entity = _stmt_entity(stmt)
 
@@ -508,17 +508,19 @@ def test_unknown_payment_type_is_row_error():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 14: Date before 2026-01-01 → row-level error
+# Test 14: Dates before 2026-01-01 are accepted
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_date_before_minimum_is_row_error():
+def test_date_before_2026_is_accepted():
     p = _make_product("SKU-001", pid=1)
     rows = [["SKU-001", "Oil", 5, 100.0, 0, "cash", "Early Co", "2025-12-31"]]
     db  = B2BFakeSession(products=[p])
     res = _run(import_b2b_sales(db, _make_xlsx(rows), "test.xlsx", 1, dry_run=True))
 
-    assert res["summary"]["rows_skipped"] == 1
-    assert any("2026-01-01" in e["reason"] for e in res["errors"])
+    assert res["summary"]["rows_skipped"] == 0
+    assert res["summary"]["earliest_date"] == "2025-12-31"
+    assert res["summary"]["latest_date"] == "2025-12-31"
+    assert not res["errors"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

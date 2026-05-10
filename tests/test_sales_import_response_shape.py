@@ -124,6 +124,8 @@ DRY_RUN_SUMMARY_FIELDS = [
     "products_auto_created",
     "earliest_date",
     "latest_date",
+    "total_subtotal",
+    "total_discount",
     "total_value",
 ]
 
@@ -136,6 +138,8 @@ REAL_RUN_SUMMARY_FIELDS = [
     "products_auto_created",
     "earliest_date",
     "latest_date",
+    "total_subtotal",
+    "total_discount",
     "total_value",
 ]
 
@@ -193,7 +197,8 @@ def test_dry_run_summary_fields_are_not_none():
 
     for field in ["rows_read", "invoices_would_create", "invoices_created",
                   "line_items", "rows_skipped", "customers_auto_created",
-                  "products_auto_created", "total_value"]:
+                  "products_auto_created", "total_subtotal",
+                  "total_discount", "total_value"]:
         assert s[field] is not None, f"summary.{field} is None (frontend would show 'undefined')"
 
 

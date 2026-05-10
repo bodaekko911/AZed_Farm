@@ -45,7 +45,6 @@ from app.models.product import Product
 from app.services.b2b_shared import post_journal, seed_deferred_revenue
 from app.services.barcode_service import normalize_barcode_value
 
-MIN_IMPORT_DATE = date(2026, 1, 1)
 VALID_MODES = frozenset({"history_only", "with_stock_adjustment"})
 _SKU_MAX = 80
 _NAME_MAX = 200
@@ -272,8 +271,6 @@ async def import_b2b_sales(
             row_errors.append("Client name is required")
         if sale_date is None:
             row_errors.append(f"Date '{raw_date}' is invalid — use YYYY-MM-DD, DD/MM/YYYY, or MM/DD/YYYY")
-        elif sale_date < MIN_IMPORT_DATE:
-            row_errors.append(f"Date {sale_date} is before the minimum import date (2026-01-01)")
 
         all_rows.append({
             "row":          rn,

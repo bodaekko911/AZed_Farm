@@ -349,7 +349,7 @@ async def download_sales_template(_=Depends(get_current_user)):
     ws = wb.active
     ws.title = "Sales"
 
-    headers = ["SKU", "Item", "QTY", "Price", "Customer", "Date"]
+    headers = ["SKU", "Item", "QTY", "Price", "Discount", "Customer", "Date"]
     hdr_font = Font(bold=True, color="00FF9D")
     hdr_fill = PatternFill("solid", fgColor="0F1424")
     for col, h in enumerate(headers, 1):
@@ -357,11 +357,11 @@ async def download_sales_template(_=Depends(get_current_user)):
         c.font = hdr_font
         c.fill = hdr_fill
         c.alignment = Alignment(horizontal="center")
-    for col, w in enumerate([14, 28, 8, 10, 22, 14], 1):
+    for col, w in enumerate([14, 28, 8, 10, 12, 22, 14], 1):
         ws.column_dimensions[get_column_letter(col)].width = w
-    ws.append(["SKU-001", "Olive Oil 500ml",  3,  15.50, "Ahmed Al-Rashid", "2026-01-15"])
-    ws.append(["SKU-002", "Tahini 250g",      10,  8.00, "Ahmed Al-Rashid", "2026-01-15"])
-    ws.append(["SKU-001", "Olive Oil 500ml",  1,  15.50, "Sara Khalil",     "2026-01-20"])
+    ws.append(["SKU-001", "Olive Oil 500ml",  3,  15.50, 0,  "Ahmed Al-Rashid", "2025-12-15"])
+    ws.append(["SKU-002", "Tahini 250g",      10,  8.00, 5,  "Ahmed Al-Rashid", "2025-12-15"])
+    ws.append(["SKU-001", "Olive Oil 500ml",  1,  15.50, 10, "Sara Khalil",     "2024-11-20"])
 
     readme = wb.create_sheet("README")
     readme.column_dimensions["A"].width = 20
@@ -370,12 +370,13 @@ async def download_sales_template(_=Depends(get_current_user)):
     readme["A1"].font = Font(bold=True)
     readme["B1"].font = Font(bold=True)
     rules = [
-        ("SKU",      "Required. Must match a product SKU in the ERP (whitespace stripped). Numeric-looking SKUs are normalised (e.g. 12345.0 → 12345)."),
-        ("Item",     "Optional. Product description — used only in error messages when the SKU is not found. Not stored on the invoice."),
+        ("SKU",      "Required. Matched by product SKU; if not found, a Product is created automatically. Numeric-looking SKUs are normalised (e.g. 12345.0 -> 12345)."),
+        ("Item",     "Optional. Product description used when auto-creating unknown SKUs."),
         ("QTY",      "Required. Numeric, must be > 0. Decimals accepted."),
         ("Price",    "Required. Unit price at the time of sale. May differ from the current product price. Must be >= 0."),
+        ("Discount", "Optional. Per-line discount percentage (e.g. 10 = 10%). Blank/null = 0. Range 0-100."),
         ("Customer", "Optional. Customer name. Leave blank for Walk-in Customer. If the name does not already exist, a new Customer record is created automatically."),
-        ("Date",     "Required. Must be >= 2026-01-01. Accepted formats: YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY. Excel date cells are also accepted."),
+        ("Date",     "Required. Any historical sale date is accepted. Accepted formats: YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY. Excel date cells are also accepted."),
         ("", ""),
         ("Grouping", "Multiple rows with the same Customer + Date are combined into a single invoice. Leave Customer blank and they go to the Walk-in invoice for that date."),
         ("Dry run",  "Always preview with Dry run checked first. Uncheck Dry run only for the final confirmed import."),
@@ -613,7 +614,7 @@ async def download_b2b_sales_template(_=Depends(get_current_user)):
                          "full_payment aliases: credit, net30, on account, invoiced. "
                          "consignment aliases: cons, sale or return, sor."),
         ("Client name",  "Required. B2B client name. Auto-created if not found."),
-        ("Date",         "Required. Must be >= 2026-01-01. Accepted formats: YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY. Excel date cells also accepted."),
+        ("Date",         "Required. Any historical sale date is accepted. Accepted formats: YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY. Excel date cells also accepted."),
         ("", ""),
         ("Grouping",     "Rows with same Client name + Date + Payment type become one invoice. "
                          "Same client can have cash + consignment rows on the same day — those create two separate invoices."),
@@ -1372,8 +1373,9 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                     <div class="col-row"><span class="col-excel">Item</span><span class="col-arrow">→</span><span class="col-field">Product name (used when auto-creating)</span><span class="col-opt">optional</span></div>
                     <div class="col-row"><span class="col-excel">QTY</span><span class="col-arrow">→</span><span class="col-field">Quantity sold (&gt; 0)</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
                     <div class="col-row"><span class="col-excel">Price</span><span class="col-arrow">→</span><span class="col-field">Unit price at time of sale</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Discount</span><span class="col-arrow">→</span><span class="col-field">Per-line discount % (blank = 0)</span><span class="col-opt">optional</span></div>
                     <div class="col-row"><span class="col-excel">Customer</span><span class="col-arrow">→</span><span class="col-field">Customer name — auto-created if unknown (blank = Walk-in)</span><span class="col-opt">optional</span></div>
-                    <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">→</span><span class="col-field">Sale date ≥ 2026-01-01</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">→</span><span class="col-field">Sale date (any historical date)</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
                     <div style="margin-top:8px;font-size:11px;color:var(--sub);padding:8px 10px;background:rgba(77,159,255,.06);border-radius:6px;border:1px solid rgba(77,159,255,.15);">
                         Unknown SKUs and unknown customers will be automatically created from the sheet data.
                         Auto-created products get <code style="font-family:var(--mono)">cost = 0</code> by default — set this via the 'Default cost ratio' option below, or adjust after import in Products → "Imported - Historical".
@@ -1523,7 +1525,7 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
                     <div class="col-row"><span class="col-excel">Discount</span><span class="col-arrow">→</span><span class="col-field">Per-line discount % (blank = 0)</span><span class="col-opt">optional</span></div>
                     <div class="col-row"><span class="col-excel">Payment type</span><span class="col-arrow">→</span><span class="col-field">cash · full_payment · consignment</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
                     <div class="col-row"><span class="col-excel">Client name</span><span class="col-arrow">→</span><span class="col-field">B2B client (auto-created if new)</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
-                    <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">→</span><span class="col-field">Sale date ≥ 2026-01-01</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
+                    <div class="col-row"><span class="col-excel">Date</span><span class="col-arrow">→</span><span class="col-field">Sale date (any historical date)</span><span style="color:var(--danger);font-size:10px;margin-left:4px">required</span></div>
                     <div style="margin-top:8px">
                         <a href="/import/api/b2b-sales/template" download style="font-size:11px;color:var(--blue);text-decoration:none">⬇ Download B2B template</a>
                     </div>
@@ -2119,7 +2121,9 @@ function renderSalesResult(data, wasDryRun) {
             Customers ${isDry?'would create':'created'}: <b>${fmt(s.customers_auto_created)}</b> &nbsp;·&nbsp;
             Products ${isDry?'would create':'created'}: <b>${fmt(s.products_auto_created)}</b> &nbsp;·&nbsp;
             Date range: ${s.earliest_date||'–'} → ${s.latest_date||'–'} &nbsp;·&nbsp;
-            Total value: <b>${fmt2(s.total_value)}</b>
+            Gross: <b>${fmt2(s.total_subtotal ?? s.total_value)}</b> &nbsp;·&nbsp;
+            Discount: <b>${fmt2(s.total_discount)}</b> &nbsp;·&nbsp;
+            Net value: <b>${fmt2(s.total_value)}</b>
         </span>`;
 
     if (data.batch_id) {

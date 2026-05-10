@@ -44,7 +44,6 @@ from app.services.barcode_service import normalize_barcode_value
 from app.services.location_inventory_service import sync_product_stock_to_default_location
 from app.services.pos_service import get_walk_in_customer_id, post_journal
 
-MIN_IMPORT_DATE = date(2026, 1, 1)
 VALID_MODES = frozenset({"history_only", "with_journals", "with_stock_and_journals"})
 _SKU_MAX  = 80
 _NAME_MAX = 200
@@ -132,6 +131,7 @@ async def import_sales(
     col_item     = _find_col(raw_headers, ["item", "name", "product", "description"])
     col_qty      = _find_col(raw_headers, ["qty", "quantity", "amount"])
     col_price    = _find_col(raw_headers, ["price", "unit price", "sale price", "sales price"])
+    col_discount = _find_col(raw_headers, ["discount", "discount %", "disc", "disc %", "discount pct", "discount_pct"])
     col_customer = _find_col(raw_headers, ["customer", "customer name", "client"])
     col_date     = _find_col(raw_headers, ["date", "sale date", "invoice date"])
 
@@ -162,6 +162,7 @@ async def import_sales(
         raw_sku      = _cell(rn, col_sku)
         raw_qty      = _cell(rn, col_qty)
         raw_price    = _cell(rn, col_price)
+        raw_discount = _cell(rn, col_discount)
         raw_customer = _cell(rn, col_customer)
         raw_date     = _cell(rn, col_date)
         raw_item     = _cell(rn, col_item) if col_item else None
@@ -169,6 +170,12 @@ async def import_sales(
         sku           = _normalize_sku(raw_sku)
         qty           = _safe_float(raw_qty)
         price         = _safe_float(raw_price)
+        discount_raw  = _safe_float(raw_discount)
+        discount_is_blank = (
+            raw_discount is None
+            or str(raw_discount).strip().lower() in ("", "none", "null")
+        )
+        discount_pct  = 0.0 if discount_is_blank else discount_raw
         customer_name = str(raw_customer).strip() if raw_customer is not None else ""
         sale_date     = _parse_date(raw_date)
         item_hint     = str(raw_item).strip() if raw_item else ""
@@ -184,10 +191,12 @@ async def import_sales(
             row_errors.append("Price is required and must be numeric")
         elif price < 0:
             row_errors.append("Price must be >= 0")
+        if not discount_is_blank and discount_raw is None:
+            row_errors.append("Discount must be numeric")
+        elif discount_pct < 0 or discount_pct > 100:
+            row_errors.append("Discount must be between 0 and 100")
         if sale_date is None:
             row_errors.append(f"Date '{raw_date}' is invalid — use YYYY-MM-DD, DD/MM/YYYY, or MM/DD/YYYY")
-        elif sale_date < MIN_IMPORT_DATE:
-            row_errors.append(f"Date {sale_date} is before the minimum import date (2026-01-01)")
 
         all_rows.append({
             "row":      rn,
@@ -195,6 +204,7 @@ async def import_sales(
             "item":     item_hint,
             "qty":      qty,
             "price":    price,
+            "discount_pct": discount_pct,
             "customer": customer_name,
             "date":     sale_date,
             "errors":   row_errors,
@@ -230,11 +240,17 @@ async def import_sales(
 
     valid_rows = [r for rows in valid_groups.values() for r in rows]
     all_valid_dates = [r["date"] for r in valid_rows if r["date"]]
-    total_value = sum(
+    total_subtotal = sum(
         r["qty"] * r["price"]
         for r in valid_rows
         if r["qty"] is not None and r["price"] is not None
     )
+    total_value = sum(
+        r["qty"] * r["price"] * (1 - r["discount_pct"] / 100)
+        for r in valid_rows
+        if r["qty"] is not None and r["price"] is not None
+    )
+    total_discount = total_subtotal - total_value
     earliest_date = min(all_valid_dates).isoformat() if all_valid_dates else None
     latest_date   = max(all_valid_dates).isoformat() if all_valid_dates else None
 
@@ -329,7 +345,7 @@ async def import_sales(
                 continue
 
         # ── Resolve / auto-create products for each line item ──────────────
-        line_items: list[tuple] = []  # (product, qty, unit_price, line_total)
+        line_items: list[tuple] = []  # (product, qty, unit_price, line_subtotal, line_total)
 
         for r in rows:
             raw_sku_str = r["sku"]
@@ -401,8 +417,12 @@ async def import_sales(
                 })
                 product = new_product
 
-            line_total = float(r["qty"]) * float(r["price"])
-            line_items.append((product, float(r["qty"]), float(r["price"]), line_total))
+            qty = float(r["qty"])
+            unit_price = float(r["price"])
+            discount_pct = float(r["discount_pct"])
+            line_subtotal = qty * unit_price
+            line_total = line_subtotal * (1 - discount_pct / 100)
+            line_items.append((product, qty, unit_price, line_subtotal, line_total))
 
         # In dry-run, count the group and move on
         if dry_run:
@@ -411,7 +431,9 @@ async def import_sales(
             continue
 
         # ── Build Invoice ──────────────────────────────────────────────────
-        subtotal = sum(lt for _, _, _, lt in line_items)
+        subtotal = round(sum(line_subtotal for _, _, _, line_subtotal, _ in line_items), 2)
+        total = round(sum(line_total for _, _, _, _, line_total in line_items), 2)
+        discount = round(subtotal - total, 2)
         sale_dt  = datetime(
             sale_date.year, sale_date.month, sale_date.day, 12, 0, 0
         ) if sale_date else datetime.now(timezone.utc)
@@ -421,9 +443,9 @@ async def import_sales(
                 customer_id=customer_id,
                 user_id=current_user_id,
                 payment_method="historical_import",
-                subtotal=round(subtotal, 2),
-                discount=0,
-                total=round(subtotal, 2),
+                subtotal=subtotal,
+                discount=discount,
+                total=total,
                 status="paid",
                 notes=f"Imported from {filename} on {today_str}",
                 created_at=sale_dt,
@@ -433,7 +455,7 @@ async def import_sales(
             await db.flush()
             invoice.invoice_number = f"HIST-{str(invoice.id).zfill(5)}"
 
-            for product, qty, unit_price, line_total in line_items:
+            for product, qty, unit_price, _line_subtotal, line_total in line_items:
                 db.add(InvoiceItem(
                     invoice_id=invoice.id,
                     product_id=product.id,
@@ -470,8 +492,8 @@ async def import_sales(
                     db,
                     f"Historical Sale — {invoice.invoice_number}",
                     [
-                        ("1000", round(subtotal, 2), 0),
-                        ("4000", 0, round(subtotal, 2)),
+                        ("1000", total, 0),
+                        ("4000", 0, total),
                     ],
                     user_id=current_user_id,
                     created_at=sale_dt,
@@ -517,6 +539,8 @@ async def import_sales(
                 "rows_skipped":           rows_skipped,
                 "earliest_date":          earliest_date,
                 "latest_date":            latest_date,
+                "total_subtotal":         round(total_subtotal, 2),
+                "total_discount":         round(total_discount, 2),
                 "total_value":            round(total_value, 2),
             },
             "errors":                  errors_report,
@@ -539,6 +563,8 @@ async def import_sales(
             "rows_skipped":           rows_skipped,
             "earliest_date":          earliest_date,
             "latest_date":            latest_date,
+            "total_subtotal":         round(total_subtotal, 2),
+            "total_discount":         round(total_discount, 2),
             "total_value":            round(total_value, 2),
         },
         "errors":                  errors_report,

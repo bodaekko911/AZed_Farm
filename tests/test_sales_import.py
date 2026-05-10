@@ -15,7 +15,7 @@ Test coverage (spec)
  3. Real import, with_journals — Journal + JournalEntry added dated to sale.
  4. Unknown SKU — row-level error, that group skipped, other groups succeed.
  5. Customer auto-creation — new Customer row, linked to invoice.
- 6. Date before 2026-01-01 — row-level error.
+ 6. Dates before 2026-01-01 are accepted.
  7. Grouping — 5 rows, 2 (customer, date) pairs → 2 invoices, not 5.
  8. Duplicate detection — second run of same data detects all as duplicates.
  9. Batch revert — DELETE /import/api/sales/batch/{batch_id} removes invoices.
@@ -369,11 +369,11 @@ def test_customer_auto_created_and_linked():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Test 6 — Date before 2026-01-01 → row-level error
+# Test 6 — Dates before 2026-01-01 are accepted
 # ═════════════════════════════════════════════════════════════════════════════
 
-def test_date_before_minimum_is_row_level_error():
-    """A date before 2026-01-01 produces a validation error; nothing imported."""
+def test_date_before_2026_is_accepted():
+    """Historical imports accept sale dates before January 2026."""
     p1 = _make_product("SKU-001", "Olive Oil")
 
     rows = [["SKU-001", "Olive Oil", 1, 10.0, "Ahmed", "2025-12-31"]]
@@ -382,16 +382,65 @@ def test_date_before_minimum_is_row_level_error():
 
     result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=False))
 
-    assert result["summary"]["invoices_created"] == 0
-    assert result["summary"]["rows_skipped"] == 1
-    errors = result["errors"]
-    assert len(errors) == 1
-    assert "2026-01-01" in errors[0]["reason"]
+    assert result["summary"]["invoices_created"] == 1
+    assert result["summary"]["rows_skipped"] == 0
+    assert result["summary"]["earliest_date"] == "2025-12-31"
+    assert result["summary"]["latest_date"] == "2025-12-31"
+    assert not result["errors"]
+
+    invoices = [o for o in db.added if isinstance(o, Invoice)]
+    assert len(invoices) == 1
+    assert invoices[0].created_at.date() == date(2025, 12, 31)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Test 7 — Grouping: 5 rows, 2 (customer, date) pairs → 2 invoices
 # ═════════════════════════════════════════════════════════════════════════════
+
+def test_discount_column_applies_to_invoice_and_line_totals():
+    """Discount is an optional per-line percentage and affects invoice totals."""
+    p1 = _make_product("SKU-001", "Olive Oil")
+    c1 = _make_customer("Ahmed", cid=5)
+    rows = [["SKU-001", "Olive Oil", 2, 100.0, 10, "Ahmed", "2026-02-14"]]
+    headers = ["SKU", "Item", "QTY", "Price", "Discount", "Customer", "Date"]
+    xls = _make_xlsx(rows, headers=headers)
+    db = FakeImportSession(products=[p1], customers=[c1])
+
+    result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=False))
+
+    assert result["summary"]["invoices_created"] == 1
+    assert result["summary"]["total_subtotal"] == pytest.approx(200.0)
+    assert result["summary"]["total_discount"] == pytest.approx(20.0)
+    assert result["summary"]["total_value"] == pytest.approx(180.0)
+    assert not result["errors"]
+
+    invoices = [o for o in db.added if isinstance(o, Invoice)]
+    assert len(invoices) == 1
+    assert invoices[0].subtotal == pytest.approx(200.0)
+    assert invoices[0].discount == pytest.approx(20.0)
+    assert invoices[0].total == pytest.approx(180.0)
+
+    items = [o for o in db.added if isinstance(o, InvoiceItem)]
+    assert len(items) == 1
+    assert items[0].unit_price == pytest.approx(100.0)
+    assert items[0].total == pytest.approx(180.0)
+
+
+def test_discount_column_rejects_out_of_range_values():
+    """Discount percentages must stay between 0 and 100."""
+    p1 = _make_product("SKU-001", "Olive Oil")
+    rows = [["SKU-001", "Olive Oil", 1, 100.0, 150, "Ahmed", "2026-02-14"]]
+    headers = ["SKU", "Item", "QTY", "Price", "Discount", "Customer", "Date"]
+    xls = _make_xlsx(rows, headers=headers)
+    db = FakeImportSession(products=[p1])
+
+    result = _run(import_sales(db, xls, "sales.xlsx", 1, dry_run=False))
+
+    assert result["summary"]["invoices_created"] == 0
+    assert result["summary"]["rows_skipped"] == 1
+    assert len(result["errors"]) == 1
+    assert "Discount must be between 0 and 100" in result["errors"][0]["reason"]
+
 
 def test_rows_grouped_into_invoices_by_customer_and_date():
     """5 rows across 2 (customer, date) groups → 2 invoices created, not 5."""
