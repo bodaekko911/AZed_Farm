@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="AZed ERP connects sales, inventory, production, finance, HR, payroll, and reports for growing operational businesses.">
+  <title>AZed ERP | The ERP built for real-world operations</title>
+  <script>
+    (function () {
+      try {
+        var theme = localStorage.getItem("colorMode") === "light" ? "light" : "dark";
+        document.documentElement.setAttribute("data-theme", theme);
+        document.documentElement.style.colorScheme = theme;
+      } catch (_) {
+        document.documentElement.setAttribute("data-theme", "dark");
+        document.documentElement.style.colorScheme = "dark";
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/landing.css">
+  <script src="/static/landing.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <nav class="site-nav" aria-label="Primary">
+      <a class="brand" href="/" aria-label="AZed ERP home">
+        <img src="/static/ERP_logo.png" alt="AZed ERP logo">
+        <span>AZed ERP</span>
+      </a>
+
+      <div class="nav-links" aria-label="Page sections">
+        <a href="#features">Features</a>
+        <a href="#industries">Industries</a>
+        <a href="#security">Security</a>
+      </div>
+
+      <div class="nav-actions">
+        <button class="theme-toggle" type="button" id="themeToggle" aria-label="Switch color theme" aria-pressed="false">
+          <svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="4"></circle>
+            <path d="M12 2v3M12 19v3M4.93 4.93l2.12 2.12M16.95 16.95l2.12 2.12M2 12h3M19 12h3M4.93 19.07l2.12-2.12M16.95 7.05l2.12-2.12"></path>
+          </svg>
+          <svg class="theme-icon theme-icon-moon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M21 14.7A8.6 8.6 0 0 1 9.3 3a7 7 0 1 0 11.7 11.7Z"></path>
+          </svg>
+        </button>
+        <button class="nav-signin" type="button" data-open-login>Sign In</button>
+      </div>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-content">
+        <img class="hero-logo" src="/static/ERP_logo.png" alt="AZed ERP">
+        <p class="product-title">AZed ERP</p>
+        <h1 id="hero-title">The ERP built for real-world operations.</h1>
+        <p class="hero-subtitle">Manage sales, inventory, production, expenses, customers, suppliers, HR, payroll, and reports from one connected business platform.</p>
+        <div class="hero-actions" aria-label="Primary actions">
+          <button class="button button-primary" type="button" data-open-login>Sign In</button>
+          <a class="button button-secondary" href="mailto:abdallah@habibacommunity.com?subject=AZed%20ERP%20Demo%20Request">Request a Demo</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="workflow" aria-labelledby="workflow-title">
+      <div class="section-inner">
+        <h2 id="workflow-title" class="sr-only">Connected business workflow</h2>
+        <ol class="workflow-list" aria-label="Purchase / Intake to reports workflow">
+          <li>Purchase / Intake</li>
+          <li>Inventory</li>
+          <li>Production</li>
+          <li>Sales</li>
+          <li>Finance</li>
+          <li>Reports</li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section" id="features" aria-labelledby="features-title">
+      <div class="section-inner">
+        <div class="section-heading">
+          <p class="eyebrow">Feature Modules</p>
+          <h2 id="features-title">One connected system for the work behind the counter, warehouse, office, and team.</h2>
+          <p>AZed brings the daily moving parts of an operational business into a single platform built for practical control.</p>
+        </div>
+
+        <div class="card-grid modules-grid">
+          <article class="module-card">
+            <div class="card-code" aria-hidden="true">POS</div>
+            <h3>POS &amp; Sales</h3>
+            <p>Sell products, issue receipts, manage refunds, and track daily cash activity.</p>
+          </article>
+          <article class="module-card">
+            <div class="card-code" aria-hidden="true">INV</div>
+            <h3>Inventory</h3>
+            <p>Monitor stock levels, receiving, adjustments, movements, and low-stock alerts.</p>
+          </article>
+          <article class="module-card">
+            <div class="card-code" aria-hidden="true">PRD</div>
+            <h3>Production</h3>
+            <p>Convert raw materials into finished goods while tracking batches, losses, and output.</p>
+          </article>
+          <article class="module-card">
+            <div class="card-code" aria-hidden="true">B2B</div>
+            <h3>B2B Wholesale</h3>
+            <p>Manage business customers, invoices, payments, balances, and order history.</p>
+          </article>
+          <article class="module-card">
+            <div class="card-code" aria-hidden="true">CRM</div>
+            <h3>Customers &amp; Suppliers</h3>
+            <p>Keep customer and supplier records organized with balances and transaction history.</p>
+          </article>
+          <article class="module-card">
+            <div class="card-code" aria-hidden="true">FIN</div>
+            <h3>Expenses &amp; Accounting</h3>
+            <p>Track expenses, supplier payments, revenue, and financial activity in one place.</p>
+          </article>
+          <article class="module-card">
+            <div class="card-code" aria-hidden="true">HR</div>
+            <h3>HR &amp; Payroll</h3>
+            <p>Manage employees, attendance, payroll, advances, and staff records.</p>
+          </article>
+          <article class="module-card">
+            <div class="card-code" aria-hidden="true">AUD</div>
+            <h3>Reports &amp; Audit</h3>
+            <p>See what is selling, what is running low, where money is going, and who did what.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="industries" aria-labelledby="industries-title">
+      <div class="section-inner">
+        <div class="section-heading">
+          <p class="eyebrow">Industries</p>
+          <h2 id="industries-title">Built for growing operational businesses</h2>
+          <p>AZed fits businesses where inventory, people, money, and customer activity all have to stay aligned.</p>
+        </div>
+
+        <div class="card-grid industries-grid">
+          <article class="industry-card">
+            <h3>Retail &amp; POS businesses</h3>
+            <p>Keep counter sales, stock, refunds, cash, and staff activity connected from daily opening to close.</p>
+          </article>
+          <article class="industry-card">
+            <h3>Food producers</h3>
+            <p>Track ingredients, batches, production output, spoilage, sales, and margins without losing sight of inventory.</p>
+          </article>
+          <article class="industry-card">
+            <h3>Farms and agriculture operations</h3>
+            <p>Manage intake, harvest movement, production, retail sales, wholesale customers, payroll, and expenses in one system.</p>
+          </article>
+          <article class="industry-card">
+            <h3>Wholesale and B2B teams</h3>
+            <p>Handle business customers, invoices, payments, balances, delivery history, and repeat orders with less spreadsheet cleanup.</p>
+          </article>
+          <article class="industry-card">
+            <h3>Small factories</h3>
+            <p>Plan raw material use, record finished goods, monitor losses, and connect production output to sales and finance.</p>
+          </article>
+          <article class="industry-card">
+            <h3>Multi-branch businesses</h3>
+            <p>Standardize daily operations across locations with shared stock visibility, permissions, reporting, and audit history.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="proof-section" aria-labelledby="proof-title">
+      <div class="section-inner proof-inner">
+        <div>
+          <p class="eyebrow">Proof Point</p>
+          <h2 id="proof-title">Built from real business operations</h2>
+        </div>
+        <p>AZed was developed inside a working farm, retail, and production environment, handling daily inventory, production, POS, B2B sales, expenses, payroll, and reporting. It was designed around real operational problems, not abstract software assumptions.</p>
+      </div>
+    </section>
+
+    <section class="section" id="security" aria-labelledby="security-title">
+      <div class="section-inner security-inner">
+        <div class="section-heading security-copy">
+          <p class="eyebrow">Security</p>
+          <h2 id="security-title">Secure by design</h2>
+          <p>AZed protects business data with role-based permissions, secure login, protected sessions, and activity tracking.</p>
+        </div>
+
+        <div class="security-badges" aria-label="Security capabilities">
+          <div class="security-badge">Role-Based Access</div>
+          <div class="security-badge">Secure Login</div>
+          <div class="security-badge">Activity Audit Trail</div>
+          <div class="security-badge">Protected Business Data</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <p>&copy; 2026 AZed ERP. Business operations, finally connected.</p>
+      <nav class="footer-links" aria-label="Footer">
+        <button type="button" data-open-login>Sign In</button>
+        <a href="mailto:abdallah@habibacommunity.com?subject=AZed%20ERP%20Demo%20Request">Request Demo</a>
+        <a href="mailto:abdallah@habibacommunity.com">Contact: abdallah@habibacommunity.com</a>
+      </nav>
+    </div>
+  </footer>
+
+  <div class="modal-overlay" id="loginOverlay" role="dialog" aria-modal="true" aria-labelledby="loginTitle" hidden>
+    <div class="login-modal" role="document">
+      <button class="modal-close" type="button" id="modalClose" aria-label="Close sign in dialog">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M18 6 6 18M6 6l12 12"></path>
+        </svg>
+      </button>
+
+      <img class="modal-logo" src="/static/ERP_logo.png" alt="AZed ERP">
+      <div class="modal-header">
+        <h2 id="loginTitle">Sign in to AZed ERP</h2>
+        <p>Access your business workspace.</p>
+      </div>
+
+      <div id="noticeEl" class="notice notice-info" role="status" hidden>Your session expired. Please sign in again.</div>
+      <div id="errEl" class="notice notice-error" role="alert" hidden></div>
+
+      <form id="loginForm" novalidate>
+        <div class="field">
+          <label for="emailInp">Email address</label>
+          <input id="emailInp" name="email" type="email" placeholder="you@company.com" autocomplete="email" required>
+        </div>
+
+        <div class="field">
+          <label for="pwdInp">Password</label>
+          <div class="password-wrap">
+            <input id="pwdInp" name="password" type="password" placeholder="Password" autocomplete="current-password" required>
+            <button class="password-toggle" type="button" id="togglePassword" aria-label="Show password" aria-pressed="false">
+              <svg class="eye-open" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+              <svg class="eye-closed" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 3l18 18M10.7 5.2A10.9 10.9 0 0 1 12 5c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.8 3.7M6.1 6.9C3.5 8.6 2 12 2 12s3.5 7 10 7c1.4 0 2.7-.3 3.8-.8"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <button class="submit-button" id="submitBtn" type="submit">
+          <span class="btn-label">Sign In</span>
+          <span class="spinner" aria-hidden="true"></span>
+        </button>
+      </form>
+
+      <p class="modal-note">Contact your administrator if you need access.</p>
+    </div>
+  </div>
+</body>
+</html>
