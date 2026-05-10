@@ -130,6 +130,17 @@ PERMISSION_MATRIX = [
         ],
     },
     {
+        "module": "carbon",
+        "resource": "footprint",
+        "label": "Carbon Footprint",
+        "icon": "carbon",
+        "actions": [
+            {"action": "view",   "key": "page_carbon",          "label": "Open carbon footprint"},
+            {"action": "log",    "key": "action_carbon_log",    "label": "Log emission entries"},
+            {"action": "manage", "key": "action_carbon_factors","label": "Manage emission factors"},
+        ],
+    },
+    {
         "module": "hr",
         "resource": "payroll",
         "label": "HR & Payroll",
@@ -265,7 +276,8 @@ ROLE_DEFINITIONS = {
             "tab_production_spoilage",
             "tab_production_recipes",
             "page_farm",
-            "page_customers",
+            "page_carbon",
+            "action_carbon_log",
             "page_suppliers",
             "tab_suppliers_directory",
             "tab_suppliers_purchases",

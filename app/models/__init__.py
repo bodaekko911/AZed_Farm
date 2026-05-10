@@ -14,6 +14,7 @@ from app.models.b2b import (
 from app.models.customer import Customer
 from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, WeatherLog
+from app.models.carbon import CarbonEmissionFactor, CarbonLog, CarbonTarget
 from app.models.hr import (
     Attendance,
     Employee,
@@ -53,6 +54,9 @@ __all__ = [
     "BatchOutput",
     "Consignment",
     "ConsignmentItem",
+    "CarbonEmissionFactor",
+    "CarbonLog",
+    "CarbonTarget",
     "Customer",
     "Employee",
     "EmployeeLoan",
