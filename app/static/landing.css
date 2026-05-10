@@ -1245,6 +1245,14 @@ html[data-theme="light"] .proof-stats div {
   color: var(--teal-strong);
 }
 
+/* IMPORTANT FIX:
+   Without this, the hidden login overlay can still sit above the page
+   and block all clicks. */
+.modal-overlay[hidden] {
+  display: none !important;
+  pointer-events: none !important;
+}
+
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -1255,6 +1263,7 @@ html[data-theme="light"] .proof-stats div {
   background: rgba(0, 0, 0, 0.62);
   backdrop-filter: blur(14px);
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.18s ease;
 }
 
@@ -1264,6 +1273,7 @@ html[data-theme="light"] .modal-overlay {
 
 .modal-overlay.open {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .login-modal {
