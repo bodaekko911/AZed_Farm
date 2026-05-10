@@ -89,6 +89,527 @@ function injectDashboardUpgradeStyles() {
   const style = document.createElement("style");
   style.id = "dashboard-upgrade-styles";
   style.textContent = `
+    .page-shell {
+      max-width: 1380px;
+      gap: 22px;
+    }
+
+    .header-strip {
+      position: relative;
+      overflow: hidden;
+      padding: 26px;
+      border: 1px solid var(--border-strong);
+      border-radius: 24px;
+      background:
+        radial-gradient(circle at 2% 0%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 34%),
+        radial-gradient(circle at 100% 10%, color-mix(in srgb, var(--warning) 12%, transparent), transparent 30%),
+        color-mix(in srgb, var(--surface) 82%, transparent);
+      box-shadow: var(--shadow-md);
+      backdrop-filter: blur(18px);
+    }
+
+    .header-strip::after {
+      content: "";
+      position: absolute;
+      inset: auto -40px -80px auto;
+      width: 260px;
+      height: 260px;
+      border-radius: 999px;
+      background: radial-gradient(circle, color-mix(in srgb, var(--accent) 18%, transparent), transparent 68%);
+      pointer-events: none;
+    }
+
+    .greeting {
+      font-family: var(--font-display, var(--font-sans));
+      font-size: clamp(34px, 5vw, 58px);
+      font-weight: 900;
+      letter-spacing: -0.065em;
+    }
+
+    .date-display {
+      color: var(--text-sub);
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .range-picker {
+      border-radius: 16px;
+      background: color-mix(in srgb, var(--surface-raised) 44%, transparent);
+      backdrop-filter: blur(14px);
+      box-shadow: none;
+    }
+
+    .range-btn {
+      transition: transform .16s ease, background .16s ease, color .16s ease;
+    }
+
+    .range-btn:hover {
+      color: var(--text);
+      background: color-mix(in srgb, var(--surface-raised) 66%, transparent);
+      transform: translateY(-1px);
+    }
+
+    .updated-pill {
+      border-color: var(--border);
+      background: color-mix(in srgb, var(--surface-raised) 45%, transparent);
+      backdrop-filter: blur(12px);
+    }
+
+    .briefing-card {
+      position: relative;
+      overflow: hidden;
+      display: grid;
+      gap: 14px;
+      border-inline-start: 0;
+      padding: 26px;
+      border-radius: 22px;
+      background:
+        linear-gradient(135deg, color-mix(in srgb, var(--accent) 12%, transparent), transparent 38%),
+        color-mix(in srgb, var(--surface-raised) 70%, transparent);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .briefing-card::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 4px;
+      background: linear-gradient(90deg, var(--accent), var(--blue), var(--positive));
+    }
+
+    .briefing-lead {
+      max-width: 980px;
+      font-family: var(--font-display, var(--font-sans));
+      font-size: clamp(22px, 2.6vw, 34px);
+      line-height: 1.13;
+      font-weight: 900;
+      letter-spacing: -0.045em;
+    }
+
+    .briefing-body {
+      max-width: 920px;
+      color: var(--text-sub);
+      font-size: 15px;
+      font-weight: 650;
+    }
+
+    .briefing-actions {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }
+
+    .briefing-action {
+      position: relative;
+      align-items: center;
+      min-height: 72px;
+      padding: 15px 16px;
+      border-radius: 18px;
+      background: color-mix(in srgb, var(--surface) 76%, transparent);
+      transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }
+
+    .briefing-action:hover {
+      transform: translateY(-2px);
+      border-color: color-mix(in srgb, var(--accent) 46%, var(--border-strong));
+      background: color-mix(in srgb, var(--surface-raised) 62%, transparent);
+    }
+
+    .briefing-action span {
+      color: var(--text-sub);
+      font-weight: 700;
+    }
+
+    .briefing-action strong {
+      white-space: nowrap;
+      color: var(--accent);
+      font-weight: 900;
+    }
+
+    .numbers-grid {
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .number-card {
+      position: relative;
+      overflow: hidden;
+      border-radius: 22px;
+      background:
+        radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 42%),
+        color-mix(in srgb, var(--surface) 88%, transparent);
+      transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+    }
+
+    .number-card:hover {
+      transform: translateY(-3px);
+    }
+
+    .number-card-button {
+      display: grid;
+      gap: 12px;
+      padding: 18px;
+      min-height: 186px;
+    }
+
+    .kpi-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .kpi-icon {
+      width: 38px;
+      height: 38px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--accent) 14%, transparent);
+      color: var(--accent);
+      font-size: 18px;
+      border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+    }
+
+    .kpi-trend {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 0 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 900;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      background: color-mix(in srgb, var(--surface-raised) 48%, transparent);
+      white-space: nowrap;
+    }
+
+    .kpi-trend.up,
+    .kpi-trend.good {
+      color: var(--positive);
+      background: color-mix(in srgb, var(--positive) 11%, transparent);
+      border-color: color-mix(in srgb, var(--positive) 26%, transparent);
+    }
+
+    .kpi-trend.down,
+    .kpi-trend.warn {
+      color: var(--warning);
+      background: color-mix(in srgb, var(--warning) 11%, transparent);
+      border-color: color-mix(in srgb, var(--warning) 28%, transparent);
+    }
+
+    .kpi-trend.bad {
+      color: var(--negative);
+      background: color-mix(in srgb, var(--negative) 11%, transparent);
+      border-color: color-mix(in srgb, var(--negative) 28%, transparent);
+    }
+
+    .number-label {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 900;
+    }
+
+    .number-value {
+      margin: 2px 0;
+      font-family: var(--font-display, var(--font-sans));
+      font-size: clamp(25px, 2.6vw, 36px);
+      font-weight: 900;
+      letter-spacing: -0.065em;
+    }
+
+    .number-meta {
+      min-height: 20px;
+      color: var(--text-sub);
+      font-weight: 750;
+    }
+
+    .number-breakdown {
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .sparkline-bars {
+      height: 32px;
+      margin-block-start: auto;
+      gap: 4px;
+      opacity: .95;
+    }
+
+    .sparkline-bars span {
+      background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 35%, transparent));
+    }
+
+    .chart-card {
+      position: relative;
+      overflow: hidden;
+      padding: 24px;
+      border-radius: 24px;
+      background:
+        radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--blue) 11%, transparent), transparent 34%),
+        color-mix(in srgb, var(--surface) 86%, transparent);
+    }
+
+    .chart-card .panel-head h2,
+    .panel-head h2 {
+      font-family: var(--font-display, var(--font-sans));
+      font-weight: 900;
+      letter-spacing: -.045em;
+    }
+
+    .chart-insight-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 4px 0 16px;
+    }
+
+    .chart-insight-card {
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: color-mix(in srgb, var(--surface-raised) 38%, transparent);
+    }
+
+    .chart-insight-label {
+      display: block;
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .chart-insight-value {
+      display: block;
+      margin-top: 4px;
+      color: var(--text);
+      font-size: 18px;
+      font-weight: 900;
+      letter-spacing: -.035em;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .chart-wrap {
+      height: 320px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: color-mix(in srgb, var(--surface) 64%, transparent);
+    }
+
+    .panel-grid {
+      gap: 18px;
+    }
+
+    .panel-card {
+      border-radius: 24px;
+      background: color-mix(in srgb, var(--surface) 86%, transparent);
+    }
+
+    .panel-head {
+      flex-wrap: wrap;
+    }
+
+    .panel-tabs {
+      padding: 4px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--surface-raised) 35%, transparent);
+    }
+
+    .tab-btn {
+      border: 0;
+      border-radius: 10px;
+      font-weight: 850;
+      color: var(--text-sub);
+      transition: transform .16s ease, background .16s ease, color .16s ease;
+    }
+
+    .tab-btn:hover {
+      color: var(--text);
+      transform: translateY(-1px);
+    }
+
+    .product-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .product-card {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 13px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: color-mix(in srgb, var(--surface) 72%, transparent);
+      transition: transform .16s ease, border-color .16s ease, background .16s ease;
+    }
+
+    .product-card:hover {
+      transform: translateY(-2px);
+      border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+      background: color-mix(in srgb, var(--surface-raised) 56%, transparent);
+    }
+
+    .product-rank {
+      width: 30px;
+      height: 30px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .product-main {
+      min-width: 0;
+    }
+
+    .product-name {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text);
+      font-weight: 900;
+      letter-spacing: -.02em;
+    }
+
+    .product-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px;
+      margin-top: 4px;
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 750;
+    }
+
+    .product-meter {
+      min-width: 150px;
+      display: grid;
+      gap: 6px;
+      justify-items: end;
+    }
+
+    .product-money {
+      color: var(--text);
+      font-weight: 900;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .product-track {
+      width: 100%;
+      height: 7px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--border) 76%, transparent);
+    }
+
+    .product-track span {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--accent), var(--positive));
+    }
+
+    .activity-table {
+      border-collapse: separate;
+      border-spacing: 0 8px;
+    }
+
+    .activity-table thead th {
+      border: 0;
+      padding: 0 10px 4px;
+    }
+
+    .activity-table tbody tr {
+      background: color-mix(in srgb, var(--surface) 72%, transparent);
+      border-radius: 16px;
+      transition: transform .16s ease, background .16s ease;
+    }
+
+    .activity-table tbody tr:hover {
+      transform: translateY(-1px);
+      background: color-mix(in srgb, var(--surface-raised) 58%, transparent);
+    }
+
+    .activity-table td {
+      border-block-end: 0;
+      padding: 13px 10px;
+      vertical-align: middle;
+    }
+
+    .activity-table td:first-child {
+      border-radius: 16px 0 0 16px;
+    }
+
+    .activity-table td:last-child {
+      border-radius: 0 16px 16px 0;
+    }
+
+    .txn-cell-main {
+      display: grid;
+      gap: 4px;
+    }
+
+    .txn-badge,
+    .txn-method,
+    .time-pill {
+      display: inline-flex;
+      width: fit-content;
+      align-items: center;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .txn-badge {
+      min-height: 24px;
+      padding: 0 8px;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+    }
+
+    .txn-badge.sale {
+      color: var(--positive);
+      background: color-mix(in srgb, var(--positive) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--positive) 26%, transparent);
+    }
+
+    .txn-badge.refund {
+      color: var(--negative);
+      background: color-mix(in srgb, var(--negative) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--negative) 26%, transparent);
+    }
+
+    .txn-method,
+    .time-pill {
+      min-height: 24px;
+      padding: 0 8px;
+      color: var(--text-muted);
+      background: color-mix(in srgb, var(--surface-raised) 48%, transparent);
+      border: 1px solid var(--border);
+    }
+
+    .txn-customer {
+      display: block;
+      color: var(--text);
+      font-weight: 850;
+    }
+
     #profit-summary-card,
     #top-b2b-card {
       overflow: hidden;
@@ -473,6 +994,19 @@ function injectDashboardUpgradeStyles() {
       font-size: 15px;
     }
 
+    .error-banner {
+      border-radius: 18px;
+      border: 1px solid color-mix(in srgb, var(--warning) 34%, transparent);
+      background: color-mix(in srgb, var(--warning) 10%, var(--surface));
+    }
+
+    @media (max-width: 1180px) {
+      .numbers-grid,
+      .chart-insight-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
     @media (max-width: 1120px) {
       .profit-mini-grid,
       .b2b-stat-grid {
@@ -494,11 +1028,35 @@ function injectDashboardUpgradeStyles() {
       }
     }
 
+    @media (max-width: 900px) {
+      .numbers-grid,
+      .panel-grid,
+      .chart-insight-grid {
+        grid-template-columns: 1fr;
+      }
+      .chart-wrap {
+        height: 260px;
+      }
+    }
+
     @media (max-width: 640px) {
+      .header-strip,
       .profit-hero-card,
       .b2b-hero-card,
-      .profit-final-row {
+      .profit-final-row,
+      .product-card {
         grid-template-columns: 1fr;
+      }
+      .header-controls {
+        justify-items: stretch;
+      }
+      .range-picker {
+        overflow-x: auto;
+        justify-content: flex-start;
+      }
+      .product-meter {
+        min-width: 0;
+        justify-items: stretch;
       }
       .profit-flow-row {
         grid-template-columns: 1fr;
@@ -650,6 +1208,7 @@ function tooltipForCard(key) {
     spent: "All recorded expenses for the period - electricity, rent, supplies, salaries, and more.",
     stock_alerts: "Products that are out of stock or nearly out.",
     sales_today: "Money taken by the current cashier today.",
+    b2b_cash: "Total cash actually collected from B2B clients during the selected range.",
   };
   return tips[key] || "";
 }
@@ -657,65 +1216,99 @@ function tooltipForCard(key) {
 function cardSpec(key) {
   const rangeLabel = dashboardData?.range?.label || "this period";
   if (key === "sales") {
+    const data = dashboardData?.numbers?.sales || {};
     return {
+      icon: "↗",
       label: dashboardData?.range?.label === "Today" ? "Sales today" : `Sales ${rangeLabel.toLowerCase()}`,
-      value: formatMoney(dashboardData?.numbers?.sales?.value || 0),
-      meta: numberDeltaText("sales", dashboardData?.numbers?.sales),
-      sparkline: dashboardData?.numbers?.sales?.sparkline || [],
+      value: formatMoney(data.value || 0),
+      meta: numberDeltaText("sales", data),
+      breakdown: `${formatNumber((dashboardData?.chart?.buckets || []).reduce((sum, b) => sum + Number(b.orders || 0), 0))} transactions`,
+      sparkline: data.sparkline || [],
+      trend: data.direction === "up" ? "up" : data.direction === "down" ? "down" : "neutral",
       tooltip: tooltipForCard("sales"),
     };
   }
   if (key === "clients_owe" && !(dashboardData?.viewer?.can_view_b2b)) {
     return {
+      icon: "◎",
       label: "Sales today",
       value: formatMoney(dashboardData?.viewer?.alt_sales_today?.value || 0),
       meta: "Your shift total so far",
+      breakdown: "Permission-limited view",
       sparkline: [],
+      trend: "neutral",
       tooltip: tooltipForCard("sales_today"),
     };
   }
   if (key === "clients_owe") {
+    const value = Number(dashboardData?.numbers?.clients_owe?.value || 0);
+    const overdue = Number(dashboardData?.numbers?.clients_owe?.overdue_count || 0);
     return {
+      icon: "◌",
       label: "Money clients owe you",
-      value: formatMoney(dashboardData?.numbers?.clients_owe?.value || 0),
-      meta: `${formatNumber(dashboardData?.numbers?.clients_owe?.overdue_count || 0)} overdue`,
+      value: formatMoney(value),
+      meta: `${formatNumber(overdue)} overdue`,
+      breakdown: value > 0 ? "Needs collection follow-up" : "No open balance",
       sparkline: [],
+      trend: overdue > 0 ? "bad" : value > 0 ? "warn" : "good",
       tooltip: tooltipForCard("clients_owe"),
     };
   }
   if (key === "spent") {
+    const data = dashboardData?.numbers?.spent || {};
     return {
-      label: dashboardData?.range?.label === "Today" ? "Money you've spent today" : `Money you've spent ${rangeLabel.toLowerCase()}`,
-      value: formatMoney(dashboardData?.numbers?.spent?.value || 0),
-      meta: numberDeltaText("spent", dashboardData?.numbers?.spent),
-      sparkline: dashboardData?.numbers?.spent?.sparkline || [],
+      icon: "↓",
+      label: dashboardData?.range?.label === "Today" ? "Money spent today" : `Money spent ${rangeLabel.toLowerCase()}`,
+      value: formatMoney(data.value || 0),
+      meta: numberDeltaText("spent", data),
+      breakdown: "Operating expenses",
+      sparkline: data.sparkline || [],
+      trend: data.direction === "up" ? "bad" : data.direction === "down" ? "good" : "neutral",
       tooltip: tooltipForCard("spent"),
     };
   }
   if (key === "b2b_cash") {
-    const val = dashboardData?.numbers?.b2b_cash?.value || 0;
+    const val = Number(dashboardData?.numbers?.b2b_cash?.value || 0);
     const periodLabel = currentRange === "today" ? "today" : rangeLabel.toLowerCase();
     return {
+      icon: "₿",
       label: `B2B cash collected ${periodLabel}`,
       value: formatMoney(val),
-      meta: "",
+      meta: val > 0 ? "Collected payments" : "No collections yet",
+      breakdown: "Cash in from B2B invoices",
       sparkline: [],
-      tooltip: "Total cash actually collected from B2B clients (payments received on invoices).",
+      trend: val > 0 ? "good" : "neutral",
+      tooltip: tooltipForCard("b2b_cash"),
     };
   }
+  const alertCount = Number(dashboardData?.numbers?.stock_alerts?.value || 0);
+  const outCount = Number(dashboardData?.numbers?.stock_alerts?.out_count || 0);
+  const lowCount = Number(dashboardData?.numbers?.stock_alerts?.low_count || 0);
   return {
+    icon: "!",
     label: "Stock alerts",
-    value: `${formatNumber(dashboardData?.numbers?.stock_alerts?.value || 0)} items`,
-    meta: `${formatNumber(dashboardData?.numbers?.stock_alerts?.out_count || 0)} out · ${formatNumber(dashboardData?.numbers?.stock_alerts?.low_count || 0)} low`,
+    value: `${formatNumber(alertCount)} items`,
+    meta: `${formatNumber(outCount)} out · ${formatNumber(lowCount)} low`,
+    breakdown: alertCount > 0 ? "Review replenishment" : "Stock looks healthy",
     sparkline: [],
+    trend: outCount > 0 ? "bad" : lowCount > 0 ? "warn" : "good",
     tooltip: tooltipForCard("stock_alerts"),
   };
+}
+
+function trendLabel(trend) {
+  if (trend === "up") return "Up";
+  if (trend === "down") return "Down";
+  if (trend === "good") return "Good";
+  if (trend === "warn") return "Watch";
+  if (trend === "bad") return "Action";
+  return "Stable";
 }
 
 function sparklineBars(values) {
   if (!values?.length) return "";
   const max = Math.max(...values, 1);
-  return values.map((value) => `<span style="height:${Math.max(6, Math.round((value / max) * 40))}px"></span>`).join("");
+  return values.map((value) => `<span style="height:${Math.max(6, Math.round((value / max) * 32))}px"></span>`).join("");
 }
 
 function renderNumbers() {
@@ -723,31 +1316,24 @@ function renderNumbers() {
     const node = document.querySelector(`[data-card="${key}"]`);
     if (!node) return;
     const spec = cardSpec(key);
-    let btn = node.querySelector(".number-card-button");
-    if (!btn) {
-      node.innerHTML = `
-        <div class="number-card-button">
-          <span class="number-label"></span>
-          <strong class="number-value"></strong>
-          <span class="number-meta"></span>
-          <div class="number-extra"></div>
-        </div>`;
-      btn = node.querySelector(".number-card-button");
-    }
-    btn.dataset.tooltip = spec.tooltip || "";
-    btn.querySelector(".number-label").textContent = spec.label || "";
-    btn.querySelector(".number-value").textContent = spec.value || "";
-    btn.querySelector(".number-meta").textContent = spec.meta || "";
-    const extra = btn.querySelector(".number-extra");
-    if (extra) {
-      if (spec.sparkline && spec.sparkline.length) {
-        extra.className = "number-extra sparkline-bars";
-        extra.innerHTML = sparklineBars(spec.sparkline);
-      } else {
-        extra.className = "number-extra";
-        extra.textContent = "";
-      }
-    }
+    const sparkline = spec.sparkline && spec.sparkline.length
+      ? `<div class="number-extra sparkline-bars" aria-hidden="true">${sparklineBars(spec.sparkline)}</div>`
+      : `<div class="number-extra"></div>`;
+
+    node.innerHTML = `
+      <div class="number-card-button" data-tooltip="${escHtml(spec.tooltip || "")}">
+        <div class="kpi-head">
+          <span class="kpi-icon" aria-hidden="true">${escHtml(spec.icon)}</span>
+          <span class="kpi-trend ${escHtml(spec.trend || "neutral")}">${escHtml(trendLabel(spec.trend))}</span>
+        </div>
+        <div>
+          <span class="number-label">${escHtml(spec.label || "")}</span>
+          <strong class="number-value">${escHtml(spec.value || "")}</strong>
+          <span class="number-meta">${escHtml(spec.meta || "")}</span>
+          <span class="number-breakdown">${escHtml(spec.breakdown || "")}</span>
+        </div>
+        ${sparkline}
+      </div>`;
   });
 }
 
@@ -757,9 +1343,11 @@ function renderBriefing() {
   setText("briefing-body", briefing.body || "");
   const actionsNode = document.getElementById("briefing-actions");
   const actions = briefing.actions || [];
-  const html = actions.map((action) => (
-    `<a class="briefing-action" href="${escHtml(action.link)}"><span>${escHtml(action.text)}</span><strong>${escHtml(action.cta)} →</strong></a>`
-  )).join("");
+  const html = actions.length
+    ? actions.map((action) => (
+      `<a class="briefing-action" href="${escHtml(action.link)}"><span>${escHtml(action.text)}</span><strong>${escHtml(action.cta)} →</strong></a>`
+    )).join("")
+    : `<a class="briefing-action" href="/reports/"><span>Open reports for a deeper view of this period.</span><strong>View reports →</strong></a>`;
   setHTML(actionsNode, html);
 }
 
@@ -775,13 +1363,24 @@ function renderTopProducts() {
   const maxValue = Math.max(...products.map((p) => topProductsTab === "revenue" ? Number(p.revenue || 0) : Number(p.qty || 0)), 1);
   const container = document.getElementById("top-products-list");
   const html = !products.length
-    ? `<div class="empty-state">No products sold in this range.</div>`
-    : products.map((product) => {
+    ? `<div class="dashboard-upgrade-empty"><strong>No products sold in this range.</strong><span>Completed POS sales will appear here once products move.</span></div>`
+    : `<div class="product-list">${products.map((product, index) => {
         const value = topProductsTab === "revenue" ? Number(product.revenue || 0) : Number(product.qty || 0);
         const label = topProductsTab === "revenue" ? formatMoney(value) : `${formatNumber(value)} units`;
         const width = Math.max(8, Math.round((value / maxValue) * 100));
-        return `<div class="list-row top-product-row"><div class="row-main"><span class="row-title">${escHtml(product.name)}</span><span class="row-value">${escHtml(label)}</span></div><span class="row-bar"><span style="width:${width}%"></span></span></div>`;
-      }).join("");
+        return `
+          <article class="product-card">
+            <span class="product-rank">${index + 1}</span>
+            <div class="product-main">
+              <span class="product-name">${escHtml(product.name || "Unknown product")}</span>
+              <span class="product-meta"><span>${formatNumber(product.qty || 0)} units</span><span>${formatMoney(product.revenue || 0)} revenue</span></span>
+            </div>
+            <div class="product-meter">
+              <strong class="product-money">${escHtml(label)}</strong>
+              <span class="product-track"><span style="width:${width}%"></span></span>
+            </div>
+          </article>`;
+      }).join("")}</div>`;
   setHTML(container, html);
 }
 
@@ -791,13 +1390,25 @@ function renderRecentActivity() {
   if (!tbody) return;
   const html = !rows.length
     ? `<tr><td colspan="4" class="empty-cell">No activity in this range.</td></tr>`
-    : rows.map((item) => `
-        <tr data-link="${escHtml(item.link || "#")}">
-          <td class="mono">${escHtml(item.invoice_number || "-")}</td>
-          <td>${escHtml(item.customer || "-")}</td>
-          <td class="${item.type === "refund" ? "negative" : "positive"}">${escHtml(item.type === "refund" ? `-${formatMoney(Math.abs(item.total || 0))}` : formatMoney(item.total || 0))}</td>
-          <td>${escHtml(item.time_relative || "-")}</td>
-        </tr>`).join("");
+    : rows.map((item) => {
+        const isRefund = item.type === "refund";
+        const amountText = isRefund ? `-${formatMoney(Math.abs(item.total || 0))}` : formatMoney(item.total || 0);
+        return `
+          <tr data-link="${escHtml(item.link || "#")}">
+            <td>
+              <div class="txn-cell-main">
+                <span class="txn-badge ${isRefund ? "refund" : "sale"}">${isRefund ? "Refund" : "Sale"}</span>
+                <span class="mono">${escHtml(item.invoice_number || "-")}</span>
+              </div>
+            </td>
+            <td>
+              <span class="txn-customer">${escHtml(item.customer || "-")}</span>
+              <span class="txn-method">${escHtml(item.method || "cash")}</span>
+            </td>
+            <td class="${isRefund ? "negative" : "positive"}"><strong>${escHtml(amountText)}</strong></td>
+            <td><span class="time-pill">${escHtml(item.time_relative || "-")}</span></td>
+          </tr>`;
+      }).join("");
   if (tbody.innerHTML !== html) {
     tbody.innerHTML = html;
     tbody.querySelectorAll("tr[data-link]").forEach((row) => {
@@ -824,9 +1435,39 @@ function chartLabels(buckets) {
   });
 }
 
+function ensureChartMetrics() {
+  let el = document.getElementById("chart-metrics");
+  if (el) return el;
+  const chartWrap = document.querySelector(".chart-card .chart-wrap");
+  if (!chartWrap || !chartWrap.parentNode) return null;
+  el = document.createElement("div");
+  el.id = "chart-metrics";
+  el.className = "chart-insight-grid";
+  chartWrap.parentNode.insertBefore(el, chartWrap);
+  return el;
+}
+
+function renderChartMetrics(buckets) {
+  const metrics = ensureChartMetrics();
+  if (!metrics) return;
+  const posTotal = buckets.reduce((sum, b) => sum + Number(b.pos || 0), 0);
+  const b2bTotal = buckets.reduce((sum, b) => sum + Number(b.b2b || 0), 0);
+  const refundTotal = buckets.reduce((sum, b) => sum + Math.abs(Number(b.refunds || 0)), 0);
+  const orders = buckets.reduce((sum, b) => sum + Number(b.orders || 0), 0);
+  const totalSales = Math.max(posTotal + b2bTotal, 1);
+  const b2bShare = (b2bTotal / totalSales) * 100;
+
+  metrics.innerHTML = `
+    <div class="chart-insight-card"><span class="chart-insight-label">POS sales</span><strong class="chart-insight-value">${formatMoney(posTotal)}</strong></div>
+    <div class="chart-insight-card"><span class="chart-insight-label">B2B sales</span><strong class="chart-insight-value">${formatMoney(b2bTotal)}</strong></div>
+    <div class="chart-insight-card"><span class="chart-insight-label">Refunds</span><strong class="chart-insight-value negative">${formatMoney(refundTotal)}</strong></div>
+    <div class="chart-insight-card"><span class="chart-insight-label">B2B share</span><strong class="chart-insight-value">${percentText(b2bShare)}</strong><span class="number-breakdown">${formatNumber(orders)} transactions</span></div>`;
+}
+
 function renderChart() {
   const buckets = dashboardData?.chart?.buckets || [];
   setText("chart-title", chartTitle());
+  renderChartMetrics(buckets);
   setHTML(document.getElementById("chart-table"), `
     <tr><th>Date</th><th>POS</th><th>B2B</th><th>Refunds</th><th>Orders</th></tr>
     ${buckets.map((bucket) => `<tr><td>${bucket.date}</td><td>${formatMoneyPrecise(bucket.pos)}</td><td>${formatMoneyPrecise(bucket.b2b)}</td><td>${formatMoneyPrecise(bucket.refunds)}</td><td>${bucket.orders}</td></tr>`).join("")}
@@ -838,9 +1479,9 @@ function renderChart() {
   const chartData = {
     labels: chartLabels(buckets),
     datasets: [
-      { label: "POS", data: buckets.map((b) => b.pos), backgroundColor: chartPalette.primary, stack: "sales" },
-      { label: "B2B", data: buckets.map((b) => b.b2b), backgroundColor: chartPalette.secondary, stack: "sales" },
-      { label: "Refunds", data: buckets.map((b) => b.refunds), backgroundColor: chartPalette.negative, stack: "sales" },
+      { label: "POS", data: buckets.map((b) => b.pos), backgroundColor: chartPalette.primary, stack: "sales", borderRadius: 8 },
+      { label: "B2B", data: buckets.map((b) => b.b2b), backgroundColor: chartPalette.secondary, stack: "sales", borderRadius: 8 },
+      { label: "Refunds", data: buckets.map((b) => b.refunds), backgroundColor: chartPalette.negative, stack: "sales", borderRadius: 8 },
     ],
   };
   const tooltipAfterBody = (items) => {
@@ -862,7 +1503,7 @@ function renderChart() {
             display: true,
             position: "top",
             align: "end",
-            labels: { color: chartPalette.text },
+            labels: { color: chartPalette.text, usePointStyle: true, boxWidth: 8, boxHeight: 8 },
           },
           tooltip: {
             backgroundColor: chartPalette.surface,
@@ -897,6 +1538,7 @@ function renderChart() {
     if (chartData.datasets[i]) {
       dataset.data = chartData.datasets[i].data;
       dataset.backgroundColor = chartData.datasets[i].backgroundColor;
+      dataset.borderRadius = chartData.datasets[i].borderRadius;
     }
   });
   salesChart.options.plugins.legend.labels.color = chartPalette.text;
