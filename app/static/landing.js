@@ -21,23 +21,33 @@
 
   function applyTheme(theme, persist) {
     var next = normalizeTheme(theme);
+
     document.documentElement.dataset.theme = next;
     document.documentElement.setAttribute("data-theme", next);
     document.documentElement.style.colorScheme = next;
+
     if (document.body) {
       document.body.dataset.theme = next;
       document.body.setAttribute("data-theme", next);
     }
+
     var toggle = byId("themeToggle");
     if (toggle) {
       toggle.setAttribute("aria-pressed", next === LIGHT ? "true" : "false");
       toggle.setAttribute("aria-label", next === LIGHT ? "Switch to dark theme" : "Switch to light theme");
+      toggle.setAttribute("title", next === LIGHT ? "Switch to dark theme" : "Switch to light theme");
     }
+
     if (persist) {
       try {
         localStorage.setItem(THEME_KEY, next);
       } catch (_) {}
     }
+
+    try {
+      window.dispatchEvent(new CustomEvent("app:themechange", { detail: { theme: next } }));
+    } catch (_) {}
+
     return next;
   }
 
@@ -55,6 +65,7 @@
   function safeUrl(url) {
     var text = typeof url === "string" ? url : "";
     var backslash = String.fromCharCode(92);
+
     return (
       text.indexOf("/") === 0 &&
       text.indexOf("//") !== 0 &&
@@ -73,6 +84,7 @@
         })
         .filter(Boolean)
     );
+
     var pages = [
       ["/dashboard", "page_dashboard"],
       ["/pos", "page_pos"],
@@ -88,17 +100,37 @@
       ["/b2b/", "page_b2b"],
       ["/hr/", "page_hr"],
       ["/accounting/", "page_accounting"],
-      ["/expenses/", "page_expenses"]
+      ["/expenses/", "page_expenses"],
+      ["/carbon/", "page_carbon"]
     ];
+
     if (data.role === "admin") return "/dashboard";
+
     var match = pages.find(function (page) {
       return permissions.has(page[1]);
     });
+
     return match ? match[0] : "/home";
+  }
+
+  function enhanceAnchorScrolling() {
+    document.querySelectorAll('a[href^="#"]').forEach(function (anchor) {
+      anchor.addEventListener("click", function (event) {
+        var targetId = anchor.getAttribute("href");
+        if (!targetId || targetId === "#") return;
+
+        var target = document.querySelector(targetId);
+        if (!target) return;
+
+        event.preventDefault();
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
   }
 
   document.addEventListener("DOMContentLoaded", function () {
     applyTheme(storedTheme(), false);
+    enhanceAnchorScrolling();
 
     var themeToggle = byId("themeToggle");
     var overlay = byId("loginOverlay");
@@ -116,6 +148,7 @@
 
     function focusableModalElements() {
       if (!modal) return [];
+
       return Array.prototype.slice.call(
         modal.querySelectorAll(
           'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
@@ -127,13 +160,16 @@
 
     function openModal() {
       if (!overlay) return;
+
       clearTimeout(closeTimer);
       previousFocus = document.activeElement;
       overlay.hidden = false;
       document.body.classList.add("modal-open");
+
       window.requestAnimationFrame(function () {
         overlay.classList.add("open");
       });
+
       setTimeout(function () {
         if (emailInput) emailInput.focus();
       }, 80);
@@ -141,11 +177,14 @@
 
     function closeModal() {
       if (!overlay) return;
+
       overlay.classList.remove("open");
       document.body.classList.remove("modal-open");
+
       closeTimer = setTimeout(function () {
         overlay.hidden = true;
       }, 180);
+
       if (previousFocus && typeof previousFocus.focus === "function") {
         previousFocus.focus();
       }
@@ -174,17 +213,21 @@
 
     document.addEventListener("keydown", function (event) {
       if (!overlay || overlay.hidden) return;
+
       if (event.key === "Escape") {
         event.preventDefault();
         closeModal();
         return;
       }
+
       if (event.key !== "Tab") return;
 
       var focusables = focusableModalElements();
       if (!focusables.length) return;
+
       var first = focusables[0];
       var last = focusables[focusables.length - 1];
+
       if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last.focus();
@@ -216,6 +259,7 @@
 
         var email = emailInput ? emailInput.value.trim() : "";
         var password = passwordInput ? passwordInput.value : "";
+
         if (!email || !password) {
           setNotice(errorEl, "Please enter both email and password.");
           return;
@@ -235,16 +279,19 @@
           });
 
           var data = {};
+
           try {
             data = await response.json();
           } catch (_) {}
 
           if (!response.ok) {
             setNotice(errorEl, data.detail || "Invalid email or password.");
+
             if (submitButton) {
               submitButton.disabled = false;
               submitButton.classList.remove("loading");
             }
+
             return;
           }
 
@@ -252,6 +299,7 @@
           window.location.href = safeUrl(next) ? next : firstAllowedPage(data);
         } catch (_) {
           setNotice(errorEl, "Connection error. Please try again.");
+
           if (submitButton) {
             submitButton.disabled = false;
             submitButton.classList.remove("loading");
