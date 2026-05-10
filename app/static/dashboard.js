@@ -1570,11 +1570,11 @@ function renderProfitSummary() {
 
   const grossProfit = Number(profit.gross_profit || 0);
   const operatingExpenses = Number(profit.operating_expenses || 0);
-  const netProfit = Number(profit.net_profit || 0);
-  const grossMarginPct = profit.gross_margin_pct;
-  const netMarginPct = profit.net_margin_pct;
+  const netProfit = revenue - operatingExpenses;
+  const grossMarginPct = revenue > 0 ? (grossProfit / revenue) * 100 : null;
+  const netMarginPct = revenue > 0 ? (netProfit / revenue) * 100 : null;
   const opexPct = revenue > 0 ? (operatingExpenses / revenue) * 100 : 0;
-  const delta = profit.net_margin_delta_pts;
+  const delta = null;
 
   let statusClass = "neutral";
   let statusText = "No comparison yet";
@@ -1584,14 +1584,14 @@ function renderProfitSummary() {
   }
 
   const healthText = netProfit >= 0
-    ? "Your selected period is profitable after operating expenses."
-    : "Your selected period is running at a net loss after operating expenses.";
+    ? "Your selected period is positive after operating expenses."
+    : "Your selected period is negative after operating expenses.";
 
   el.innerHTML = `
     <div class="profit-summary-shell">
       <div class="profit-hero-card">
         <div>
-          <span class="profit-hero-label">Net profit</span>
+          <span class="profit-hero-label">Operating profit</span>
           <strong class="profit-hero-value ${netProfit >= 0 ? "positive" : "negative"}">${signedMoney(netProfit)}</strong>
           <p class="profit-hero-sub">${escHtml(healthText)}</p>
         </div>
@@ -1617,13 +1617,13 @@ function renderProfitSummary() {
         ${profitFlowRow("Revenue", revenue, 100, "revenue", 100)}
         ${profitFlowRow("Gross profit", grossProfit, grossMarginPct, "gross", ratioOf(grossProfit, revenue))}
         ${profitFlowRow("Operating expenses", operatingExpenses, opexPct, "opex", ratioOf(operatingExpenses, revenue), true)}
-        ${profitFlowRow("Net profit", netProfit, netMarginPct, `net ${netProfit < 0 ? "negative" : ""}`, ratioOf(netProfit, revenue))}
+        ${profitFlowRow("Operating profit", netProfit, netMarginPct, `net ${netProfit < 0 ? "negative" : ""}`, ratioOf(netProfit, revenue))}
       </div>
 
       <div class="profit-final-row">
         <div>
           <span class="profit-final-title">Operating result</span>
-          <span class="profit-final-sub">Gross profit minus operating expenses</span>
+          <span class="profit-final-sub">Revenue minus operating expenses</span>
         </div>
         <strong class="profit-final-value ${netProfit >= 0 ? "positive" : "negative"}">${signedMoney(netProfit)}</strong>
       </div>
