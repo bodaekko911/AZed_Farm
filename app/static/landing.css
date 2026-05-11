@@ -1516,24 +1516,19 @@ html[data-theme="light"] .theme-icon-moon {
 }
 
 
-/* Logo blend mode fix
+/* Final logo blend fix
    Uses the original /static/ERP_logo.png.
-   The key change: light mode uses screen, not darken/multiply.
-   darken/multiply keeps the darker baked-in logo background visible.
+   Important: do NOT isolate the parent, otherwise the logo blends against the wrong backdrop.
+   Light mode uses multiply to remove a light baked-in logo background.
+   Dark mode uses screen to remove a dark baked-in logo background.
 */
-.brand,
-.hero-copy,
-.footer-brand,
-.login-modal {
-  isolation: isolate;
-}
-
 .brand img,
 .hero-logo,
 .footer-brand img,
 .modal-logo {
-  mix-blend-mode: screen;
-  filter: brightness(1.02) contrast(1.08) saturate(1.04);
+  background: transparent !important;
+  border: 0 !important;
+  object-fit: contain !important;
 }
 
 html[data-theme="light"] .brand img,
@@ -1552,8 +1547,8 @@ body[data-theme="light"] .modal-logo,
 .theme-light .hero-logo,
 .theme-light .footer-brand img,
 .theme-light .modal-logo {
-  mix-blend-mode: screen;
-  filter: brightness(1.05) contrast(1.12) saturate(1.05);
+  mix-blend-mode: multiply !important;
+  filter: contrast(1.08) saturate(1.04) !important;
 }
 
 html[data-theme="dark"] .brand img,
@@ -1572,6 +1567,6 @@ body[data-theme="dark"] .modal-logo,
 .theme-dark .hero-logo,
 .theme-dark .footer-brand img,
 .theme-dark .modal-logo {
-  mix-blend-mode: screen;
-  filter: brightness(1.03) contrast(1.08) saturate(1.04);
+  mix-blend-mode: screen !important;
+  filter: contrast(1.08) saturate(1.04) !important;
 }
