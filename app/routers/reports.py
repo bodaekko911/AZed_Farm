@@ -224,18 +224,28 @@ def to_xlsx(headers, rows, sheet_name="Report", report_title=None, metadata=None
 
 
 def parse_dates(date_from, date_to):
-    now = datetime.now(timezone.utc)
-    if date_from and date_to:
-        try:
-            d_from = datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc)
-            d_to   = datetime.fromisoformat(date_to).replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
-        except Exception:
-            d_from = now.replace(day=1, hour=0, minute=0, second=0)
-            d_to   = now
-    else:
-        d_from = now.replace(day=1, hour=0, minute=0, second=0)
-        d_to   = now
-    return d_from, d_to
+    """
+    Convert a local date range (YYYY-MM-DD strings) to UTC datetime bounds that
+    match what the Dashboard uses.  Relies on APP_TIMEZONE so that a transaction
+    at 11 pm local time is never shifted into the wrong calendar day.
+    """
+    from app.core.time_utils import utc_bounds, today_local
+    from datetime import date as _date
+
+    try:
+        if date_from and date_to:
+            d_from_local = _date.fromisoformat(date_from)
+            d_to_local   = _date.fromisoformat(date_to)
+        else:
+            today = today_local()
+            d_from_local = today.replace(day=1)
+            d_to_local   = today
+    except Exception:
+        today = today_local()
+        d_from_local = today.replace(day=1)
+        d_to_local   = today
+
+    return utc_bounds(d_from_local, d_to_local)
 
 
 def _resolve_pagination(skip, limit, default_limit=100):
@@ -1529,78 +1539,123 @@ async def export_production(date_from: str = None, date_to: str = None, db: Asyn
 # ── P&L ────────────────────────────────────────────────
 @router.get("/api/pl")
 async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_pl"))):
+    """
+    Profit & Loss report.
+
+    Uses the SAME revenue definition as the Dashboard and Sales Report so that
+    all three surfaces always agree:
+
+        Revenue = paid POS invoices (Invoice.total, status="paid")
+                + paid B2B invoices (B2BInvoice.total, status="paid")
+                - retail refunds    (RetailRefund.total)
+                - B2B refunds       (B2BRefund.total)
+
+    Expenses come from the Expenses module (Expense.expense_date).
+    Date filtering uses APP_TIMEZONE-aware UTC bounds — same as the Dashboard.
+    """
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
-    acc_res = await db.execute(
-        select(Account)
-        .options(selectinload(Account.entries).selectinload(JournalEntry.journal))
+
+    # ── Revenue ──────────────────────────────────────────
+    pos_result = await db.execute(
+        select(func.coalesce(func.sum(Invoice.total), 0))
+        .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to, Invoice.status == "paid")
     )
-    accounts = acc_res.scalars().all()
+    pos_sales = float(pos_result.scalar())
 
-    from app.models.expense import Expense
-    from datetime import datetime, time, timezone
-    expense_res = await db.execute(select(Expense.journal_id, Expense.expense_date).where(Expense.journal_id.is_not(None)))
-    expense_dates = {row[0]: row[1] for row in expense_res.all()}
+    b2b_result = await db.execute(
+        select(func.coalesce(func.sum(B2BInvoice.total), 0))
+        .where(B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to, B2BInvoice.status == "paid")
+    )
+    b2b_sales = float(b2b_result.scalar())
 
-    def acc_entries(acc):
-        valid = []
-        for e in acc.entries:
-            if not e.journal:
-                continue
-            j_date = expense_dates.get(e.journal_id)
-            if j_date:
-                dt = datetime.combine(j_date, time.min, tzinfo=timezone.utc)
-                if d_from <= dt <= d_to:
-                    valid.append(e)
-            else:
-                if e.journal.created_at and d_from <= e.journal.created_at <= d_to:
-                    valid.append(e)
-        return valid
+    retail_refund_result = await db.execute(
+        select(func.coalesce(func.sum(RetailRefund.total), 0))
+        .where(RetailRefund.created_at >= d_from, RetailRefund.created_at <= d_to)
+    )
+    retail_refunds = float(retail_refund_result.scalar())
 
-    def acc_movement(acc):
-        entries = acc_entries(acc)
-        return sum(float(e.credit) - float(e.debit) for e in entries)
+    b2b_refund_result = await db.execute(
+        select(func.coalesce(func.sum(B2BRefund.total), 0))
+        .where(B2BRefund.created_at >= d_from, B2BRefund.created_at <= d_to)
+    )
+    b2b_refunds = float(b2b_refund_result.scalar())
 
-    def entry_details(acc):
-        entries = sorted(acc_entries(acc), key=lambda e: (expense_dates.get(e.journal_id) or (e.journal.created_at.date() if e.journal.created_at else datetime.min.date())), reverse=True)
-        result = []
-        for e in entries:
-            j = e.journal
-            fallback = expense_dates.get(e.journal_id)
-            dt_str = fallback.strftime("%Y-%m-%d") if fallback else (j.created_at.strftime("%Y-%m-%d %H:%M") if j.created_at else "—")
-            result.append({
-                "date": dt_str,
-                "ref_type": j.ref_type or "manual",
-                "description": j.description or "—",
-                "debit": float(e.debit),
-                "credit": float(e.credit),
-                "amount": abs(float(e.credit) - float(e.debit)),
-            })
-        return result
+    total_refunds  = retail_refunds + b2b_refunds
+    total_revenue  = round(pos_sales + b2b_sales - total_refunds, 2)
 
+    # Build revenue_lines in the same shape the export and frontend expect:
+    # [{code, name, amount, entries: [{date, ref_type, description, amount}]}]
     revenue_lines = []
-    for a in accounts:
-        if a.type == "revenue":
-            mv = round(acc_movement(a), 2)
-            if mv != 0:
-                revenue_lines.append({"name": a.name, "code": a.code, "amount": round(abs(mv), 2), "entries": entry_details(a)})
+    if abs(pos_sales) >= 0.01:
+        revenue_lines.append({
+            "code": "POS",
+            "name": "Paid POS Sales",
+            "amount": round(pos_sales, 2),
+            "entries": [],   # line-level drill-down not available for invoice-aggregated view
+        })
+    if abs(b2b_sales) >= 0.01:
+        revenue_lines.append({
+            "code": "B2B",
+            "name": "Paid B2B Sales",
+            "amount": round(b2b_sales, 2),
+            "entries": [],
+        })
+    if abs(total_refunds) >= 0.01:
+        revenue_lines.append({
+            "code": "REF",
+            "name": "Refunds (deducted)",
+            "amount": round(-total_refunds, 2),   # negative — reduces revenue
+            "entries": [],
+        })
+
+    # ── Expenses ─────────────────────────────────────────
+    # Grouped by expense category, filtered by expense_date (local date, no tz shift).
+    from app.core.time_utils import app_tz
+    tz          = app_tz()
+    local_from  = d_from.astimezone(tz).date()
+    local_to    = d_to.astimezone(tz).date()
+
+    expense_rows = await db.execute(
+        select(
+            ExpenseCategory.account_code.label("code"),
+            ExpenseCategory.name.label("name"),
+            func.coalesce(func.sum(Expense.amount), 0).label("amount"),
+        )
+        .select_from(Expense)
+        .join(ExpenseCategory, ExpenseCategory.id == Expense.category_id, isouter=True)
+        .where(Expense.expense_date >= local_from, Expense.expense_date <= local_to)
+        .group_by(ExpenseCategory.account_code, ExpenseCategory.name)
+        .order_by(ExpenseCategory.name)
+    )
 
     expense_lines = []
-    for a in accounts:
-        if a.type == "expense":
-            mv = round(acc_movement(a), 2)
-            if mv != 0:
-                expense_lines.append({"name": a.name, "code": a.code, "amount": round(abs(mv), 2), "entries": entry_details(a)})
+    for row in expense_rows.mappings().all():
+        amt = round(float(row["amount"]), 2)
+        if abs(amt) < 0.01:
+            continue
+        expense_lines.append({
+            "code":    row["code"] or "OPC",
+            "name":    row["name"] or "Operational Cost",
+            "amount":  amt,
+            "entries": [],
+        })
 
-    total_revenue = sum(r["amount"] for r in revenue_lines)
-    total_expense = sum(e["amount"] for e in expense_lines)
-    return {"revenue_lines": revenue_lines, "expense_lines": expense_lines,
-            "total_revenue": round(total_revenue, 2), "total_expense": round(total_expense, 2),
-            "net_profit": round(total_revenue - total_expense, 2),
-            "date_from": d_from.strftime("%Y-%m-%d"), "date_to": d_to.strftime("%Y-%m-%d"),
-            "used_balance_fallback": False,
-            "warning": None if (revenue_lines or expense_lines) else "No journal-backed revenue or expense movement was found in this period. Current account balances were not used as a substitute."}
+    total_expense = round(sum(e["amount"] for e in expense_lines), 2)
+    net_profit    = round(total_revenue - total_expense, 2)
+
+    return {
+        "revenue_lines":  revenue_lines,
+        "expense_lines":  expense_lines,
+        "total_revenue":  total_revenue,
+        "total_expense":  total_expense,
+        "net_profit":     net_profit,
+        "date_from":      d_from.astimezone(tz).strftime("%Y-%m-%d"),
+        "date_to":        d_to.astimezone(tz).strftime("%Y-%m-%d"),
+        "used_balance_fallback": False,
+        "warning":        None,
+    }
 
 @router.get("/export/pl", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_pl(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
