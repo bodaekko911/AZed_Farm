@@ -190,13 +190,13 @@ h3,
   display: block;
   width: auto;
   height: 46px;
-  max-width: 170px;
+  max-width: 176px;
   object-fit: contain;
   object-position: left center;
   background: transparent;
   border: 0;
-  mix-blend-mode: normal;
   filter: none;
+  mix-blend-mode: normal;
 }
 
 
@@ -403,8 +403,8 @@ html[data-theme="light"] .theme-icon-moon {
   object-position: left center;
   background: transparent;
   border: 0;
-  mix-blend-mode: normal;
   filter: none;
+  mix-blend-mode: normal;
 }
 
 #hero-title {
@@ -1079,13 +1079,13 @@ html[data-theme="light"] .theme-icon-moon {
 .footer-brand img {
   display: block;
   width: auto;
-  height: 40px;
-  max-width: 150px;
+  height: 42px;
+  max-width: 160px;
   object-fit: contain;
   background: transparent;
   border: 0;
-  mix-blend-mode: normal;
   filter: none;
+  mix-blend-mode: normal;
 }
 
 .footer-inner p {
@@ -1174,14 +1174,14 @@ html[data-theme="light"] .theme-icon-moon {
 
 .modal-logo {
   display: block;
-  width: 154px;
-  height: auto;
-  max-height: 88px;
+  width: auto;
+  height: 92px;
+  max-width: 180px;
   object-fit: contain;
   background: transparent;
   border: 0;
-  mix-blend-mode: normal;
   filter: none;
+  mix-blend-mode: normal;
   margin: 0 auto 22px;
 }
 
@@ -1492,4 +1492,17 @@ html[data-theme="light"] .theme-icon-moon {
     padding: 26px 20px;
     border-radius: 24px;
   }
+}
+
+
+/* Logo reset: match the rest of the app */
+.brand img,
+.hero-logo,
+.footer-brand img,
+.modal-logo {
+  background: transparent !important;
+  border: 0 !important;
+  filter: none !important;
+  mix-blend-mode: normal !important;
+  object-fit: contain !important;
 }
