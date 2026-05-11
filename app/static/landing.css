@@ -191,6 +191,39 @@ h3,
   object-fit: contain;
 }
 
+.brand-text,
+.footer-brand-text,
+.modal-logo-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-mark {
+  width: 42px;
+  height: 42px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 14px;
+  color: #041014;
+  background: linear-gradient(135deg, var(--accent), var(--green));
+  box-shadow: 0 14px 28px color-mix(in srgb, var(--accent) 18%, transparent);
+  font-family: var(--font-heading);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+
+.brand-name {
+  color: var(--text);
+  font-family: var(--font-heading);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.045em;
+  white-space: nowrap;
+}
+
 .nav-links {
   display: flex;
   align-items: center;
@@ -385,10 +418,53 @@ html[data-theme="light"] .theme-icon-moon {
 }
 
 .hero-logo {
-  width: min(240px, 64vw);
-  height: auto;
+  width: fit-content;
+  max-width: 100%;
   margin-bottom: 28px;
   filter: drop-shadow(0 18px 30px rgba(0, 0, 0, 0.18));
+}
+
+.hero-logo-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--surface-strong) 76%, transparent);
+  backdrop-filter: blur(18px);
+}
+
+.hero-logo-mark {
+  width: 56px;
+  height: 56px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 18px;
+  color: #041014;
+  background: linear-gradient(135deg, var(--accent), var(--green));
+  font-family: var(--font-heading);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.05em;
+}
+
+.hero-logo-text strong {
+  display: block;
+  color: var(--text);
+  font-family: var(--font-heading);
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: -0.045em;
+}
+
+.hero-logo-text small {
+  display: block;
+  margin-top: 5px;
+  color: var(--text-sub);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
 }
 
 #hero-title {
@@ -1064,6 +1140,10 @@ html[data-theme="light"] .theme-icon-moon {
   height: 40px;
 }
 
+.footer-brand-text {
+  flex: 0 0 auto;
+}
+
 .footer-inner p {
   margin: 0;
   color: var(--muted);
@@ -1149,8 +1229,12 @@ html[data-theme="light"] .theme-icon-moon {
 }
 
 .modal-logo {
-  width: 154px;
+  width: fit-content;
   margin: 0 auto 22px;
+}
+
+.modal-logo-text {
+  justify-content: center;
 }
 
 .modal-header {
@@ -1435,8 +1519,18 @@ html[data-theme="light"] .theme-icon-moon {
     width: 100%;
   }
 
-  .hero-logo {
-    width: 190px;
+  .hero-logo-text {
+    width: 100%;
+  }
+
+  .hero-logo-mark {
+    width: 48px;
+    height: 48px;
+    font-size: 19px;
+  }
+
+  .hero-logo-text strong {
+    font-size: 21px;
   }
 
   .preview-main {
