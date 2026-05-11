@@ -6,8 +6,10 @@ from sqlalchemy.orm import selectinload
 from typing import Optional, List
 from pydantic import BaseModel, Field
 from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from app.database import get_async_session
+from app.core.config import settings
 from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.core.navigation import render_app_header
@@ -238,6 +240,15 @@ async def create_journal(data: JournalCreate, db: AsyncSession = Depends(get_asy
     return {"id": journal.id, "ok": True}
 
 
+
+def _num(value) -> float:
+    """Safely convert database numeric values to float."""
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _validate_date_range(from_date: Optional[date], to_date: Optional[date]) -> None:
     if from_date and to_date and from_date > to_date:
         raise HTTPException(status_code=400, detail="From date cannot be after To date")
@@ -272,12 +283,42 @@ def _normalize_journal_pagination(
     return page, page_size, skip, limit
 
 
+def _local_day_bounds_utc(
+    from_date: Optional[date],
+    to_date: Optional[date],
+) -> tuple[Optional[datetime], Optional[datetime]]:
+    """
+    Convert local app dates to UTC datetime bounds.
+
+    This keeps Accounting P&L aligned with the Dashboard date logic:
+    selected local day/month -> equivalent UTC timestamp range.
+    """
+    tz = ZoneInfo(settings.APP_TIMEZONE)
+    utc = ZoneInfo("UTC")
+
+    utc_start = None
+    utc_end = None
+
+    if from_date:
+        utc_start = datetime.combine(from_date, time.min, tzinfo=tz).astimezone(utc)
+
+    if to_date:
+        utc_end = datetime.combine(to_date + timedelta(days=1), time.min, tzinfo=tz).astimezone(utc)
+
+    return utc_start, utc_end
+
+
 def _apply_date_range(stmt, column, from_date: Optional[date], to_date: Optional[date]):
     _validate_date_range(from_date, to_date)
-    if from_date:
-        stmt = stmt.where(column >= datetime.combine(from_date, time.min, tzinfo=timezone.utc))
-    if to_date:
-        stmt = stmt.where(column < datetime.combine(to_date + timedelta(days=1), time.min, tzinfo=timezone.utc))
+
+    utc_start, utc_end = _local_day_bounds_utc(from_date, to_date)
+
+    if utc_start:
+        stmt = stmt.where(column >= utc_start)
+
+    if utc_end:
+        stmt = stmt.where(column < utc_end)
+
     return stmt
 
 
@@ -492,10 +533,17 @@ async def profit_loss(
     total_expense = round(sum(item["amount"] for item in expenses), 2)
     net_profit = round(total_revenue - total_expense, 2)
 
-    revenues = [
-        {"code": "POS", "name": "Paid POS Sales", "amount": round(pos_sales, 2)},
-        {"code": "B2B", "name": "Paid B2B Sales", "amount": round(b2b_sales, 2)},
-    ]
+    revenues = []
+
+    if abs(pos_sales) >= 0.01:
+        revenues.append(
+            {"code": "POS", "name": "Paid POS Sales", "amount": round(pos_sales, 2)}
+        )
+
+    if abs(b2b_sales) >= 0.01:
+        revenues.append(
+            {"code": "B2B", "name": "Paid B2B Sales", "amount": round(b2b_sales, 2)}
+        )
 
     return {
         "revenues": revenues,
