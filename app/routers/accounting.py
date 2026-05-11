@@ -389,7 +389,6 @@ async def trial_balance(
     }
 
 @router.get("/api/profit-loss")
-@router.get("/api/profit-loss")
 async def profit_loss(
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
@@ -497,8 +496,6 @@ async def profit_loss(
         {"code": "POS", "name": "Paid POS Sales", "amount": round(pos_sales, 2)},
         {"code": "B2B", "name": "Paid B2B Sales", "amount": round(b2b_sales, 2)},
     ]
-    if total_refunds > 0:
-        revenues.append({"code": "REF", "name": "Refunds Deducted", "amount": round(-total_refunds, 2)})
 
     return {
         "revenues": revenues,
@@ -2000,7 +1997,7 @@ async function loadPL(){
     let profitColor = d.net_profit>=0?"var(--green)":"var(--danger)";
     const refundLine = d.total_refunds > 0
         ? `<div class="pl-row" style="background:rgba(255,77,109,.04);border-left:3px solid rgba(255,77,109,.4);">
-               <span style="color:var(--danger)">↩ Retail Refunds (${d.refund_count} refunds — already deducted from revenue above)</span>
+               <span style="color:var(--danger)">↩ Refunds Deducted (${d.refund_count} refunds — already deducted from net revenue)</span>
                <span style="font-family:var(--mono);color:var(--danger)">−${d.total_refunds.toFixed(2)}</span>
            </div>`
         : "";
