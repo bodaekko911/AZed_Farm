@@ -6,7 +6,7 @@ from sqlalchemy import func, inspect, literal, or_, select
 from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
 from types import SimpleNamespace
-from typing import Optional
+from typing import Optional, Any
 import io
 import re
 
@@ -16,11 +16,11 @@ from app.core.navigation import render_app_header
 from app.core.product_types import is_stock_tracked_product
 from app.models.product import Product
 from app.models.invoice import Invoice, InvoiceItem
-from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund
+from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund, B2BRefundItem
 from app.models.inventory import StockMove
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.spoilage import SpoilageRecord
-from app.models.refund import RetailRefund
+from app.models.refund import RetailRefund, RetailRefundItem
 from app.models.production import ProductionBatch, BatchInput, BatchOutput
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.receipt import ProductReceipt
@@ -423,105 +423,184 @@ async def _build_sales_report(
     limit: int = 100,
     include_all: bool = False,
 ):
+    """
+    Operational Sales Report using the same revenue definition as Dashboard and P&L.
+
+    Revenue / Net Sales = paid POS invoices
+                        + paid B2B invoices
+                        - retail refunds
+                        - B2B refunds
+
+    Notes:
+    - Unpaid and partial B2B invoices are not counted as revenue.
+    - B2B client payment records are counted as cash collection only, not revenue.
+    - Top products are calculated from POS + B2B sold items minus refunded items.
+    """
     b2b_payment_records = await _load_b2b_client_payment_records(db, d_from=d_from, d_to=d_to)
-    result = await db.execute(
+
+    pos_result = await db.execute(
         select(Invoice)
-        .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to)
+        .where(
+            Invoice.created_at >= d_from,
+            Invoice.created_at <= d_to,
+            Invoice.status == "paid",
+        )
         .options(selectinload(Invoice.items), selectinload(Invoice.user), selectinload(Invoice.customer))
     )
-    pos_invoices = result.scalars().all()
+    pos_invoices = pos_result.scalars().all()
 
-    result = await db.execute(
+    b2b_result = await db.execute(
         select(B2BInvoice)
-        .where(B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to)
+        .where(
+            B2BInvoice.created_at >= d_from,
+            B2BInvoice.created_at <= d_to,
+            B2BInvoice.status == "paid",
+        )
         .options(
             selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product),
             selectinload(B2BInvoice.client),
             selectinload(B2BInvoice.user),
         )
     )
-    b2b_invoices = result.scalars().all()
+    b2b_invoices = b2b_result.scalars().all()
 
-    result = await db.execute(
+    retail_refund_result = await db.execute(
         select(RetailRefund)
         .where(RetailRefund.created_at >= d_from, RetailRefund.created_at <= d_to)
-        .options(selectinload(RetailRefund.customer), selectinload(RetailRefund.user))
+        .options(
+            selectinload(RetailRefund.items).selectinload(RetailRefundItem.product),
+            selectinload(RetailRefund.customer),
+            selectinload(RetailRefund.user),
+        )
     )
-    retail_refunds = result.scalars().all()
+    retail_refunds = retail_refund_result.scalars().all()
 
-    result = await db.execute(
+    b2b_refund_result = await db.execute(
         select(B2BRefund)
         .where(B2BRefund.created_at >= d_from, B2BRefund.created_at <= d_to)
-        .options(selectinload(B2BRefund.client), selectinload(B2BRefund.user))
+        .options(
+            selectinload(B2BRefund.items).selectinload(B2BRefundItem.product),
+            selectinload(B2BRefund.client),
+            selectinload(B2BRefund.user),
+        )
     )
-    b2b_refunds = result.scalars().all()
+    b2b_refunds = b2b_refund_result.scalars().all()
 
     channels = {"pos": _channel_totals(), "b2b": _channel_totals()}
     daily = defaultdict(lambda: {"gross_sales": 0.0, "refunds": 0.0, "cash_collected": 0.0})
-    product_sales = defaultdict(lambda: {"qty": 0.0, "revenue": 0.0})
+    product_sales: dict[str, dict[str, Any]] = {}
+
+    def product_key(product_id: Any, name: str) -> str:
+        return f"product:{product_id}" if product_id is not None else f"name:{name}"
+
+    def add_product(
+        product_id: Any,
+        name: str | None,
+        qty: Any,
+        revenue: Any,
+        multiplier: int = 1,
+    ) -> None:
+        product_name = name or "-"
+        key = product_key(product_id, product_name)
+        if key not in product_sales:
+            product_sales[key] = {"name": product_name, "qty": 0.0, "revenue": 0.0}
+        if product_sales[key]["name"] == "-" and product_name != "-":
+            product_sales[key]["name"] = product_name
+        product_sales[key]["qty"] += _num(qty) * multiplier
+        product_sales[key]["revenue"] += _num(revenue) * multiplier
 
     pos_records = []
-    for inv in sorted(pos_invoices, key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+    for inv in sorted(
+        pos_invoices,
+        key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    ):
         total = _num(inv.total)
-        collected = total if (inv.status or "").lower() == "paid" else 0.0
-        outstanding = max(total - collected, 0.0)
+        collected = total
+        outstanding = 0.0
         day_key = inv.created_at.strftime("%Y-%m-%d") if inv.created_at else ""
+
         channels["pos"]["gross_sales"] += total
         channels["pos"]["cash_collected"] += collected
         channels["pos"]["outstanding"] += outstanding
         channels["pos"]["count"] += 1
         daily[day_key]["gross_sales"] += total
         daily[day_key]["cash_collected"] += collected
+
         for item in inv.items:
-            item_name = item.name or "—"
-            product_sales[item_name]["qty"] += _num(item.qty)
-            product_sales[item_name]["revenue"] += _num(item.total)
-        pos_records.append({
-            "invoice_number": inv.invoice_number or f"POS-{inv.id}",
-            "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
-            "customer": inv.customer.name if inv.customer else "Walk-in",
-            "user_name": inv.user.name if inv.user else "—",
-            "payment": inv.payment_method or "—",
-            "status": inv.status or "—",
-            "items": [{"name": it.name, "qty": _num(it.qty), "unit_price": _num(it.unit_price), "total": _num(it.total)} for it in inv.items],
-            "total": total,
-            "cash_collected": collected,
-            "outstanding": outstanding,
-        })
+            add_product(item.product_id, item.name or "-", item.qty, item.total, 1)
+
+        pos_records.append(
+            {
+                "invoice_number": inv.invoice_number or f"POS-{inv.id}",
+                "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "-",
+                "customer": inv.customer.name if inv.customer else "Walk-in",
+                "user_name": inv.user.name if inv.user else "-",
+                "payment": inv.payment_method or "-",
+                "status": inv.status or "-",
+                "items": [
+                    {
+                        "name": item.name,
+                        "qty": _num(item.qty),
+                        "unit_price": _num(item.unit_price),
+                        "total": _num(item.total),
+                    }
+                    for item in inv.items
+                ],
+                "total": total,
+                "cash_collected": collected,
+                "outstanding": outstanding,
+            }
+        )
 
     b2b_records = []
-    for inv in sorted(b2b_invoices, key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+    for inv in sorted(
+        b2b_invoices,
+        key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    ):
         total = _num(inv.total)
         amount_paid = _num(inv.amount_paid)
         collected = 0.0 if (inv.invoice_type or "").lower() == "consignment" else amount_paid
         outstanding = max(total - amount_paid, 0.0)
         day_key = inv.created_at.strftime("%Y-%m-%d") if inv.created_at else ""
+
         channels["b2b"]["gross_sales"] += total
         channels["b2b"]["cash_collected"] += collected
         channels["b2b"]["outstanding"] += outstanding
         channels["b2b"]["count"] += 1
         daily[day_key]["gross_sales"] += total
         daily[day_key]["cash_collected"] += collected
+
         items_data = []
-        for it in inv.items:
-            product_name = it.product.name if it.product else "—"
-            item_qty = _num(it.qty)
-            item_total = _num(it.total)
-            items_data.append({"name": product_name, "qty": item_qty, "unit_price": _num(it.unit_price), "total": item_total})
-            product_sales[product_name]["qty"] += item_qty
-            product_sales[product_name]["revenue"] += item_total
-        b2b_records.append({
-            "invoice_number": inv.invoice_number,
-            "client": inv.client.name if inv.client else "—",
-            "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "—",
-            "user_name": inv.user.name if inv.user else "—",
-            "invoice_type": inv.invoice_type,
-            "status": inv.status or "—",
-            "items": items_data,
-            "total": total,
-            "amount_paid": amount_paid,
-            "balance_due": outstanding,
-        })
+        for item in inv.items:
+            product_name = item.product.name if item.product else "-"
+            item_qty = _num(item.qty)
+            item_total = _num(item.total)
+            items_data.append(
+                {
+                    "name": product_name,
+                    "qty": item_qty,
+                    "unit_price": _num(item.unit_price),
+                    "total": item_total,
+                }
+            )
+            add_product(item.product_id, product_name, item_qty, item_total, 1)
+
+        b2b_records.append(
+            {
+                "invoice_number": inv.invoice_number,
+                "client": inv.client.name if inv.client else "-",
+                "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "-",
+                "user_name": inv.user.name if inv.user else "-",
+                "invoice_type": inv.invoice_type,
+                "status": inv.status or "-",
+                "items": items_data,
+                "total": total,
+                "amount_paid": amount_paid,
+                "balance_due": outstanding,
+            }
+        )
 
     for payment in b2b_payment_records:
         channels["b2b"]["cash_collected"] += payment["amount"]
@@ -532,56 +611,95 @@ async def _build_sales_report(
     retail_cash_refunds = 0.0
     b2b_cash_refunds = 0.0
     total_refunds = 0.0
-    for refund in sorted(retail_refunds, key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+
+    for refund in sorted(
+        retail_refunds,
+        key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    ):
         refund_total = _num(refund.total)
         day_key = refund.created_at.strftime("%Y-%m-%d") if refund.created_at else ""
         daily[day_key]["refunds"] += refund_total
         total_refunds += refund_total
         if (refund.refund_method or "").lower() == "cash":
             retail_cash_refunds += refund_total
-        refund_records.append({
-            "refund_number": refund.refund_number,
-            "source": "Retail",
-            "counterparty": refund.customer.name if refund.customer else "—",
-            "datetime": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "—",
-            "processed_by": refund.user.name if refund.user else "—",
-            "reason": refund.reason or "—",
-            "refund_method": refund.refund_method or "—",
-            "total": refund_total,
-        })
-    for refund in sorted(b2b_refunds, key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+
+        for item in refund.items:
+            product_name = item.product.name if item.product else "-"
+            add_product(item.product_id, product_name, item.qty, item.total, -1)
+
+        refund_records.append(
+            {
+                "refund_number": refund.refund_number,
+                "source": "Retail",
+                "counterparty": refund.customer.name if refund.customer else "-",
+                "datetime": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "-",
+                "processed_by": refund.user.name if refund.user else "-",
+                "reason": refund.reason or "-",
+                "refund_method": refund.refund_method or "-",
+                "total": refund_total,
+            }
+        )
+
+    for refund in sorted(
+        b2b_refunds,
+        key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    ):
         refund_total = _num(refund.total)
         day_key = refund.created_at.strftime("%Y-%m-%d") if refund.created_at else ""
         daily[day_key]["refunds"] += refund_total
         total_refunds += refund_total
         b2b_cash_refunds += refund_total
-        refund_records.append({
-            "refund_number": refund.refund_number,
-            "source": "B2B",
-            "counterparty": refund.client.name if refund.client else "—",
-            "datetime": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "—",
-            "processed_by": refund.user.name if refund.user else "—",
-            "reason": refund.notes or "—",
-            "refund_method": "cash",
-            "total": refund_total,
-        })
+
+        for item in refund.items:
+            product_name = item.product.name if item.product else "-"
+            add_product(item.product_id, product_name, item.qty, item.total, -1)
+
+        refund_records.append(
+            {
+                "refund_number": refund.refund_number,
+                "source": "B2B",
+                "counterparty": refund.client.name if refund.client else "-",
+                "datetime": refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "-",
+                "processed_by": refund.user.name if refund.user else "-",
+                "reason": refund.notes or "-",
+                "refund_method": "cash",
+                "total": refund_total,
+            }
+        )
 
     gross_sales = channels["pos"]["gross_sales"] + channels["b2b"]["gross_sales"]
-    cash_collected = channels["pos"]["cash_collected"] + channels["b2b"]["cash_collected"] - retail_cash_refunds - b2b_cash_refunds
+    cash_collected = (
+        channels["pos"]["cash_collected"]
+        + channels["b2b"]["cash_collected"]
+        - retail_cash_refunds
+        - b2b_cash_refunds
+    )
     outstanding = channels["pos"]["outstanding"] + channels["b2b"]["outstanding"]
     net_sales = gross_sales - total_refunds
 
     daily_rows = []
     for day_key, bucket in sorted(daily.items()):
-        daily_rows.append({
-            "date": day_key,
-            "gross_sales": round(bucket["gross_sales"], 2),
-            "refunds": round(bucket["refunds"], 2),
-            "net_sales": round(bucket["gross_sales"] - bucket["refunds"], 2),
-            "cash_collected": round(bucket["cash_collected"], 2),
-        })
+        daily_rows.append(
+            {
+                "date": day_key,
+                "gross_sales": round(bucket["gross_sales"], 2),
+                "refunds": round(bucket["refunds"], 2),
+                "net_sales": round(bucket["gross_sales"] - bucket["refunds"], 2),
+                "cash_collected": round(bucket["cash_collected"], 2),
+            }
+        )
 
-    top_products = sorted(product_sales.items(), key=lambda x: x[1]["revenue"], reverse=True)[:10]
+    top_products = sorted(
+        [
+            values
+            for values in product_sales.values()
+            if _num(values["qty"]) > 0 or _num(values["revenue"]) > 0
+        ],
+        key=lambda values: (-_num(values["revenue"]), values["name"].lower()),
+    )[:10]
+
     return {
         "gross_sales": round(gross_sales, 2),
         "refunds": round(total_refunds, 2),
@@ -603,11 +721,18 @@ async def _build_sales_report(
             },
         },
         "refund_breakdown": {
-            "retail": round(sum(_num(r.total) for r in retail_refunds), 2),
-            "b2b": round(sum(_num(r.total) for r in b2b_refunds), 2),
+            "retail": round(sum(_num(refund.total) for refund in retail_refunds), 2),
+            "b2b": round(sum(_num(refund.total) for refund in b2b_refunds), 2),
         },
         "daily": daily_rows,
-        "top_products": [{"name": name, "qty": round(values["qty"], 2), "revenue": round(values["revenue"], 2)} for name, values in top_products],
+        "top_products": [
+            {
+                "name": values["name"],
+                "qty": round(values["qty"], 2),
+                "revenue": round(values["revenue"], 2),
+            }
+            for values in top_products
+        ],
         "pos_records": _paginate_rows(pos_records, skip, limit, include_all=include_all),
         "b2b_records": _paginate_rows(b2b_records, skip, limit, include_all=include_all),
         "b2b_payment_records": _paginate_rows(b2b_payment_records, skip, limit, include_all=include_all),
@@ -619,7 +744,6 @@ async def _build_sales_report(
         "date_from": d_from.strftime("%Y-%m-%d"),
         "date_to": d_to.strftime("%Y-%m-%d"),
     }
-
 
 # ── SALES ──────────────────────────────────────────────
 @router.get("/api/sales")

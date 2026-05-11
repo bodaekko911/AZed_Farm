@@ -12,9 +12,11 @@ from app.core.permissions import get_current_user, require_permission
 from app.core.log import record
 from app.core.navigation import render_app_header
 from app.models.accounting import Account, Journal, JournalEntry
-from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem
-from app.models.expense import Expense
+from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund
+from app.models.expense import Expense, ExpenseCategory
 from app.models.user import User
+from app.models.invoice import Invoice
+from app.models.refund import RetailRefund
 from app.schemas.invoice import B2BPaymentRequest
 from decimal import Decimal
 
@@ -392,96 +394,129 @@ async def profit_loss(
     to_date: Optional[date] = Query(None),
     db: AsyncSession = Depends(get_async_session),
 ):
-    from app.models.refund import RetailRefund
-    journal_sums = (
-        _apply_date_range(
-            select(
-                JournalEntry.account_id.label("account_id"),
-                func.coalesce(func.sum(JournalEntry.debit), 0).label("debit_sum"),
-                func.coalesce(func.sum(JournalEntry.credit), 0).label("credit_sum"),
-            ).select_from(JournalEntry).join(Journal, Journal.id == JournalEntry.journal_id),
-            Journal.created_at,
-            from_date,
-            to_date,
-        )
-        .group_by(JournalEntry.account_id)
-        .subquery()
-    )
-    expense_journal_sums = (
-        _apply_period_with_fallback_date(
-            select(
-                JournalEntry.account_id.label("account_id"),
-                func.coalesce(func.sum(JournalEntry.debit), 0).label("debit_sum"),
-                func.coalesce(func.sum(JournalEntry.credit), 0).label("credit_sum"),
-            )
-            .select_from(JournalEntry)
-            .join(Journal, Journal.id == JournalEntry.journal_id)
-            .outerjoin(Expense, Expense.journal_id == Journal.id),
-            Journal.created_at,
-            from_date,
-            to_date,
-            Expense.expense_date,
-        )
-        .group_by(JournalEntry.account_id)
-        .subquery()
-    )
-    rev_result = await db.execute(
-        select(
-            Account,
-            func.coalesce(journal_sums.c.debit_sum, 0).label("debit_sum"),
-            func.coalesce(journal_sums.c.credit_sum, 0).label("credit_sum"),
-        )
-        .outerjoin(journal_sums, journal_sums.c.account_id == Account.id)
-        .where(Account.type == "revenue")
-        .order_by(Account.code)
-    )
-    revenue_accounts = rev_result.all()
-    exp_result = await db.execute(
-        select(
-            Account,
-            func.coalesce(expense_journal_sums.c.debit_sum, 0).label("debit_sum"),
-            func.coalesce(expense_journal_sums.c.credit_sum, 0).label("credit_sum"),
-        )
-        .outerjoin(expense_journal_sums, expense_journal_sums.c.account_id == Account.id)
-        .where(Account.type == "expense")
-        .order_by(Account.code)
-    )
-    expense_accounts = exp_result.all()
+    """
+    Operational P&L using the same revenue definition as Dashboard and Sales Report.
 
-    revenues = []
-    for a, debit_sum_raw, credit_sum_raw in revenue_accounts:
-        amount = round(float(credit_sum_raw or 0) - float(debit_sum_raw or 0), 2)
-        if abs(amount) < 0.01:
-            continue
-        revenues.append({"code": a.code, "name": a.name, "amount": amount})
+    Revenue = paid POS invoices
+            + paid B2B invoices
+            - retail refunds
+            - B2B refunds
+
+    Operational Cost = expenses recorded in the Expenses module by expense_date.
+    Operating Profit = Revenue - Operational Cost.
+    """
+    _validate_date_range(from_date, to_date)
+
+    pos_sales_stmt = _apply_date_range(
+        select(func.coalesce(func.sum(Invoice.total), 0)),
+        Invoice.created_at,
+        from_date,
+        to_date,
+    ).where(Invoice.status == "paid")
+    pos_sales_result = await db.execute(pos_sales_stmt)
+    pos_sales = _num(pos_sales_result.scalar())
+
+    b2b_sales_stmt = _apply_date_range(
+        select(func.coalesce(func.sum(B2BInvoice.total), 0)),
+        B2BInvoice.created_at,
+        from_date,
+        to_date,
+    ).where(B2BInvoice.status == "paid")
+    b2b_sales_result = await db.execute(b2b_sales_stmt)
+    b2b_sales = _num(b2b_sales_result.scalar())
+
+    retail_refunds_stmt = _apply_date_range(
+        select(
+            func.coalesce(func.sum(RetailRefund.total), 0).label("total"),
+            func.count(RetailRefund.id).label("count"),
+        ),
+        RetailRefund.created_at,
+        from_date,
+        to_date,
+    )
+    retail_refunds_row = (await db.execute(retail_refunds_stmt)).one()
+    retail_refunds = _num(retail_refunds_row.total)
+    retail_refund_count = _num(retail_refunds_row.count)
+
+    b2b_refunds_stmt = _apply_date_range(
+        select(
+            func.coalesce(func.sum(B2BRefund.total), 0).label("total"),
+            func.count(B2BRefund.id).label("count"),
+        ),
+        B2BRefund.created_at,
+        from_date,
+        to_date,
+    )
+    b2b_refunds_row = (await db.execute(b2b_refunds_stmt)).one()
+    b2b_refunds = _num(b2b_refunds_row.total)
+    b2b_refund_count = _num(b2b_refunds_row.count)
+
+    total_refunds = retail_refunds + b2b_refunds
+    total_revenue = round(pos_sales + b2b_sales - total_refunds, 2)
+
+    expense_stmt = (
+        select(
+            ExpenseCategory.account_code.label("code"),
+            ExpenseCategory.name.label("name"),
+            func.coalesce(func.sum(Expense.amount), 0).label("amount"),
+        )
+        .select_from(Expense)
+        .join(ExpenseCategory, ExpenseCategory.id == Expense.category_id, isouter=True)
+    )
+
+    if from_date:
+        expense_stmt = expense_stmt.where(Expense.expense_date >= from_date)
+    if to_date:
+        expense_stmt = expense_stmt.where(Expense.expense_date <= to_date)
+
+    expense_stmt = (
+        expense_stmt
+        .group_by(ExpenseCategory.account_code, ExpenseCategory.name)
+        .order_by(ExpenseCategory.name)
+    )
+    expense_rows = (await db.execute(expense_stmt)).all()
 
     expenses = []
-    for a, debit_sum_raw, credit_sum_raw in expense_accounts:
-        amount = round(float(debit_sum_raw or 0) - float(credit_sum_raw or 0), 2)
+    for row in expense_rows:
+        amount = round(_num(row.amount), 2)
         if abs(amount) < 0.01:
             continue
-        expenses.append({"code": a.code, "name": a.name, "amount": amount})
+        expenses.append(
+            {
+                "code": row.code or "OPC",
+                "name": row.name or "Operational Cost",
+                "amount": amount,
+            }
+        )
 
-    total_revenue = sum(r["amount"] for r in revenues)
-    total_expense = sum(e["amount"] for e in expenses)
-    net_profit    = total_revenue - total_expense
+    total_expense = round(sum(item["amount"] for item in expenses), 2)
+    net_profit = round(total_revenue - total_expense, 2)
 
-    # Retail refund total for display as a deduction note
-    refunds_stmt = _apply_date_range(select(func.sum(RetailRefund.total)), RetailRefund.created_at, from_date, to_date)
-    sum_result = await db.execute(refunds_stmt)
-    total_refunds = float(sum_result.scalar() or 0)
-    refund_count_stmt = _apply_date_range(select(func.count(RetailRefund.id)), RetailRefund.created_at, from_date, to_date)
-    cnt_result = await db.execute(refund_count_stmt)
-    refund_count = cnt_result.scalar() or 0
+    revenues = [
+        {"code": "POS", "name": "Paid POS Sales", "amount": round(pos_sales, 2)},
+        {"code": "B2B", "name": "Paid B2B Sales", "amount": round(b2b_sales, 2)},
+    ]
+    if total_refunds > 0:
+        revenues.append({"code": "REF", "name": "Refunds Deducted", "amount": round(-total_refunds, 2)})
 
     return {
-        "revenues":      revenues,
-        "expenses":      expenses,
+        "revenues": revenues,
+        "expenses": expenses,
         "total_revenue": total_revenue,
         "total_expense": total_expense,
-        "net_profit":    net_profit,
-        "total_refunds": total_refunds,
-        "refund_count":  refund_count,
+        "net_profit": net_profit,
+        "total_refunds": round(total_refunds, 2),
+        "refund_count": int(retail_refund_count + b2b_refund_count),
+        "refund_breakdown": {
+            "retail": round(retail_refunds, 2),
+            "b2b": round(b2b_refunds, 2),
+        },
+        "revenue_breakdown": {
+            "pos_paid_sales": round(pos_sales, 2),
+            "b2b_paid_sales": round(b2b_sales, 2),
+            "retail_refunds": round(retail_refunds, 2),
+            "b2b_refunds": round(b2b_refunds, 2),
+        },
         "from_date": from_date.isoformat() if from_date else None,
         "to_date": to_date.isoformat() if to_date else None,
     }
