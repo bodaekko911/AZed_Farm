@@ -1516,10 +1516,10 @@ html[data-theme="light"] .theme-icon-moon {
 }
 
 
-/* Light-mode logo background fix
-   The original ERP_logo.png stays in use.
-   Dark mode: screen keeps the logo bright on dark surfaces.
-   Light mode: darken hides the light baked-in logo background better than multiply.
+/* Logo blend mode fix
+   Uses the original /static/ERP_logo.png.
+   The key change: light mode uses screen, not darken/multiply.
+   darken/multiply keeps the darker baked-in logo background visible.
 */
 .brand,
 .hero-copy,
@@ -1533,21 +1533,45 @@ html[data-theme="light"] .theme-icon-moon {
 .footer-brand img,
 .modal-logo {
   mix-blend-mode: screen;
-  filter: contrast(1.06) saturate(1.05);
+  filter: brightness(1.02) contrast(1.08) saturate(1.04);
 }
 
 html[data-theme="light"] .brand img,
 html[data-theme="light"] .hero-logo,
 html[data-theme="light"] .footer-brand img,
-html[data-theme="light"] .modal-logo {
-  mix-blend-mode: darken;
-  filter: contrast(1.08) saturate(1.06);
+html[data-theme="light"] .modal-logo,
+body[data-theme="light"] .brand img,
+body[data-theme="light"] .hero-logo,
+body[data-theme="light"] .footer-brand img,
+body[data-theme="light"] .modal-logo,
+.light .brand img,
+.light .hero-logo,
+.light .footer-brand img,
+.light .modal-logo,
+.theme-light .brand img,
+.theme-light .hero-logo,
+.theme-light .footer-brand img,
+.theme-light .modal-logo {
+  mix-blend-mode: screen;
+  filter: brightness(1.05) contrast(1.12) saturate(1.05);
 }
 
 html[data-theme="dark"] .brand img,
 html[data-theme="dark"] .hero-logo,
 html[data-theme="dark"] .footer-brand img,
-html[data-theme="dark"] .modal-logo {
+html[data-theme="dark"] .modal-logo,
+body[data-theme="dark"] .brand img,
+body[data-theme="dark"] .hero-logo,
+body[data-theme="dark"] .footer-brand img,
+body[data-theme="dark"] .modal-logo,
+.dark .brand img,
+.dark .hero-logo,
+.dark .footer-brand img,
+.dark .modal-logo,
+.theme-dark .brand img,
+.theme-dark .hero-logo,
+.theme-dark .footer-brand img,
+.theme-dark .modal-logo {
   mix-blend-mode: screen;
-  filter: contrast(1.06) saturate(1.05);
+  filter: brightness(1.03) contrast(1.08) saturate(1.04);
 }
