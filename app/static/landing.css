@@ -28,11 +28,6 @@
   --shadow-md: 0 22px 80px rgba(0, 0, 0, 0.36);
   --shadow-lg: 0 32px 110px rgba(0, 0, 0, 0.46);
 
-  --radius-sm: 12px;
-  --radius-md: 18px;
-  --radius-lg: 26px;
-  --radius-xl: 34px;
-
   color-scheme: dark;
 }
 
@@ -169,7 +164,7 @@ h3,
 .site-nav {
   max-width: 1220px;
   margin: 0 auto;
-  height: 70px;
+  min-height: 70px;
   display: flex;
   align-items: center;
   gap: 22px;
@@ -330,6 +325,12 @@ html[data-theme="light"] .theme-icon-moon {
   overflow: hidden;
 }
 
+.farm-hero {
+  background:
+    radial-gradient(circle at 12% 18%, color-mix(in srgb, var(--green) 9%, transparent), transparent 34rem),
+    radial-gradient(circle at 88% 14%, color-mix(in srgb, var(--amber) 8%, transparent), transparent 30rem);
+}
+
 .hero-bg {
   position: absolute;
   border-radius: 999px;
@@ -408,17 +409,17 @@ html[data-theme="light"] .theme-icon-moon {
 }
 
 #hero-title {
-  max-width: 780px;
+  max-width: 820px;
   margin: 0;
   font-family: var(--font-heading);
-  font-size: clamp(48px, 7.1vw, 86px);
+  font-size: clamp(46px, 6.8vw, 82px);
   font-weight: 700;
   line-height: 0.96;
   letter-spacing: -0.06em;
 }
 
 .hero-subtitle {
-  max-width: 660px;
+  max-width: 680px;
   margin: 24px 0 0;
   color: var(--text-sub);
   font-size: clamp(17px, 2vw, 21px);
@@ -456,7 +457,7 @@ html[data-theme="light"] .theme-icon-moon {
 
 .hero-visual {
   position: relative;
-  min-height: 580px;
+  min-height: 600px;
 }
 
 .preview-shell {
@@ -465,7 +466,7 @@ html[data-theme="light"] .theme-icon-moon {
   border: 1px solid var(--border-strong);
   border-radius: 34px;
   background:
-    linear-gradient(135deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent 30%),
+    linear-gradient(135deg, color-mix(in srgb, var(--green) 12%, transparent), transparent 30%),
     color-mix(in srgb, var(--surface-strong) 94%, transparent);
   box-shadow: var(--shadow-lg);
 }
@@ -515,7 +516,7 @@ html[data-theme="light"] .theme-icon-moon {
 .preview-body {
   display: grid;
   grid-template-columns: 70px minmax(0, 1fr);
-  min-height: 500px;
+  min-height: 520px;
 }
 
 .preview-sidebar {
@@ -620,10 +621,10 @@ html[data-theme="light"] .theme-icon-moon {
 }
 
 .chart-card {
-  min-height: 190px;
+  min-height: 220px;
   padding: 18px;
   display: grid;
-  gap: 18px;
+  gap: 16px;
 }
 
 .chart-head {
@@ -644,8 +645,35 @@ html[data-theme="light"] .theme-icon-moon {
   font-weight: 750;
 }
 
+.farm-flow-mini {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.farm-flow-mini div {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface-soft);
+}
+
+.farm-flow-mini span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 950;
+  letter-spacing: 0.1em;
+}
+
+.farm-flow-mini strong {
+  display: block;
+  font-size: 13px;
+}
+
 .chart-bars {
-  height: 120px;
+  height: 94px;
   display: flex;
   align-items: end;
   gap: 10px;
@@ -702,7 +730,7 @@ html[data-theme="light"] .theme-icon-moon {
 .floating-card {
   position: absolute;
   z-index: 4;
-  min-width: 176px;
+  min-width: 184px;
   padding: 16px;
   border-radius: 20px;
   border: 1px solid var(--border-strong);
@@ -892,7 +920,7 @@ html[data-theme="light"] .theme-icon-moon {
 .module-card {
   position: relative;
   overflow: hidden;
-  min-height: 270px;
+  min-height: 286px;
   padding: 24px;
   border: 1px solid var(--border);
   border-radius: 26px;
@@ -909,7 +937,7 @@ html[data-theme="light"] .theme-icon-moon {
 
 .module-featured {
   background:
-    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--accent) 17%, transparent), transparent 42%),
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--green) 18%, transparent), transparent 42%),
     var(--surface-strong);
 }
 
@@ -943,7 +971,7 @@ html[data-theme="light"] .theme-icon-moon {
   border: 1px solid var(--border-strong);
   border-radius: 34px;
   background:
-    radial-gradient(circle at 0% 0%, color-mix(in srgb, var(--accent) 15%, transparent), transparent 38%),
+    radial-gradient(circle at 0% 0%, color-mix(in srgb, var(--green) 15%, transparent), transparent 38%),
     var(--surface-strong);
   box-shadow: var(--shadow-md);
 }
@@ -958,7 +986,7 @@ html[data-theme="light"] .theme-icon-moon {
 }
 
 .workflow-list li {
-  min-height: 180px;
+  min-height: 190px;
   padding: 18px;
   border: 1px solid var(--border);
   border-radius: 22px;
@@ -988,7 +1016,7 @@ html[data-theme="light"] .theme-icon-moon {
   line-height: 1.55;
 }
 
-/* Security */
+/* Visibility */
 
 .security-inner {
   display: grid;
@@ -1004,7 +1032,7 @@ html[data-theme="light"] .theme-icon-moon {
 }
 
 .security-card {
-  min-height: 210px;
+  min-height: 224px;
   padding: 22px;
   border: 1px solid var(--border);
   border-radius: 24px;
@@ -1403,7 +1431,7 @@ html[data-theme="light"] .theme-icon-moon {
   }
 
   #hero-title {
-    font-size: clamp(44px, 13vw, 68px);
+    font-size: clamp(42px, 12vw, 64px);
   }
 
   .preview-body {
@@ -1417,7 +1445,8 @@ html[data-theme="light"] .theme-icon-moon {
   .metric-grid,
   .modules-grid,
   .security-grid,
-  .workflow-list {
+  .workflow-list,
+  .farm-flow-mini {
     grid-template-columns: 1fr;
   }
 
