@@ -155,6 +155,43 @@ h3,
   transform: translateY(0);
 }
 
+
+/* Real logo background cleanup
+   If the uploaded logo has a white/off-white rectangle baked into the image,
+   these blend modes visually remove that background while keeping the real logo.
+*/
+.brand img,
+.hero-logo,
+.footer-brand img,
+.modal-logo {
+  isolation: isolate;
+  mix-blend-mode: multiply;
+  filter: contrast(1.06) saturate(1.06);
+}
+
+.hero-logo {
+  filter: contrast(1.06) saturate(1.06) drop-shadow(0 18px 30px rgba(0, 0, 0, 0.18));
+}
+
+html[data-theme="dark"] .brand img,
+html[data-theme="dark"] .footer-brand img,
+html[data-theme="dark"] .modal-logo {
+  mix-blend-mode: screen;
+  filter: invert(1) hue-rotate(180deg) contrast(1.08) saturate(1.08);
+}
+
+html[data-theme="dark"] .hero-logo {
+  mix-blend-mode: screen;
+  filter: invert(1) hue-rotate(180deg) contrast(1.08) saturate(1.08) drop-shadow(0 18px 30px rgba(0, 0, 0, 0.18));
+}
+
+html[data-theme="light"] .brand img,
+html[data-theme="light"] .hero-logo,
+html[data-theme="light"] .footer-brand img,
+html[data-theme="light"] .modal-logo {
+  mix-blend-mode: multiply;
+}
+
 /* Header */
 
 .site-header {
@@ -191,7 +228,8 @@ h3,
   max-width: 170px;
   object-fit: contain;
   object-position: left center;
-  image-rendering: auto;
+  background: transparent;
+  border: 0;
 }
 
 
@@ -395,7 +433,8 @@ html[data-theme="light"] .theme-icon-moon {
   margin-bottom: 28px;
   object-fit: contain;
   object-position: left center;
-  filter: drop-shadow(0 18px 30px rgba(0, 0, 0, 0.18));
+  background: transparent;
+  border: 0;
 }
 
 #hero-title {
@@ -1072,6 +1111,8 @@ html[data-theme="light"] .theme-icon-moon {
   height: 40px;
   max-width: 150px;
   object-fit: contain;
+  background: transparent;
+  border: 0;
 }
 
 .footer-inner p {
@@ -1163,6 +1204,8 @@ html[data-theme="light"] .theme-icon-moon {
   height: auto;
   max-height: 88px;
   object-fit: contain;
+  background: transparent;
+  border: 0;
   margin: 0 auto 22px;
 }
 
