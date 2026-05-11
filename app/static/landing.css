@@ -1516,10 +1516,10 @@ html[data-theme="light"] .theme-icon-moon {
 }
 
 /* Clean logo treatment
-   The logo image itself is now a cropped transparent PNG saved at
-   /static/ERP_logo.png. This keeps the original logo colors and removes the
-   old dark artwork background from the asset. CSS only controls sizing,
-   spacing, and contrast only. No logo plate/background is added in light mode.
+   The dark-mode logo remains the original transparent artwork.
+   Light mode uses /static/ERP_logo_light.png where only the AZed word is black.
+   This keeps the background transparent and avoids CSS filters that change the
+   logo colors.
 */
 .clean-logo {
   --clean-logo-padding: 0;
@@ -1542,7 +1542,8 @@ html[data-theme="light"] .theme-icon-moon {
   box-shadow: var(--clean-logo-shadow);
 }
 
-.clean-logo img {
+.clean-logo img,
+.clean-logo .logo-image {
   display: block;
   width: auto;
   max-width: 100%;
@@ -1554,6 +1555,10 @@ html[data-theme="light"] .theme-icon-moon {
   border: 0 !important;
   filter: none !important;
   mix-blend-mode: normal !important;
+}
+
+.logo-image-light {
+  display: none !important;
 }
 
 .logo-header {
@@ -1600,10 +1605,16 @@ html[data-theme="light"] .theme-icon-moon {
   max-width: 180px;
 }
 
-/* Light mode: keep the logo background fully transparent.
-   The image itself is a cropped transparent PNG. The shadow only helps the
-   white wordmark stay readable on light surfaces; it does not change the
-   logo colors and it does not add a plate behind the logo. */
+/* Light mode: swap to the transparent light-mode logo asset.
+   AZed becomes black while the icon and ERP subtitle keep their original colors. */
+html[data-theme="light"] .logo-image-dark {
+  display: none !important;
+}
+
+html[data-theme="light"] .logo-image-light {
+  display: block !important;
+}
+
 html[data-theme="light"] .clean-logo {
   --clean-logo-padding: 0;
   --clean-logo-bg: transparent;
@@ -1612,12 +1623,20 @@ html[data-theme="light"] .clean-logo {
 }
 
 html[data-theme="light"] .clean-logo img {
-  filter:
-    drop-shadow(0 1px 1px rgba(12, 27, 44, 0.34))
-    drop-shadow(0 10px 18px rgba(12, 27, 44, 0.12)) !important;
+  filter: none !important;
 }
 
-/* Dark mode: transparent wrapper, no color manipulation. */
+/* Dark mode: show the original transparent logo, no color manipulation. */
+html[data-theme="dark"] .logo-image-dark,
+:root:not([data-theme="light"]) .logo-image-dark {
+  display: block !important;
+}
+
+html[data-theme="dark"] .logo-image-light,
+:root:not([data-theme="light"]) .logo-image-light {
+  display: none !important;
+}
+
 html[data-theme="dark"] .clean-logo,
 :root:not([data-theme="light"]) .clean-logo {
   --clean-logo-padding: 0;
@@ -1640,5 +1659,5 @@ html[data-theme="dark"] .clean-logo img,
     width: 210px;
     max-height: none;
   }
-
 }
+
