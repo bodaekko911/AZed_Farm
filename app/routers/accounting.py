@@ -389,6 +389,7 @@ async def trial_balance(
     }
 
 @router.get("/api/profit-loss")
+@router.get("/api/profit-loss")
 async def profit_loss(
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
@@ -434,9 +435,9 @@ async def profit_loss(
         from_date,
         to_date,
     )
-    retail_refunds_row = (await db.execute(retail_refunds_stmt)).one()
-    retail_refunds = _num(retail_refunds_row.total)
-    retail_refund_count = _num(retail_refunds_row.count)
+    retail_refunds_row = (await db.execute(retail_refunds_stmt)).mappings().one()
+    retail_refunds = _num(retail_refunds_row["total"])
+    retail_refund_count = _num(retail_refunds_row["count"])
 
     b2b_refunds_stmt = _apply_date_range(
         select(
@@ -447,9 +448,9 @@ async def profit_loss(
         from_date,
         to_date,
     )
-    b2b_refunds_row = (await db.execute(b2b_refunds_stmt)).one()
-    b2b_refunds = _num(b2b_refunds_row.total)
-    b2b_refund_count = _num(b2b_refunds_row.count)
+    b2b_refunds_row = (await db.execute(b2b_refunds_stmt)).mappings().one()
+    b2b_refunds = _num(b2b_refunds_row["total"])
+    b2b_refund_count = _num(b2b_refunds_row["count"])
 
     total_refunds = retail_refunds + b2b_refunds
     total_revenue = round(pos_sales + b2b_sales - total_refunds, 2)
@@ -474,17 +475,17 @@ async def profit_loss(
         .group_by(ExpenseCategory.account_code, ExpenseCategory.name)
         .order_by(ExpenseCategory.name)
     )
-    expense_rows = (await db.execute(expense_stmt)).all()
+    expense_rows = (await db.execute(expense_stmt)).mappings().all()
 
     expenses = []
     for row in expense_rows:
-        amount = round(_num(row.amount), 2)
+        amount = round(_num(row["amount"]), 2)
         if abs(amount) < 0.01:
             continue
         expenses.append(
             {
-                "code": row.code or "OPC",
-                "name": row.name or "Operational Cost",
+                "code": row["code"] or "OPC",
+                "name": row["name"] or "Operational Cost",
                 "amount": amount,
             }
         )
