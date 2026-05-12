@@ -10,6 +10,8 @@
  * cross-tab sync after parse — this file just gets the colors right at t=0.
  */
 (function () {
+  var THEME_KEY = "colorMode";
+  var LEGACY_KEYS = ["dashboard:theme", "expenses-theme", "refund-theme"];
   var palettes = {
     dark: {
       bg: "#0B1120",
@@ -107,6 +109,10 @@
 
   function mountDashboardBackground() {
     if (!document.body) return;
+    if (
+      document.documentElement.getAttribute("data-app-bg") === "off" ||
+      document.body.getAttribute("data-app-bg") === "off"
+    ) return;
     if (document.querySelector(".bg-layer,.app-bg-layer")) return;
 
     var layer = document.createElement("div");
@@ -151,17 +157,27 @@
     document.body.classList.toggle("light", theme === "light");
   }
 
-  try {
-    var stored = localStorage.getItem("colorMode");
-    // Legacy keys older builds may still have:
-    if (!stored) {
-      var legacy = ["dashboard:theme", "expenses-theme", "refund-theme"];
-      for (var i = 0; i < legacy.length; i += 1) {
-        var v = localStorage.getItem(legacy[i]);
-        if (v) { stored = v; break; }
+  function normalizeTheme(theme) {
+    return theme === "light" ? "light" : "dark";
+  }
+
+  function readStoredTheme() {
+    var stored = localStorage.getItem(THEME_KEY);
+    if (stored) return normalizeTheme(stored);
+
+    for (var i = 0; i < LEGACY_KEYS.length; i += 1) {
+      var legacy = localStorage.getItem(LEGACY_KEYS[i]);
+      if (legacy) {
+        localStorage.setItem(THEME_KEY, normalizeTheme(legacy));
+        return normalizeTheme(legacy);
       }
     }
-    var theme = stored === "light" ? "light" : "dark";
+
+    return normalizeTheme(document.documentElement.getAttribute("data-theme"));
+  }
+
+  try {
+    var theme = readStoredTheme();
     appliedTheme = theme;
     installDashboardPaletteStyle();
     installDashboardBackgroundStyle();

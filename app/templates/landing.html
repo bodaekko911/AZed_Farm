@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" data-app-bg="off">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -10,20 +10,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 
-  <script>
-    (function () {
-      try {
-        var theme = localStorage.getItem("colorMode") === "light" ? "light" : "dark";
-        document.documentElement.setAttribute("data-theme", theme);
-        document.documentElement.style.colorScheme = theme;
-      } catch (_) {
-        document.documentElement.setAttribute("data-theme", "dark");
-        document.documentElement.style.colorScheme = "dark";
-      }
-    })();
-  </script>
+  <script src="/static/theme-init.js"></script>
 
   <link rel="stylesheet" href="/static/landing.css?v=18">
+  <script src="/static/theme.js" defer></script>
   <script src="/static/landing.js" defer></script>
 </head>
 
@@ -47,7 +37,7 @@
       <div class="nav-actions">
         <a class="button button-ghost nav-demo" href="mailto:abdallah@habibacommunity.com?subject=AZed%20ERP%20Demo%20Request">Request Demo</a>
 
-        <button class="theme-toggle" type="button" id="themeToggle" aria-label="Switch color theme" aria-pressed="false">
+        <button class="theme-toggle app-theme-toggle" type="button" id="themeToggle" data-theme-toggle aria-label="Switch color theme" aria-pressed="false">
           <svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true">
             <circle cx="12" cy="12" r="4"></circle>
             <path d="M12 2v3M12 19v3M4.93 4.93l2.12 2.12M16.95 16.95l2.12 2.12M2 12h3M19 12h3M4.93 19.07l2.12-2.12M16.95 7.05l2.12-2.12"></path>

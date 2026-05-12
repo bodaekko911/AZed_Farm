@@ -3,6 +3,7 @@
 
   const THEME_KEY = "colorMode";
   const LEGACY_KEYS = ["dashboard:theme", "expenses-theme", "refund-theme"];
+  const TOGGLE_SELECTOR = "[data-theme-toggle], #mode-btn, #themeToggle, .app-theme-toggle";
   const LIGHT = "light";
   const DARK = "dark";
   const PALETTES = {
@@ -72,9 +73,17 @@
   }
 
   function updateButtons(theme) {
-    const label = theme === LIGHT ? "&#9728;&#65039;" : "&#127769;";
-    document.querySelectorAll("#mode-btn").forEach((button) => {
-      button.innerHTML = label;
+    const label = theme === LIGHT ? "Switch to dark theme" : "Switch to light theme";
+    const icon = theme === LIGHT ? "&#9728;&#65039;" : "&#127769;";
+
+    document.querySelectorAll(TOGGLE_SELECTOR).forEach((button) => {
+      button.setAttribute("aria-label", label);
+      button.setAttribute("title", label);
+      button.setAttribute("aria-pressed", theme === LIGHT ? "true" : "false");
+
+      if (!button.querySelector("svg")) {
+        button.innerHTML = icon;
+      }
     });
   }
 
@@ -135,8 +144,21 @@
     ensureTheme({ persist: false, dispatch: false });
   });
 
+  document.addEventListener(
+    "click",
+    (event) => {
+      const button = event.target && event.target.closest && event.target.closest(TOGGLE_SELECTOR);
+      if (!button || !document.contains(button)) return;
+
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      window.__appTheme.toggle();
+    },
+    true
+  );
+
   window.addEventListener("storage", (event) => {
     if (![THEME_KEY, ...LEGACY_KEYS].includes(event.key || "")) return;
-    ensureTheme({ persist: true, dispatch: true });
+    ensureTheme({ persist: false, dispatch: true });
   });
 })();

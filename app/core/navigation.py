@@ -358,6 +358,7 @@ def app_nav_script() -> str:
 (function(){
   var THEME_KEY = "colorMode";
   var LEGACY_KEYS = ["dashboard:theme", "expenses-theme", "refund-theme"];
+  var TOGGLE_SELECTOR = "[data-theme-toggle], #mode-btn, #themeToggle, .app-theme-toggle";
 
   function normalizeTheme(theme){
     return theme === "light" ? "light" : "dark";
@@ -389,8 +390,8 @@ def app_nav_script() -> str:
   function syncThemeButton(theme){
     var icon = theme === "light" ? "&#9728;&#65039;" : "&#127769;";
     var label = theme === "light" ? "Switch to dark theme" : "Switch to light theme";
-    document.querySelectorAll("#mode-btn").forEach(function(button){
-      button.innerHTML = icon;
+    document.querySelectorAll(TOGGLE_SELECTOR).forEach(function(button){
+      if(!button.querySelector("svg")) button.innerHTML = icon;
       button.setAttribute("aria-label", label);
       button.setAttribute("title", label);
       button.setAttribute("aria-pressed", theme === "light" ? "true" : "false");
@@ -526,7 +527,7 @@ def render_app_header(user: User, active_permission: str | None = None) -> str:
   <button class="app-nav-mobile-toggle" type="button" aria-label="Toggle navigation" onclick="document.getElementById('app-nav').classList.toggle('open')">&#9776;</button>
   <div class="app-nav-main">{groups}</div>
   <div class="app-nav-actions topbar-right">
-    <button class="mode-btn" id="mode-btn" type="button" title="Switch color theme" aria-label="Switch color theme" aria-pressed="false" onclick="window.__appNav.toggleTheme()">&#127769;</button>
+    <button class="mode-btn app-theme-toggle" id="mode-btn" type="button" data-theme-toggle title="Switch color theme" aria-label="Switch color theme" aria-pressed="false" onclick="window.__appNav.toggleTheme()">&#127769;</button>
     <div class="account-menu">
       <button class="user-pill" id="account-trigger" type="button" onclick="window.__appNav.toggleAccount(event)" aria-haspopup="menu" aria-expanded="false">
         <div class="user-avatar" id="user-avatar">{avatar}</div>
