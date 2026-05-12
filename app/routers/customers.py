@@ -429,7 +429,7 @@ canvas#spend-chart{{display:block}}
         <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
     </a>
     <div class="topbar-right">
-        <button class="mode-btn" id="mode-btn" onclick="toggleMode()">&#127769;</button>
+        <button class="mode-btn app-theme-toggle" id="mode-btn" type="button" data-theme-toggle aria-label="Switch color theme" aria-pressed="false">&#127769;</button>
         <a href="/customers-mgmt/" class="back-btn">&#8592; Customers</a>
     </div>
 </header>
@@ -441,14 +441,8 @@ canvas#spend-chart{{display:block}}
 
 <script>
 const CUSTOMER_ID = {customer_id};
-if (localStorage.getItem("colorMode") === "light") {{
-    document.body.classList.add("light");
-    document.getElementById("mode-btn").innerHTML = "&#9728;&#65039;";
-}}
-function toggleMode(){{
-    const isLight = document.body.classList.toggle("light");
-    document.getElementById("mode-btn").innerHTML = isLight ? "&#9728;&#65039;" : "&#127769;";
-    localStorage.setItem("colorMode", isLight ? "light" : "dark");
+if (window.__appTheme && typeof window.__appTheme.sync === "function") {{
+    window.__appTheme.sync();
 }}
 
 function fmt(n){{ return Number(n).toLocaleString("en-US",{{minimumFractionDigits:2,maximumFractionDigits:2}}); }}
