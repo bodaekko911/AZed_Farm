@@ -464,7 +464,7 @@ def dashboard_ui():
     <a href="/inventory/" class="nav-link">Inventory</a>
   </div>
   <div class="nav-actions">
-    <button class="mode-btn" id="mode-btn" type="button" aria-label="Toggle color mode" title="Toggle light/dark mode">&#127769;</button>
+    <button class="mode-btn app-theme-toggle" id="mode-btn" type="button" data-theme-toggle aria-label="Switch color theme" title="Switch color theme" aria-pressed="false">&#127769;</button>
     <div class="account-menu">
       <button class="user-pill" id="account-trigger" type="button" aria-haspopup="menu" aria-expanded="false">
         <div class="user-avatar" id="user-avatar">A</div>

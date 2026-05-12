@@ -144,6 +144,30 @@
     (document.head || document.documentElement).appendChild(style);
   }
 
+  function installControlThemeStyle() {
+    if (document.getElementById("app-control-theme-style")) return;
+    var style = document.createElement("style");
+    style.id = "app-control-theme-style";
+    style.textContent = [
+      ":root{--app-control-bg:#1E293B;--app-control-bg-hover:#334155;--app-control-border:#334155;--app-control-border-hover:#475569;--app-control-text:#cbd5e1;--app-control-text-strong:#F8FAFC;--app-control-muted:#94A3B8;--app-control-shadow:0 24px 50px rgba(0,0,0,.35);}",
+      'html[data-theme="light"]{--app-control-bg:#f8fafc;--app-control-bg-hover:#e2e8f0;--app-control-border:#e2e8f0;--app-control-border-hover:#cbd5e1;--app-control-text:#334155;--app-control-text-strong:#0f172a;--app-control-muted:#64748b;--app-control-shadow:0 18px 44px rgba(15,23,42,.12);}',
+      ":where(.mode-btn,.app-theme-toggle,#themeToggle){display:inline-flex!important;align-items:center!important;justify-content:center!important;width:36px!important;height:36px!important;min-width:36px!important;min-height:36px!important;padding:0!important;border-radius:10px!important;border:1px solid var(--app-control-border)!important;background:var(--app-control-bg)!important;color:var(--app-control-text)!important;box-shadow:none!important;font-size:16px!important;line-height:1!important;transition:border-color .18s ease,color .18s ease,background .18s ease,transform .18s ease!important;}",
+      ":where(.mode-btn,.app-theme-toggle,#themeToggle):hover{border-color:var(--app-control-border-hover)!important;background:var(--app-control-bg-hover)!important;color:var(--app-control-text-strong)!important;transform:scale(1.06)!important;}",
+      ":where(.user-pill){display:flex!important;align-items:center!important;gap:10px!important;min-height:36px!important;padding:7px 16px 7px 10px!important;border-radius:40px!important;border:1px solid var(--app-control-border)!important;background:var(--app-control-bg)!important;color:var(--app-control-text)!important;box-shadow:none!important;}",
+      ":where(.user-pill:hover,.user-pill.open){border-color:var(--app-control-border-hover)!important;background:var(--app-control-bg-hover)!important;color:var(--app-control-text-strong)!important;}",
+      ":where(.user-avatar){width:28px!important;height:28px!important;border-radius:50%!important;display:flex!important;align-items:center!important;justify-content:center!important;flex:0 0 28px!important;background:linear-gradient(135deg,#00B8D4,#f59e0b)!important;color:#0a0c08!important;font-size:12px!important;font-weight:700!important;}",
+      ":where(.user-name){font-size:13px!important;font-weight:500!important;color:currentColor!important;}",
+      ":where(.menu-caret){font-size:11px!important;color:var(--app-control-muted)!important;}",
+      ":where(.account-dropdown){min-width:220px!important;background:var(--app-control-bg)!important;border:1px solid var(--app-control-border-hover)!important;border-radius:14px!important;padding:8px!important;box-shadow:var(--app-control-shadow)!important;color:var(--app-control-text)!important;}",
+      ":where(.account-head){border-bottom:1px solid var(--app-control-border)!important;}",
+      ":where(.account-label){color:var(--app-control-muted)!important;}",
+      ":where(.account-email){color:var(--app-control-text)!important;}",
+      ":where(.account-item){color:var(--app-control-text)!important;border-radius:10px!important;}",
+      ":where(.account-item:hover){background:var(--app-control-bg-hover)!important;color:var(--app-control-text-strong)!important;}"
+    ].join("");
+    (document.head || document.documentElement).appendChild(style);
+  }
+
   function syncRootTheme(theme) {
     document.documentElement.setAttribute("data-theme", theme);
     document.documentElement.style.colorScheme = theme;
@@ -182,12 +206,14 @@
     installDashboardPaletteStyle();
     installDashboardBackgroundStyle();
     installLogoThemeStyle();
+    installControlThemeStyle();
     syncRootTheme(theme);
     window.__appThemePalette = palettes[theme];
   } catch (_) {
     installDashboardPaletteStyle();
     installDashboardBackgroundStyle();
     installLogoThemeStyle();
+    installControlThemeStyle();
     syncRootTheme("dark");
     window.__appThemePalette = palettes.dark;
   }
