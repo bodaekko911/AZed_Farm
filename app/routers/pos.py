@@ -8,16 +8,19 @@ from decimal import Decimal
 from app.database import get_async_session
 from app.core.log import logger
 from app.core.permissions import ensure_action_permission, require_action, require_permission
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_role
 from app.core.navigation import render_app_header
 from app.core.product_types import is_stock_tracked_product, normalize_item_type
 from app.models.product import Product
 from app.models.customer import Customer
-from app.models.invoice import Invoice
+from app.models.invoice import Invoice, InvoiceItem
+from app.models.inventory import StockMove
+from app.models.accounting import Journal, JournalEntry
 from app.models.user import User
 from app.schemas.invoice import InvoiceCollectionRequest, InvoiceCreate
 from app.services.barcode_service import find_product_by_barcode, normalize_barcode_value
-from app.services.pos_service import create_invoice
+from app.services.location_inventory_service import sync_product_stock_to_default_location
+from app.services.pos_service import create_invoice, post_journal
 
 router = APIRouter(
     tags=["POS"],
@@ -189,6 +192,7 @@ async def get_unpaid_invoices(db: AsyncSession = Depends(get_async_session)):
         result.append({
             "id":             i.id,
             "invoice_number": i.invoice_number,
+            "customer_id":     i.customer_id,
             "customer":       i.customer.name if i.customer else "—",
             "total":          float(i.total),
             "subtotal":       float(i.subtotal),
@@ -196,6 +200,7 @@ async def get_unpaid_invoices(db: AsyncSession = Depends(get_async_session)):
             "created_at":     i.created_at.strftime("%Y-%m-%d %H:%M") if i.created_at else "—",
             "items": [
                 {
+                    "sku":        it.sku,
                     "name":       it.name,
                     "qty":        float(it.qty),
                     "unit_price": float(it.unit_price),
@@ -205,6 +210,208 @@ async def get_unpaid_invoices(db: AsyncSession = Depends(get_async_session)):
             ],
         })
     return result
+
+
+async def _reverse_invoice_journals(db: AsyncSession, invoice: Invoice) -> None:
+    invoice_number = invoice.invoice_number or f"INV-{str(invoice.id).zfill(5)}"
+    _r = await db.execute(
+        select(Journal)
+        .where(
+            Journal.ref_type == "invoice",
+            or_(
+                Journal.ref_id == invoice.id,
+                Journal.description.ilike(f"%{invoice_number}%"),
+            ),
+        )
+        .options(selectinload(Journal.entries).selectinload(JournalEntry.account))
+    )
+    for journal in _r.scalars().unique().all():
+        for entry in journal.entries:
+            if entry.account:
+                entry.account.balance = (
+                    Decimal(str(entry.account.balance or 0))
+                    - Decimal(str(entry.debit or 0))
+                    + Decimal(str(entry.credit or 0))
+                )
+        await db.delete(journal)
+
+
+async def _reverse_invoice_stock(db: AsyncSession, invoice: Invoice, note_prefix: str) -> None:
+    for item in invoice.items:
+        product = item.product
+        if not product or not is_stock_tracked_product(product):
+            continue
+        qty = float(item.qty or 0)
+        before = float(product.stock or 0)
+        after = before + qty
+        _, location_stock = await sync_product_stock_to_default_location(db, product=product)
+        location_stock.qty = float(location_stock.qty or 0) + qty
+        product.stock = after
+        db.add(StockMove(
+            product_id=product.id,
+            type="in",
+            qty=qty,
+            qty_before=before,
+            qty_after=after,
+            ref_type="invoice",
+            ref_id=invoice.id,
+            note=f"{note_prefix} - {invoice.invoice_number}",
+        ))
+
+
+async def _replace_unpaid_invoice_lines(
+    db: AsyncSession,
+    invoice: Invoice,
+    data: InvoiceCreate,
+    user_id: int | None,
+) -> None:
+    if not data.items:
+        raise HTTPException(status_code=400, detail="Cart is empty")
+
+    subtotal = 0.0
+    new_lines = []
+    for item in data.items:
+        _r = await db.execute(
+            select(Product).where(
+                Product.sku == item.sku,
+                or_(Product.is_active.is_(True), Product.is_active.is_(None)),
+            )
+        )
+        product = _r.scalar_one_or_none()
+        if not product:
+            raise HTTPException(status_code=404, detail=f"Product not found: {item.sku}")
+
+        qty = float(item.qty)
+        unit_price = float(item.unit_price if item.unit_price is not None else product.price)
+        if is_stock_tracked_product(product) and float(product.stock or 0) < qty:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not enough stock for {product.name}. Available: {float(product.stock or 0)}",
+            )
+        line_total = round(unit_price * qty, 2)
+        subtotal += line_total
+        new_lines.append((product, qty, unit_price, line_total))
+
+    discount_percent = float(data.discount_percent or 0)
+    discount_amount = round(subtotal * (discount_percent / 100), 2)
+    total = round(subtotal - discount_amount, 2)
+
+    for item in list(invoice.items):
+        await db.delete(item)
+    await db.flush()
+
+    invoice.customer_id = data.customer_id or invoice.customer_id
+    invoice.payment_method = "unpaid"
+    invoice.status = "unpaid"
+    invoice.subtotal = round(subtotal, 2)
+    invoice.discount = discount_amount
+    invoice.total = total
+    invoice.notes = data.notes
+
+    for product, qty, unit_price, line_total in new_lines:
+        db.add(InvoiceItem(
+            invoice_id=invoice.id,
+            product_id=product.id,
+            sku=product.sku,
+            name=product.name,
+            qty=qty,
+            unit_price=unit_price,
+            total=line_total,
+        ))
+        if is_stock_tracked_product(product):
+            before = float(product.stock or 0)
+            after = before - qty
+            _, location_stock = await sync_product_stock_to_default_location(db, product=product)
+            location_before = float(location_stock.qty or 0)
+            if location_before < qty:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Not enough stock for {product.name}. Available: {location_before}",
+                )
+            location_stock.qty = location_before - qty
+            product.stock = after
+            db.add(StockMove(
+                product_id=product.id,
+                type="out",
+                qty=-qty,
+                qty_before=before,
+                qty_after=after,
+                ref_type="invoice",
+                ref_id=invoice.id,
+                note=f"Admin edit unpaid sale - {invoice.invoice_number}",
+                user_id=user_id,
+            ))
+
+    await post_journal(db, f"Unpaid Sale - {invoice.invoice_number}", [
+        ("1100", total, 0),
+        ("4000", 0, total),
+    ], user_id=user_id)
+
+
+@router.put("/invoice/{invoice_id}", dependencies=[Depends(require_role("admin"))])
+async def update_unpaid_invoice(
+    invoice_id: int,
+    data: InvoiceCreate,
+    db: AsyncSession = Depends(get_async_session),
+    user=Depends(get_current_user),
+):
+    _r = await db.execute(
+        select(Invoice)
+        .where(Invoice.id == invoice_id)
+        .options(
+            selectinload(Invoice.items).selectinload(InvoiceItem.product),
+            selectinload(Invoice.customer),
+        )
+    )
+    invoice = _r.scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if invoice.status != "unpaid":
+        raise HTTPException(status_code=400, detail="Only unpaid invoices can be edited here")
+    try:
+        await _reverse_invoice_stock(db, invoice, "Admin edit reversal")
+        await _reverse_invoice_journals(db, invoice)
+        await _replace_unpaid_invoice_lines(db, invoice, data, user.id)
+        await db.commit()
+        await db.refresh(invoice)
+        return {
+            "ok": True,
+            "id": invoice.id,
+            "invoice_number": invoice.invoice_number,
+            "status": invoice.status,
+            "total": float(invoice.total),
+        }
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.delete("/invoice/{invoice_id}", dependencies=[Depends(require_role("admin"))])
+async def delete_unpaid_invoice(
+    invoice_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    user=Depends(get_current_user),
+):
+    _r = await db.execute(
+        select(Invoice)
+        .where(Invoice.id == invoice_id)
+        .options(selectinload(Invoice.items).selectinload(InvoiceItem.product))
+    )
+    invoice = _r.scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if invoice.status != "unpaid":
+        raise HTTPException(status_code=400, detail="Only unpaid invoices can be deleted here")
+    try:
+        invoice_number = invoice.invoice_number
+        await _reverse_invoice_stock(db, invoice, "Admin delete reversal")
+        await _reverse_invoice_journals(db, invoice)
+        await db.delete(invoice)
+        await db.commit()
+        return {"ok": True, "invoice_number": invoice_number}
+    except Exception:
+        await db.rollback()
+        raise
 
 
 @router.post("/invoice/{invoice_id}/collect", dependencies=[Depends(require_action("pos", "sales", "approve"))])
@@ -551,6 +758,12 @@ body.light #right{background:rgba(244,245,239,.92);}
 .collect-cash:hover{background:rgba(0,255,157,.18);}
 .collect-visa{border:1px solid var(--blue);background:rgba(77,159,255,.08);color:var(--blue);}
 .collect-visa:hover{background:rgba(77,159,255,.18);}
+.admin-unpaid-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;}
+.admin-unpaid-btn{padding:8px;border-radius:8px;font-family:var(--sans);font-size:12px;font-weight:800;cursor:pointer;transition:all .15s;border:1px solid var(--border2);background:transparent;color:var(--sub);}
+.admin-unpaid-edit{border-color:rgba(77,159,255,.45);color:var(--blue);}
+.admin-unpaid-edit:hover{background:rgba(77,159,255,.14);}
+.admin-unpaid-delete{border-color:rgba(255,77,109,.45);color:var(--danger);}
+.admin-unpaid-delete:hover{background:rgba(255,77,109,.14);}
 
 /* INVOICE DETAIL MODAL */
 .modal-bg{position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.8);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;}
@@ -558,6 +771,7 @@ body.light #right{background:rgba(244,245,239,.92);}
 .inv-modal{background:var(--card);border:1px solid var(--border2);border-radius:16px;padding:24px;width:380px;max-width:95vw;max-height:85vh;overflow-y:auto;animation:modalIn .2s ease;}
 @keyframes modalIn{from{opacity:0;transform:scale(.95)}to{opacity:1;transform:scale(1)}}
 .inv-modal-header{text-align:center;margin-bottom:14px;}
+.inv-logo{height:96px;max-width:220px;object-fit:contain;margin:0 auto 6px;display:block;}
 .inv-modal-num{font-family:var(--mono);font-size:12px;color:var(--muted);}
 .inv-modal-title{font-size:18px;font-weight:800;color:var(--green);margin-bottom:4px;}
 .inv-divider{border:none;border-top:1px dashed var(--border2);margin:12px 0;}
@@ -593,6 +807,7 @@ body.light .toast{background:var(--card);}
     .inv-modal-actions{display:none;}
     .modal-bg{position:static;background:white;display:block;}
     .inv-modal{box-shadow:none;border:none;background:white;color:black;max-height:none;}
+    .inv-logo{height:110px;}
     .inv-modal-title{color:black;}
     .inv-row .label,.inv-total-row{color:black;}
     .inv-item-name{color:black;}
@@ -765,7 +980,7 @@ body.light .toast{background:var(--card);}
 <div class="modal-bg" id="inv-modal">
     <div class="inv-modal" id="inv-modal-content">
         <div class="inv-modal-header">
-            <div style="font-size:16px;font-weight:800;color:var(--green);margin-bottom:2px;">🌿 Habiba Organic Farm</div>
+            <img class="inv-logo" src="/static/Logo.png" alt="Habiba Organic Farm">
             <div class="inv-modal-num" id="modal-inv-num">—</div>
         </div>
         <hr class="inv-divider">
@@ -850,6 +1065,9 @@ let customers=[], products=[], cart=[], lastCart=[];
 let categories=[], selectedCategory=null;
 let searchMode=false;
 let selectedCustomer = null;
+let currentUser = null;
+let editingUnpaidInvoiceId = null;
+let editingUnpaidInvoiceNumber = null;
 let userCanEditPrice = false;
 let selectedPayMethod = "cash";
 let toastTimer = null;
@@ -861,6 +1079,7 @@ let lastProcessedBarcode = "";
 let lastProcessedBarcodeAt = 0;
 initUser().then(u => {
     if(!u) return;
+    currentUser = u;
     if(!hasPermission("action_pos_discount", u)){
         document.getElementById("discount").disabled = true;
         document.getElementById("discount").value = "0";
@@ -875,6 +1094,18 @@ initUser().then(u => {
     userCanEditPrice = hasPermission("action_pos_edit_price", u);
     if(userCanEditPrice) drawCart();
 });
+
+function isAdminUser(){
+    return currentUser && currentUser.role === "admin";
+}
+
+function updateEditingState(){
+    const settleBtn = document.getElementById("settle_btn");
+    if(!settleBtn) return;
+    settleBtn.innerText = editingUnpaidInvoiceId
+        ? `Save Edit ${editingUnpaidInvoiceNumber || ""}`.trim()
+        : "⏳ Settle Later (requires customer)";
+}
 
 /* ── OFFLINE / INDEXEDDB ── */
 function openDB(){
@@ -1285,6 +1516,9 @@ function clearCart(){
     if(!cart.length) return;
     if(!confirm("Clear all items?")) return;
     lastCart=[...cart]; cart=[]; drawCart(); showToast("Cart cleared",true,true);
+    editingUnpaidInvoiceId = null;
+    editingUnpaidInvoiceNumber = null;
+    updateEditingState();
 }
 function undoCart(){ cart=[...lastCart]; drawCart(); hideToast(); }
 async function logout(){ await fetch("/auth/logout", { method: "POST" }); window.location.href="/"; }
@@ -1366,6 +1600,11 @@ function hideToast(){ document.getElementById("toast").classList.remove("show");
 /* ── CHECKOUT ── */
 async function checkout(settleLater=false){
     if(!cart.length){ showToast("Cart is empty"); return; }
+    if(editingUnpaidInvoiceId && !settleLater){
+        showToast("Use Save Edit to keep this invoice unpaid");
+        return;
+    }
+    if(editingUnpaidInvoiceId) settleLater = true;
     if(settleLater && !selectedCustomer){ showToast("Select a customer to settle later"); return; }
     let btn=document.getElementById(settleLater?"settle_btn":"checkout_btn");
     btn.disabled=true; btn.innerText="Processing…";
@@ -1380,8 +1619,8 @@ async function checkout(settleLater=false){
     };
 
     try {
-        let res=await fetch("/invoice",{
-            method:"POST",
+        let res=await fetch(editingUnpaidInvoiceId ? `/invoice/${editingUnpaidInvoiceId}` : "/invoice",{
+            method:editingUnpaidInvoiceId ? "PUT" : "POST",
             headers:{"Content-Type":"application/json"},
             body:JSON.stringify(payload),
         });
@@ -1393,7 +1632,10 @@ async function checkout(settleLater=false){
         }
         if(data.detail){ showToast("Error: "+data.detail); return; }
         if(settleLater){
-            showToast(`⏳ ${data.invoice_number} saved — settle later`);
+            showToast(editingUnpaidInvoiceId ? `✓ ${data.invoice_number} updated` : `⏳ ${data.invoice_number} saved — settle later`);
+            editingUnpaidInvoiceId = null;
+            editingUnpaidInvoiceNumber = null;
+            updateEditingState();
             clearCustomer(); cart=[]; drawCart();
             checkUnpaidCount();
         } else {
@@ -1404,6 +1646,10 @@ async function checkout(settleLater=false){
             window.location.href="/invoice/"+data.id;
         }
     } catch(e){
+        if(editingUnpaidInvoiceId){
+            showToast("Network error — could not save invoice edit");
+            return;
+        }
         // Network failure — queue for later sync
         try {
             await queueOfflineSale(payload);
@@ -1414,7 +1660,7 @@ async function checkout(settleLater=false){
             showToast("Network error — could not save offline");
         }
     }
-    finally { btn.disabled=false; btn.innerText=settleLater?"⏳ Settle Later (requires customer)":"Confirm Order"; }
+    finally { btn.disabled=false; btn.innerText=settleLater?(editingUnpaidInvoiceId ? "Save Edit" : "⏳ Settle Later (requires customer)"):"Confirm Order"; updateEditingState(); }
 }
 
 /* ── UNPAID INVOICES ── */
@@ -1454,10 +1700,68 @@ async function loadUnpaidInvoices(){
                         💳 Visa
                     </button>
                 </div>
+                <div class="admin-unpaid-actions" onclick="event.stopPropagation()" style="${isAdminUser() ? "" : "display:none"}">
+                    <button class="admin-unpaid-btn admin-unpaid-edit" onclick="editUnpaidInvoice(${JSON.stringify(inv).replace(/"/g,'&quot;')})">Edit</button>
+                    <button class="admin-unpaid-btn admin-unpaid-delete" onclick="deleteUnpaidInvoice(${inv.id})">Delete</button>
+                </div>
             </div>`).join("");
     } catch(e){
         list.innerHTML=`<div style="color:var(--danger);font-size:13px;text-align:center;padding:20px 0">Error loading invoices</div>`;
     }
+}
+
+function editUnpaidInvoice(inv){
+    if(!isAdminUser()) return;
+    if(typeof inv === "string") inv = JSON.parse(inv);
+    if(cart.length && !confirm("Replace the current cart with this unpaid invoice?")) return;
+
+    editingUnpaidInvoiceId = inv.id;
+    editingUnpaidInvoiceNumber = inv.invoice_number;
+    cart = inv.items.map(item => {
+        const product = products.find(p => p.sku === item.sku);
+        const catalogPrice = product ? Number(product.price) : Number(item.unit_price);
+        return {
+            sku:item.sku,
+            name:item.name,
+            price:Number(item.unit_price),
+            original_price:catalogPrice,
+            qty:Number(item.qty),
+        };
+    });
+
+    const customer = customers.find(c => Number(c.id) === Number(inv.customer_id));
+    selectedCustomer = inv.customer_id;
+    document.getElementById("cust_search").value = customer ? customer.name : inv.customer;
+    document.getElementById("sel_name").innerText = customer ? customer.name : inv.customer;
+    document.getElementById("selected_badge").classList.add("show");
+    document.getElementById("cust_wrap").style.display = "none";
+    const discountPct = inv.subtotal ? (Number(inv.discount || 0) / Number(inv.subtotal)) * 100 : 0;
+    document.getElementById("discount").value = discountPct.toFixed(1);
+    updateEditingState();
+    drawCart();
+    switchPosTab("cart");
+    closeInvModal();
+    showToast(`Editing ${inv.invoice_number}`);
+}
+
+async function deleteUnpaidInvoice(invoiceId){
+    if(!isAdminUser()) return;
+    if(!confirm("Delete this unpaid invoice and restore its stock?")) return;
+    let res = await fetch(`/invoice/${invoiceId}`, {method:"DELETE"});
+    let data = await res.json().catch(()=>({detail:`Request failed (${res.status})`}));
+    if(data.detail){ showToast("Error: "+data.detail); return; }
+    showToast(`✓ ${data.invoice_number} deleted`);
+    if(editingUnpaidInvoiceId === invoiceId){
+        editingUnpaidInvoiceId = null;
+        editingUnpaidInvoiceNumber = null;
+        cart = [];
+        clearCustomer();
+        drawCart();
+        updateEditingState();
+    }
+    closeInvModal();
+    loadUnpaidInvoices();
+    checkUnpaidCount();
 }
 
 async function collectPayment(invoiceId, invoiceNumber, method){
