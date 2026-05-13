@@ -13,7 +13,11 @@ from app.models.supplier import Supplier, Purchase, PurchaseItem
 from app.models.user import User
 from app.models.product import Product
 from app.models.inventory import StockMove
-from app.schemas.supplier import SupplierCreate, SupplierUpdate
+from app.schemas.supplier import SupplierCreate, SupplierUpdate, SupplierPaymentCreate
+from app.services.supplier_payment_service import (
+    record_supplier_payment,
+    supplier_account_statement,
+)
 
 router = APIRouter(
     prefix="/suppliers",
@@ -49,6 +53,7 @@ async def get_suppliers(q: str = "", db: AsyncSession = Depends(get_async_sessio
             "phone":   s.phone or "—",
             "email":   s.email or "—",
             "address": s.address or "—",
+            "balance": float(s.balance or 0),
             "purchases": len(s.purchases),
         }
         for s in items
@@ -79,6 +84,36 @@ async def delete_supplier(supplier_id: int, db: AsyncSession = Depends(get_async
         raise HTTPException(status_code=404, detail="Supplier not found")
     await db.delete(s); await db.commit()
     return {"ok": True}
+
+
+# ── ACCOUNT / PAYMENTS API ───────────────────────────
+@router.get("/api/{supplier_id}/account")
+async def supplier_account(
+    supplier_id: int,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Full statement for a supplier: profile, receipts on credit, payments, current balance."""
+    return await supplier_account_statement(db, supplier_id)
+
+
+@router.post("/api/{supplier_id}/pay")
+async def supplier_pay(
+    supplier_id: int,
+    data: SupplierPaymentCreate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Record a payment against a supplier's outstanding balance.
+    Does NOT create a new expense; only reduces balance and credits cash."""
+    return await record_supplier_payment(
+        db,
+        supplier_id=supplier_id,
+        amount=data.amount,
+        payment_date=data.payment_date,
+        payment_method=data.payment_method,
+        notes=data.notes,
+        current_user=current_user,
+    )
 
 
 # ── PURCHASE API ───────────────────────────────────────
@@ -494,12 +529,13 @@ td.mono { font-family: var(--mono); color: var(--green); }
                         <th>Phone</th>
                         <th>Email</th>
                         <th>Address</th>
+                        <th>Balance Owed</th>
                         <th>Orders</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody id="suppliers-body">
-                    <tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr>
+                    <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -539,6 +575,77 @@ td.mono { font-family: var(--mono); color: var(--green); }
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeSupplierModal()">Cancel</button>
             <button class="btn btn-green" onclick="saveSupplier()">Save Supplier</button>
+        </div>
+    </div>
+</div>
+
+<!-- SUPPLIER ACCOUNT MODAL -->
+<div class="modal-bg" id="account-modal">
+    <div class="modal" style="width:780px;max-height:90vh;overflow-y:auto">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <div>
+                <div class="modal-title" id="account-supplier-name" style="margin-bottom:4px">Supplier</div>
+                <div style="font-size:12px;color:var(--muted)">Account statement</div>
+            </div>
+            <button class="btn-cancel" onclick="closeAccountModal()">Close</button>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px">
+            <div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:14px">
+                <div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Current Balance</div>
+                <div id="acct-balance" style="font-family:var(--mono);font-size:22px;font-weight:800;color:var(--warn);margin-top:6px">0.00</div>
+            </div>
+            <div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:14px">
+                <div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Total Receipts</div>
+                <div id="acct-receipts-total" style="font-family:var(--mono);font-size:22px;font-weight:800;color:var(--text);margin-top:6px">0.00</div>
+            </div>
+            <div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:14px">
+                <div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Total Paid</div>
+                <div id="acct-paid-total" style="font-family:var(--mono);font-size:22px;font-weight:800;color:var(--green);margin-top:6px">0.00</div>
+            </div>
+        </div>
+
+        <!-- Record Payment form -->
+        <div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:18px">
+            <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:10px">Record a Payment</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+                <div class="fld" style="margin-bottom:0"><label>Amount</label><input type="number" id="pay-amount" step="0.01" min="0.01" placeholder="0.00"></div>
+                <div class="fld" style="margin-bottom:0"><label>Date</label><input type="date" id="pay-date"></div>
+                <div class="fld" style="margin-bottom:0">
+                    <label>Method</label>
+                    <select id="pay-method">
+                        <option value="cash">Cash</option>
+                        <option value="bank_transfer">Bank Transfer</option>
+                        <option value="card">Card</option>
+                    </select>
+                </div>
+            </div>
+            <div class="fld" style="margin-bottom:0;margin-top:10px"><label>Notes (optional)</label><input id="pay-notes" placeholder="Optional notes"></div>
+            <div style="display:flex;justify-content:flex-end;margin-top:12px">
+                <button class="btn btn-green" onclick="submitSupplierPayment()">Record Payment</button>
+            </div>
+        </div>
+
+        <!-- Receipts on this supplier -->
+        <div style="font-size:13px;font-weight:700;color:var(--text);margin:8px 0">Stock Receipts</div>
+        <div class="table-wrap" style="margin-bottom:14px">
+            <table>
+                <thead>
+                    <tr><th>Ref</th><th>Date</th><th>Product</th><th>Qty</th><th>Total</th><th>Paid</th><th>Unpaid</th></tr>
+                </thead>
+                <tbody id="acct-receipts-body"><tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">—</td></tr></tbody>
+            </table>
+        </div>
+
+        <!-- Payment history -->
+        <div style="font-size:13px;font-weight:700;color:var(--text);margin:8px 0">Payment History</div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr><th>Ref</th><th>Date</th><th>Amount</th><th>Method</th><th>Notes</th><th>By</th></tr>
+                </thead>
+                <tbody id="acct-payments-body"><tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">—</td></tr></tbody>
+            </table>
         </div>
     </div>
 </div>
@@ -743,22 +850,30 @@ async function loadSuppliers(){
 
         if(!suppliers.length){
             document.getElementById("suppliers-body").innerHTML =
-                `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">No suppliers found</td></tr>`;
+                `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No suppliers found</td></tr>`;
             return;
         }
 
-        document.getElementById("suppliers-body").innerHTML = suppliers.map(s => `
+        document.getElementById("suppliers-body").innerHTML = suppliers.map(s => {
+            const bal = Number(s.balance || 0);
+            const balCell = bal > 0
+                ? `<span style="color:var(--warn);font-weight:700">${bal.toFixed(2)}</span>`
+                : `<span style="color:var(--muted)">${bal.toFixed(2)}</span>`;
+            return `
             <tr>
                 <td class="name">${s.name}</td>
                 <td style="font-family:var(--mono);font-size:12px">${s.phone}</td>
                 <td style="font-size:12px">${s.email}</td>
                 <td style="font-size:12px">${s.address}</td>
+                <td style="font-family:var(--mono)">${balCell}</td>
                 <td style="font-family:var(--mono);color:var(--blue)">${s.purchases}</td>
-                <td style="display:flex;gap:6px">
+                <td style="display:flex;gap:6px;flex-wrap:wrap">
+                    <button class="action-btn" onclick="openSupplierAccount(${s.id},'${escapeJsString(s.name)}')">Account</button>
                     <button class="action-btn" onclick="openEditSupplierModal(${s.id},'${escapeJsString(s.name)}','${escapeJsString(s.phone)}','${escapeJsString(s.email)}','${escapeJsString(s.address)}')">Edit</button>
                     <button class="action-btn danger" onclick="deleteSupplier(${s.id},'${escapeJsString(s.name)}')">Delete</button>
                 </td>
-            </tr>`).join("");
+            </tr>`;
+        }).join("");
     } catch (error) {
         console.error("Failed to load suppliers", error);
         document.getElementById("suppliers-body").innerHTML =
@@ -818,6 +933,120 @@ async function deleteSupplier(id,name){
     if(data.detail){ showToast("Error: "+data.detail); return; }
     showToast("Supplier deleted ✓");
     loadSuppliers();
+}
+
+/* ── SUPPLIER ACCOUNT ── */
+let currentAccountSupplierId = null;
+
+function fmtMoney(v){ return Number(v||0).toFixed(2); }
+
+function escHtml(s){
+    return String(s ?? "")
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+async function openSupplierAccount(id, name){
+    currentAccountSupplierId = id;
+    document.getElementById("account-supplier-name").textContent = name;
+    document.getElementById("acct-receipts-body").innerHTML =
+        `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">Loading…</td></tr>`;
+    document.getElementById("acct-payments-body").innerHTML =
+        `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">Loading…</td></tr>`;
+    document.getElementById("pay-amount").value = "";
+    document.getElementById("pay-notes").value = "";
+    document.getElementById("pay-method").value = "cash";
+    document.getElementById("pay-date").value = new Date().toISOString().slice(0,10);
+    document.getElementById("account-modal").classList.add("open");
+    await loadSupplierAccount();
+}
+
+function closeAccountModal(){
+    document.getElementById("account-modal").classList.remove("open");
+    currentAccountSupplierId = null;
+}
+
+async function loadSupplierAccount(){
+    if(currentAccountSupplierId == null) return;
+    try {
+        const res = await fetch(`/suppliers/api/${currentAccountSupplierId}/account`);
+        if(!res.ok){
+            const err = await res.json().catch(()=>({}));
+            showToast("Could not load account: " + (err.detail || "error"));
+            return;
+        }
+        const data = await res.json();
+
+        document.getElementById("account-supplier-name").textContent = data.supplier.name;
+        document.getElementById("acct-balance").textContent = fmtMoney(data.supplier.balance);
+
+        const receipts = data.receipts || [];
+        const totalReceipts = receipts.reduce((s,r)=>s + Number(r.total||0), 0);
+        const totalPaid = receipts.reduce((s,r)=>s + Number(r.paid||0), 0)
+                          + (data.payments||[]).reduce((s,p)=>s + Number(p.amount||0), 0);
+        document.getElementById("acct-receipts-total").textContent = fmtMoney(totalReceipts);
+        document.getElementById("acct-paid-total").textContent = fmtMoney(totalPaid);
+
+        if(!receipts.length){
+            document.getElementById("acct-receipts-body").innerHTML =
+                `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">No receipts</td></tr>`;
+        } else {
+            document.getElementById("acct-receipts-body").innerHTML = receipts.map(r => `
+                <tr>
+                    <td style="font-family:var(--mono);font-size:12px">${escHtml(r.ref_number)}</td>
+                    <td style="font-size:12px">${escHtml(r.receive_date||'—')}</td>
+                    <td>${escHtml(r.product_name||'—')}</td>
+                    <td style="font-family:var(--mono);font-size:12px">${Number(r.qty||0).toFixed(3)}</td>
+                    <td style="font-family:var(--mono)">${fmtMoney(r.total)}</td>
+                    <td style="font-family:var(--mono);color:var(--green)">${fmtMoney(r.paid)}</td>
+                    <td style="font-family:var(--mono);color:${Number(r.unpaid||0)>0?'var(--warn)':'var(--muted)'}">${fmtMoney(r.unpaid)}</td>
+                </tr>`).join("");
+        }
+
+        const payments = data.payments || [];
+        if(!payments.length){
+            document.getElementById("acct-payments-body").innerHTML =
+                `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">No payments yet</td></tr>`;
+        } else {
+            document.getElementById("acct-payments-body").innerHTML = payments.map(p => `
+                <tr>
+                    <td style="font-family:var(--mono);font-size:12px">${escHtml(p.ref_number)}</td>
+                    <td style="font-size:12px">${escHtml(p.payment_date||'—')}</td>
+                    <td style="font-family:var(--mono);color:var(--green)">${fmtMoney(p.amount)}</td>
+                    <td style="font-size:12px">${escHtml(p.payment_method||'cash')}</td>
+                    <td style="font-size:12px;color:var(--sub)">${escHtml(p.notes||'—')}</td>
+                    <td style="font-size:12px;color:var(--sub)">${escHtml(p.recorded_by||'—')}</td>
+                </tr>`).join("");
+        }
+    } catch(e){
+        showToast("Network error loading account");
+    }
+}
+
+async function submitSupplierPayment(){
+    if(currentAccountSupplierId == null) return;
+    const amount = parseFloat(document.getElementById("pay-amount").value);
+    const date   = document.getElementById("pay-date").value;
+    const method = document.getElementById("pay-method").value;
+    const notes  = document.getElementById("pay-notes").value.trim();
+    if(!amount || amount <= 0){ showToast("Enter a positive amount"); return; }
+    if(!date){ showToast("Choose a date"); return; }
+    try {
+        const res = await fetch(`/suppliers/api/${currentAccountSupplierId}/pay`, {
+            method:  "POST",
+            headers: {"Content-Type":"application/json"},
+            body:    JSON.stringify({
+                amount, payment_date: date, payment_method: method, notes: notes || null
+            }),
+        });
+        const data = await res.json();
+        if(!res.ok){ showToast("Error: " + (data.detail || "payment failed")); return; }
+        showToast(`Payment recorded ✓  (${data.ref_number})`);
+        document.getElementById("pay-amount").value = "";
+        document.getElementById("pay-notes").value = "";
+        await loadSupplierAccount();
+        await loadSuppliers();
+    } catch(e){ showToast("Network error"); }
 }
 
 /* ── PURCHASES ── */
@@ -993,6 +1222,7 @@ function closeSide(){
 
 document.getElementById("supplier-modal").addEventListener("click",function(e){ if(e.target===this)closeSupplierModal(); });
 document.getElementById("po-modal").addEventListener("click",function(e){ if(e.target===this)closePOModal(); });
+document.getElementById("account-modal").addEventListener("click",function(e){ if(e.target===this)closeAccountModal(); });
 
 let toastTimer=null;
 function showToast(msg){

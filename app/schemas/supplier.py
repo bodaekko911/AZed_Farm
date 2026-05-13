@@ -1,3 +1,4 @@
+from datetime import date as date_type
 from pydantic import BaseModel, Field
 from typing import Optional, List
 
@@ -27,3 +28,11 @@ class PurchaseCreate(BaseModel):
     items:          List[PurchaseItemCreate]
     notes:          Optional[str] = Field(None, max_length=500)
     payment_method: str = Field("cash", max_length=50)
+
+
+class SupplierPaymentCreate(BaseModel):
+    """Payment recorded against a supplier's outstanding balance."""
+    amount:         float    = Field(..., gt=0)
+    payment_date:   date_type
+    payment_method: str      = Field("cash", max_length=20)
+    notes:          Optional[str] = Field(None, max_length=500)

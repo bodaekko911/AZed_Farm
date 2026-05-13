@@ -3,6 +3,15 @@
 Handles stock intake: updates inventory, creates a StockMove, and — when a
 cost is provided — posts a linked Expense + double-entry Journal.
 
+Supports three payment modes when a supplier is linked:
+  • cash     — fully paid at receive   → Dr Expense / Cr Cash
+  • credit   — fully on supplier credit → Dr Expense / Cr Accounts Payable
+  • partial  — split between cash + credit
+                → Dr Expense / Cr Cash (paid portion) + Cr A/P (unpaid)
+
+If no supplier is linked, behaviour is exactly cash (legacy).
+The supplier's `balance` is increased by the unpaid portion (we owe them).
+
 The internal `_create_receipt_core` does all work without committing so that
 `create_receipt_batch` can process multiple products in one transaction.
 """
@@ -24,6 +33,7 @@ from app.models.expense import Expense, ExpenseCategory
 from app.models.inventory import StockMove
 from app.models.product import Product
 from app.models.receipt import ProductReceipt
+from app.models.supplier import Supplier
 from app.models.user import User
 
 _MONEY = Decimal("0.01")
@@ -40,6 +50,11 @@ RECEIPT_PRODUCT_TYPE_TO_CATEGORY = {
     PRODUCT_TYPE_PACKAGING: (PACKAGING_CATEGORY_NAME, PACKAGING_CATEGORY_ACCOUNT_CODE),
 }
 
+CASH_ACCOUNT_CODE = "1000"
+CASH_ACCOUNT_NAME = "Cash"
+AP_ACCOUNT_CODE   = "2000"
+AP_ACCOUNT_NAME   = "Accounts Payable"
+
 
 # ── Input schemas ─────────────────────────────────────────────────────────────
 
@@ -51,6 +66,8 @@ class ReceiptCreate(BaseModel):
     product_type: Literal["products", "packaging_materials"]
     receive_date: date_type
     supplier_ref: Optional[str]   = Field(None, max_length=150)
+    supplier_id:  Optional[int]   = Field(None, ge=1)
+    amount_paid:  Optional[float] = Field(None, ge=0)  # cash paid at receive time
     notes:        Optional[str]   = None
     affect_stock: bool            = True
 
@@ -63,16 +80,28 @@ class BatchReceiptItem(BaseModel):
 
 
 class BatchReceiptCreate(BaseModel):
-    """Multi-product receive submitted from the form."""
+    """Multi-product receive submitted from the form.
+
+    Payment fields apply to the whole batch:
+      • supplier_id  — optional supplier link
+      • amount_paid  — total cash paid (split proportionally across line items)
+    """
     product_type: Literal["products", "packaging_materials"]
     receive_date: date_type
     supplier_ref: Optional[str] = Field(None, max_length=150)
+    supplier_id:  Optional[int] = Field(None, ge=1)
+    amount_paid:  Optional[float] = Field(None, ge=0)
     notes:        Optional[str] = None
     items:        list[BatchReceiptItem] = Field(..., min_length=1)
 
 
 class ReceiptUpdate(BaseModel):
-    """Editable fields for an existing receipt."""
+    """Editable fields for an existing receipt.
+
+    Note: supplier link and payment status are NOT editable here. Use the
+    suppliers payment API to record additional payments. Changing total cost
+    is only permitted when the receipt was a cash receipt (no supplier credit).
+    """
     qty:          float           = Field(..., gt=0)
     unit_cost:    Optional[float] = Field(None, ge=0)
     product_type: Optional[Literal["products", "packaging_materials"]] = None
@@ -153,6 +182,16 @@ async def _get_or_create_receipt_category(
     return category
 
 
+def _payment_method_label(paid: Decimal, total: Decimal) -> str:
+    if total <= 0:
+        return "cash"
+    if paid >= total:
+        return "cash"
+    if paid <= 0:
+        return "credit"
+    return "partial"
+
+
 async def _post_receipt_expense(
     db: AsyncSession,
     *,
@@ -161,12 +200,26 @@ async def _post_receipt_expense(
     receipt_ref: str,
     qty: Decimal,
     total_cost: Decimal,
+    paid_cash: Decimal,
     receive_date: date_type,
+    supplier: Optional[Supplier],
     supplier_ref: Optional[str],
     user_id: Optional[int],
 ) -> Expense:
-    """Create Expense + double-entry Journal. No commit — caller owns transaction."""
+    """Create Expense + double-entry Journal.
+
+    Journal layout:
+      Debit  expense account        (total_cost)
+      Credit cash                   (paid_cash)            ── if > 0
+      Credit accounts_payable       (total_cost - paid_cash) ── if > 0
+
+    No commit — caller owns transaction.
+    """
     exp_ref = await _next_expense_ref(db)
+    unpaid  = (total_cost - paid_cash)
+    if unpaid < 0:
+        unpaid = Decimal("0")
+    payment_method = _payment_method_label(paid_cash, total_cost)
 
     journal = Journal(
         ref_type="expense",
@@ -176,23 +229,44 @@ async def _post_receipt_expense(
     db.add(journal)
     await db.flush()
 
-    amount      = float(total_cost)
+    total_amount = float(total_cost)
     expense_acc = await _ensure_account(db, category.account_code, category.name, "expense")
-    cash_acc    = await _ensure_account(db, "1000", "Cash", "asset")
+    db.add(JournalEntry(
+        journal_id=journal.id, account_id=expense_acc.id,
+        debit=total_amount, credit=0,
+    ))
+    expense_acc.balance = Decimal(str(expense_acc.balance or 0)) + total_cost
 
-    db.add(JournalEntry(journal_id=journal.id, account_id=expense_acc.id, debit=amount, credit=0))
-    db.add(JournalEntry(journal_id=journal.id, account_id=cash_acc.id,    debit=0,      credit=amount))
-    expense_acc.balance += Decimal(str(amount))
-    cash_acc.balance    -= Decimal(str(amount))
+    if paid_cash > 0:
+        cash_acc = await _ensure_account(db, CASH_ACCOUNT_CODE, CASH_ACCOUNT_NAME, "asset")
+        db.add(JournalEntry(
+            journal_id=journal.id, account_id=cash_acc.id,
+            debit=0, credit=float(paid_cash),
+        ))
+        cash_acc.balance = Decimal(str(cash_acc.balance or 0)) - paid_cash
+
+    if unpaid > 0:
+        ap_acc = await _ensure_account(db, AP_ACCOUNT_CODE, AP_ACCOUNT_NAME, "liability")
+        db.add(JournalEntry(
+            journal_id=journal.id, account_id=ap_acc.id,
+            debit=0, credit=float(unpaid),
+        ))
+        ap_acc.balance = Decimal(str(ap_acc.balance or 0)) + unpaid
+
+    # bump supplier balance with the unpaid amount
+    if supplier is not None and unpaid > 0:
+        supplier.balance = Decimal(str(supplier.balance or 0)) + unpaid
+
+    vendor_label = supplier.name if supplier is not None else supplier_ref
 
     expense = Expense(
         ref_number=exp_ref,
         category_id=category.id,
         user_id=user_id,
         expense_date=receive_date,
-        amount=amount,
-        payment_method="cash",
-        vendor=supplier_ref,
+        amount=total_amount,
+        payment_method=payment_method,
+        vendor=vendor_label,
         description=(
             f"Stock receipt {receipt_ref} — "
             f"{float(qty):.3f} \u00d7 {product_name}"
@@ -210,6 +284,7 @@ async def _get_receipt_or_404(db: AsyncSession, receipt_id: int) -> ProductRecei
             selectinload(ProductReceipt.product),
             selectinload(ProductReceipt.user),
             selectinload(ProductReceipt.expense),
+            selectinload(ProductReceipt.supplier),
         )
         .where(ProductReceipt.id == receipt_id)
     )
@@ -242,6 +317,7 @@ async def _get_receipt_move(db: AsyncSession, receipt_id: int) -> StockMove | No
 
 
 async def _delete_expense_bundle(db: AsyncSession, expense: Expense | None) -> None:
+    """Delete expense + reverse its journal account balances. No supplier reversal."""
     if expense is None:
         return
 
@@ -257,7 +333,11 @@ async def _delete_expense_bundle(db: AsyncSession, expense: Expense | None) -> N
     if journal is not None:
         for entry in journal.entries:
             if entry.account is not None and entry.account.balance is not None:
-                entry.account.balance = Decimal(str(entry.account.balance)) - Decimal(str(entry.debit or 0)) + Decimal(str(entry.credit or 0))
+                entry.account.balance = (
+                    Decimal(str(entry.account.balance))
+                    - Decimal(str(entry.debit or 0))
+                    + Decimal(str(entry.credit or 0))
+                )
         await db.delete(journal)
 
     await db.delete(expense)
@@ -274,6 +354,29 @@ async def _sync_receipt_expense(
     supplier_ref: Optional[str],
     product_type: Optional[str] = None,
 ) -> Optional[str]:
+    """Update path: only safe when receipt has NO outstanding supplier balance.
+
+    If the receipt was on credit/partial, we refuse to mutate the journal here
+    to keep supplier balance + A/P consistent. Caller should reject those edits
+    upstream; this function is a defensive no-op for those cases.
+    """
+    # Refuse edits to receipts that carried any supplier credit.
+    paid_cash = Decimal(str(receipt.amount_paid or 0))
+    original_total = Decimal(str(receipt.total_cost or 0))
+    had_credit = (
+        receipt.supplier_id is not None
+        and original_total > 0
+        and paid_cash < original_total
+    )
+    if had_credit:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Cannot edit a receipt that was on supplier credit. "
+                "Record a payment from the Suppliers page, or delete and re-create."
+            ),
+        )
+
     if total_cost is None or total_cost <= 0:
         if receipt.expense_id:
             expense_result = await db.execute(
@@ -284,6 +387,7 @@ async def _sync_receipt_expense(
             expense = expense_result.scalar_one_or_none()
             await _delete_expense_bundle(db, expense)
             receipt.expense_id = None
+        receipt.amount_paid = Decimal("0")
         return None
 
     if receipt.expense_id is None:
@@ -297,14 +401,18 @@ async def _sync_receipt_expense(
             receipt_ref=receipt.ref_number,
             qty=qty,
             total_cost=total_cost,
+            paid_cash=total_cost,             # cash on edit-recreate
             receive_date=receive_date,
+            supplier=None,
             supplier_ref=supplier_ref,
             user_id=receipt.user_id,
         )
         await db.flush()
         receipt.expense_id = expense.id
+        receipt.amount_paid = total_cost
         return expense.ref_number
 
+    # Existing expense — straightforward cash receipt update path
     expense_result = await db.execute(
         select(Expense)
         .options(selectinload(Expense.category))
@@ -340,7 +448,7 @@ async def _sync_receipt_expense(
         expense.category_id = expense_category.id
 
     expense_account = await _ensure_account(db, expense_category.account_code, expense_category.name, "expense")
-    cash_account = await _ensure_account(db, "1000", "Cash", "asset")
+    cash_account = await _ensure_account(db, CASH_ACCOUNT_CODE, CASH_ACCOUNT_NAME, "asset")
     if delta:
         expense_account.balance = Decimal(str(expense_account.balance or 0)) + delta
         cash_account.balance = Decimal(str(cash_account.balance or 0)) - delta
@@ -384,11 +492,26 @@ async def _sync_receipt_expense(
     expense.expense_date = receive_date
     expense.amount = float(total_cost)
     expense.vendor = supplier_ref
+    expense.payment_method = "cash"
     expense.description = (
         f"Stock receipt {receipt.ref_number} — "
         f"{float(qty):.3f} × {product_name}"
     )
+    receipt.amount_paid = total_cost
     return expense.ref_number
+
+
+async def _resolve_supplier(
+    db: AsyncSession,
+    supplier_id: Optional[int],
+) -> Optional[Supplier]:
+    if supplier_id is None:
+        return None
+    result = await db.execute(select(Supplier).where(Supplier.id == supplier_id))
+    supplier = result.scalar_one_or_none()
+    if supplier is None:
+        raise HTTPException(status_code=404, detail=f"Supplier {supplier_id} not found")
+    return supplier
 
 
 async def _create_receipt_core(
@@ -413,6 +536,28 @@ async def _create_receipt_core(
         unit_cost  = Decimal(str(data.unit_cost)).quantize(_MONEY, rounding=ROUND_HALF_UP)
         total_cost = (qty * unit_cost).quantize(_MONEY, rounding=ROUND_HALF_UP)
 
+    # Resolve supplier + payment split
+    supplier = await _resolve_supplier(db, data.supplier_id)
+
+    # Determine cash paid for this line
+    if total_cost is None or total_cost <= 0:
+        paid_cash = Decimal("0")
+    else:
+        if data.amount_paid is None:
+            # Default: no supplier ⇒ fully cash. With supplier ⇒ fully credit.
+            paid_cash = Decimal("0") if supplier is not None else total_cost
+        else:
+            paid_cash = Decimal(str(data.amount_paid)).quantize(_MONEY, rounding=ROUND_HALF_UP)
+            if paid_cash > total_cost:
+                paid_cash = total_cost
+            if paid_cash < 0:
+                paid_cash = Decimal("0")
+
+    # Credit (unpaid) is only meaningful when supplier is set
+    if supplier is None and total_cost is not None and total_cost > 0:
+        # No supplier => must be fully cash for clean accounting
+        paid_cash = total_cost
+
     ref_number = await _next_receipt_ref(db)
 
     qty_before    = Decimal(str(product.stock or 0))
@@ -434,6 +579,8 @@ async def _create_receipt_core(
         unit_cost=unit_cost,
         total_cost=total_cost,
         supplier_ref=supplier_ref,
+        supplier_id=supplier.id if supplier is not None else None,
+        amount_paid=paid_cash,
         notes=notes,
     )
     db.add(receipt)
@@ -457,6 +604,8 @@ async def _create_receipt_core(
         await db.flush()
 
     expense_ref: Optional[str] = None
+    payment_method = "cash"
+    unpaid_amount = Decimal("0")
     if total_cost and total_cost > 0:
         category = await _get_or_create_receipt_category(db, product_type=data.product_type)
         expense  = await _post_receipt_expense(
@@ -466,13 +615,17 @@ async def _create_receipt_core(
             receipt_ref=ref_number,
             qty=qty,
             total_cost=total_cost,
+            paid_cash=paid_cash,
             receive_date=data.receive_date,
+            supplier=supplier,
             supplier_ref=supplier_ref,
             user_id=current_user.id,
         )
         await db.flush()
         receipt.expense_id = expense.id
         expense_ref = expense.ref_number
+        payment_method = expense.payment_method
+        unpaid_amount = (total_cost - paid_cash)
 
     record(
         db,
@@ -485,20 +638,25 @@ async def _create_receipt_core(
     )
 
     return {
-        "id":           receipt.id,
-        "ref_number":   ref_number,
-        "product_id":   product.id,
-        "product_name": product.name,
-        "product_sku":  product.sku,
-        "receive_date": data.receive_date.isoformat(),
-        "qty":          float(qty),
-        "unit_cost":    float(unit_cost)  if unit_cost  else None,
-        "total_cost":   float(total_cost) if total_cost else None,
-        "supplier_ref": supplier_ref,
-        "notes":        notes,
-        "product_type": data.product_type,
-        "expense_id":   receipt.expense_id,
-        "expense_ref":  expense_ref,
+        "id":             receipt.id,
+        "ref_number":     ref_number,
+        "product_id":     product.id,
+        "product_name":   product.name,
+        "product_sku":    product.sku,
+        "receive_date":   data.receive_date.isoformat(),
+        "qty":            float(qty),
+        "unit_cost":      float(unit_cost)  if unit_cost  else None,
+        "total_cost":     float(total_cost) if total_cost else None,
+        "supplier_ref":   supplier_ref,
+        "supplier_id":    supplier.id   if supplier else None,
+        "supplier_name":  supplier.name if supplier else None,
+        "amount_paid":    float(paid_cash),
+        "amount_unpaid":  float(unpaid_amount) if unpaid_amount > 0 else 0.0,
+        "payment_method": payment_method,
+        "notes":          notes,
+        "product_type":   data.product_type,
+        "expense_id":     receipt.expense_id,
+        "expense_ref":    expense_ref,
     }
 
 
@@ -616,6 +774,21 @@ async def delete_receipt(
 
     product.stock = new_stock
 
+    # Reverse supplier balance if there was unpaid credit on this receipt
+    if receipt.supplier_id is not None:
+        total_cost = Decimal(str(receipt.total_cost or 0))
+        paid_cash  = Decimal(str(receipt.amount_paid or 0))
+        unpaid     = total_cost - paid_cash
+        if unpaid > 0:
+            supplier = receipt.supplier
+            if supplier is None:
+                sup_result = await db.execute(
+                    select(Supplier).where(Supplier.id == receipt.supplier_id)
+                )
+                supplier = sup_result.scalar_one_or_none()
+            if supplier is not None:
+                supplier.balance = Decimal(str(supplier.balance or 0)) - unpaid
+
     move = await _get_receipt_move(db, receipt.id)
     if move is not None:
         await db.delete(move)
@@ -652,17 +825,67 @@ async def create_receipt_batch(
     """
     Multi-product receive submitted in one form.
 
+    Payment split: amount_paid is distributed across line items proportionally
+    to each line's total cost. All items share supplier_id.
+
     All items are processed inside a single transaction:
     one commit at the end — if any product is invalid the whole batch rolls back.
     """
-    receipts: list[dict[str, Any]] = []
+    # First pass — compute per-line totals so we can distribute amount_paid proportionally.
+    line_totals: list[Decimal] = []
     for item in data.items:
+        if item.unit_cost is not None and item.unit_cost > 0:
+            t = (Decimal(str(item.qty)) * Decimal(str(item.unit_cost))).quantize(
+                _MONEY, rounding=ROUND_HALF_UP
+            )
+        else:
+            t = Decimal("0")
+        line_totals.append(t)
+    grand_total = sum(line_totals, Decimal("0"))
+
+    # Determine total amount_paid for the batch
+    if data.amount_paid is None:
+        # No supplier ⇒ implicit fully cash. With supplier ⇒ fully credit.
+        if data.supplier_id is None:
+            total_paid = grand_total
+        else:
+            total_paid = Decimal("0")
+    else:
+        total_paid = Decimal(str(data.amount_paid)).quantize(_MONEY, rounding=ROUND_HALF_UP)
+        if total_paid > grand_total:
+            total_paid = grand_total
+        if total_paid < 0:
+            total_paid = Decimal("0")
+
+    # Distribute total_paid across lines proportionally; assign rounding remainder to last paid line.
+    per_line_paid: list[Decimal] = []
+    if grand_total > 0 and total_paid > 0:
+        running = Decimal("0")
+        for i, lt in enumerate(line_totals):
+            if i == len(line_totals) - 1:
+                share = total_paid - running
+            else:
+                share = (total_paid * lt / grand_total).quantize(_MONEY, rounding=ROUND_HALF_UP)
+                running += share
+            if share < 0:
+                share = Decimal("0")
+            if share > lt:
+                share = lt
+            per_line_paid.append(share)
+    else:
+        per_line_paid = [Decimal("0")] * len(line_totals)
+
+    receipts: list[dict[str, Any]] = []
+    for idx, item in enumerate(data.items):
+        paid_for_line = float(per_line_paid[idx]) if line_totals[idx] > 0 else None
         line = ReceiptCreate(
             product_id=item.product_id,
             qty=item.qty,
             unit_cost=item.unit_cost,
             receive_date=data.receive_date,
             supplier_ref=data.supplier_ref,
+            supplier_id=data.supplier_id,
+            amount_paid=paid_for_line,
             notes=data.notes,
             product_type=data.product_type,
         )
@@ -670,11 +893,15 @@ async def create_receipt_batch(
 
     await db.commit()
 
-    total_cost = sum(r["total_cost"] or 0 for r in receipts)
+    total_cost   = sum(r["total_cost"]    or 0 for r in receipts)
+    total_paid_f = sum(r["amount_paid"]   or 0 for r in receipts)
+    total_unpaid = sum(r["amount_unpaid"] or 0 for r in receipts)
     return {
-        "count":      len(receipts),
-        "total_cost": round(total_cost, 2),
-        "receipts":   receipts,
+        "count":         len(receipts),
+        "total_cost":    round(total_cost, 2),
+        "total_paid":    round(total_paid_f, 2),
+        "total_unpaid":  round(total_unpaid, 2),
+        "receipts":      receipts,
     }
 
 
@@ -685,7 +912,7 @@ async def list_receipts(
     limit: int = 50,
     product_id: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Paginated receipt history with product, user, and expense refs."""
+    """Paginated receipt history with product, user, supplier, and expense refs."""
     base = select(ProductReceipt)
     if product_id is not None:
         base = base.where(ProductReceipt.product_id == product_id)
@@ -699,6 +926,7 @@ async def list_receipts(
         base.options(
             selectinload(ProductReceipt.product),
             selectinload(ProductReceipt.user),
+            selectinload(ProductReceipt.supplier),
             selectinload(ProductReceipt.expense).selectinload(Expense.category),
         )
         .order_by(ProductReceipt.receive_date.desc(), ProductReceipt.id.desc())
@@ -708,27 +936,35 @@ async def list_receipts(
     result   = await db.execute(rows_stmt)
     receipts = result.scalars().all()
 
+    def _row(r: ProductReceipt) -> dict[str, Any]:
+        total_cost = float(r.total_cost) if r.total_cost is not None else None
+        paid       = float(r.amount_paid) if r.amount_paid is not None else 0.0
+        unpaid     = (total_cost - paid) if (total_cost is not None) else None
+        return {
+            "id":             r.id,
+            "ref_number":     r.ref_number,
+            "product_id":     r.product_id,
+            "product_name":   r.product.name if r.product else None,
+            "product_sku":    r.product.sku  if r.product else None,
+            "receive_date":   r.receive_date.isoformat() if r.receive_date else None,
+            "qty":            float(r.qty),
+            "unit_cost":      float(r.unit_cost) if r.unit_cost is not None else None,
+            "total_cost":     total_cost,
+            "supplier_ref":   r.supplier_ref,
+            "supplier_id":    r.supplier_id,
+            "supplier_name":  r.supplier.name if r.supplier else None,
+            "amount_paid":    paid,
+            "amount_unpaid":  unpaid if (unpaid and unpaid > 0) else 0.0,
+            "payment_method": (r.expense.payment_method if r.expense else None),
+            "notes":          r.notes,
+            "expense_category_name": r.expense.category.name if r.expense and r.expense.category else None,
+            "expense_id":     r.expense_id,
+            "expense_ref":    r.expense.ref_number if r.expense else None,
+            "received_by":    r.user.name if r.user else None,
+            "created_at":     r.created_at.isoformat() if r.created_at else None,
+        }
+
     return {
         "total": total,
-        "items": [
-            {
-                "id":           r.id,
-                "ref_number":   r.ref_number,
-                "product_id":   r.product_id,
-                "product_name": r.product.name if r.product else None,
-                "product_sku":  r.product.sku  if r.product else None,
-                "receive_date": r.receive_date.isoformat() if r.receive_date else None,
-                "qty":          float(r.qty),
-                "unit_cost":    float(r.unit_cost)  if r.unit_cost  is not None else None,
-                "total_cost":   float(r.total_cost) if r.total_cost is not None else None,
-                "supplier_ref": r.supplier_ref,
-                "notes":        r.notes,
-                "expense_category_name": r.expense.category.name if r.expense and r.expense.category else None,
-                "expense_id":   r.expense_id,
-                "expense_ref":  r.expense.ref_number if r.expense else None,
-                "received_by":  r.user.name if r.user else None,
-                "created_at":   r.created_at.isoformat() if r.created_at else None,
-            }
-            for r in receipts
-        ],
+        "items": [_row(r) for r in receipts],
     }

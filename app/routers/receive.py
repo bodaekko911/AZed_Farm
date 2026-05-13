@@ -87,6 +87,21 @@ async def get_products(db: AsyncSession = Depends(get_async_session)):
     ]
 
 
+@router.get("/api/suppliers")
+async def get_suppliers_list(db: AsyncSession = Depends(get_async_session)):
+    """Lightweight supplier list for the receive form dropdown."""
+    from app.models.supplier import Supplier
+    result = await db.execute(select(Supplier).order_by(Supplier.name))
+    return [
+        {
+            "id":      s.id,
+            "name":    s.name,
+            "balance": float(s.balance or 0),
+        }
+        for s in result.scalars().all()
+    ]
+
+
 @router.post("/api/receive-batch", status_code=201)
 async def receive_products_batch(
     data: BatchReceiptCreate,
@@ -151,6 +166,10 @@ async def export_receipts_excel(
         "Unit Cost",
         "Total Cost",
         "Expense Ref",
+        "Supplier",
+        "Amount Paid",
+        "Amount Unpaid",
+        "Payment Method",
         "Supplier Ref",
         "Notes",
         "Received By",
@@ -166,6 +185,10 @@ async def export_receipts_excel(
             item["unit_cost"],
             item["total_cost"],
             item["expense_ref"],
+            item.get("supplier_name"),
+            item.get("amount_paid"),
+            item.get("amount_unpaid"),
+            item.get("payment_method"),
             item["supplier_ref"],
             item["notes"],
             item["received_by"],
@@ -455,8 +478,33 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
           </div>
         </div>
         <div class="field">
-          <label>Supplier / Reference <span style="color:var(--muted);font-weight:400">(optional)</span></label>
-          <input type="text" id="supplier-ref" maxlength="150" placeholder="e.g. Acme Supplies / INV-2026-001">
+          <label>Supplier <span style="color:var(--muted);font-weight:400">(optional — for credit tracking)</span></label>
+          <select id="supplier-select" onchange="onSupplierChange()">
+            <option value="">— No supplier (cash purchase) —</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Supplier Ref / Invoice <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+          <input type="text" id="supplier-ref" maxlength="150" placeholder="e.g. INV-2026-001">
+        </div>
+        <div class="field full" id="payment-block" style="display:none">
+          <label>Payment</label>
+          <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:6px">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text);cursor:pointer">
+              <input type="radio" name="pay-mode" value="cash" onchange="onPayModeChange()" checked> Cash now
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text);cursor:pointer">
+              <input type="radio" name="pay-mode" value="credit" onchange="onPayModeChange()"> On account (settle later)
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text);cursor:pointer">
+              <input type="radio" name="pay-mode" value="partial" onchange="onPayModeChange()"> Partial payment
+            </label>
+          </div>
+          <div id="partial-row" style="display:none;margin-top:10px;align-items:center;gap:10px">
+            <label style="font-size:12px;color:var(--muted);min-width:120px">Amount paid now</label>
+            <input type="number" id="amount-paid" step="0.01" min="0" placeholder="0.00" style="max-width:180px" oninput="updateRemainingHint()">
+            <span style="font-size:12px;color:var(--muted)" id="remaining-hint"></span>
+          </div>
         </div>
         <div class="field full">
           <label>Notes <span style="color:var(--muted);font-weight:400">(optional)</span></label>
@@ -507,11 +555,11 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
           <tr>
             <th>Receipt #</th><th>Date</th><th>Product</th>
             <th>Qty</th><th>Unit Cost</th><th>Total</th>
-            <th>Expense</th><th>Supplier Ref</th><th>Notes</th><th>By</th><th>Actions</th>
+            <th>Expense</th><th>Supplier</th><th>Payment</th><th>Supplier Ref</th><th>Notes</th><th>By</th><th>Actions</th>
           </tr>
         </thead>
         <tbody id="history-body">
-          <tr><td colspan="10" class="empty-row">Loading…</td></tr>
+          <tr><td colspan="13" class="empty-row">Loading…</td></tr>
         </tbody>
       </table>
     </div>
@@ -629,11 +677,83 @@ async function init() {
     document.body.classList.add('light');
     document.getElementById('mode-btn').innerHTML = '&#9728;&#65039;';
   }
-  await Promise.all([initUser(), loadProducts()]);
+  await Promise.all([initUser(), loadProducts(), loadSuppliers()]);
   document.getElementById('receive-date').value = todayIso();
   syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
   addRow();          // start with one empty row
   await loadHistory();
+}
+
+let _suppliers = [];
+
+async function loadSuppliers() {
+  try {
+    const r = await fetch('/receive/api/suppliers');
+    if (!r.ok) return;
+    _suppliers = await r.json();
+    const sel = document.getElementById('supplier-select');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">— No supplier (cash purchase) —</option>'
+      + _suppliers.map(s => {
+          const bal = Number(s.balance || 0);
+          const lbl = bal > 0
+            ? `${escHtml(s.name)} (owed ${bal.toFixed(2)})`
+            : escHtml(s.name);
+          return `<option value="${s.id}">${lbl}</option>`;
+        }).join('');
+  } catch (_) { /* silent */ }
+}
+
+function escHtml(s){
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function onSupplierChange(){
+  const v = document.getElementById('supplier-select').value;
+  const block = document.getElementById('payment-block');
+  if (v) {
+    block.style.display = '';
+    // default to "credit" when a supplier is selected — it's the whole point
+    const credit = document.querySelector('input[name="pay-mode"][value="credit"]');
+    if (credit) credit.checked = true;
+    onPayModeChange();
+  } else {
+    block.style.display = 'none';
+  }
+}
+
+function onPayModeChange(){
+  const mode = (document.querySelector('input[name="pay-mode"]:checked') || {}).value || 'cash';
+  const partial = document.getElementById('partial-row');
+  partial.style.display = (mode === 'partial') ? 'flex' : 'none';
+  if (mode !== 'partial') document.getElementById('amount-paid').value = '';
+  updateRemainingHint();
+}
+
+function updateRemainingHint(){
+  const total = computeGrandTotalRaw();
+  const hint = document.getElementById('remaining-hint');
+  if (!hint) return;
+  const paid = parseFloat(document.getElementById('amount-paid').value || 0) || 0;
+  const remaining = Math.max(total - paid, 0);
+  if (total > 0) {
+    hint.textContent = `Total ${total.toFixed(2)} · Remaining on account: ${remaining.toFixed(2)}`;
+  } else {
+    hint.textContent = '';
+  }
+}
+
+function computeGrandTotalRaw(){
+  let total = 0;
+  document.querySelectorAll('.data-row').forEach(tr => {
+    const id = tr.dataset.row;
+    const qty = parseFloat((document.getElementById(`qty-${id}`)||{}).value) || 0;
+    const cost = parseFloat((document.getElementById(`cost-${id}`)||{}).value) || 0;
+    if (qty > 0 && cost > 0) total += qty * cost;
+  });
+  return total;
 }
 
 async function initUser() {
@@ -852,6 +972,7 @@ function updateGrandTotal() {
   const el = document.getElementById('grand-total');
   if (sum > 0) { el.textContent = sum.toFixed(2); el.style.color = 'var(--amber)'; }
   else         { el.textContent = '—';             el.style.color = 'var(--muted)'; }
+  updateRemainingHint();
 }
 
 function syncProductTypeFields(selectId, displayId, helpId, errorId, blockId) {
@@ -952,10 +1073,36 @@ async function submitBatch(e) {
     return;
   }
 
+  // Supplier & payment fields
+  const supplierVal = document.getElementById('supplier-select').value;
+  const supplierId = supplierVal ? parseInt(supplierVal, 10) : null;
+  let amountPaid = null;
+  if (supplierId) {
+    const mode = (document.querySelector('input[name="pay-mode"]:checked') || {}).value || 'cash';
+    const grandTotal = computeGrandTotalRaw();
+    if (mode === 'cash')         amountPaid = grandTotal;
+    else if (mode === 'credit')  amountPaid = 0;
+    else if (mode === 'partial') {
+      amountPaid = parseFloat(document.getElementById('amount-paid').value) || 0;
+      if (amountPaid <= 0) {
+        showToast('Enter the amount paid for a partial payment.', 'err');
+        btn.disabled = false; btn.textContent = '✓ Receive Stock';
+        return;
+      }
+      if (amountPaid > grandTotal) {
+        showToast('Amount paid cannot exceed the grand total.', 'err');
+        btn.disabled = false; btn.textContent = '✓ Receive Stock';
+        return;
+      }
+    }
+  }
+
   const payload = {
     product_type: productType,
     receive_date: document.getElementById('receive-date').value,
     supplier_ref: document.getElementById('supplier-ref').value.trim() || null,
+    supplier_id:  supplierId,
+    amount_paid:  amountPaid,
     notes:        document.getElementById('notes').value.trim() || null,
     items,
   };
@@ -972,12 +1119,17 @@ async function submitBatch(e) {
     } else {
       const data = await r.json();
       const expCount = data.receipts.filter(r => r.expense_ref).length;
-      const msg = `${data.count} product${data.count > 1 ? 's' : ''} received`
-        + (data.total_cost ? ` · Total ${data.total_cost.toFixed(2)}` : '')
-        + (expCount        ? ` · ${expCount} expense${expCount > 1 ? 's' : ''} posted` : '');
+      const paid   = Number(data.total_paid   || 0);
+      const unpaid = Number(data.total_unpaid || 0);
+      let msg = `${data.count} product${data.count > 1 ? 's' : ''} received`;
+      if (data.total_cost) msg += ` · Total ${data.total_cost.toFixed(2)}`;
+      if (expCount)        msg += ` · ${expCount} expense${expCount > 1 ? 's' : ''} posted`;
+      if (unpaid > 0)      msg += ` · ${unpaid.toFixed(2)} on account`;
+      else if (paid > 0)   msg += ` · paid ${paid.toFixed(2)}`;
       showToast(msg, 'ok');
       resetForm();
       await loadProducts();
+      await loadSuppliers();
       await loadHistory();
     }
   } catch { showToast('Network error', 'err'); }
@@ -989,6 +1141,12 @@ function resetForm() {
   document.getElementById('product-type').value = '';
   syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
   document.getElementById('supplier-ref').value = '';
+  document.getElementById('supplier-select').value = '';
+  document.getElementById('amount-paid').value = '';
+  const cashRadio = document.querySelector('input[name="pay-mode"][value="cash"]');
+  if (cashRadio) cashRadio.checked = true;
+  document.getElementById('payment-block').style.display = 'none';
+  document.getElementById('partial-row').style.display = 'none';
   document.getElementById('notes').value = '';
   document.getElementById('receive-date').value = todayIso();
   document.getElementById('rows-body').innerHTML = '';
@@ -1001,17 +1159,31 @@ function resetForm() {
 async function loadHistory() {
   const r     = await fetch('/receive/api/history?limit=100');
   const tbody = document.getElementById('history-body');
-  if (!r.ok) { tbody.innerHTML = `<tr><td colspan="11" class="empty-row">Could not load.</td></tr>`; return; }
+  if (!r.ok) { tbody.innerHTML = `<tr><td colspan="13" class="empty-row">Could not load.</td></tr>`; return; }
   const data  = await r.json();
   _historyItems = data.items || [];
   const canUpdate = hasPermission('action_receive_products_update');
   const canDelete = hasPermission('action_receive_products_delete');
   const canManage = canUpdate || canDelete;
   if (!_historyItems.length) {
-    tbody.innerHTML = `<tr><td colspan="11" class="empty-row">No receipts yet.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="13" class="empty-row">No receipts yet.</td></tr>`;
     return;
   }
-  tbody.innerHTML = _historyItems.map(row => `<tr>
+  tbody.innerHTML = _historyItems.map(row => {
+    let payCell = '<span style="color:var(--muted)">—</span>';
+    if (row.total_cost != null && row.total_cost > 0) {
+      const total  = parseFloat(row.total_cost);
+      const paid   = parseFloat(row.amount_paid || 0);
+      const unpaid = parseFloat(row.amount_unpaid || 0);
+      if (unpaid > 0 && paid > 0) {
+        payCell = `<span style="color:var(--amber)" title="Partial: paid ${paid.toFixed(2)} / unpaid ${unpaid.toFixed(2)}">Partial · ${unpaid.toFixed(2)} owed</span>`;
+      } else if (unpaid > 0) {
+        payCell = `<span style="color:var(--amber)">On account · ${unpaid.toFixed(2)}</span>`;
+      } else {
+        payCell = `<span style="color:#3dd06a">Paid</span>`;
+      }
+    }
+    return `<tr>
     <td><span class="badge">${esc(row.ref_number)}</span></td>
     <td>${esc(row.receive_date||'')}</td>
     <td>
@@ -1022,6 +1194,8 @@ async function loadHistory() {
     <td style="font-family:var(--mono)">${row.unit_cost!=null ? parseFloat(row.unit_cost).toFixed(2) : '<span style="color:var(--muted)">—</span>'}</td>
     <td style="font-family:var(--mono);color:var(--amber)">${row.total_cost!=null ? parseFloat(row.total_cost).toFixed(2) : '<span style="color:var(--muted)">—</span>'}</td>
     <td>${row.expense_ref ? `<span class="badge badge-exp">${esc(row.expense_ref)}</span>` : '<span class="badge badge-none">—</span>'}</td>
+    <td style="color:var(--sub)">${row.supplier_name ? esc(row.supplier_name) : '<span style="color:var(--muted)">—</span>'}</td>
+    <td>${payCell}</td>
     <td style="color:var(--sub)">${esc(row.supplier_ref||'—')}</td>
     <td style="color:var(--sub);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
         title="${esc(row.notes||'')}">${esc(row.notes||'—')}</td>
@@ -1030,7 +1204,8 @@ async function loadHistory() {
       ${canUpdate ? `<button type="button" class="action-btn" onclick="openEditModal(${row.id})">Edit</button>` : ''}
       ${canDelete ? `<button type="button" class="action-btn danger" onclick="deleteReceipt(${row.id})">Delete</button>` : ''}
     </div>` : '<span style="color:var(--muted)">-</span>'}</td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
 }
 
 // ── Utils ───────────────────────────────────────────────────────────────────

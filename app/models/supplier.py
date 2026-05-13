@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Numeric, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Date, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -16,6 +16,8 @@ class Supplier(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     purchases = relationship("Purchase", back_populates="supplier")
+    payments  = relationship("SupplierPayment", back_populates="supplier",
+                             cascade="all, delete-orphan")
 
 
 class Purchase(Base):
@@ -50,3 +52,28 @@ class PurchaseItem(Base):
 
     purchase = relationship("Purchase", back_populates="items")
     product  = relationship("Product", back_populates="purchase_items")
+
+
+class SupplierPayment(Base):
+    """A payment made to a supplier — reduces supplier.balance and credits cash.
+
+    Does NOT create a new expense (the expense was already booked at receive time).
+    Books a journal: Debit accounts_payable, Credit cash.
+    """
+    __tablename__ = "supplier_payments"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    ref_number      = Column(String(30), unique=True, index=True, nullable=False)
+    supplier_id     = Column(Integer, ForeignKey("suppliers.id", ondelete="CASCADE"),
+                             nullable=False, index=True)
+    user_id         = Column(Integer, ForeignKey("users.id"), nullable=True)
+    payment_date    = Column(Date, nullable=False)
+    amount          = Column(Numeric(14, 2), nullable=False)
+    payment_method  = Column(String(20), default="cash")  # cash | bank_transfer | card
+    notes           = Column(Text, nullable=True)
+    journal_id      = Column(Integer, ForeignKey("journals.id"), nullable=True)
+    created_at      = Column(DateTime(timezone=True), server_default=func.now())
+
+    supplier = relationship("Supplier", back_populates="payments")
+    user     = relationship("User")
+    journal  = relationship("Journal")

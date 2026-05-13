@@ -17,10 +17,14 @@ class ProductReceipt(Base):
     unit_cost    = Column(Numeric(12, 2), nullable=True)
     total_cost   = Column(Numeric(12, 2), nullable=True)
     supplier_ref = Column(String(150), nullable=True)
+    supplier_id  = Column(Integer, ForeignKey("suppliers.id", ondelete="SET NULL"),
+                          nullable=True, index=True)
+    amount_paid  = Column(Numeric(12, 2), nullable=False, default=0, server_default="0")
     notes        = Column(Text, nullable=True)
     expense_id   = Column(Integer, ForeignKey("expenses.id"), nullable=True)
     created_at   = Column(DateTime(timezone=True), server_default=func.now())
 
-    product = relationship("Product")
-    user    = relationship("User")
-    expense = relationship("Expense")
+    product  = relationship("Product")
+    user     = relationship("User")
+    expense  = relationship("Expense")
+    supplier = relationship("Supplier")

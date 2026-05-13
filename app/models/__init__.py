@@ -36,7 +36,7 @@ from app.models.production import (
 )
 from app.models.refund import RetailRefund, RetailRefundItem
 from app.models.spoilage import SpoilageRecord
-from app.models.supplier import Purchase, PurchaseItem, Supplier
+from app.models.supplier import Purchase, PurchaseItem, Supplier, SupplierPayment
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
 
@@ -89,6 +89,7 @@ __all__ = [
     "StockMove",
     "StockTransfer",
     "Supplier",
+    "SupplierPayment",
     "User",
     "WeatherLog",
 ]
