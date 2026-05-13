@@ -1082,18 +1082,18 @@
   .nav-brand img {
     height: 38px;
     object-fit: contain;
-    mix-blend-mode: multiply;   /* knocks out black bg on light backgrounds */
+    mix-blend-mode: multiply;   /* knocks out white/light bg on light backgrounds */
   }
 
   body.dark .nav-brand img {
-    mix-blend-mode: normal;
-    filter: brightness(0) invert(1);  /* makes logo white on dark bg */
+    mix-blend-mode: screen;     /* knocks out dark bg on dark backgrounds — preserves logo colors */
+    filter: none;
   }
 
   .footer-logo img {
     height: 44px;
     object-fit: contain;
-    filter: brightness(0) invert(1);  /* footer is always dark, so always white */
+    mix-blend-mode: screen;     /* footer is always dark — screen knocks out dark bg */
   }
   /* ── SIGN IN MODAL ───────────────────────────────────── */
   .modal-overlay {
@@ -1142,6 +1142,10 @@
     background: var(--leaf-pale);
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
   }
+
+  .modal-logo-img { mix-blend-mode: multiply; }
+  body.dark .modal-logo-icon { background: #2a2a2a; }
+  body.dark .modal-logo-img { mix-blend-mode: screen; }
 
   .modal-brand {
     font-family: 'Playfair Display', serif;
@@ -1515,9 +1519,7 @@
 
     <div class="modal-logo">
       <div class="modal-logo-icon">
-        <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-          <path d="M14 3C9.5 3 6 7.5 6 12c0 3.5 2.2 6.5 5.5 8v3.5h5V20c3.3-1.5 5.5-4.5 5.5-8 0-4.5-3.5-9-8-9z" fill="#4A8A42"/>
-        </svg>
+        <img src="/static/Logo.png" alt="AZed ERP" style="width:36px;height:36px;object-fit:contain;mix-blend-mode:multiply;border-radius:4px;" class="modal-logo-img" />
       </div>
       <div>
         <div class="modal-brand">AZed ERP</div>
