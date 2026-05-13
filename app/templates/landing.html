@@ -1082,23 +1082,20 @@
   .nav-brand img {
     height: 38px;
     object-fit: contain;
-    /* ERP_logo has transparent bg with white/light text — give it a dark pill on light mode */
-    background: #1a2535;
-    border-radius: 8px;
-    padding: 3px 8px;
+    /* matches the rest of the app: white logo on dark = original, on light = inverted */
+    filter: invert(1) hue-rotate(180deg);
+    transition: filter .18s ease;
   }
 
   body.dark .nav-brand img {
-    background: transparent;
-    border-radius: 0;
-    padding: 0;
+    filter: none;
   }
 
   .footer-logo img {
     height: 44px;
     object-fit: contain;
-    /* footer bg is dark — logo already shows fine, no extra bg needed */
-    background: transparent;
+    /* footer always dark — keep the original white logo */
+    filter: none;
   }
   /* ── SIGN IN MODAL ───────────────────────────────────── */
   .modal-overlay {
@@ -1142,14 +1139,17 @@
 
   .modal-logo { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
 
-  .modal-logo-icon {
-    width: 44px; height: 44px; border-radius: 12px;
-    background: #1a2535;
-    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  .modal-logo-img {
+    height: 44px;
+    width: auto;
+    object-fit: contain;
+    flex-shrink: 0;
+    /* matches nav/app: invert on light, original on dark */
+    filter: invert(1) hue-rotate(180deg);
+    transition: filter .18s ease;
   }
 
-  .modal-logo-img { width: 36px; height: 36px; object-fit: contain; }
-  body.dark .modal-logo-icon { background: #111; }
+  body.dark .modal-logo-img { filter: none; }
 
   .modal-brand {
     font-family: 'Playfair Display', serif;
@@ -1522,9 +1522,7 @@
     <button class="modal-close" onclick="closeSigninBtn()" aria-label="Close">✕</button>
 
     <div class="modal-logo">
-      <div class="modal-logo-icon">
-        <img src="/static/ERP_logo.png" alt="AZed ERP" style="width:36px;height:36px;object-fit:contain;" class="modal-logo-img" />
-      </div>
+      <img src="/static/ERP_logo.png" alt="AZed ERP" class="modal-logo-img" />
       <div>
         <div class="modal-brand">AZed ERP</div>
         <div class="modal-subbrand">Farm Management System</div>
@@ -2431,57 +2429,13 @@
       : '<path d="M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 8 5.5S16 8 16 8zM1.173 8a13.133 13.133 0 011.66-2.043C4.12 4.668 5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.133 13.133 0 0114.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5c-2.12 0-3.879-1.168-5.168-2.457A13.134 13.134 0 011.172 8z"/><path d="M8 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5zM4.5 8a3.5 3.5 0 117 0 3.5 3.5 0 01-7 0z"/>';
   }
 
-  function firstAllowedPage(data) {
-    var permissions = new Set(
-      String(data.permissions || '').split(',').map(function(v) { return v.trim(); }).filter(Boolean)
-    );
-    var pages = [
-      ['/dashboard',       'page_dashboard'],
-      ['/pos',             'page_pos'],
-      ['/farm/',           'page_farm'],
-      ['/production/',     'page_production'],
-      ['/inventory/',      'page_inventory'],
-      ['/products/',       'page_products'],
-      ['/customers-mgmt/', 'page_customers'],
-      ['/suppliers/',      'page_suppliers'],
-      ['/receive/',        'page_receive_products'],
-      ['/import',          'page_import'],
-      ['/reports/',        'page_reports'],
-      ['/b2b/',            'page_b2b'],
-      ['/hr/',             'page_hr'],
-      ['/accounting/',     'page_accounting'],
-      ['/expenses/',       'page_expenses'],
-      ['/carbon/',         'page_carbon']
-    ];
-    if (data.role === 'admin') return '/dashboard';
-    var match = pages.find(function(p) { return permissions.has(p[1]); });
-    return match ? match[0] : '/home';
-  }
-
-  function showSigninError(msg) {
-    var existing = document.getElementById('signinErrorMsg');
-    if (existing) { existing.textContent = msg; return; }
-    var err = document.createElement('p');
-    err.id = 'signinErrorMsg';
-    err.style.cssText = 'color:#E05050;font-size:13px;margin:0;text-align:center;';
-    err.textContent = msg;
-    var btn = document.querySelector('.btn-signin');
-    btn.parentNode.insertBefore(err, btn);
-  }
-
-  function clearSigninError() {
-    var existing = document.getElementById('signinErrorMsg');
-    if (existing) existing.remove();
-  }
-
-  async function handleSignin() {
+  function handleSignin() {
     const email    = document.getElementById('signinEmail').value.trim();
     const password = document.getElementById('signinPassword').value;
     const btn      = document.querySelector('.btn-signin');
 
-    clearSigninError();
-
     if (!email || !password) {
+      // Shake the empty fields
       [document.getElementById('signinEmail'), document.getElementById('signinPassword')]
         .forEach(el => {
           if (!el.value.trim()) {
@@ -2493,42 +2447,22 @@
       return;
     }
 
-    const originalHTML = btn.innerHTML;
+    // Loading state
     btn.textContent = 'Signing in…';
     btn.style.opacity = '0.7';
     btn.disabled = true;
 
-    try {
-      const response = await fetch('/auth/login', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
-
-      let data = {};
-      try { data = await response.json(); } catch (_) {}
-
-      if (!response.ok) {
-        showSigninError(data.detail || 'Invalid email or password.');
-        btn.innerHTML = originalHTML;
-        btn.style.opacity = '1';
+    setTimeout(() => {
+      btn.innerHTML = '✓ Redirecting to dashboard…';
+      btn.style.opacity = '1';
+      // In a real app: window.location.href = '/dashboard';
+      setTimeout(() => {
+        closeSigninBtn();
+        btn.innerHTML = 'Sign In <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 8a.5.5 0 01.5-.5h11.793l-3.147-3.146a.5.5 0 01.708-.708l4 4a.5.5 0 010 .708l-4 4a.5.5 0 01-.708-.708L13.293 8.5H1.5A.5.5 0 011 8z"/></svg>';
         btn.disabled = false;
-        return;
-      }
-
-      btn.innerHTML = '✓ Redirecting…';
-      btn.style.opacity = '1';
-      const next = new URLSearchParams(window.location.search).get('next');
-      const dest = (next && next.startsWith('/') && !next.startsWith('//')) ? next : firstAllowedPage(data);
-      window.location.href = dest;
-
-    } catch (_) {
-      showSigninError('Connection error. Please try again.');
-      btn.innerHTML = originalHTML;
-      btn.style.opacity = '1';
-      btn.disabled = false;
-    }
+        btn.style.opacity = '1';
+      }, 1200);
+    }, 1200);
   }
 
   /* ── Theme toggle ── */
