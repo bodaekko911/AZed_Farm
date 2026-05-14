@@ -1288,11 +1288,14 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
             earned_base   = _money(min(daily_rate_val * _dec(days_present), _money(emp.base_salary)))
             food_all      = _money(getattr(emp, "food_allowance", 0) or 0)
             trans_all     = _money(getattr(emp, "transportation_allowance", 0) or 0)
-            total_allow   = _money(food_all + trans_all)
+            total_allow_monthly = _money(food_all + trans_all)
+            # Allowance prorated by working days: (allowance / working_days) * days_present
+            allow_daily   = _money(total_allow_monthly / Decimal(str(working_days))) if working_days > 0 else Decimal("0")
+            earned_allow  = _money(allow_daily * _dec(days_present))
             payroll.base_salary = earned_base     # attendance-based salary only
-            # Store allowance as bonus so it's tracked separately
+            # Store prorated allowance as bonus so it's tracked separately
             if emp.id not in bonus_by_employee:
-                bonus_amount = total_allow
+                bonus_amount = earned_allow
             payroll.bonuses = bonus_amount
             payroll.days_worked = days_present
             payroll.working_days = working_days
@@ -1476,9 +1479,14 @@ async def hr_summary(db: AsyncSession = Depends(get_async_session)):
         .where(Employee.is_active == True)
     )
     present_employees = _present_emps.scalars().all()
-    # to_pay_today = salary daily rate only (allowances are fixed monthly, not daily)
+    # to_pay_today = salary daily rate + allowance daily rate (allowance / 30 per day)
     to_pay_today = sum(
-        float(_paid_days_and_rate(emp)[1])
+        float(
+            _paid_days_and_rate(emp)[1]
+            + _money((_money(getattr(emp, "food_allowance", 0) or 0)
+                     + _money(getattr(emp, "transportation_allowance", 0) or 0))
+                     / Decimal("30"))
+        )
         for emp in present_employees
     )
 
