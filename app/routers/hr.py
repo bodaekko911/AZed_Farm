@@ -1811,18 +1811,14 @@ td.mono { font-family: var(--mono); color: var(--green); }
 
 <!-- ALLOWANCE TAB PANEL -->
 <div id="tab-panel-allowances" style="display:none">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:10px">
         <div>
-            <div style="font-size:16px;font-weight:700">Monthly Allowances</div>
-            <div style="font-size:12px;color:var(--muted)">Food &amp; transportation allowances — paid monthly, separate from salary</div>
+            <div style="font-size:15px;font-weight:600;color:var(--text)">Monthly Allowances</div>
+            <div style="font-size:12px;color:var(--muted);margin-top:2px">Food &amp; transportation — fixed monthly, separate from salary</div>
         </div>
+        <div id="allowance-summary-bar" style="display:flex;gap:12px;flex-wrap:wrap"></div>
     </div>
-    <div class="table-wrap">
-        <table>
-            <thead><tr><th>Employee</th><th>Position</th><th>Food Allowance</th><th>Transport Allowance</th><th>Total / Month</th><th>Open Advances</th><th>Actions</th></tr></thead>
-            <tbody id="allowance-body"></tbody>
-        </table>
-    </div>
+    <div id="allowance-body" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px"></div>
 </div>
 
 <!-- ADD EMPLOYEE MODAL -->
@@ -2585,42 +2581,73 @@ let allowanceAdvanceEmployeeName = "";
 async function loadAllowanceBoard(){
     const body = document.getElementById("allowance-body");
     if(!body) return;
-    body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">Loading…</td></tr>`;
+    body.innerHTML = `<div style="color:var(--muted);padding:20px;grid-column:1/-1">Loading…</div>`;
     try {
         const emps = employees.filter(e => e.is_active !== false &&
             (numberValue(e.food_allowance) > 0 || numberValue(e.transportation_allowance) > 0));
         if(!emps.length){
-            body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No employees with allowances yet.<br>Add food or transport allowances in the employee profile.</td></tr>`;
+            body.innerHTML = `<div style="color:var(--muted);padding:30px;grid-column:1/-1;text-align:center">No employees with allowances yet.<br>Add food or transport allowances in the employee profile.</div>`;
             return;
         }
-        // Load open advances for each employee
-        const rows = await Promise.all(emps.map(async e => {
+        const cards = await Promise.all(emps.map(async e => {
             let advances = [];
             try {
                 const r = await fetch(`/hr/api/employees/${e.id}/allowance-advances`);
                 advances = await r.json();
-            } catch(err) {}
-            const openAdv = advances.filter(a => a.status === "open").reduce((s,a) => s + numberValue(a.amount), 0);
-            const food    = numberValue(e.food_allowance) || 0;
-            const trans   = numberValue(e.transportation_allowance) || 0;
-            const total   = food + trans;
-            return `<tr>
-                <td class="name">${escapeHtml(e.name)}</td>
-                <td style="color:var(--muted);font-size:12px">${escapeHtml(e.position||"—")}</td>
-                <td class="mono">${money(food)}</td>
-                <td class="mono">${money(trans)}</td>
-                <td class="mono" style="font-weight:700;color:var(--blue)">${money(total)}</td>
-                <td class="mono" style="color:${openAdv>0?"var(--warn)":"var(--muted)"}">${openAdv>0?money(openAdv):"—"}</td>
-                <td><button class="action-btn blue" onclick="openAllowanceAdvanceModal(${e.id},'${escapeHtml(e.name)}',${food},${trans})">Advance</button></td>
-            </tr>`;
+            } catch(err){}
+            const openAdv = advances.filter(a => a.status==="open").reduce((s,a)=>s+numberValue(a.amount),0);
+            const food    = numberValue(e.food_allowance)||0;
+            const trans   = numberValue(e.transportation_allowance)||0;
+            const total   = food+trans;
+            const initials = escapeHtml(e.name).split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase();
+            const advBadge = openAdv>0
+                ? `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--card2);border:1px solid var(--warn);border-radius:20px;padding:2px 10px;font-size:11px;color:var(--warn);font-weight:600">⚠ ${money(openAdv)} advance</span>`
+                : `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--card2);border:1px solid var(--border2);border-radius:20px;padding:2px 10px;font-size:11px;color:var(--muted)">No advances</span>`;
+            return `
+            <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px;display:flex;flex-direction:column;gap:14px">
+                <div style="display:flex;align-items:center;gap:12px">
+                    <div style="width:40px;height:40px;border-radius:50%;background:var(--card2);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;color:var(--sub);flex-shrink:0">${initials}</div>
+                    <div style="min-width:0">
+                        <div style="font-weight:600;font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(e.name)}</div>
+                        <div style="font-size:12px;color:var(--muted)">${escapeHtml(e.position||"—")}</div>
+                    </div>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                    <div style="background:var(--card2);border-radius:8px;padding:10px 12px">
+                        <div style="font-size:11px;color:var(--muted);margin-bottom:3px">Food</div>
+                        <div style="font-size:15px;font-weight:600;color:var(--text);font-family:var(--mono)">${money(food)}</div>
+                    </div>
+                    <div style="background:var(--card2);border-radius:8px;padding:10px 12px">
+                        <div style="font-size:11px;color:var(--muted);margin-bottom:3px">Transport</div>
+                        <div style="font-size:15px;font-weight:600;color:var(--text);font-family:var(--mono)">${money(trans)}</div>
+                    </div>
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;padding-top:6px;border-top:1px solid var(--border)">
+                    <div>
+                        <div style="font-size:11px;color:var(--muted)">Total / month</div>
+                        <div style="font-size:17px;font-weight:700;color:var(--blue);font-family:var(--mono)">${money(total)} <span style="font-size:11px;font-weight:400">EGP</span></div>
+                    </div>
+                    <button class="btn btn-blue" style="font-size:12px;padding:7px 14px" onclick="openAllowanceAdvanceModal(${e.id},'${escapeHtml(e.name)}',${food},${trans})">+ Advance</button>
+                </div>
+                <div>${advBadge}</div>
+            </div>`;
         }));
-        body.innerHTML = rows.join("");
-        // Update stat card
-        const totalAllow = emps.reduce((s,e) => s + numberValue(e.food_allowance) + numberValue(e.transportation_allowance), 0);
+        body.innerHTML = cards.join("");
+        const totalAllow = emps.reduce((s,e)=>s+numberValue(e.food_allowance)+numberValue(e.transportation_allowance),0);
         const el = document.getElementById("stat-allowance");
-        if(el) el.innerText = money(totalAllow) + " EGP";
-    } catch(err) {
-        body.innerHTML = `<tr><td colspan="7" style="color:var(--danger);padding:18px">Could not load allowances</td></tr>`;
+        if(el) el.innerText = money(totalAllow)+" EGP";
+        const bar = document.getElementById("allowance-summary-bar");
+        if(bar) bar.innerHTML = `
+            <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:8px 14px;font-size:13px">
+                <span style="color:var(--muted)">Total monthly &nbsp;</span>
+                <span style="font-weight:600;font-family:var(--mono);color:var(--blue)">${money(totalAllow)} EGP</span>
+            </div>
+            <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:8px 14px;font-size:13px">
+                <span style="color:var(--muted)">Staff with allowances &nbsp;</span>
+                <span style="font-weight:600">${emps.length}</span>
+            </div>`;
+    } catch(err){
+        body.innerHTML = `<div style="color:var(--danger);padding:18px;grid-column:1/-1">Could not load allowances</div>`;
     }
 }
 
