@@ -1618,7 +1618,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             </div>
             <div class="table-wrap">
                 <table>
-                    <thead><tr><th>Employee</th><th>Base Salary</th><th>Bonus</th><th>Day Ded.</th><th>Manual Ded.</th><th>Loan Balance</th><th>Loan Repay</th><th>Net Preview</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Employee</th><th>Base Salary</th><th>Bonus</th><th>Day Ded.</th><th>Manual Ded.</th><th>Loan Deducted</th><th>Net Preview</th><th>Status</th></tr></thead>
                     <tbody id="preview-body"></tbody>
                 </table>
             </div>
@@ -2467,20 +2467,26 @@ async function loadPayrollPreview(){
         `<b>${escapeHtml(monthName)}</b> &nbsp;-&nbsp; ${numberValue(d.days_elapsed)} of ${numberValue(d.working_days)} working days elapsed`;
     document.getElementById("preview-total").innerText = money(d.total_to_pay) + " EGP";
 
-    document.getElementById("preview-body").innerHTML = d.employees.map(e => `
+    document.getElementById("preview-body").innerHTML = d.employees.map(e => {
+        const loanBal = (e.outstanding_loan_balance !== null && e.outstanding_loan_balance !== undefined) ? numberValue(e.outstanding_loan_balance) : 0;
+        const dayDed  = numberValue(e.pending_day_deductions);
+        const manDed  = numberValue(e.pending_manual_deductions);
+        const base    = numberValue(e.base_salary);
+        const net     = base - dayDed - manDed - loanBal;
+        return `
         <tr>
-            <td class="name">${displayText(e.employee)}<br><span style="font-size:11px;color:var(--muted)">${displayText(e.position)} - ${numberValue(e.days_present)} present / ${numberValue(e.working_days)} working</span></td>
-            <td style="font-family:var(--mono)">${money(e.base_salary)}</td>
+            <td class="name">${displayText(e.employee)}<br><span style="font-size:11px;color:var(--muted)">${displayText(e.position)} · ${numberValue(e.days_present)} present / ${numberValue(e.working_days)} working days</span></td>
+            <td style="font-family:var(--mono)">${money(base)}</td>
             <td><input class="pay-bonus-input" data-emp-id="${numberValue(e.employee_id)}" type="number" min="0" step="0.01" value="0" style="width:86px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:6px" oninput="updatePayrollPreviewNet(this)"></td>
-            <td style="font-family:var(--mono);color:var(--danger)" data-day-ded="${numberValue(e.pending_day_deductions)}">${numberValue(e.pending_day_deduction_days)}d / ${money(e.pending_day_deductions)}</td>
-            <td style="font-family:var(--mono);color:var(--danger)" data-manual-ded="${numberValue(e.pending_manual_deductions)}">${money(e.pending_manual_deductions)}</td>
-            <td style="font-family:var(--mono);color:var(--warn)">${e.outstanding_loan_balance === null || e.outstanding_loan_balance === undefined ? "-" : money(e.outstanding_loan_balance)}</td>
-            <td><input class="pay-loan-input" data-emp-id="${numberValue(e.employee_id)}" data-max="${numberValue(e.outstanding_loan_balance)}" type="number" min="0" step="0.01" value="0" style="width:96px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:6px" oninput="updatePayrollPreviewNet(this)"></td>
-            <td class="mono pay-net-preview" data-base="${numberValue(e.base_salary)}">${money(e.net_before_loan)}</td>
+            <td style="font-family:var(--mono);color:var(--danger)" data-day-ded="${dayDed}">${numberValue(e.pending_day_deduction_days)}d / ${money(dayDed)}</td>
+            <td style="font-family:var(--mono);color:var(--danger)" data-manual-ded="${manDed}">${money(manDed)}</td>
+            <td style="font-family:var(--mono);color:var(--warn);font-weight:700" data-loan-bal="${loanBal}">${loanBal > 0 ? money(loanBal) : "—"}</td>
+            <td class="mono pay-net-preview" style="font-weight:700;color:${net<0?"var(--danger)":"var(--green)"}" data-base="${base}" data-loan="${loanBal}">${money(net)}</td>
             <td><span style="font-size:11px;color:${e.already_run?"var(--warn)":"var(--muted)"}">${e.already_run?"Will update":"New"}</span></td>
-        </tr>`).join("") +
+        </tr>`;
+    }).join("") +
         `<tr style="background:var(--card2)">
-            <td colspan="7" style="font-weight:700;color:var(--sub)">Total to Pay</td>
+            <td colspan="6" style="font-weight:700;color:var(--sub)">Total to Pay</td>
             <td style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green)">${money(d.total_to_pay)}</td>
             <td></td>
         </tr>`;
@@ -2489,13 +2495,15 @@ async function loadPayrollPreview(){
 function updatePayrollPreviewNet(input){
     const row = input.closest("tr");
     if(!row) return;
-    const base = numberValue(row.querySelector(".pay-net-preview")?.dataset.base);
-    const bonus = numberValue(row.querySelector(".pay-bonus-input")?.value);
-    const loan = numberValue(row.querySelector(".pay-loan-input")?.value);
-    const day = numberValue(row.querySelector("[data-day-ded]")?.dataset.dayDed);
-    const manual = numberValue(row.querySelector("[data-manual-ded]")?.dataset.manualDed);
-    // No max cap on loan — allow full outstanding balance to be deducted
-    row.querySelector(".pay-net-preview").innerText = money(base + bonus - day - manual - loan);
+    const netCell = row.querySelector(".pay-net-preview");
+    const base    = numberValue(netCell?.dataset.base);
+    const loan    = numberValue(netCell?.dataset.loan);
+    const bonus   = numberValue(row.querySelector(".pay-bonus-input")?.value);
+    const day     = numberValue(row.querySelector("[data-day-ded]")?.dataset.dayDed);
+    const manual  = numberValue(row.querySelector("[data-manual-ded]")?.dataset.manualDed);
+    const net     = base + bonus - day - manual - loan;
+    netCell.innerText = money(net);
+    netCell.style.color = net < 0 ? "var(--danger)" : "var(--green)";
 }
 
 async function confirmRunPayroll(){
@@ -2507,10 +2515,10 @@ async function confirmRunPayroll(){
         if(value > 0) bonuses[numberValue(input.dataset.empId)] = value;
     });
     const loan_repayments = {};
-    document.querySelectorAll(".pay-loan-input").forEach(input => {
-        const value = numberValue(input.value);
-        if(value > 0) loan_repayments[numberValue(input.dataset.empId)] = value;
-        // No cap — backend will apply up to the outstanding balance
+    document.querySelectorAll("[data-loan-bal]").forEach(cell => {
+        const value = numberValue(cell.dataset.loanBal);
+        const empId = numberValue(cell.closest("tr")?.querySelector(".pay-bonus-input")?.dataset.empId);
+        if(value > 0 && empId) loan_repayments[empId] = value;
     });
     let res  = await fetch("/hr/api/payroll/run",{
         method:"POST", headers:{"Content-Type":"application/json"},
