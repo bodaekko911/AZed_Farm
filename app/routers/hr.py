@@ -1762,7 +1762,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="stat-value blue" id="stat-present">-</div>
         </div>
         <div class="stat-card warn">
-            <div class="stat-label">Absent Today</div>
+            <div class="stat-label">Days Off Today</div>
             <div class="stat-value warn" id="stat-absent">-</div>
         </div>
         <div class="stat-card green">
@@ -1931,7 +1931,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
         <div class="fld"><label>Status</label>
             <select id="a-status">
                 <option value="present">Present</option>
-                <option value="absent">Absent</option>
+                <option value="absent">Day Off</option>
                 <option value="late">Late</option>
                 <option value="leave">Leave</option>
             </select>
@@ -2022,7 +2022,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
                         <div class="money-preview" id="deduct-preview" style="font-size:18px;font-weight:700;color:var(--danger)">0.00 EGP</div>
                         <div style="font-size:11px;color:var(--muted)" id="deduct-rate-hint"></div>
                     </div>
-                    <div class="fld span2"><label>Reason</label><input id="deduct-note" placeholder="Late, absent, penalty…"></div>
+                    <div class="fld span2"><label>Reason</label><input id="deduct-note" placeholder="Late, day off, penalty…"></div>
                     <div class="fld span2"><button class="btn btn-blue" onclick="saveDayDeduction()">+ Add Deduction</button></div>
                 </div>
                 <div class="hr-ledger-table" style="margin-top:16px"><table><thead><tr><th>Period</th><th>Date</th><th>Days</th><th>Daily Rate</th><th>Amount</th><th>Status</th><th>Reason</th></tr></thead><tbody id="deduction-history-body"></tbody></table></div>
@@ -2800,7 +2800,7 @@ function renderAttendanceRows(records){
     document.getElementById("att-body").innerHTML = records.map(r => {
         let status = String(r.status || "");
         let cls = `status-${safeStatusClass(status)}`;
-        let labels = {present:"Present",absent:"Absent",late:"Late",leave:"Leave"};
+        let labels = {present:"Present",absent:"Day Off",late:"Late",leave:"Leave"};
         let canEdit = hasPermission("action_hr_edit_attendance");
         return `
         <tr>
@@ -2810,7 +2810,7 @@ function renderAttendanceRows(records){
                 ${canEdit
                     ? `<select onchange="editAttendanceStatus(${r.id}, this.value)" style="background:var(--card2);border:1px solid var(--border2);border-radius:6px;padding:4px 8px;font-size:12px;color:var(--text);cursor:pointer">
                         <option value="present" ${status==="present"?"selected":""}>Present</option>
-                        <option value="absent" ${status==="absent"?"selected":""}>Absent</option>
+                        <option value="absent" ${status==="absent"?"selected":""}>Day Off</option>
                         <option value="late" ${status==="late"?"selected":""}>Late</option>
                         <option value="leave" ${status==="leave"?"selected":""}>Leave</option>
                     </select>`
@@ -2893,14 +2893,14 @@ async function loadTodayAttendance(){
     let grid = document.getElementById("today-attendance-grid");
     if(!grid) return;
     if(!employees.length){ grid.innerHTML = `<div style="color:var(--muted);font-size:13px">No employees found</div>`; return; }
-    const todayLabels = {present:"Present",absent:"Absent",late:"Late",leave:"Leave"};
+    const todayLabels = {present:"Present",absent:"Day Off",late:"Late",leave:"Leave"};
     grid.innerHTML = employees.map(emp => {
         let rec    = todayRecs.find(r => r.employee_id === emp.id);
         let autoStatus = emp.attendance_auto_status || "present";
         let status = rec ? rec.status : autoStatus;
         let isAbs  = status === "absent";
         let isAutoAbsent = autoStatus === "absent";
-        let statusText = isAutoAbsent ? "Absent until marked present" : (todayLabels[status] || status || "Present");
+        let statusText = isAutoAbsent ? "Day off until marked present" : (todayLabels[status] || status || "Present");
         let statusColor = isAbs || isAutoAbsent ? "var(--danger)" : "var(--green)";
         return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:var(--card2);border:1px solid ${isAbs?"rgba(255,77,109,.2)":"rgba(0,255,157,.1)"};border-radius:9px;">
             <div>
@@ -2913,7 +2913,7 @@ async function loadTodayAttendance(){
                 </span>
                 ${hasPermission("action_hr_run_payroll") ? ((isAbs || isAutoAbsent)
                     ? `<button class="action-btn green" onclick="markPresentToday(${emp.id})">Mark Present</button>`
-                    : `<button class="action-btn danger" onclick="markAbsentToday(${emp.id})">Mark Absent</button>`
+                    : `<button class="action-btn danger" onclick="markAbsentToday(${emp.id})">Mark Day Off</button>`
                 ) : ""}
             </div>
         </div>`;
@@ -2927,7 +2927,7 @@ async function markAbsentToday(empId){
     });
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
-    showToast("Marked absent until marked present");
+    showToast("Marked day off");
     await loadEmployees();
     loadTodayAttendance(); loadAttendance(); loadSummary();
 }
