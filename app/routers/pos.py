@@ -1633,11 +1633,8 @@ function hideToast(){ document.getElementById("toast").classList.remove("show");
 /* ── CHECKOUT ── */
 async function checkout(settleLater=false){
     if(!cart.length){ showToast("Cart is empty"); return; }
-    if(editingUnpaidInvoiceId && !settleLater){
-        showToast("Use Save Edit to keep this invoice unpaid");
-        return;
-    }
-    if(editingUnpaidInvoiceId) settleLater = true;
+    const collectingEditedInvoice = editingUnpaidInvoiceId && !settleLater;
+    if(editingUnpaidInvoiceId && !collectingEditedInvoice) settleLater = true;
     if(settleLater && !selectedCustomer){ showToast("Select a customer to settle later"); return; }
     let btn=document.getElementById(settleLater?"settle_btn":"checkout_btn");
     btn.disabled=true; btn.innerText="Processing…";
@@ -1664,6 +1661,25 @@ async function checkout(settleLater=false){
             data = {detail:`Request failed (${res.status})`};
         }
         if(data.detail){ showToast("Error: "+data.detail); return; }
+        if(collectingEditedInvoice){
+            const paidInvoiceId = editingUnpaidInvoiceId;
+            const paidInvoiceNumber = data.invoice_number || editingUnpaidInvoiceNumber;
+            let collectRes=await fetch(`/invoice/${paidInvoiceId}/collect`,{
+                method:"POST",
+                headers:{"Content-Type":"application/json"},
+                body:JSON.stringify({payment_method:selectedPayMethod}),
+            });
+            let collectData = await collectRes.json().catch(()=>({detail:`Request failed (${collectRes.status})`}));
+            if(collectData.detail){ showToast("Error: "+collectData.detail); return; }
+            showToast(`✓ ${paidInvoiceNumber} collected via ${selectedPayMethod}!`);
+            editingUnpaidInvoiceId = null;
+            editingUnpaidInvoiceNumber = null;
+            updateEditingState();
+            clearCustomer(); cart=[]; drawCart();
+            checkUnpaidCount();
+            window.location.href="/invoice/"+paidInvoiceId;
+            return;
+        }
         if(settleLater){
             showToast(editingUnpaidInvoiceId ? `✓ ${data.invoice_number} updated` : `⏳ ${data.invoice_number} saved — settle later`);
             editingUnpaidInvoiceId = null;
