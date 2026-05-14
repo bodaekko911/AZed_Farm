@@ -204,6 +204,40 @@ async def _get_employee_or_404(db: AsyncSession, employee_id: int) -> Employee:
     return employee
 
 
+async def _backfill_attendance(
+    db: AsyncSession,
+    employee_id: int,
+    start_date: date,
+    end_date: date,
+) -> int:
+    """Create 'present' attendance records for all weekdays from start_date to end_date (exclusive).
+    Skips days that already have a record."""
+    from datetime import timedelta
+    count = 0
+    current = start_date
+    while current < end_date:
+        # Skip weekends (Saturday=5, Sunday=6)
+        if current.weekday() < 5:
+            existing = await db.execute(
+                select(Attendance.id).where(
+                    Attendance.employee_id == employee_id,
+                    Attendance.date == current,
+                )
+            )
+            if not existing.scalar_one_or_none():
+                db.add(Attendance(
+                    employee_id=employee_id,
+                    date=current,
+                    status="present",
+                    note="Auto-logged from hire date",
+                ))
+                count += 1
+        current += timedelta(days=1)
+    if count > 0:
+        await db.commit()
+    return count
+
+
 async def _get_attendance_for_day(
     db: AsyncSession,
     employee_id: int,
@@ -569,6 +603,11 @@ async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_asyn
            f"Added employee: {e.name} — {e.position or ''} / {e.department or ''} — salary: {float(e.base_salary):.2f}",
            ref_type="employee", ref_id=e.id)
     await db.commit(); await db.refresh(e)
+
+    # ── Auto-log attendance from hire_date to today ──
+    if hire and hire < date.today():
+        await _backfill_attendance(db, e.id, hire, date.today())
+
     if farm:
         e.farm = farm
     return _employee_payload(e)
@@ -1063,6 +1102,50 @@ async def log_attendance(data: AttendanceCreate, db: AsyncSession = Depends(get_
         employee.attendance_auto_status = status
     await db.commit()
     return {"id": attendance.id, "updated": updated}
+
+
+class AttendanceUpdate(BaseModel):
+    status: str
+    note: Optional[str] = None
+
+
+@router.put("/api/attendance/{att_id}", dependencies=[Depends(require_permission("action_hr_edit_attendance"))])
+async def edit_attendance(
+    att_id: int,
+    data: AttendanceUpdate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    _r = await db.execute(select(Attendance).where(Attendance.id == att_id))
+    att = _r.scalar_one_or_none()
+    if not att:
+        raise HTTPException(status_code=404, detail="Attendance record not found")
+    att.status = _normalize_attendance_status(data.status)
+    if data.note is not None:
+        att.note = data.note.strip() or None
+    record(db, "HR", "edit_attendance",
+           f"Edited attendance #{att.id}: {att.status} on {att.date}",
+           user=current_user, ref_type="attendance", ref_id=att.id)
+    await db.commit()
+    return {"ok": True, "id": att.id, "status": att.status}
+
+
+@router.delete("/api/attendance/{att_id}", dependencies=[Depends(require_permission("action_hr_edit_attendance"))])
+async def delete_attendance(
+    att_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    _r = await db.execute(select(Attendance).where(Attendance.id == att_id))
+    att = _r.scalar_one_or_none()
+    if not att:
+        raise HTTPException(status_code=404, detail="Attendance record not found")
+    record(db, "HR", "delete_attendance",
+           f"Deleted attendance #{att.id}: {att.status} on {att.date}",
+           user=current_user, ref_type="attendance", ref_id=att.id)
+    await db.delete(att)
+    await db.commit()
+    return {"ok": True}
 
 
 @router.post("/api/attendance/auto-today")
@@ -1756,7 +1839,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
 
         <div class="table-wrap">
             <table>
-                <thead><tr><th>Employee</th><th>Date</th><th>Status</th><th>Note</th></tr></thead>
+                <thead><tr><th>Employee</th><th>Date</th><th>Status</th><th>Note</th><th></th></tr></thead>
                 <tbody id="att-body"><tr><td colspan="4" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr></tbody>
             </table>
         </div>
@@ -2717,14 +2800,51 @@ async function loadAttendance(){
         let status = String(r.status || "");
         let cls = `status-${safeStatusClass(status)}`;
         let labels = {present:"Present",absent:"Absent",late:"Late",leave:"Leave"};
+        let canEdit = hasPermission("action_hr_edit_attendance");
         return `
         <tr>
             <td class="name">${displayText(r.employee)}</td>
             <td style="font-family:var(--mono);font-size:12px">${displayText(r.date)}</td>
-            <td><span class="${cls}">${displayText(labels[status] || status)}</span></td>
+            <td>
+                ${canEdit
+                    ? `<select onchange="editAttendanceStatus(${r.id}, this.value)" style="background:var(--card2);border:1px solid var(--border2);border-radius:6px;padding:4px 8px;font-size:12px;color:var(--text);cursor:pointer">
+                        <option value="present" ${status==="present"?"selected":""}>Present</option>
+                        <option value="absent" ${status==="absent"?"selected":""}>Absent</option>
+                        <option value="late" ${status==="late"?"selected":""}>Late</option>
+                        <option value="leave" ${status==="leave"?"selected":""}>Leave</option>
+                    </select>`
+                    : `<span class="${cls}">${displayText(labels[status] || status)}</span>`
+                }
+            </td>
             <td style="color:var(--muted);font-size:12px">${escapeHtml(r.note || "-")}</td>
+            <td>${canEdit ? `<button class="action-btn danger" onclick="deleteAttendance(${r.id})" style="font-size:11px;padding:3px 8px">✕</button>` : ""}</td>
         </tr>`;
     }).join("");
+}
+
+async function editAttendanceStatus(attId, newStatus){
+    try {
+        let res = await fetch(`/hr/api/attendance/${attId}`, {
+            method:"PUT",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({status:newStatus}),
+        });
+        let data = await res.json();
+        if(data.detail){ showToast("Error: "+data.detail); return; }
+        showToast("Attendance updated");
+        loadAttendance(); loadTodayAttendance(); loadSummary();
+    } catch(err){ showToast("Error: "+err.message); }
+}
+
+async function deleteAttendance(attId){
+    if(!confirm("Delete this attendance record?")) return;
+    try {
+        let res = await fetch(`/hr/api/attendance/${attId}`, {method:"DELETE"});
+        let data = await res.json();
+        if(data.detail){ showToast("Error: "+data.detail); return; }
+        showToast("Attendance deleted");
+        loadAttendance(); loadTodayAttendance(); loadSummary();
+    } catch(err){ showToast("Error: "+err.message); }
 }
 
 function openLogAttModal(){

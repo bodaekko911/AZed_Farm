@@ -165,6 +165,7 @@ PERMISSION_MATRIX = [
             {"action": "manage_loans", "key": "action_hr_manage_loans", "label": "Manage employee loans"},
             {"action": "view_deductions", "key": "action_hr_view_deductions", "label": "View payroll deductions"},
             {"action": "manage_deductions", "key": "action_hr_manage_deductions", "label": "Manage payroll deductions"},
+            {"action": "edit_attendance", "key": "action_hr_edit_attendance", "label": "Edit / delete attendance records"},
             {"action": "clear_hr_data", "key": "action_hr_clear_data", "label": "Clear all HR data"},
         ],
     },
