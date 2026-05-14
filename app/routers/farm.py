@@ -70,14 +70,18 @@ async def get_farms(db: AsyncSession = Depends(get_async_session)):
         for f in farms
     ]
 
-@router.post("/api/farms")
-async def create_farm(name: str, location: str = "", db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+@router.post("/api/farms", dependencies=[Depends(require_permission("action_farm_create"))])
+async def create_farm(name: str, location: str = "", notes: str = "", db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Farm name is required")
     result = await db.execute(select(Farm).where(Farm.name == name))
     if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Farm name already exists")
-    f = Farm(name=name, location=location)
+        raise HTTPException(status_code=400, detail="A farm with that name already exists")
+    f = Farm(name=name, location=location.strip() or None, notes=notes.strip() or None)
     db.add(f); await db.commit(); await db.refresh(f)
-    return {"id": f.id, "name": f.name}
+    await record(db, current_user.id, "farm_create", f"Created farm: {f.name}")
+    return {"id": f.id, "name": f.name, "location": f.location or ""}
 
 
 # ── DELIVERY API ───────────────────────────────────────
@@ -711,6 +715,30 @@ td.name{color:var(--text);font-weight:600;}
     </div>
 </div>
 
+<!-- ADD FARM MODAL -->
+<div class="modal-bg" id="add-farm-modal">
+    <div class="modal" style="width:480px">
+        <div class="modal-title">Add New Farm</div>
+        <div class="modal-sub">The farm will immediately appear in all dropdowns, delivery forms, weather logs, and season analysis.</div>
+        <div class="fld">
+            <label>Farm Name *</label>
+            <input id="af-name" placeholder="e.g. Desert Rose Farm" maxlength="150">
+        </div>
+        <div class="fld">
+            <label>Location</label>
+            <input id="af-location" placeholder="e.g. Nuweiba, South Sinai" maxlength="200">
+        </div>
+        <div class="fld">
+            <label>Notes</label>
+            <textarea id="af-notes" placeholder="Any notes about this farm (optional)"></textarea>
+        </div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeAddFarmModal()">Cancel</button>
+            <button class="btn btn-lime" id="af-save-btn" onclick="saveNewFarm()">✓ Create Farm</button>
+        </div>
+    </div>
+</div>
+
 <!-- WEATHER MODAL -->
 <div class="modal-bg" id="weather-modal">
     <div class="modal" style="width:500px">
@@ -911,6 +939,7 @@ function configureFarmPermissions(u){
 
     if(!hasPermission("action_farm_delivery_create", u)) document.getElementById("btn-add-delivery").style.display = "none";
     if(!hasPermission("action_farm_weather_log", u)) document.getElementById("btn-add-weather").style.display = "none";
+    if(!hasPermission("action_farm_create", u)) { let b = document.getElementById("btn-add-farm"); if(b) b.style.display = "none"; }
     if(firstAvailable) switchTab(firstAvailable);
 }
 
@@ -955,18 +984,29 @@ function fillWeatherFarmFilter(){
 }
 
 function fillSeasonFarmSelect(){
+    let allOption = allFarms.length > 1
+        ? `<option value="both">All Farms (Combined)</option>`
+        : "";
     document.getElementById("season-farm").innerHTML =
         `<option value="">Select farm...</option>` +
-        `<option value="both">Both Farms</option>` +
+        allOption +
         allFarms.map(f=>`<option value="${f.id}">${f.name}</option>`).join("");
 }
 
 /* ── FARMS ── */
+const FARM_ICONS   = ["🌿","♻️","🌱","🍃","🌾","🫘","🌻","🌺","🍀","🌳"];
+const FARM_CLASSES = ["farm-organic","farm-regenerative","farm-organic","farm-regenerative","farm-organic","farm-regenerative","farm-organic","farm-regenerative","farm-organic","farm-regenerative"];
+const FARM_OPT_CLS = ["","regen","","regen","","regen","","regen","","regen"];
+
+function getFarmIcon(i){ return FARM_ICONS[i % FARM_ICONS.length]; }
+function getFarmCardClass(i){ return FARM_CLASSES[i % FARM_CLASSES.length]; }
+function getFarmOptClass(i){ return FARM_OPT_CLS[i % FARM_OPT_CLS.length]; }
+
 function renderFarmCards(){
     document.getElementById("farms-row").innerHTML = allFarms.map((f,i)=>`
         <div class="farm-card" onclick="filterByFarm(${f.id})">
-            <div class="farm-name">${i===0?"🌿":"♻️"} ${f.name}</div>
-            <div class="farm-loc">${f.location}</div>
+            <div class="farm-name">${getFarmIcon(i)} ${f.name}</div>
+            <div class="farm-loc">${f.location || "—"}</div>
             <div class="farm-stat">
                 <span class="farm-stat-label">Total Deliveries</span>
                 <span class="farm-stat-val">${f.delivery_count}</span>
@@ -974,10 +1014,10 @@ function renderFarmCards(){
         </div>`).join("") || `<div style="color:var(--muted)">No farms found.</div>`;
 
     document.getElementById("farm-selector").innerHTML = allFarms.map((f,i)=>`
-        <div class="farm-opt ${i===0?"":"regen"}" id="farm-opt-${f.id}" onclick="selectFarm(${f.id})">
-            <div class="farm-opt-icon">${i===0?"🌿":"♻️"}</div>
+        <div class="farm-opt ${getFarmOptClass(i)}" id="farm-opt-${f.id}" onclick="selectFarm(${f.id})">
+            <div class="farm-opt-icon">${getFarmIcon(i)}</div>
             <div class="farm-opt-name">${f.name}</div>
-            <div class="farm-opt-loc">${f.location}</div>
+            <div class="farm-opt-loc">${f.location || "—"}</div>
         </div>`).join("");
 }
 
@@ -1045,7 +1085,7 @@ async function loadDeliveries(){
     let html="";
     data.deliveries.forEach(d=>{
         let farmIdx = allFarms.findIndex(f=>f.id===d.farm_id);
-        let farmCls = farmIdx===0?"farm-organic":"farm-regenerative";
+        let farmCls = farmIdx%2===0?"farm-organic":"farm-regenerative";
         let adminBtns = `<div style="display:flex;gap:6px">`;
         if (hasPermission("action_farm_delivery_update")) adminBtns += `<button class="action-btn" onclick="event.stopPropagation();openEditDelivery(${d.id})">Edit</button>`;
         if (hasPermission("action_farm_delivery_delete")) adminBtns += `<button class="action-btn danger" onclick="event.stopPropagation();deleteDelivery(${d.id},'${d.delivery_number}')">Delete</button>`;
@@ -1107,11 +1147,11 @@ async function loadHistory(){
     document.getElementById("history-content").innerHTML = Object.values(byFarm).map((farm,fi)=>{
         let products = Object.entries(farm.products).sort((a,b)=>b[1]-a[1]);
         let maxQty   = products.length ? products[0][1] : 1;
-        let color    = fi===0?"var(--lime)":"var(--teal)";
+        let color    = fi%2===0?"var(--lime)":"var(--teal)";
         return `
         <div class="history-section">
             <div class="history-title">
-                <span style="font-size:20px">${fi===0?"🌿":"♻️"}</span>
+                <span style="font-size:20px">${getFarmIcon(fi)}</span>
                 <span>${farm.name}</span>
                 <span style="font-size:12px;color:var(--muted);font-weight:400">${farm.deliveries.length} deliveries</span>
             </div>
@@ -1354,6 +1394,56 @@ document.getElementById("delivery-modal").addEventListener("click",function(e){
 document.getElementById("weather-modal").addEventListener("click",function(e){
     if(e.target===this) closeWeatherModal();
 });
+document.getElementById("add-farm-modal").addEventListener("click",function(e){
+    if(e.target===this) closeAddFarmModal();
+});
+
+/* ── ADD FARM ── */
+function openAddFarmModal(){
+    document.getElementById("af-name").value     = "";
+    document.getElementById("af-location").value = "";
+    document.getElementById("af-notes").value    = "";
+    document.getElementById("add-farm-modal").classList.add("open");
+    setTimeout(()=>document.getElementById("af-name").focus(), 100);
+}
+
+function closeAddFarmModal(){
+    document.getElementById("add-farm-modal").classList.remove("open");
+}
+
+async function saveNewFarm(){
+    let name     = document.getElementById("af-name").value.trim();
+    let location = document.getElementById("af-location").value.trim();
+    let notes    = document.getElementById("af-notes").value.trim();
+    if(!name){ showToast("Farm name is required"); document.getElementById("af-name").focus(); return; }
+
+    let btn = document.getElementById("af-save-btn");
+    btn.disabled = true;
+    btn.innerText = "Saving…";
+
+    try {
+        let url = `/farm/api/farms?name=${encodeURIComponent(name)}&location=${encodeURIComponent(location)}&notes=${encodeURIComponent(notes)}`;
+        let res  = await fetch(url, {method:"POST"});
+        let data = await res.json();
+        if(data.detail){ showToast("Error: "+data.detail); return; }
+
+        closeAddFarmModal();
+        showToast(`${name} created ✓ — it now appears everywhere`);
+
+        // Reload farms then refresh everything
+        allFarms = await (await fetch("/farm/api/farms")).json();
+        renderFarmCards();
+        fillFarmFilter();
+        fillWeatherFarmFilter();
+        fillSeasonFarmSelect();
+        await loadStats();
+    } catch(err) {
+        showToast("Error: "+err.message);
+    } finally {
+        btn.disabled  = false;
+        btn.innerText = "✓ Create Farm";
+    }
+}
 
 /* ── WEATHER LOG ── */
 let editingWeatherId = null;

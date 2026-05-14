@@ -126,7 +126,16 @@ PERMISSION_MATRIX = [
         "label": "Farm Intake",
         "icon": "farm",
         "actions": [
-            {"action": "view", "key": "page_farm", "label": "Open farm intake"},
+            {"action": "view",   "key": "page_farm",                    "label": "Open farm intake"},
+            {"action": "create", "key": "action_farm_create",             "label": "Add / create new farms"},
+            {"action": "create_delivery", "key": "action_farm_delivery_create", "label": "Record farm deliveries"},
+            {"action": "update_delivery", "key": "action_farm_delivery_update", "label": "Edit farm deliveries"},
+            {"action": "delete_delivery", "key": "action_farm_delivery_delete", "label": "Delete farm deliveries"},
+            {"action": "weather_log", "key": "action_farm_weather_log",   "label": "Log / edit farm weather"},
+            {"action": "view_deliveries", "key": "tab_farm_deliveries",   "label": "Deliveries tab"},
+            {"action": "view_history",    "key": "tab_farm_history",      "label": "Farm History tab"},
+            {"action": "view_weather",    "key": "tab_farm_weather",      "label": "Weather Log tab"},
+            {"action": "view_season",     "key": "tab_farm_season",       "label": "Season Analysis tab"},
         ],
     },
     {
