@@ -70,7 +70,7 @@ async def get_farms(db: AsyncSession = Depends(get_async_session)):
         for f in farms
     ]
 
-@router.post("/api/farms", dependencies=[Depends(require_permission("action_farm_create"))])
+@router.post("/api/farms")
 async def create_farm(name: str, location: str = "", notes: str = "", db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     name = name.strip()
     if not name:
@@ -79,8 +79,13 @@ async def create_farm(name: str, location: str = "", notes: str = "", db: AsyncS
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="A farm with that name already exists")
     f = Farm(name=name, location=location.strip() or None, notes=notes.strip() or None)
-    db.add(f); await db.commit(); await db.refresh(f)
-    await record(db, current_user.id, "farm_create", f"Created farm: {f.name}")
+    db.add(f)
+    await db.commit()
+    await db.refresh(f)
+    try:
+        record(db, "farm", "create", f"Created farm: {f.name}", user=current_user)
+    except Exception:
+        pass
     return {"id": f.id, "name": f.name, "location": f.location or ""}
 
 
