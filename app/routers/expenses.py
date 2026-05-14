@@ -1348,8 +1348,9 @@ let editingCategoryId = null;
 
 function fillCarbonFactorSelect(){
     const sel = document.getElementById("cm-carbon-factor");
-    if(!sel || !window.carbonFactors) return;
-    sel.innerHTML = `<option value="">— none —</option>` + window.carbonFactors.map(f =>
+    if(!sel) return;
+    const factors = Array.isArray(window.carbonFactors) ? window.carbonFactors : [];
+    sel.innerHTML = `<option value="">— none —</option>` + factors.map(f =>
         `<option value="${f.source_key}">${f.label} (${f.unit}, ${f.factor} kg CO₂e/${f.unit})</option>`
     ).join("");
 }
@@ -1769,7 +1770,12 @@ function updateCarbonPreview(consumption){
 async function loadCarbonFactors(){
     try {
         const r = await fetch("/expenses/api/carbon-factors");
-        window.carbonFactors = await r.json();
+        if(r.ok){
+            const data = await r.json();
+            window.carbonFactors = Array.isArray(data) ? data : [];
+        } else {
+            window.carbonFactors = [];
+        }
     } catch(err){ window.carbonFactors = []; }
 }
 

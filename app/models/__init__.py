@@ -18,6 +18,7 @@ from app.models.carbon import CarbonEmissionFactor, CarbonLog, CarbonTarget
 from app.models.hr import (
     Attendance,
     Employee,
+    EmployeeAllowanceAdvance,
     EmployeeLoan,
     EmployeeLoanRepayment,
     EmployeePayrollDeduction,
@@ -59,6 +60,7 @@ __all__ = [
     "CarbonTarget",
     "Customer",
     "Employee",
+    "EmployeeAllowanceAdvance",
     "EmployeeLoan",
     "EmployeeLoanRepayment",
     "EmployeePayrollDeduction",
