@@ -22,7 +22,7 @@ from app.models.user import User
 from app.services.expense_service import get_summary as get_expense_summary
 
 router = APIRouter(
-    tags=["Dashboard"],
+    tags=["Sales Dashboard"],
     dependencies=[Depends(require_permission("page_dashboard"))],
 )
 
@@ -434,7 +434,7 @@ def dashboard_ui():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard – AZed ERP</title>
+<title>Sales Dashboard – AZed ERP</title>
 <script src="/static/theme-init.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -457,7 +457,8 @@ def dashboard_ui():
     <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
   </a>
   <div class="nav-links">
-    <a href="/dashboard" class="nav-link active">Dashboard</a>
+    <a href="/dashboard" class="nav-link active">Sales dashboard</a>
+    <a href="/farm-dashboard" class="nav-link">Farm dashboard</a>
     <a href="/pos" class="nav-link">POS</a>
     <a href="/b2b/" class="nav-link">B2B</a>
     <a href="/reports/" class="nav-link">Reports</a>
