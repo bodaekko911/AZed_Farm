@@ -213,11 +213,17 @@ async def _reverse_invoice_stock(invoice, db: AsyncSession):
 async def _reverse_invoice_journal(invoice, db: AsyncSession):
     total = float(invoice.total)
     if invoice.invoice_type == "cash":
-        # Reverse: debit Revenue, credit Cash
+        # Cash invoices now use AR at creation (Dr AR / Cr Revenue)
+        # Reverse: Dr Revenue / Cr AR
         await _post_journal(db, f"Reversal — {invoice.invoice_number}", "b2b_reversal", [
-            ("1000", 0, total),
+            ("1100", 0, total),
             ("4000", total, 0),
         ])
+        client = invoice.client
+        # Reverse outstanding: subtract unpaid portion
+        unpaid = max(0.0, total - float(invoice.amount_paid))
+        if unpaid > 0:
+            client.outstanding = Decimal(str(max(0, float(client.outstanding) - unpaid)))
     elif invoice.invoice_type in ("full_payment", "consignment"):
         # Reverse: debit Deferred Revenue, credit AR
         await _post_journal(db, f"Reversal — {invoice.invoice_number}", "b2b_reversal", [
@@ -450,7 +456,7 @@ async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_asy
     discount_amount = round(subtotal * (discount_pct / 100), 2)
     total           = round(subtotal - discount_amount, 2)
     invoice_number  = await _next_b2b_number(db)
-    status = "paid" if invoice_type == "cash" else "unpaid"
+    status = "unpaid"
 
     invoice = B2BInvoice(
         invoice_number=invoice_number, client_id=data.client_id,
@@ -460,7 +466,7 @@ async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_asy
         payment_method=invoice_type,
         subtotal=round(subtotal, 2), discount=discount_amount,
         total=total,
-        amount_paid=total if invoice_type == "cash" else 0,
+        amount_paid=0,
         notes=data.notes,
     )
     db.add(invoice); await db.flush()
@@ -485,11 +491,14 @@ async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_asy
             ))
 
     # ── ACCOUNTING ──────────────────────────────────────
+    # Cash invoices: journal is posted when payment is collected (not at creation)
+    # AR is always tracked for all types so outstanding balance works
     if invoice_type == "cash":
-        await _post_journal(db, f"B2B Cash Sale - {invoice_number}", "b2b", [
-            ("1000", total, 0),
+        await _post_journal(db, f"B2B Cash Invoice - {invoice_number}", "b2b", [
+            ("1100", total, 0),
             ("4000", 0, total),
         ], user_id=current_user.id)
+        client.outstanding = Decimal(str(float(client.outstanding) + total))
 
     elif invoice_type == "full_payment":
         await _post_journal(db, f"B2B Full Payment Invoice - {invoice_number}", "b2b", [
@@ -538,8 +547,8 @@ async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = 
     invoice = _r.scalar_one_or_none()
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    if invoice.status == "paid" and float(invoice.amount_paid) > 0 and invoice.invoice_type == "cash":
-        raise HTTPException(status_code=400, detail="Cannot edit a paid cash invoice.")
+    if invoice.status == "paid" and float(invoice.amount_paid) > 0:
+        raise HTTPException(status_code=400, detail="Cannot edit a paid invoice. Refund first if needed.")
     if invoice.invoice_type == "consignment":
         cons_r = await db.execute(
             select(Consignment).where(Consignment.invoice_id == invoice_id)
@@ -591,8 +600,8 @@ async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = 
     invoice.subtotal       = round(subtotal, 2)
     invoice.discount       = discount_amount
     invoice.total          = total
-    invoice.amount_paid    = total if invoice_type == "cash" else 0
-    invoice.status         = "paid" if invoice_type == "cash" else "unpaid"
+    invoice.amount_paid    = 0
+    invoice.status         = "unpaid"
     invoice.notes          = data.notes
 
     for item in data.items:
@@ -615,10 +624,12 @@ async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = 
             ))
 
     if invoice_type == "cash":
-        await _post_journal(db, f"B2B Cash Sale (edited) - {invoice.invoice_number}", "b2b", [
-            ("1000", total, 0),
+        await _post_journal(db, f"B2B Cash Invoice (edited) - {invoice.invoice_number}", "b2b", [
+            ("1100", total, 0),
             ("4000", 0, total),
         ], user_id=current_user.id)
+        if client:
+            client.outstanding = Decimal(str(float(client.outstanding) + total))
     elif invoice_type in ("full_payment", "consignment"):
         await _post_journal(db, f"B2B {invoice_type} Invoice (edited) - {invoice.invoice_number}", "b2b", [
             ("1100", total, 0),
@@ -683,8 +694,9 @@ async def delete_invoice(invoice_id: int, db: AsyncSession = Depends(get_async_s
 @router.post("/api/invoices/{invoice_id}/pay", dependencies=[Depends(require_action("b2b", "invoices", "approve"))])
 async def record_payment(invoice_id: int, data: PaymentRecord, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """
-    Collect payment on a full_payment invoice.
-    Moves amount from Deferred Revenue → Sales Revenue, and Cash ← AR.
+    Collect payment on an invoice (cash, full_payment, or consignment).
+    For cash: Dr Cash / Cr AR (revenue was already recognised at creation).
+    For full_payment: Dr Cash / Cr AR, and Dr Deferred Revenue / Cr Sales Revenue.
     """
     _r = await db.execute(
         select(B2BInvoice)
@@ -705,12 +717,21 @@ async def record_payment(invoice_id: int, data: PaymentRecord, db: AsyncSession 
     client = invoice.client
     client.outstanding = Decimal(str(max(0, float(client.outstanding) - amount)))
 
-    await _post_journal(db, f"Payment received - {invoice.invoice_number}", "b2b_payment", [
-        ("1000", amount, 0),
-        ("1100", 0, amount),
-        ("2200", amount, 0),
-        ("4000", 0, amount),
-    ], user_id=current_user.id)
+    if invoice.invoice_type == "cash":
+        # Revenue already recognised at creation (Dr AR / Cr Revenue)
+        # Now just collect cash: Dr Cash / Cr AR
+        await _post_journal(db, f"Cash collected - {invoice.invoice_number}", "b2b_collection", [
+            ("1000", amount, 0),
+            ("1100", 0, amount),
+        ], user_id=current_user.id)
+    else:
+        # full_payment / consignment: Dr Cash / Cr AR, Dr Deferred Revenue / Cr Revenue
+        await _post_journal(db, f"Payment received - {invoice.invoice_number}", "b2b_payment", [
+            ("1000", amount, 0),
+            ("1100", 0, amount),
+            ("2200", amount, 0),
+            ("4000", 0, amount),
+        ], user_id=current_user.id)
 
     await db.commit()
     return {"ok": True, "status": invoice.status}
@@ -3026,6 +3047,7 @@ function renderInvoices(invoices){
     const typeLabel={cash:"💵 Cash",full_payment:"📋 Full Payment",consignment:"🔄 Consignment"};
     document.getElementById("invoices-body").innerHTML = invoices.map(i=>{
         let actionBtns=`<div style="display:flex;gap:5px;flex-wrap:wrap">
+            ${i.balance_due > 0 && (isAdmin || hasPermission("action_b2b_approve")) ? `<button class="action-btn green" onclick="openPayModal(${i.id},'${i.invoice_number}',${i.balance_due})">Collect</button>` : ""}
             <button class="action-btn" onclick="window.open('/b2b/invoice/${i.id}/print','_blank')">🖨 Print</button>
             ${(isAdmin || hasPermission("action_b2b_delete"))?`<button class="action-btn danger" onclick="deleteInvoice(${i.id},'${i.invoice_number}')">Delete</button>`:""}
         </div>`;
