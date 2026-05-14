@@ -95,8 +95,7 @@ class LoanRepaymentCreate(BaseModel):
 class DayDeductionCreate(BaseModel):
     period: str
     deduction_date: str
-    days: Decimal = Field(gt=0)
-    working_days: Decimal = Field(gt=0)
+    days: Decimal = Field(gt=0)   # e.g. 1, 0.5, 0.25 — daily rate auto-calculated
     note: Optional[str] = None
 
 
@@ -355,8 +354,10 @@ async def _apply_loan_repayment_to_oldest_loans(
         return Decimal("0")
 
     outstanding = await _employee_loan_balance(db, employee_id)
-    if amount > outstanding:
-        raise HTTPException(status_code=400, detail="Loan repayment exceeds outstanding balance")
+    # Allow repayment even if it exceeds balance — cap to actual outstanding
+    if outstanding <= 0:
+        return Decimal("0")
+    amount = min(amount, outstanding)
 
     loans_result = await db.execute(
         select(EmployeeLoan)
@@ -640,8 +641,7 @@ async def create_loan_repayment(
     balance = await _loan_balance(db, loan)
     if amount <= 0:
         raise HTTPException(status_code=400, detail="Repayment amount must be greater than 0")
-    if amount > balance:
-        raise HTTPException(status_code=400, detail="Repayment amount exceeds outstanding balance")
+    # No upper cap — allow overpayment; the loan will just close
     repayment = EmployeeLoanRepayment(
         loan_id=loan.id,
         employee_id=loan.employee_id,
@@ -723,19 +723,21 @@ async def create_day_deduction(
     db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
+    from calendar import monthrange
     employee = await _get_employee_or_404(db, employee_id)
     period = _validate_period(data.period)
     deduction_date = _parse_required_iso_date(data.deduction_date, "deduction_date")
     days = _days(data.days)
-    working_days = _days(data.working_days)
     base_salary = _money(employee.base_salary)
     if base_salary <= 0:
         raise HTTPException(status_code=400, detail="Employee base salary must be greater than 0")
     if days <= 0:
         raise HTTPException(status_code=400, detail="Deduction days must be greater than 0")
-    if working_days <= 0:
-        raise HTTPException(status_code=400, detail="Working days must be greater than 0")
-    daily_rate = _money(base_salary / working_days)
+    # Auto-calculate working days from the period calendar
+    year, month = int(period.split("-")[0]), int(period.split("-")[1])
+    total_days = monthrange(year, month)[1]
+    working_days = _days(sum(1 for d in range(1, total_days + 1) if date(year, month, d).weekday() < 5))
+    daily_rate = _money(base_salary / working_days) if working_days > 0 else Decimal("0")
     amount = _money(daily_rate * days)
     deduction = EmployeePayrollDeduction(
         employee_id=employee.id,
@@ -1169,6 +1171,7 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
             payroll.deductions = _money(
                 payroll.loan_deductions + payroll.day_deductions + payroll.manual_deductions
             )
+            # net_salary may be negative if deductions exceed salary — allowed by design
             payroll.net_salary = _money(payroll.base_salary + payroll.bonuses - payroll.deductions)
             await db.flush()
             payroll_ids.append(payroll.id)
@@ -1479,6 +1482,10 @@ td.mono { font-family: var(--mono); color: var(--green); }
 .danger-note { border:1px solid rgba(255,77,109,.28); background:rgba(255,77,109,.08); border-radius:12px; padding:12px 14px; color:var(--sub); font-size:13px; line-height:1.45; margin-bottom:16px; }
 .confirm-token { font-family:var(--mono); color:var(--danger); font-weight:800; }
 .hr-ledger-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.ld-tab{background:none;border:none;border-bottom:2px solid transparent;padding:8px 16px;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;margin-bottom:-1px;transition:color .15s,border-color .15s}
+.ld-tab.active{color:var(--text);border-bottom-color:var(--green)}
+.day-quick{background:var(--card2);border:1px solid var(--border2);border-radius:6px;padding:4px 8px;font-size:12px;cursor:pointer;color:var(--text)}
+.day-quick:hover{background:var(--border2)}
 .hr-ledger-panel { border:1px solid var(--border); border-radius:12px; padding:14px; }
 .hr-ledger-title { font-size:11px; font-weight:800; letter-spacing:1.3px; text-transform:uppercase; color:var(--muted); margin-bottom:12px; }
 .hr-ledger-table { max-height:220px; overflow:auto; border:1px solid var(--border); border-radius:10px; }
@@ -1705,46 +1712,60 @@ td.mono { font-family: var(--mono); color: var(--green); }
 <!-- LOANS & DEDUCTIONS MODAL -->
 <div class="modal-bg" id="loan-deduction-modal">
     <div class="modal wide">
-        <div class="modal-title">Loans & Deductions</div>
+        <div class="modal-title" id="loan-deduction-title">Loans & Deductions</div>
         <div class="modal-sub" id="loan-deduction-emp" style="color:var(--muted);font-size:13px;margin-bottom:16px"></div>
-        <div class="hr-ledger-grid">
-            <div class="hr-ledger-panel" id="loan-section">
-                <div class="hr-ledger-title">Employee Loans</div>
+
+        <!-- Tab switcher -->
+        <div style="display:flex;gap:8px;margin-bottom:18px;border-bottom:1px solid var(--border2);padding-bottom:0">
+            <button class="ld-tab active" id="ld-tab-loans" onclick="switchLDTab('loans')">Loans</button>
+            <button class="ld-tab" id="ld-tab-deductions" onclick="switchLDTab('deductions')">Penalties / Deductions</button>
+        </div>
+
+        <!-- LOANS PANEL -->
+        <div id="ld-panel-loans">
+            <div id="loan-section">
+                <div class="hr-ledger-title" style="margin-bottom:10px">Add Loan</div>
                 <div class="form-row" id="loan-create-form">
-                    <div class="fld"><label>Loan Date</label><input id="loan-date" type="date"></div>
-                    <div class="fld"><label>Amount</label><input id="loan-amount" type="number" min="0" step="0.01"></div>
-                    <div class="fld span2"><label>Description</label><input id="loan-description" placeholder="Salary advance"></div>
-                    <div class="fld span2"><button class="btn btn-green" onclick="saveEmployeeLoan()">Save Loan</button></div>
+                    <div class="fld"><label>Date</label><input id="loan-date" type="date"></div>
+                    <div class="fld"><label>Amount (EGP)</label><input id="loan-amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
+                    <div class="fld span2"><label>Note</label><input id="loan-description" placeholder="Salary advance, personal loan…"></div>
+                    <div class="fld span2"><button class="btn btn-green" onclick="saveEmployeeLoan()">+ Add Loan</button></div>
                 </div>
-                <div class="form-row" id="loan-repayment-form" style="margin-top:10px">
-                    <div class="fld"><label>Loan</label><select id="repay-loan-id"></select></div>
-                    <div class="fld"><label>Repayment Date</label><input id="repay-date" type="date"></div>
-                    <div class="fld"><label>Amount</label><input id="repay-amount" type="number" min="0" step="0.01"></div>
-                    <div class="fld"><label>Note</label><input id="repay-note" placeholder="Cash repayment"></div>
-                    <div class="fld span2"><button class="btn btn-blue" onclick="saveLoanRepayment()">Save Repayment</button></div>
-                </div>
-                <div class="hr-ledger-table"><table><thead><tr><th>Date</th><th>Amount</th><th>Repaid</th><th>Balance</th><th>Status</th><th>Actions</th></tr></thead><tbody id="loan-history-body"></tbody></table></div>
+                <div style="font-size:11px;color:var(--muted);margin:8px 0 14px">The loan balance will auto-deduct from salary each payroll run.</div>
+                <div class="hr-ledger-table"><table><thead><tr><th>Date</th><th>Amount</th><th>Repaid</th><th>Balance</th><th>Status</th><th></th></tr></thead><tbody id="loan-history-body"></tbody></table></div>
             </div>
-            <div class="hr-ledger-panel" id="deduction-section">
-                <div class="hr-ledger-title">Payroll Deductions</div>
+        </div>
+
+        <!-- DEDUCTIONS PANEL -->
+        <div id="ld-panel-deductions" style="display:none">
+            <div id="deduction-section">
+                <div class="hr-ledger-title" style="margin-bottom:10px">Add Penalty / Deduction</div>
                 <div class="form-row" id="day-deduction-form">
                     <div class="fld"><label>Period</label><input id="deduct-period" type="month"></div>
                     <div class="fld"><label>Date</label><input id="deduct-date" type="date"></div>
-                    <div class="fld"><label>Days</label><input id="deduct-days" type="number" min="0" step="0.25" oninput="updateDayDeductionPreview()"></div>
-                    <div class="fld"><label>Working Days</label><input id="deduct-working-days" type="number" min="1" step="1" oninput="updateDayDeductionPreview()"></div>
-                    <div class="fld"><label>Amount Preview</label><div class="money-preview" id="deduct-preview">0.00</div></div>
-                    <div class="fld"><label>Note</label><input id="deduct-note" placeholder="Left early"></div>
-                    <div class="fld span2"><button class="btn btn-blue" onclick="saveDayDeduction()">Save Day Deduction</button></div>
+                    <div class="fld">
+                        <label>Days Deducted</label>
+                        <div style="display:flex;gap:6px;align-items:center">
+                            <input id="deduct-days" type="number" min="0" step="0.25" placeholder="e.g. 1, 0.5, 0.25" oninput="updateDayDeductionPreview()" style="flex:1">
+                            <div style="display:flex;gap:4px">
+                                <button class="day-quick" onclick="setDeductDays(1)">1d</button>
+                                <button class="day-quick" onclick="setDeductDays(0.5)">½d</button>
+                                <button class="day-quick" onclick="setDeductDays(0.25)">¼d</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="fld">
+                        <label>Amount Preview</label>
+                        <div class="money-preview" id="deduct-preview" style="font-size:18px;font-weight:700;color:var(--danger)">0.00 EGP</div>
+                        <div style="font-size:11px;color:var(--muted)" id="deduct-rate-hint"></div>
+                    </div>
+                    <div class="fld span2"><label>Reason</label><input id="deduct-note" placeholder="Late, absent, penalty…"></div>
+                    <div class="fld span2"><button class="btn btn-blue" onclick="saveDayDeduction()">+ Add Deduction</button></div>
                 </div>
-                <div class="form-row" id="manual-deduction-form" style="margin-top:10px">
-                    <div class="fld"><label>Period</label><input id="manual-deduct-period" type="month"></div>
-                    <div class="fld"><label>Amount</label><input id="manual-deduct-amount" type="number" min="0" step="0.01"></div>
-                    <div class="fld span2"><label>Note</label><input id="manual-deduct-note" placeholder="Manual deduction"></div>
-                    <div class="fld span2"><button class="btn btn-purple" onclick="saveManualDeduction()">Save Manual Deduction</button></div>
-                </div>
-                <div class="hr-ledger-table"><table><thead><tr><th>Period</th><th>Type</th><th>Days</th><th>Rate</th><th>Amount</th><th>Payroll</th><th>Note</th></tr></thead><tbody id="deduction-history-body"></tbody></table></div>
+                <div class="hr-ledger-table" style="margin-top:16px"><table><thead><tr><th>Period</th><th>Date</th><th>Days</th><th>Daily Rate</th><th>Amount</th><th>Status</th><th>Reason</th></tr></thead><tbody id="deduction-history-body"></tbody></table></div>
             </div>
         </div>
+
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeLoanDeductionModal()">Close</button>
         </div>
@@ -2128,18 +2149,25 @@ function setDefaultLoanDeductionDates(){
     if(working && !working.value) working.value = "30";
 }
 
+/* ── LOANS & DEDUCTIONS MODAL ── */
+function switchLDTab(tab){
+    document.getElementById("ld-panel-loans").style.display      = tab==="loans"      ? "" : "none";
+    document.getElementById("ld-panel-deductions").style.display = tab==="deductions" ? "" : "none";
+    document.getElementById("ld-tab-loans").classList.toggle("active",      tab==="loans");
+    document.getElementById("ld-tab-deductions").classList.toggle("active", tab==="deductions");
+}
+
 async function openLoanDeductionModal(employeeId, name, salary){
     loanDeductionEmployeeId = employeeId;
     loanDeductionEmployeeSalary = salary;
-    document.getElementById("loan-deduction-emp").innerText = `${name} - Base salary ${money(salary)} EGP`;
+    document.getElementById("loan-deduction-emp").innerText = `${name}  ·  Base salary: ${money(salary)} EGP`;
     setDefaultLoanDeductionDates();
     updateDayDeductionPreview();
-    document.getElementById("loan-section").style.display = hasPermission("action_hr_view_loans") ? "" : "none";
-    document.getElementById("loan-create-form").style.display = hasPermission("action_hr_manage_loans") ? "" : "none";
-    document.getElementById("loan-repayment-form").style.display = hasPermission("action_hr_manage_loans") ? "" : "none";
+    switchLDTab("loans");
+    document.getElementById("loan-section").style.display      = hasPermission("action_hr_view_loans")      ? "" : "none";
+    document.getElementById("loan-create-form").style.display  = hasPermission("action_hr_manage_loans")    ? "" : "none";
     document.getElementById("deduction-section").style.display = hasPermission("action_hr_view_deductions") ? "" : "none";
     document.getElementById("day-deduction-form").style.display = hasPermission("action_hr_manage_deductions") ? "" : "none";
-    document.getElementById("manual-deduction-form").style.display = hasPermission("action_hr_manage_deductions") ? "" : "none";
     document.getElementById("loan-deduction-modal").classList.add("open");
     await refreshLoanDeductionModal();
 }
@@ -2150,31 +2178,28 @@ function closeLoanDeductionModal(){
 
 async function refreshLoanDeductionModal(){
     if(!loanDeductionEmployeeId) return;
-    if(hasPermission("action_hr_view_loans")) await loadEmployeeLoans();
+    if(hasPermission("action_hr_view_loans"))      await loadEmployeeLoans();
     if(hasPermission("action_hr_view_deductions")) await loadEmployeeDeductions();
 }
 
 async function loadEmployeeLoans(){
     const body = document.getElementById("loan-history-body");
-    const select = document.getElementById("repay-loan-id");
     try{
         const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/loans`);
         currentEmployeeLoans = await readApiResponse(res);
-        const openLoans = currentEmployeeLoans.filter(loan => loan.status === "open" && numberValue(loan.balance) > 0);
-        select.innerHTML = openLoans.map(loan =>
-            `<option value="${numberValue(loan.id)}">#${numberValue(loan.id)} - ${money(loan.balance)} EGP</option>`
-        ).join("") || `<option value="">No open loans</option>`;
+        const totalBalance = currentEmployeeLoans.reduce((s,l)=>s+numberValue(l.balance),0);
         body.innerHTML = currentEmployeeLoans.map(loan => `
             <tr>
                 <td>${displayText(loan.loan_date)}</td>
                 <td class="mono">${money(loan.amount)}</td>
-                <td class="mono">${money(loan.repaid_amount)}</td>
-                <td class="mono">${money(loan.balance)}</td>
-                <td>${displayText(loan.status)}</td>
+                <td class="mono" style="color:var(--muted)">${money(loan.repaid_amount)}</td>
+                <td class="mono" style="font-weight:700;color:${numberValue(loan.balance)>0?"var(--warn)":"var(--muted)"}">${money(loan.balance)}</td>
+                <td><span class="status-${loan.status==="open"?"pending":loan.status==="paid"?"success":"danger"}">${displayText(loan.status)}</span></td>
                 <td>
-                    ${loan.status === "open" && hasPermission("action_hr_manage_loans") ? `<button class="action-btn" onclick="selectLoanForRepayment(${numberValue(loan.id)})">Repay</button> <button class="action-btn danger" onclick="cancelLoan(${numberValue(loan.id)})">Cancel</button>` : ""}
+                    ${loan.status==="open" && hasPermission("action_hr_manage_loans") ? `<button class="action-btn danger" onclick="cancelLoan(${numberValue(loan.id)})">Cancel</button>` : ""}
                 </td>
-            </tr>`).join("") || `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px">No loans recorded</td></tr>`;
+            </tr>`).join("") || `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px">No loans yet</td></tr>`;
+        if(totalBalance>0) body.innerHTML += `<tr style="background:var(--card2)"><td colspan="3" style="font-weight:700;color:var(--sub)">Total Outstanding</td><td class="mono" style="font-weight:700;color:var(--warn)">${money(totalBalance)}</td><td colspan="2"></td></tr>`;
     }catch(err){
         body.innerHTML = `<tr><td colspan="6" style="color:var(--danger);padding:18px">Could not load loans</td></tr>`;
     }
@@ -2185,16 +2210,16 @@ async function loadEmployeeDeductions(){
     try{
         const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/deductions`);
         const deductions = await readApiResponse(res);
-        body.innerHTML = deductions.map(d => `
+        body.innerHTML = deductions.filter(d=>d.type!=="loan_repayment").map(d => `
             <tr>
                 <td>${displayText(d.period || d.payroll_period)}</td>
-                <td>${displayText(String(d.type || "").replace(/_/g, " "))}</td>
-                <td>${d.days === null || d.days === undefined ? "-" : numberValue(d.days)}</td>
-                <td class="mono">${d.daily_rate === null || d.daily_rate === undefined ? "-" : money(d.daily_rate)}</td>
-                <td class="mono">${money(d.amount)}</td>
-                <td>${d.payroll_id ? "#" + numberValue(d.payroll_id) : "Pending"}</td>
-                <td>${displayText(d.note)}</td>
-            </tr>`).join("") || `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:18px">No deductions recorded</td></tr>`;
+                <td>${d.deduction_date ? displayText(d.deduction_date) : "-"}</td>
+                <td style="font-weight:700">${d.days!==null&&d.days!==undefined ? numberValue(d.days)+"d" : "-"}</td>
+                <td class="mono" style="color:var(--muted)">${d.daily_rate!==null&&d.daily_rate!==undefined ? money(d.daily_rate) : "-"}</td>
+                <td class="mono" style="font-weight:700;color:var(--danger)">${money(d.amount)}</td>
+                <td style="font-size:11px;color:${d.payroll_id?"var(--green)":"var(--warn)"}">${d.payroll_id?"Applied to payroll":"Pending"}</td>
+                <td style="color:var(--muted);font-size:12px">${escapeHtml(d.note||"-")}</td>
+            </tr>`).join("") || `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:18px">No deductions yet</td></tr>`;
     }catch(err){
         body.innerHTML = `<tr><td colspan="7" style="color:var(--danger);padding:18px">Could not load deductions</td></tr>`;
     }
@@ -2202,107 +2227,84 @@ async function loadEmployeeDeductions(){
 
 async function saveEmployeeLoan(){
     if(!hasPermission("action_hr_manage_loans")) return;
+    const amt = parseFloat(document.getElementById("loan-amount").value||"0");
+    if(!amt||amt<=0){ showToast("Enter a valid loan amount"); return; }
     const body = {
         loan_date: document.getElementById("loan-date").value,
-        amount: parseFloat(document.getElementById("loan-amount").value || "0"),
-        description: document.getElementById("loan-description").value.trim() || null,
+        amount: amt,
+        description: document.getElementById("loan-description").value.trim()||null,
     };
     try{
-        const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/loans`, {
-            method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
+        const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/loans`,{
+            method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),
         });
         await readApiResponse(res);
-        document.getElementById("loan-amount").value = "";
-        document.getElementById("loan-description").value = "";
-        showToast("Loan saved");
+        document.getElementById("loan-amount").value="";
+        document.getElementById("loan-description").value="";
+        showToast("Loan added — will auto-deduct from next payroll");
         await loadEmployeeLoans();
-    }catch(err){ showToast("Error: " + (err.message || "Could not save loan")); }
-}
-
-function selectLoanForRepayment(loanId){
-    document.getElementById("repay-loan-id").value = String(loanId);
-    document.getElementById("repay-amount").focus();
-}
-
-async function saveLoanRepayment(){
-    if(!hasPermission("action_hr_manage_loans")) return;
-    const loanId = document.getElementById("repay-loan-id").value;
-    if(!loanId){ showToast("Select an open loan"); return; }
-    const body = {
-        repayment_date: document.getElementById("repay-date").value,
-        amount: parseFloat(document.getElementById("repay-amount").value || "0"),
-        note: document.getElementById("repay-note").value.trim() || null,
-    };
-    try{
-        const res = await fetch(`/hr/api/loans/${loanId}/repayments`, {
-            method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
-        });
-        await readApiResponse(res);
-        document.getElementById("repay-amount").value = "";
-        document.getElementById("repay-note").value = "";
-        showToast("Repayment saved");
-        await loadEmployeeLoans();
-    }catch(err){ showToast("Error: " + (err.message || "Could not save repayment")); }
+    }catch(err){ showToast("Error: "+(err.message||"Could not save loan")); }
 }
 
 async function cancelLoan(loanId){
     if(!hasPermission("action_hr_manage_loans")) return;
-    if(!confirm("Cancel this loan? It will stay in history.")) return;
+    if(!confirm("Cancel this loan? It will stay in history but no longer deduct.")) return;
     try{
-        const res = await fetch(`/hr/api/loans/${loanId}/cancel`, {method:"POST"});
+        const res = await fetch(`/hr/api/loans/${loanId}/cancel`,{method:"POST"});
         await readApiResponse(res);
         showToast("Loan cancelled");
         await loadEmployeeLoans();
-    }catch(err){ showToast("Error: " + (err.message || "Could not cancel loan")); }
+    }catch(err){ showToast("Error: "+(err.message||"Could not cancel loan")); }
+}
+
+function setDeductDays(d){
+    document.getElementById("deduct-days").value = d;
+    updateDayDeductionPreview();
 }
 
 function updateDayDeductionPreview(){
     const days = numberValue(document.getElementById("deduct-days")?.value);
-    const workingDays = numberValue(document.getElementById("deduct-working-days")?.value);
-    const amount = workingDays > 0 ? (loanDeductionEmployeeSalary / workingDays) * days : 0;
+    const period = document.getElementById("deduct-period")?.value;
+    let workingDays = 22;
+    if(period){
+        const [yr,mo] = period.split("-").map(Number);
+        const daysInMonth = new Date(yr,mo,0).getDate();
+        let wd=0; for(let d=1;d<=daysInMonth;d++){ if(new Date(yr,mo-1,d).getDay()%6!==0) wd++; }
+        workingDays = wd;
+    }
+    const dailyRate = loanDeductionEmployeeSalary / workingDays;
+    const amount = dailyRate * days;
     const preview = document.getElementById("deduct-preview");
-    if(preview) preview.innerText = money(amount);
+    const hint    = document.getElementById("deduct-rate-hint");
+    if(preview) preview.innerText = money(amount)+" EGP";
+    if(hint) hint.innerText = days>0 ? `Daily rate: ${money(dailyRate)} EGP × ${days}d (${workingDays} working days)` : "";
 }
 
 async function saveDayDeduction(){
     if(!hasPermission("action_hr_manage_deductions")) return;
+    const days = parseFloat(document.getElementById("deduct-days").value||"0");
+    if(!days||days<=0){ showToast("Enter days to deduct (e.g. 1, 0.5, 0.25)"); return; }
     const body = {
         period: document.getElementById("deduct-period").value,
         deduction_date: document.getElementById("deduct-date").value,
-        days: parseFloat(document.getElementById("deduct-days").value || "0"),
-        working_days: parseFloat(document.getElementById("deduct-working-days").value || "0"),
-        note: document.getElementById("deduct-note").value.trim() || null,
+        days: days,
+        note: document.getElementById("deduct-note").value.trim()||null,
     };
     try{
-        const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/deductions/day`, {
-            method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
+        const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/deductions/day`,{
+            method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),
         });
         await readApiResponse(res);
-        document.getElementById("deduct-days").value = "";
-        document.getElementById("deduct-note").value = "";
+        document.getElementById("deduct-days").value="";
+        document.getElementById("deduct-note").value="";
         updateDayDeductionPreview();
-        showToast("Day deduction saved");
+        showToast("Deduction saved");
         await loadEmployeeDeductions();
-    }catch(err){ showToast("Error: " + (err.message || "Could not save deduction")); }
+    }catch(err){ showToast("Error: "+(err.message||"Could not save deduction")); }
 }
 
 async function saveManualDeduction(){
-    if(!hasPermission("action_hr_manage_deductions")) return;
-    const body = {
-        period: document.getElementById("manual-deduct-period").value,
-        amount: parseFloat(document.getElementById("manual-deduct-amount").value || "0"),
-        note: document.getElementById("manual-deduct-note").value.trim() || null,
-    };
-    try{
-        const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/deductions/manual`, {
-            method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
-        });
-        await readApiResponse(res);
-        document.getElementById("manual-deduct-amount").value = "";
-        document.getElementById("manual-deduct-note").value = "";
-        showToast("Manual deduction saved");
-        await loadEmployeeDeductions();
-    }catch(err){ showToast("Error: " + (err.message || "Could not save deduction")); }
+    return; // Removed — use day deduction for all penalties
 }
 
 /* ── ATTENDANCE ── */
@@ -2490,14 +2492,10 @@ function updatePayrollPreviewNet(input){
     const base = numberValue(row.querySelector(".pay-net-preview")?.dataset.base);
     const bonus = numberValue(row.querySelector(".pay-bonus-input")?.value);
     const loan = numberValue(row.querySelector(".pay-loan-input")?.value);
-    const maxLoan = numberValue(row.querySelector(".pay-loan-input")?.dataset.max);
-    if(maxLoan > 0 && loan > maxLoan){
-        row.querySelector(".pay-loan-input").value = maxLoan.toFixed(2);
-    }
     const day = numberValue(row.querySelector("[data-day-ded]")?.dataset.dayDed);
     const manual = numberValue(row.querySelector("[data-manual-ded]")?.dataset.manualDed);
-    const safeLoan = Math.min(numberValue(row.querySelector(".pay-loan-input")?.value), maxLoan || 0);
-    row.querySelector(".pay-net-preview").innerText = money(base + bonus - day - manual - safeLoan);
+    // No max cap on loan — allow full outstanding balance to be deducted
+    row.querySelector(".pay-net-preview").innerText = money(base + bonus - day - manual - loan);
 }
 
 async function confirmRunPayroll(){
@@ -2512,6 +2510,7 @@ async function confirmRunPayroll(){
     document.querySelectorAll(".pay-loan-input").forEach(input => {
         const value = numberValue(input.value);
         if(value > 0) loan_repayments[numberValue(input.dataset.empId)] = value;
+        // No cap — backend will apply up to the outstanding balance
     });
     let res  = await fetch("/hr/api/payroll/run",{
         method:"POST", headers:{"Content-Type":"application/json"},
