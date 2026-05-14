@@ -563,6 +563,10 @@ td.name{color:var(--text);font-weight:600;}
         <div class="page-sub">Receive crops from your farms — stock updates automatically</div>
     </div>
 
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:8px;">
+        <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);">Your Farms</div>
+        <button class="btn btn-lime" id="btn-add-farm" onclick="openAddFarmModal()" style="font-size:12px;padding:7px 14px;">+ Add Farm</button>
+    </div>
     <div class="farms-row" id="farms-row">
         <div style="color:var(--muted);padding:20px">Loading farms...</div>
     </div>
