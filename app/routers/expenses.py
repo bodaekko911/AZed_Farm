@@ -14,6 +14,7 @@ from app.database import get_async_session
 from app.core.navigation import render_app_header
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.expense import Expense, ExpenseCategory
+from app.models.carbon import CarbonEmissionFactor, CarbonLog
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.product import Product
 from app.models.user import User
@@ -28,18 +29,33 @@ router = APIRouter(
 # ── Schemas ─────────────────────────────────────────────────────────────────
 
 class CategoryCreate(BaseModel):
-    name:         str
-    account_code: Optional[str] = None   # auto-generated if not provided
-    description:  Optional[str] = None
+    name:               str
+    account_code:       Optional[str]   = None
+    description:        Optional[str]   = None
+    unit_price:         Optional[float] = None
+    unit_name:          Optional[str]   = None
+    carbon_factor_key:  Optional[str]   = None
+
+
+class CategoryUpdate(BaseModel):
+    name:               Optional[str]   = None
+    description:        Optional[str]   = None
+    unit_price:         Optional[float] = None
+    unit_name:          Optional[str]   = None
+    carbon_factor_key:  Optional[str]   = None
+
 
 class ExpenseCreate(BaseModel):
     category_id:    int
-    expense_date:   str          # ISO "YYYY-MM-DD"
+    expense_date:   str
     amount:         float
     payment_method: str = "cash"
     vendor:         Optional[str] = None
     description:    Optional[str] = None
-    farm_id:        Optional[int] = None   # link to farm for cost allocation
+    farm_id:        Optional[int] = None
+    consumption:    Optional[float] = None    # quantity in category unit (auto-calculated if blank)
+    unit_price_used: Optional[float] = None   # editable override for unit price
+
 
 class ExpenseUpdate(BaseModel):
     category_id:    Optional[int]   = None
@@ -49,9 +65,46 @@ class ExpenseUpdate(BaseModel):
     vendor:         Optional[str]   = None
     description:    Optional[str]   = None
     farm_id:        Optional[int]   = None
+    consumption:    Optional[float] = None
+    unit_price_used: Optional[float] = None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+async def _create_carbon_log_for_expense(
+    db: AsyncSession,
+    expense: Expense,
+    category: ExpenseCategory,
+    consumption: float,
+    current_user: User,
+) -> None:
+    """Auto-create a CarbonLog when an expense has a unit & a mapped emission factor."""
+    if not category.carbon_factor_key or consumption <= 0:
+        return
+    _f = await db.execute(
+        select(CarbonEmissionFactor).where(
+            CarbonEmissionFactor.source_key == category.carbon_factor_key,
+            CarbonEmissionFactor.is_active == True,
+        )
+    )
+    factor = _f.scalar_one_or_none()
+    if not factor:
+        return
+    qty = Decimal(str(consumption))
+    kg_co2e = (qty * factor.factor_kg_co2e_per_unit).quantize(Decimal("0.0001"))
+    log = CarbonLog(
+        factor_id=factor.id,
+        farm_id=expense.farm_id,
+        user_id=current_user.id,
+        log_date=expense.expense_date,
+        quantity=qty,
+        kg_co2e=kg_co2e,
+        ref_type="expense",
+        ref_id=expense.id,
+        notes=f"Auto-logged from expense {expense.ref_number} ({category.name})",
+    )
+    db.add(log)
+
 
 async def _next_ref(db: AsyncSession) -> str:
     _r = await db.execute(select(func.max(Expense.id)))
@@ -146,6 +199,9 @@ async def list_categories(db: AsyncSession = Depends(get_async_session)):
             "name":         c.name,
             "account_code": c.account_code,
             "description":  c.description or "",
+            "unit_price":   float(c.unit_price) if c.unit_price is not None else None,
+            "unit_name":    c.unit_name or "",
+            "carbon_factor_key": c.carbon_factor_key or "",
             "count":        len(c.expenses),
             "total":        float(sum(e.amount for e in c.expenses)),
         }
@@ -184,11 +240,58 @@ async def create_category(
         name=data.name.strip(),
         account_code=account_code,
         description=(data.description or "").strip() or None,
+        unit_price=data.unit_price if data.unit_price and data.unit_price > 0 else None,
+        unit_name=(data.unit_name or "").strip() or None,
+        carbon_factor_key=(data.carbon_factor_key or "").strip() or None,
     )
     db.add(cat)
     await db.commit()
     await db.refresh(cat)
     return {"id": cat.id, "name": cat.name, "account_code": cat.account_code}
+
+
+@router.get("/api/carbon-factors")
+async def list_carbon_factors(db: AsyncSession = Depends(get_async_session)):
+    _r = await db.execute(
+        select(CarbonEmissionFactor)
+        .where(CarbonEmissionFactor.is_active == True)
+        .order_by(CarbonEmissionFactor.source_type, CarbonEmissionFactor.label)
+    )
+    return [
+        {
+            "source_key": f.source_key,
+            "label":      f.label,
+            "unit":       f.unit,
+            "factor":     float(f.factor_kg_co2e_per_unit),
+            "source_type": f.source_type,
+        }
+        for f in _r.scalars().all()
+    ]
+
+
+@router.put("/api/categories/{cat_id}")
+async def update_category(
+    cat_id: int,
+    data: CategoryUpdate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    _r = await db.execute(select(ExpenseCategory).where(ExpenseCategory.id == cat_id))
+    cat = _r.scalar_one_or_none()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
+    if data.name is not None:
+        cat.name = data.name.strip()
+    if data.description is not None:
+        cat.description = data.description.strip() or None
+    if data.unit_price is not None:
+        cat.unit_price = data.unit_price if data.unit_price > 0 else None
+    if data.unit_name is not None:
+        cat.unit_name = data.unit_name.strip() or None
+    if data.carbon_factor_key is not None:
+        cat.carbon_factor_key = data.carbon_factor_key.strip() or None
+    await db.commit()
+    return {"ok": True, "id": cat.id, "name": cat.name}
 
 
 @router.delete("/api/categories/{cat_id}")
@@ -258,6 +361,9 @@ async def list_expenses(
             "created_by":     e.user.name if e.user else "—",
             "farm_id":        e.farm_id,
             "farm_name":      e.farm.name if e.farm else None,
+            "consumption":    float(e.consumption) if e.consumption is not None else None,
+            "unit_price_used": float(e.unit_price_used) if e.unit_price_used is not None else None,
+            "unit_name":      e.category.unit_name if e.category else None,
         }
         for e in expenses
     ]
@@ -350,6 +456,19 @@ async def add_expense(
         user_id=current_user.id,
     )
 
+    # ── Consumption + unit price ──
+    unit_price_used = None
+    consumption = None
+    if data.unit_price_used is not None and data.unit_price_used > 0:
+        unit_price_used = round(float(data.unit_price_used), 4)
+    elif cat.unit_price is not None and float(cat.unit_price) > 0:
+        unit_price_used = float(cat.unit_price)
+
+    if data.consumption is not None and data.consumption > 0:
+        consumption = round(float(data.consumption), 4)
+    elif unit_price_used and unit_price_used > 0:
+        consumption = round(float(data.amount) / unit_price_used, 4)
+
     expense = Expense(
         ref_number=ref,
         category_id=cat.id,
@@ -361,21 +480,31 @@ async def add_expense(
         description=desc,
         journal_id=journal.id,
         farm_id=data.farm_id or None,
+        consumption=consumption,
+        unit_price_used=unit_price_used,
     )
     db.add(expense)
+    await db.flush()   # need expense.id for carbon log
+
+    if consumption and cat.carbon_factor_key:
+        await _create_carbon_log_for_expense(db, expense, cat, consumption, current_user)
+
     record(
         db, "Expenses", "add_expense",
-        f"{cat.name} — {ref} — {float(data.amount):.2f} — {data.payment_method}",
-        user=current_user, ref_type="expense", ref_id=0,
+        f"{cat.name} — {ref} — {float(data.amount):.2f} — {data.payment_method}" +
+        (f" — {consumption} {cat.unit_name}" if consumption and cat.unit_name else ""),
+        user=current_user, ref_type="expense", ref_id=expense.id,
     )
     await db.commit()
     await db.refresh(expense)
-    # update ref_id in activity log — simpler to just re-record
     return {
         "id":         expense.id,
         "ref_number": expense.ref_number,
         "amount":     float(expense.amount),
         "category":   cat.name,
+        "consumption": consumption,
+        "unit_name":  cat.unit_name,
+        "unit_price_used": unit_price_used,
     }
 
 
@@ -987,11 +1116,11 @@ nav {
         <div class="modal-row">
             <div class="fld">
                 <label>Category *</label>
-                <select id="m-category"></select>
+                <select id="m-category" onchange="onCategoryChange()"></select>
             </div>
             <div class="fld">
                 <label>Amount (EGP) *</label>
-                <input id="m-amount" type="number" min="0.01" step="0.01" placeholder="0.00">
+                <input id="m-amount" type="number" min="0.01" step="0.01" placeholder="0.00" oninput="recalcConsumption()">
             </div>
         </div>
         <div class="modal-row">
@@ -1020,6 +1149,18 @@ nav {
                 </select>
             </div>
         </div>
+        <!-- Consumption row — visible only when category has a unit_price -->
+        <div class="modal-row" id="m-consumption-row" style="display:none">
+            <div class="fld">
+                <label>Unit Price (EGP / <span id="m-unit-label">unit</span>) <span style="font-size:10px;color:var(--muted)">editable</span></label>
+                <input id="m-unit-price" type="number" step="0.0001" min="0" placeholder="0.00" oninput="recalcConsumption()">
+            </div>
+            <div class="fld">
+                <label>Consumption (<span id="m-unit-label-2">unit</span>) <span style="font-size:10px;color:var(--muted)">auto</span></label>
+                <input id="m-consumption" type="number" step="0.0001" min="0" placeholder="auto from amount" oninput="recalcAmount()">
+            </div>
+        </div>
+        <div id="m-carbon-preview" style="display:none;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:var(--muted)"></div>
         <div class="fld">
             <label>Notes</label>
             <textarea id="m-notes" placeholder="Optional description…"></textarea>
@@ -1033,16 +1174,42 @@ nav {
 
 <!-- Add Category Modal -->
 <div class="modal-bg" id="cat-modal">
-    <div class="modal" style="width:380px">
-        <div class="modal-title">New Category</div>
-        <div class="modal-sub">A ledger account code will be assigned automatically.</div>
+    <div class="modal" style="width:460px">
+        <div class="modal-title" id="cat-modal-title">New Category</div>
+        <div class="modal-sub">For utilities (water, electricity, gas), set a unit price to auto-calculate consumption and CO₂.</div>
         <div class="fld">
             <label>Category Name *</label>
-            <input id="cm-name" placeholder="e.g. Internet & Phone">
+            <input id="cm-name" placeholder="e.g. Water, Electricity, Natural Gas">
         </div>
         <div class="fld">
             <label>Description</label>
             <input id="cm-desc" placeholder="Optional">
+        </div>
+        <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:14px">
+            <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px">Consumption tracking (optional)</div>
+            <div class="modal-row">
+                <div class="fld">
+                    <label>Unit Price (EGP)</label>
+                    <input id="cm-unit-price" type="number" step="0.0001" min="0" placeholder="e.g. 25.50">
+                </div>
+                <div class="fld">
+                    <label>Unit</label>
+                    <select id="cm-unit-name">
+                        <option value="">— none —</option>
+                        <option value="m³">m³ (cubic meter)</option>
+                        <option value="kWh">kWh (kilowatt-hour)</option>
+                        <option value="litre">litre</option>
+                        <option value="kg">kg</option>
+                    </select>
+                </div>
+            </div>
+            <div class="fld">
+                <label>Carbon Emission Factor (optional)</label>
+                <select id="cm-carbon-factor">
+                    <option value="">— none —</option>
+                </select>
+                <div style="font-size:11px;color:var(--muted);margin-top:4px">When set, expenses in this category auto-log to Carbon Footprint.</div>
+            </div>
         </div>
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeModal('cat-modal')">Cancel</button>
@@ -1156,12 +1323,15 @@ function renderCategories() {
         return;
     }
     body.innerHTML = categories.map(c => `
-        <div class="cat-item ${activeCatId === c.id ? "active" : ""}" onclick="filterCategory(${c.id})">
+        <div class="cat-item ${activeCatId === c.id ? "active" : ""}" onclick="filterCategory(${c.id})" style="position:relative">
             <div>
-                <div class="cat-item-name">${c.name}</div>
-                <div class="cat-item-code">${c.account_code}</div>
+                <div class="cat-item-name">${c.name}${c.unit_price ? ` <span style="font-size:10px;color:var(--blue);font-weight:400">${c.unit_price}/${c.unit_name||"unit"}</span>` : ""}</div>
+                <div class="cat-item-code">${c.account_code}${c.carbon_factor_key ? " · 🌿" : ""}</div>
             </div>
-            <div class="cat-item-total">${c.total > 0 ? c.total.toFixed(0) : "—"}</div>
+            <div style="display:flex;align-items:center;gap:6px">
+                <div class="cat-item-total">${c.total > 0 ? c.total.toFixed(0) : "—"}</div>
+                ${hasPermission("action_expenses_create") ? `<button class="action-btn" onclick="event.stopPropagation();openEditCategoryModal(${c.id})" style="font-size:11px;padding:3px 8px">✏</button>` : ""}
+            </div>
         </div>
     `).join("");
 
@@ -1174,6 +1344,44 @@ function renderCategories() {
     if (prev) sel.value = prev;
 }
 
+let editingCategoryId = null;
+
+function fillCarbonFactorSelect(){
+    const sel = document.getElementById("cm-carbon-factor");
+    if(!sel || !window.carbonFactors) return;
+    sel.innerHTML = `<option value="">— none —</option>` + window.carbonFactors.map(f =>
+        `<option value="${f.source_key}">${f.label} (${f.unit}, ${f.factor} kg CO₂e/${f.unit})</option>`
+    ).join("");
+}
+
+function openNewCategoryModal(){
+    editingCategoryId = null;
+    document.getElementById("cat-modal-title").innerText = "New Category";
+    document.getElementById("create-category-btn").innerText = "Create";
+    document.getElementById("cm-name").value = "";
+    document.getElementById("cm-desc").value = "";
+    document.getElementById("cm-unit-price").value = "";
+    document.getElementById("cm-unit-name").value = "";
+    document.getElementById("cm-carbon-factor").value = "";
+    fillCarbonFactorSelect();
+    openModal("cat-modal");
+}
+
+function openEditCategoryModal(catId){
+    const cat = categories.find(c => c.id === catId);
+    if(!cat) return;
+    editingCategoryId = catId;
+    document.getElementById("cat-modal-title").innerText = "Edit Category: " + cat.name;
+    document.getElementById("create-category-btn").innerText = "Save Changes";
+    document.getElementById("cm-name").value = cat.name;
+    document.getElementById("cm-desc").value = cat.description || "";
+    document.getElementById("cm-unit-price").value = cat.unit_price || "";
+    document.getElementById("cm-unit-name").value = cat.unit_name || "";
+    fillCarbonFactorSelect();
+    document.getElementById("cm-carbon-factor").value = cat.carbon_factor_key || "";
+    openModal("cat-modal");
+}
+
 async function saveCategory() {
     if (!hasPermission("action_expenses_create")) {
         showToast("Permission denied: action_expenses_create", "err");
@@ -1181,22 +1389,27 @@ async function saveCategory() {
     }
     const name = document.getElementById("cm-name").value.trim();
     const desc = document.getElementById("cm-desc").value.trim();
+    const unitPrice = parseFloat(document.getElementById("cm-unit-price").value) || null;
+    const unitName  = document.getElementById("cm-unit-name").value || null;
+    const factorKey = document.getElementById("cm-carbon-factor").value || null;
     if (!name) { showToast("Category name is required", "err"); return; }
+    const body = { name, description: desc, unit_price: unitPrice, unit_name: unitName, carbon_factor_key: factorKey };
     try {
-        const res  = await fetch("/expenses/api/categories", {
-            method: "POST",
+        const url = editingCategoryId ? `/expenses/api/categories/${editingCategoryId}` : "/expenses/api/categories";
+        const method = editingCategoryId ? "PUT" : "POST";
+        const res  = await fetch(url, {
+            method: method,
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name, description: desc }),
+            body: JSON.stringify(body),
         });
         const data = await res.json();
         if (data.detail) { showToast(data.detail, "err"); return; }
-        showToast(`✓ "${data.name}" created (code ${data.account_code})`, "ok");
+        showToast(editingCategoryId ? `✓ "${data.name}" updated` : `✓ "${data.name}" created (code ${data.account_code})`, "ok");
         closeModal("cat-modal");
-        document.getElementById("cm-name").value = "";
-        document.getElementById("cm-desc").value = "";
+        editingCategoryId = null;
         await loadCategories();
     } catch(e) {
-        showToast("Failed to create category", "err");
+        showToast("Failed to save category", "err");
     }
 }
 
@@ -1205,7 +1418,7 @@ function openCatModal() {
         showToast("Permission denied: action_expenses_create", "err");
         return;
     }
-    openModal("cat-modal");
+    openNewCategoryModal();
 }
 function filterCategory(id) {
     activeCatId = id;
@@ -1460,6 +1673,9 @@ function openAddModal() {
     document.getElementById("m-notes").value    = "";
     document.getElementById("m-farm").value     = "";
     if (activeCatId) document.getElementById("m-category").value = activeCatId;
+    document.getElementById("m-unit-price").value   = "";
+    document.getElementById("m-consumption").value  = "";
+    onCategoryChange();
     openModal("expense-modal");
 }
 
@@ -1479,7 +1695,82 @@ function openEditModal(e) {
     document.getElementById("m-vendor").value   = e.vendor || "";
     document.getElementById("m-notes").value    = e.description || "";
     document.getElementById("m-farm").value     = e.farm_id || "";
+    document.getElementById("m-unit-price").value   = e.unit_price_used || "";
+    document.getElementById("m-consumption").value  = e.consumption || "";
+    onCategoryChange();
+    if(e.unit_price_used) document.getElementById("m-unit-price").value = e.unit_price_used;
+    if(e.consumption)     document.getElementById("m-consumption").value = e.consumption;
     openModal("expense-modal");
+}
+
+let currentCategoryMeta = null;
+
+function onCategoryChange(){
+    const catId = parseInt(document.getElementById("m-category").value) || 0;
+    currentCategoryMeta = categories.find(c => c.id === catId) || null;
+    const row    = document.getElementById("m-consumption-row");
+    const ulabel = document.getElementById("m-unit-label");
+    const ulabel2 = document.getElementById("m-unit-label-2");
+    const upInput = document.getElementById("m-unit-price");
+    const consumption = document.getElementById("m-consumption");
+    if(currentCategoryMeta && currentCategoryMeta.unit_price && currentCategoryMeta.unit_name){
+        row.style.display = "";
+        ulabel.innerText = currentCategoryMeta.unit_name;
+        ulabel2.innerText = currentCategoryMeta.unit_name;
+        if(!upInput.value || parseFloat(upInput.value) <= 0){
+            upInput.value = currentCategoryMeta.unit_price;
+        }
+        recalcConsumption();
+    } else {
+        row.style.display = "none";
+        upInput.value = "";
+        consumption.value = "";
+        document.getElementById("m-carbon-preview").style.display = "none";
+    }
+}
+
+function recalcConsumption(){
+    const amount = parseFloat(document.getElementById("m-amount").value || 0);
+    const unitPrice = parseFloat(document.getElementById("m-unit-price").value || 0);
+    const consInput = document.getElementById("m-consumption");
+    if(amount > 0 && unitPrice > 0){
+        consInput.value = (amount / unitPrice).toFixed(4);
+        updateCarbonPreview(amount / unitPrice);
+    } else {
+        consInput.value = "";
+        document.getElementById("m-carbon-preview").style.display = "none";
+    }
+}
+
+function recalcAmount(){
+    const consumption = parseFloat(document.getElementById("m-consumption").value || 0);
+    const unitPrice = parseFloat(document.getElementById("m-unit-price").value || 0);
+    if(consumption > 0 && unitPrice > 0){
+        document.getElementById("m-amount").value = (consumption * unitPrice).toFixed(2);
+        updateCarbonPreview(consumption);
+    } else {
+        document.getElementById("m-carbon-preview").style.display = "none";
+    }
+}
+
+function updateCarbonPreview(consumption){
+    const box = document.getElementById("m-carbon-preview");
+    if(!currentCategoryMeta || !currentCategoryMeta.carbon_factor_key || !window.carbonFactors){
+        box.style.display = "none";
+        return;
+    }
+    const f = window.carbonFactors.find(x => x.source_key === currentCategoryMeta.carbon_factor_key);
+    if(!f){ box.style.display = "none"; return; }
+    const co2 = (consumption * f.factor).toFixed(2);
+    box.style.display = "";
+    box.innerHTML = `🌿 Will auto-log <b style="color:var(--green)">${co2} kg CO₂e</b> in Carbon Footprint (${consumption.toFixed(2)} ${f.unit} × ${f.factor} kg/${f.unit})`;
+}
+
+async function loadCarbonFactors(){
+    try {
+        const r = await fetch("/expenses/api/carbon-factors");
+        window.carbonFactors = await r.json();
+    } catch(err){ window.carbonFactors = []; }
 }
 
 async function saveExpense() {
@@ -1503,12 +1794,16 @@ async function saveExpense() {
     btn.disabled = true;
 
     const farmId = parseInt(document.getElementById("m-farm").value) || null;
+    const unitPrice   = parseFloat(document.getElementById("m-unit-price")?.value || 0);
+    const consumption = parseFloat(document.getElementById("m-consumption")?.value || 0);
     const body = {
         category_id: cat, amount, expense_date: date,
         payment_method: method,
         vendor:      vendor || null,
         description: notes  || null,
         farm_id:     farmId,
+        consumption: consumption > 0 ? consumption : null,
+        unit_price_used: unitPrice > 0 ? unitPrice : null,
     };
 
     try {
@@ -1523,7 +1818,7 @@ async function saveExpense() {
         if (data.detail) { showToast(data.detail, "err"); return; }
         showToast(editingId ? "Expense updated" : `✓ ${data.ref_number} recorded`, "ok");
         closeModal("expense-modal");
-        await Promise.all([loadExpenses(), loadSummary(), loadCategories()]);
+        await Promise.all([loadExpenses(), loadSummary(), loadCategories(), loadCarbonFactors()]);
     } catch(e) {
         showToast("Failed to save", "err");
     } finally {
@@ -1544,7 +1839,7 @@ async function deleteExpense(id, ref) {
         const data = await res.json();
         if (data.detail) { showToast(data.detail, "err"); return; }
         showToast(`${ref} deleted`, "ok");
-        await Promise.all([loadExpenses(), loadSummary(), loadCategories()]);
+        await Promise.all([loadExpenses(), loadSummary(), loadCategories(), loadCarbonFactors()]);
     } catch(e) {
         showToast("Failed to delete", "err");
     }
@@ -1574,6 +1869,7 @@ async function bootstrapExpensesPage() {
     await initUser();
     await Promise.allSettled([
         loadCategories(),
+        loadCarbonFactors(),
         loadSummary(),
         loadExpenses(),
         loadFarmsDropdown()

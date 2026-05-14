@@ -16,6 +16,9 @@ class ExpenseCategory(Base):
     account_code = Column(String(20), nullable=False)   # e.g. "5001", "5002"
     description  = Column(String(255), nullable=True)
     is_active    = Column(String(1), default="1")        # "1" active, "0" archived
+    unit_price   = Column(Numeric(12, 4), nullable=True)   # EGP per unit (e.g. price per m³ of water)
+    unit_name    = Column(String(20),  nullable=True)      # "m³", "kWh", "litre"
+    carbon_factor_key = Column(String(60), nullable=True)  # FK by string to CarbonEmissionFactor.source_key
 
     expenses = relationship("Expense", back_populates="category")
 
@@ -41,6 +44,8 @@ class Expense(Base):
 
     farm_id     = Column(Integer, ForeignKey("farms.id"), nullable=True)
     payroll_id  = Column(Integer, ForeignKey("payroll.id"), nullable=True, unique=True, index=True)
+    consumption = Column(Numeric(14, 4), nullable=True)        # quantity in the category's unit
+    unit_price_used = Column(Numeric(12, 4), nullable=True)    # snapshot of unit price at time of entry
 
     category = relationship("ExpenseCategory", back_populates="expenses")
     user     = relationship("User")
