@@ -22,6 +22,7 @@ from app.models.hr import (
     EmployeeLoan,
     EmployeeLoanRepayment,
     EmployeePayrollDeduction,
+    EmployeeAllowanceAdvance,
     Payroll,
 )
 from app.models.farm import Farm
@@ -107,6 +108,12 @@ class DayDeductionCreate(BaseModel):
 
 class ManualDeductionCreate(BaseModel):
     period: str
+    amount: Decimal = Field(gt=0)
+    note: Optional[str] = None
+
+
+class AllowanceAdvanceCreate(BaseModel):
+    advance_date: str
     amount: Decimal = Field(gt=0)
     note: Optional[str] = None
 
@@ -730,6 +737,79 @@ async def cancel_employee_loan(
     return {"ok": True, "loan_id": loan.id, "status": loan.status}
 
 
+# ── ALLOWANCE ADVANCES API ─────────────────────────────
+@router.get("/api/employees/{employee_id}/allowance-advances")
+async def get_allowance_advances(employee_id: int, db: AsyncSession = Depends(get_async_session)):
+    await _get_employee_or_404(db, employee_id)
+    result = await db.execute(
+        select(EmployeeAllowanceAdvance)
+        .where(EmployeeAllowanceAdvance.employee_id == employee_id)
+        .order_by(EmployeeAllowanceAdvance.advance_date.desc(), EmployeeAllowanceAdvance.id.desc())
+    )
+    advances = result.scalars().all()
+    return [_allowance_advance_payload(a) for a in advances]
+
+
+@router.post("/api/employees/{employee_id}/allowance-advances")
+async def create_allowance_advance(
+    employee_id: int,
+    data: AllowanceAdvanceCreate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    employee = await _get_employee_or_404(db, employee_id)
+    advance_date = _parse_required_iso_date(data.advance_date, "advance_date")
+    amount = _money(data.amount)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+    advance = EmployeeAllowanceAdvance(
+        employee_id=employee.id,
+        advance_date=advance_date,
+        amount=amount,
+        note=(data.note or "").strip() or None,
+        status="open",
+        created_by_user_id=current_user.id,
+    )
+    db.add(advance)
+    await db.flush()
+    record(db, "HR", "create_allowance_advance",
+           f"Allowance advance for {employee.name}: {amount:.2f}",
+           user=current_user, ref_type="allowance_advance", ref_id=advance.id)
+    await db.commit()
+    await db.refresh(advance)
+    return {"ok": True, **_allowance_advance_payload(advance)}
+
+
+@router.post("/api/allowance-advances/{advance_id}/cancel")
+async def cancel_allowance_advance(
+    advance_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(EmployeeAllowanceAdvance).where(EmployeeAllowanceAdvance.id == advance_id))
+    advance = result.scalar_one_or_none()
+    if not advance:
+        raise HTTPException(status_code=404, detail="Advance not found")
+    if advance.status == "deducted":
+        raise HTTPException(status_code=400, detail="Cannot cancel an already deducted advance")
+    advance.status = "cancelled"
+    await db.commit()
+    return {"ok": True}
+
+
+def _allowance_advance_payload(advance: EmployeeAllowanceAdvance) -> dict:
+    return {
+        "id": advance.id,
+        "employee_id": advance.employee_id,
+        "advance_date": advance.advance_date.isoformat(),
+        "amount": _as_float(advance.amount),
+        "note": advance.note or "",
+        "status": advance.status,
+        "payroll_id": advance.payroll_id,
+        "created_at": str(advance.created_at) if advance.created_at else None,
+    }
+
+
 @router.get("/api/employees/{employee_id}/deductions", dependencies=[Depends(require_permission("action_hr_view_deductions"))])
 async def get_employee_deductions(employee_id: int, db: AsyncSession = Depends(get_async_session)):
     await _get_employee_or_404(db, employee_id)
@@ -885,12 +965,14 @@ async def _payroll_preview_for_employee(
     base_salary  = _money(employee.base_salary)
     food_all     = _money(getattr(employee, "food_allowance", 0) or 0)
     trans_all    = _money(getattr(employee, "transportation_allowance", 0) or 0)
+    total_allowance = _money(food_all + trans_all)   # fixed, paid on 30 days
     vacation     = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
     paid_days, daily_rate = _paid_days_and_rate(employee)
 
-    # Earned = days_present × daily_rate (capped at base_salary) + allowances
+    # Earned salary = days_present × daily_rate (capped at base_salary)
+    # Allowance is separate and fixed (not attendance-based)
     earned_base  = _money(min(daily_rate * _dec(days_present), base_salary))
-    earned_total = _money(earned_base + food_all + trans_all)
+    earned_total = _money(earned_base + total_allowance)
 
     pending_day_days = Decimal("0")
     pending_day_amount = Decimal("0")
@@ -919,6 +1001,9 @@ async def _payroll_preview_for_employee(
         "days_absent": days_elapsed - days_present,
         "daily_rate": _as_float(daily_rate),
         "earned_base": _as_float(earned_base),
+        "total_allowance": _as_float(total_allowance),
+        "food_allowance": _as_float(food_all),
+        "transportation_allowance": _as_float(trans_all),
         "earned": _as_float(earned_total),
         "already_run": already_run,
         "outstanding_loan_balance": _as_float(outstanding_loan_balance) if outstanding_loan_balance is not None else None,
@@ -1203,8 +1288,11 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
             earned_base   = _money(min(daily_rate_val * _dec(days_present), _money(emp.base_salary)))
             food_all      = _money(getattr(emp, "food_allowance", 0) or 0)
             trans_all     = _money(getattr(emp, "transportation_allowance", 0) or 0)
-            earned_salary = _money(earned_base + food_all + trans_all)
-            payroll.base_salary = earned_salary   # earned base + allowances
+            total_allow   = _money(food_all + trans_all)
+            payroll.base_salary = earned_base     # attendance-based salary only
+            # Store allowance as bonus so it's tracked separately
+            if emp.id not in bonus_by_employee:
+                bonus_amount = total_allow
             payroll.bonuses = bonus_amount
             payroll.days_worked = days_present
             payroll.working_days = working_days
@@ -1388,10 +1476,9 @@ async def hr_summary(db: AsyncSession = Depends(get_async_session)):
         .where(Employee.is_active == True)
     )
     present_employees = _present_emps.scalars().all()
+    # to_pay_today = salary daily rate only (allowances are fixed monthly, not daily)
     to_pay_today = sum(
-        float(_paid_days_and_rate(emp)[1]
-              + _money(getattr(emp, "food_allowance", 0) or 0)
-              + _money(getattr(emp, "transportation_allowance", 0) or 0))
+        float(_paid_days_and_rate(emp)[1])
         for emp in present_employees
     )
 
@@ -1601,6 +1688,11 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="stat-value green" id="stat-today-pay" style="font-size:20px">-</div>
             <div style="font-size:11px;color:var(--muted);margin-top:2px">based on present employees</div>
         </div>
+        <div class="stat-card blue">
+            <div class="stat-label">Monthly Allowances</div>
+            <div class="stat-value blue" id="stat-allowance">-</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">food + transport (all staff)</div>
+        </div>
         <div class="stat-card purple">
             <div class="stat-label">Monthly Payroll</div>
             <div class="stat-value purple" id="stat-salary">-</div>
@@ -1613,6 +1705,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <button class="tab active" id="tab-emp"        onclick="switchTab('employees')">Employees</button>
             <button class="tab"        id="tab-att"        onclick="switchTab('attendance')">Attendance</button>
             <button class="tab"        id="tab-pay"        onclick="switchTab('payroll')">Payroll</button>
+            <button class="tab"        id="tab-allow"      onclick="switchTab('allowances')">Allowances</button>
         </div>
         <div style="display:flex;gap:10px;" id="tab-actions">
             <button class="btn btn-green"  id="btn-add-emp"  onclick="openAddEmpModal()">+ Add Employee</button>
@@ -1708,6 +1801,22 @@ td.mono { font-family: var(--mono); color: var(--green); }
     </div>
 </div>
 
+<!-- ALLOWANCE TAB PANEL -->
+<div id="tab-panel-allowances" style="display:none">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <div>
+            <div style="font-size:16px;font-weight:700">Monthly Allowances</div>
+            <div style="font-size:12px;color:var(--muted)">Food &amp; transportation allowances — paid monthly, separate from salary</div>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Employee</th><th>Position</th><th>Food Allowance</th><th>Transport Allowance</th><th>Total / Month</th><th>Open Advances</th><th>Actions</th></tr></thead>
+            <tbody id="allowance-body"></tbody>
+        </table>
+    </div>
+</div>
+
 <!-- ADD EMPLOYEE MODAL -->
 <div class="modal-bg" id="emp-modal">
     <div class="modal">
@@ -1718,7 +1827,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="fld"><label>Department</label><input id="e-department" placeholder="e.g. Sales"></div>
             <div class="fld"><label>Farm</label><select id="e-farm"><option value="">No farm selected</option></select></div>
             <div class="fld"><label>Phone</label><input id="e-phone" placeholder="+20 100 000 0000"></div>
-            <div class="fld"><label>Hire Date</label><input id="e-hire" type="date"></div>
+            <div class="fld"><label>Hire Date <span id="e-hire-lock" style="font-size:10px;color:var(--muted)">🔒 locked</span></label><input id="e-hire" type="date"></div>
             <div class="fld"><label>Base Salary (EGP)</label><input id="e-salary" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
             <div class="fld"><label>Vacation Days / Month</label><input id="e-vacation" type="number" placeholder="0" min="0" max="20" step="1" oninput="updateEmpDailyRatePreview()"></div>
             <div class="fld"><label>Food Allowance (EGP)</label><input id="e-food" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
@@ -1843,6 +1952,28 @@ td.mono { font-family: var(--mono); color: var(--green); }
 
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeLoanDeductionModal()">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- ALLOWANCE ADVANCE MODAL -->
+<div class="modal-bg" id="allowance-advance-modal">
+    <div class="modal wide">
+        <div class="modal-title">Allowance Advance</div>
+        <div class="modal-sub" id="allowance-advance-emp" style="color:var(--muted);font-size:13px;margin-bottom:16px"></div>
+        <div class="hr-ledger-panel">
+            <div class="hr-ledger-title" style="margin-bottom:10px">Give Advance</div>
+            <div class="form-row">
+                <div class="fld"><label>Date</label><input id="adv-date" type="date"></div>
+                <div class="fld"><label>Amount (EGP)</label><input id="adv-amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
+                <div class="fld span2"><label>Note</label><input id="adv-note" placeholder="e.g. advance on food allowance"></div>
+                <div class="fld span2"><button class="btn btn-blue" onclick="saveAllowanceAdvance()">+ Give Advance</button></div>
+            </div>
+            <div style="font-size:11px;color:var(--muted);margin:8px 0 14px">Advance will be deducted from the employee's monthly allowance payout at next payroll.</div>
+            <div class="hr-ledger-table"><table><thead><tr><th>Date</th><th>Amount</th><th>Status</th><th>Note</th><th></th></tr></thead><tbody id="adv-history-body"></tbody></table></div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeAllowanceAdvanceModal()">Close</button>
         </div>
     </div>
 </div>
@@ -2006,6 +2137,8 @@ async function loadSummary(){
     document.getElementById("stat-absent").innerText    = d.absent_today;
     document.getElementById("stat-today-pay").innerText = money(d.to_pay_today || 0) + " EGP";
     document.getElementById("stat-salary").innerText    = money(d.total_salary) + " EGP";
+    // Allowance stat: calculated from employees array after load
+    updateAllowanceStat();
 }
 
 /* ── TABS ── */
@@ -2022,8 +2155,14 @@ function switchTab(tab){
     });
     document.getElementById("btn-add-emp").style.display  = tab==="employees" ?"":"none";
     document.getElementById("btn-log-att").style.display  = tab==="attendance"?"":"none";
-    if(tab==="attendance") initAttendanceTab();
-    if(tab==="payroll")    initPayrollTab();
+    // Allowance tab
+    const allowEl  = document.getElementById("tab-panel-allowances");
+    const allowTab = document.getElementById("tab-allow");
+    if(allowEl)  allowEl.style.display  = tab==="allowances" ? "" : "none";
+    if(allowTab) allowTab.classList.toggle("active", tab==="allowances");
+    if(tab==="attendance")  initAttendanceTab();
+    if(tab==="payroll")     initPayrollTab();
+    if(tab==="allowances")  loadAllowanceBoard();
 }
 
 /* ── EMPLOYEES ── */
@@ -2056,7 +2195,7 @@ async function loadEmployees(){
             <td style="font-size:12px;color:var(--muted)">${displayText(e.hire_date)}</td>
             <td class="mono">${money(salary)}</td>
             <td style="display:flex;gap:6px">
-                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}" data-vacation="${numberValue(e.vacation_days_per_month)||0}" data-food="${numberValue(e.food_allowance)||0}" data-transport="${numberValue(e.transportation_allowance)||0}">Edit</button>
+                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}" data-vacation="${numberValue(e.vacation_days_per_month)||0}" data-food="${numberValue(e.food_allowance)||0}" data-transport="${numberValue(e.transportation_allowance)||0}" data-hire-date="${escapeHtml(e.hire_date||'')}">Edit</button>
                 ${(hasPermission("action_hr_view_loans") || hasPermission("action_hr_view_deductions"))?`<button class="action-btn purple" onclick="openLoanDeductionModalFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-salary="${salary}">Loans & Deductions</button>`:""}
                 ${hasPermission("action_hr_run_payroll")?`<button class="action-btn danger" onclick="deactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Remove</button>`:""}
             </td>
@@ -2075,7 +2214,8 @@ function openEditEmpFromButton(btn){
         btn.dataset.farmId || "",
         numberValue(btn.dataset.vacation) || 0,
         numberValue(btn.dataset.food) || 0,
-        numberValue(btn.dataset.transport) || 0
+        numberValue(btn.dataset.transport) || 0,
+        btn.dataset.hireDate || ""
     );
 }
 
@@ -2086,14 +2226,15 @@ function deactivateEmployeeFromButton(btn){
 function openAddEmpModal(){
     editingEmpId = null;
     document.getElementById("emp-modal-title").innerText = "Add Employee";
-    ["e-name","e-position","e-department","e-phone","e-salary","e-vacation","e-food","e-transport"].forEach(id=>document.getElementById(id).value="");
+    ["e-name","e-position","e-department","e-phone","e-salary","e-vacation","e-food","e-transport","e-hire"].forEach(id=>document.getElementById(id).value="");
+    applyHireDateLock(false);
     updateEmpDailyRatePreview();
     document.getElementById("e-hire").value = "";
     fillEmployeeFarmSelect("");
     document.getElementById("emp-modal").classList.add("open");
 }
 
-function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacationDays,food,transport){
+function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacationDays,food,transport,hireDate){
     editingEmpId = id;
     document.getElementById("emp-modal-title").innerText = "Edit Employee";
     document.getElementById("e-name").value       = name;
@@ -2104,6 +2245,8 @@ function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacati
     document.getElementById("e-vacation").value   = vacationDays || 0;
     document.getElementById("e-food").value       = food || 0;
     document.getElementById("e-transport").value  = transport || 0;
+    document.getElementById("e-hire").value       = (hireDate && hireDate !== "—") ? hireDate : "";
+    applyHireDateLock(true);
     fillEmployeeFarmSelect(farmId || "");
     updateEmpDailyRatePreview();
     document.getElementById("emp-modal").classList.add("open");
@@ -2408,6 +2551,134 @@ async function saveDayDeduction(){
 
 async function saveManualDeduction(){
     return; // Removed — use day deduction for all penalties
+}
+
+function updateAllowanceStat(){
+    const totalAllow = employees.reduce((s,e) =>
+        s + (numberValue(e.food_allowance)||0) + (numberValue(e.transportation_allowance)||0), 0);
+    const el = document.getElementById("stat-allowance");
+    if(el) el.innerText = money(totalAllow) + " EGP";
+}
+
+/* ── HIRE DATE LOCK ── */
+function applyHireDateLock(isEdit){
+    const hireInput = document.getElementById("e-hire");
+    const lockLabel = document.getElementById("e-hire-lock");
+    const canEdit   = !isEdit || (currentUser && (currentUser.role==="admin" || currentUser.role==="manager"));
+    hireInput.disabled = !canEdit;
+    hireInput.style.opacity = canEdit ? "1" : "0.5";
+    if(lockLabel) lockLabel.style.display = (isEdit && !canEdit) ? "" : "none";
+}
+
+/* ── ALLOWANCE BOARD ── */
+let allowanceAdvanceEmployeeId = null;
+let allowanceAdvanceEmployeeName = "";
+
+async function loadAllowanceBoard(){
+    const body = document.getElementById("allowance-body");
+    if(!body) return;
+    body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">Loading…</td></tr>`;
+    try {
+        const emps = employees.filter(e => e.is_active !== false &&
+            (numberValue(e.food_allowance) > 0 || numberValue(e.transportation_allowance) > 0));
+        if(!emps.length){
+            body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No employees with allowances yet.<br>Add food or transport allowances in the employee profile.</td></tr>`;
+            return;
+        }
+        // Load open advances for each employee
+        const rows = await Promise.all(emps.map(async e => {
+            let advances = [];
+            try {
+                const r = await fetch(`/hr/api/employees/${e.id}/allowance-advances`);
+                advances = await r.json();
+            } catch(err) {}
+            const openAdv = advances.filter(a => a.status === "open").reduce((s,a) => s + numberValue(a.amount), 0);
+            const food    = numberValue(e.food_allowance) || 0;
+            const trans   = numberValue(e.transportation_allowance) || 0;
+            const total   = food + trans;
+            return `<tr>
+                <td class="name">${escapeHtml(e.name)}</td>
+                <td style="color:var(--muted);font-size:12px">${escapeHtml(e.position||"—")}</td>
+                <td class="mono">${money(food)}</td>
+                <td class="mono">${money(trans)}</td>
+                <td class="mono" style="font-weight:700;color:var(--blue)">${money(total)}</td>
+                <td class="mono" style="color:${openAdv>0?"var(--warn)":"var(--muted)"}">${openAdv>0?money(openAdv):"—"}</td>
+                <td><button class="action-btn blue" onclick="openAllowanceAdvanceModal(${e.id},'${escapeHtml(e.name)}',${food},${trans})">Advance</button></td>
+            </tr>`;
+        }));
+        body.innerHTML = rows.join("");
+        // Update stat card
+        const totalAllow = emps.reduce((s,e) => s + numberValue(e.food_allowance) + numberValue(e.transportation_allowance), 0);
+        const el = document.getElementById("stat-allowance");
+        if(el) el.innerText = money(totalAllow) + " EGP";
+    } catch(err) {
+        body.innerHTML = `<tr><td colspan="7" style="color:var(--danger);padding:18px">Could not load allowances</td></tr>`;
+    }
+}
+
+async function openAllowanceAdvanceModal(empId, name, food, trans){
+    allowanceAdvanceEmployeeId = empId;
+    allowanceAdvanceEmployeeName = name;
+    document.getElementById("allowance-advance-emp").innerHTML =
+        `${escapeHtml(name)} &nbsp;·&nbsp; Food: ${money(food)} EGP &nbsp;·&nbsp; Transport: ${money(trans)} EGP &nbsp;·&nbsp; <b>Total: ${money(food+trans)} EGP/month</b>`;
+    document.getElementById("adv-date").value   = new Date().toISOString().split("T")[0];
+    document.getElementById("adv-amount").value = "";
+    document.getElementById("adv-note").value   = "";
+    document.getElementById("allowance-advance-modal").classList.add("open");
+    await loadAllowanceAdvances();
+}
+
+function closeAllowanceAdvanceModal(){
+    document.getElementById("allowance-advance-modal").classList.remove("open");
+}
+
+async function loadAllowanceAdvances(){
+    const body = document.getElementById("adv-history-body");
+    if(!allowanceAdvanceEmployeeId) return;
+    try {
+        const res = await fetch(`/hr/api/employees/${allowanceAdvanceEmployeeId}/allowance-advances`);
+        const advances = await res.json();
+        body.innerHTML = advances.map(a => `<tr>
+            <td>${displayText(a.advance_date)}</td>
+            <td class="mono" style="font-weight:700">${money(a.amount)}</td>
+            <td><span class="status-${a.status==="open"?"pending":a.status==="deducted"?"success":"danger"}">${a.status}</span></td>
+            <td style="color:var(--muted);font-size:12px">${escapeHtml(a.note||"—")}</td>
+            <td>${a.status==="open"?`<button class="action-btn danger" onclick="cancelAllowanceAdvance(${a.id})">Cancel</button>`:""}</td>
+        </tr>`).join("") || `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:14px">No advances yet</td></tr>`;
+    } catch(err) {
+        body.innerHTML = `<tr><td colspan="5" style="color:var(--danger)">Could not load advances</td></tr>`;
+    }
+}
+
+async function saveAllowanceAdvance(){
+    const amt = parseFloat(document.getElementById("adv-amount").value||"0");
+    if(!amt||amt<=0){ showToast("Enter a valid amount"); return; }
+    const body = {
+        advance_date: document.getElementById("adv-date").value,
+        amount: amt,
+        note: document.getElementById("adv-note").value.trim()||null,
+    };
+    try {
+        const res = await fetch(`/hr/api/employees/${allowanceAdvanceEmployeeId}/allowance-advances`, {
+            method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
+        });
+        await readApiResponse(res);
+        document.getElementById("adv-amount").value = "";
+        document.getElementById("adv-note").value   = "";
+        showToast("Advance recorded");
+        await loadAllowanceAdvances();
+        loadAllowanceBoard();
+    } catch(err){ showToast("Error: "+(err.message||"Could not save advance")); }
+}
+
+async function cancelAllowanceAdvance(advId){
+    if(!confirm("Cancel this advance?")) return;
+    try {
+        await fetch(`/hr/api/allowance-advances/${advId}/cancel`, {method:"POST"});
+        showToast("Advance cancelled");
+        await loadAllowanceAdvances();
+        loadAllowanceBoard();
+    } catch(err){ showToast("Error: "+(err.message||"Could not cancel")); }
 }
 
 /* ── ATTENDANCE ── */
@@ -2815,7 +3086,7 @@ async function confirmClearHRData(){
 }
 
 /* ── MODAL CLOSE ON BG ── */
-["emp-modal","att-modal","pay-run-modal","edit-pay-modal","loan-deduction-modal","clear-hr-modal"].forEach(id=>{
+["emp-modal","att-modal","pay-run-modal","edit-pay-modal","loan-deduction-modal","allowance-advance-modal","clear-hr-modal"].forEach(id=>{
     document.getElementById(id).addEventListener("click",function(e){
         if(e.target!==this) return;
         if(id === "clear-hr-modal") closeClearHRDataModal();

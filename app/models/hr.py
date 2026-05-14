@@ -27,6 +27,7 @@ class Employee(Base):
     loans      = relationship("EmployeeLoan", back_populates="employee")
     loan_repayments = relationship("EmployeeLoanRepayment", back_populates="employee")
     payroll_deductions = relationship("EmployeePayrollDeduction", back_populates="employee")
+    allowance_advances = relationship("EmployeeAllowanceAdvance", back_populates="employee")
     farm       = relationship("Farm", back_populates="employees")
 
 
@@ -104,6 +105,26 @@ class EmployeeLoanRepayment(Base):
     loan = relationship("EmployeeLoan", back_populates="repayments")
     employee = relationship("Employee", back_populates="loan_repayments")
     payroll = relationship("Payroll", back_populates="loan_repayments")
+    created_by = relationship("User", foreign_keys=[created_by_user_id])
+
+
+class EmployeeAllowanceAdvance(Base):
+    """An advance paid against an employee's monthly allowance (food/transport).
+    The advance amount is deducted from the next payroll's allowance payout.
+    """
+    __tablename__ = "employee_allowance_advances"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False, index=True)
+    advance_date = Column(Date, nullable=False)
+    amount      = Column(Numeric(12, 2), nullable=False)
+    note        = Column(Text, nullable=True)
+    status      = Column(String(20), nullable=False, default="open", server_default="open")  # open / deducted / cancelled
+    payroll_id  = Column(Integer, ForeignKey("payroll.id"), nullable=True, index=True)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+
+    employee   = relationship("Employee", back_populates="allowance_advances")
     created_by = relationship("User", foreign_keys=[created_by_user_id])
 
 
