@@ -439,23 +439,11 @@ body {
             <a href="/dashboard" class="module-card c-blue" data-permission="page_dashboard">
                 <div class="card-icon">📊</div>
                 <div class="card-body">
-                    <div class="card-name">Sales dashboard</div>
+                    <div class="card-name">Dashboard</div>
                     <div class="card-desc">Sales today, top products, low stock alerts</div>
                 </div>
                 <div class="card-footer">
                     <span class="card-tag">Reports</span>
-                    <span class="card-arrow">↗</span>
-                </div>
-            </a>
-
-            <a href="/farm-dashboard" class="module-card c-green" data-permission="page_farm_dashboard">
-                <div class="card-icon">🌾</div>
-                <div class="card-body">
-                    <div class="card-name">Farm dashboard</div>
-                    <div class="card-desc">Farm deliveries, spoilage, expenses, season analysis</div>
-                </div>
-                <div class="card-footer">
-                    <span class="card-tag">Operations</span>
                     <span class="card-arrow">↗</span>
                 </div>
             </a>

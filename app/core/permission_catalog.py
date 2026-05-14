@@ -8,19 +8,10 @@ PERMISSION_MATRIX = [
     {
         "module": "dashboard",
         "resource": "overview",
-        "label": "Sales Dashboard",
+        "label": "Dashboard",
         "icon": "chart",
         "actions": [
-            {"action": "view", "key": "page_dashboard", "label": "View sales dashboard"},
-        ],
-    },
-    {
-        "module": "farm_dashboard",
-        "resource": "overview",
-        "label": "Farm Dashboard",
-        "icon": "farm",
-        "actions": [
-            {"action": "view", "key": "page_farm_dashboard", "label": "View farm dashboard"},
+            {"action": "view", "key": "page_dashboard", "label": "View dashboard"},
         ],
     },
     {
@@ -295,7 +286,6 @@ ROLE_DEFINITIONS = {
             "tab_production_spoilage",
             "tab_production_recipes",
             "page_farm",
-            "page_farm_dashboard",
             "page_carbon",
             "action_carbon_log",
             "page_suppliers",
@@ -355,7 +345,6 @@ ROLE_DEFINITIONS = {
         "description": "Read-only role for owners, auditors, or supervisors who need visibility without operational control. Includes dashboard access and report tabs only. Cannot create, edit, approve, delete, refund, post journals, or manage users unless extra permissions are added.",
         "permissions": {
             "page_dashboard",
-            "page_farm_dashboard",
             "page_reports",
             "tab_reports_sales",
             "tab_reports_pl",
