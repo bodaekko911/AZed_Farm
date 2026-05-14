@@ -4,6 +4,28 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AZed ERP — Farm Management System</title>
+<meta name="description" content="AZed ERP — Farm Management System. Track farm operations, inventory, sales, and accounting in one place.">
+
+<!-- Favicon -->
+<link rel="icon" type="image/png" href="/static/ERP_logo.png">
+<link rel="apple-touch-icon" href="/static/ERP_logo.png">
+
+<!-- Open Graph (Facebook, WhatsApp, LinkedIn, iMessage, Slack, Discord) -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="AZed ERP">
+<meta property="og:title" content="AZed ERP — Farm Management System">
+<meta property="og:description" content="AZed ERP — Farm Management System. Track farm operations, inventory, sales, and accounting in one place.">
+<meta property="og:image" content="/static/landing-preview.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="AZed ERP — Farm Management System">
+
+<!-- Twitter / X Card -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="AZed ERP — Farm Management System">
+<meta name="twitter:description" content="AZed ERP — Farm Management System. Track farm operations, inventory, sales, and accounting in one place.">
+<meta name="twitter:image" content="/static/landing-preview.png">
+<meta name="twitter:image:alt" content="AZed ERP — Farm Management System">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;700&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
@@ -1082,23 +1104,18 @@
   .nav-brand img {
     height: 38px;
     object-fit: contain;
-    /* ERP_logo has transparent bg with white/light text — give it a dark pill on light mode */
-    background: #1a2535;
-    border-radius: 8px;
-    padding: 3px 8px;
+    filter: invert(1) hue-rotate(180deg);
+    transition: filter .18s ease;
   }
 
   body.dark .nav-brand img {
-    background: transparent;
-    border-radius: 0;
-    padding: 0;
+    filter: none;
   }
 
   .footer-logo img {
     height: 44px;
     object-fit: contain;
-    /* footer bg is dark — logo already shows fine, no extra bg needed */
-    background: transparent;
+    filter: none;
   }
   /* ── SIGN IN MODAL ───────────────────────────────────── */
   .modal-overlay {
@@ -1142,14 +1159,13 @@
 
   .modal-logo { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
 
-  .modal-logo-icon {
-    width: 44px; height: 44px; border-radius: 12px;
-    background: #1a2535;
-    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  .modal-logo-img {
+    height: 44px; width: auto; object-fit: contain; flex-shrink: 0;
+    filter: invert(1) hue-rotate(180deg);
+    transition: filter .18s ease;
   }
 
-  .modal-logo-img { width: 36px; height: 36px; object-fit: contain; }
-  body.dark .modal-logo-icon { background: #111; }
+  body.dark .modal-logo-img { filter: none; }
 
   .modal-brand {
     font-family: 'Playfair Display', serif;
@@ -1522,9 +1538,7 @@
     <button class="modal-close" onclick="closeSigninBtn()" aria-label="Close">✕</button>
 
     <div class="modal-logo">
-      <div class="modal-logo-icon">
-        <img src="/static/ERP_logo.png" alt="AZed ERP" style="width:36px;height:36px;object-fit:contain;" class="modal-logo-img" />
-      </div>
+      <img src="/static/ERP_logo.png" alt="AZed ERP" class="modal-logo-img" />
       <div>
         <div class="modal-brand">AZed ERP</div>
         <div class="modal-subbrand">Farm Management System</div>
@@ -2432,10 +2446,10 @@
   }
 
   function firstAllowedPage(data) {
-    var permissions = new Set(
-      String(data.permissions || '').split(',').map(function(v) { return v.trim(); }).filter(Boolean)
+    const permissions = new Set(
+      String(data.permissions || '').split(',').map(v => v.trim()).filter(Boolean)
     );
-    var pages = [
+    const pages = [
       ['/dashboard',       'page_dashboard'],
       ['/pos',             'page_pos'],
       ['/farm/',           'page_farm'],
@@ -2454,23 +2468,23 @@
       ['/carbon/',         'page_carbon']
     ];
     if (data.role === 'admin') return '/dashboard';
-    var match = pages.find(function(p) { return permissions.has(p[1]); });
+    const match = pages.find(p => permissions.has(p[1]));
     return match ? match[0] : '/home';
   }
 
   function showSigninError(msg) {
-    var existing = document.getElementById('signinErrorMsg');
+    const existing = document.getElementById('signinErrorMsg');
     if (existing) { existing.textContent = msg; return; }
-    var err = document.createElement('p');
+    const err = document.createElement('p');
     err.id = 'signinErrorMsg';
-    err.style.cssText = 'color:#E05050;font-size:13px;margin:0;text-align:center;';
+    err.style.cssText = 'color:#E05050;font-size:13px;margin:0 0 12px 0;text-align:center;';
     err.textContent = msg;
-    var btn = document.querySelector('.btn-signin');
+    const btn = document.querySelector('.btn-signin');
     btn.parentNode.insertBefore(err, btn);
   }
 
   function clearSigninError() {
-    var existing = document.getElementById('signinErrorMsg');
+    const existing = document.getElementById('signinErrorMsg');
     if (existing) existing.remove();
   }
 
@@ -2478,6 +2492,7 @@
     const email    = document.getElementById('signinEmail').value.trim();
     const password = document.getElementById('signinPassword').value;
     const btn      = document.querySelector('.btn-signin');
+    const originalHTML = btn.innerHTML;
 
     clearSigninError();
 
@@ -2493,8 +2508,7 @@
       return;
     }
 
-    const originalHTML = btn.innerHTML;
-    btn.textContent = 'Signing in…';
+    btn.textContent = 'Signing in\u2026';
     btn.style.opacity = '0.7';
     btn.disabled = true;
 
@@ -2517,7 +2531,7 @@
         return;
       }
 
-      btn.innerHTML = '✓ Redirecting…';
+      btn.innerHTML = '\u2713 Redirecting\u2026';
       btn.style.opacity = '1';
       const next = new URLSearchParams(window.location.search).get('next');
       const dest = (next && next.startsWith('/') && !next.startsWith('//')) ? next : firstAllowedPage(data);
