@@ -10,7 +10,8 @@ NAV_GROUPS = [
     {
         "label": "Work",
         "items": [
-            {"label": "Dashboard", "href": "/dashboard", "permission": "page_dashboard"},
+            {"label": "Sales dashboard", "href": "/dashboard", "permission": "page_dashboard"},
+            {"label": "Farm dashboard", "href": "/farm-dashboard", "permission": "page_farm_dashboard"},
             {"label": "POS", "href": "/pos", "permission": "page_pos"},
             {"label": "B2B", "href": "/b2b/", "permission": "page_b2b"},
             {"label": "Reports", "href": "/reports/", "permission": "page_reports"},
