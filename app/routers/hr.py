@@ -216,22 +216,21 @@ async def _backfill_attendance(
     count = 0
     current = start_date
     while current < end_date:
-        # Skip weekends (Saturday=5, Sunday=6)
-        if current.weekday() < 5:
-            existing = await db.execute(
-                select(Attendance.id).where(
-                    Attendance.employee_id == employee_id,
-                    Attendance.date == current,
-                )
+        # Log every day (no weekend skip — attendance tracked daily)
+        existing = await db.execute(
+            select(Attendance.id).where(
+                Attendance.employee_id == employee_id,
+                Attendance.date == current,
             )
-            if not existing.scalar_one_or_none():
-                db.add(Attendance(
-                    employee_id=employee_id,
-                    date=current,
-                    status="present",
-                    note="Auto-logged from hire date",
-                ))
-                count += 1
+        )
+        if not existing.scalar_one_or_none():
+            db.add(Attendance(
+                employee_id=employee_id,
+                date=current,
+                status="present",
+                note="Auto-logged from hire date",
+            ))
+            count += 1
         current += timedelta(days=1)
     if count > 0:
         await db.commit()
