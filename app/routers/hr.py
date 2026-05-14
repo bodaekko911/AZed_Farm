@@ -42,22 +42,24 @@ router = APIRouter(
 
 # ── Schemas ────────────────────────────────────────────
 class EmployeeCreate(BaseModel):
-    name:        str
-    phone:       Optional[str]  = None
-    position:    Optional[str]  = None
-    department:  Optional[str]  = None
-    hire_date:   Optional[str]  = None
-    base_salary: float          = 0
-    farm_id:     Optional[int]  = None
+    name:                   str
+    phone:                  Optional[str]  = None
+    position:               Optional[str]  = None
+    department:             Optional[str]  = None
+    hire_date:              Optional[str]  = None
+    base_salary:            float          = 0
+    vacation_days_per_month: int           = 0
+    farm_id:                Optional[int]  = None
 
 class EmployeeUpdate(BaseModel):
-    name:        Optional[str]   = None
-    phone:       Optional[str]   = None
-    position:    Optional[str]   = None
-    department:  Optional[str]   = None
-    base_salary: Optional[float] = None
-    farm_id:     Optional[int]   = None
-    is_active:   Optional[bool]  = None
+    name:                   Optional[str]   = None
+    phone:                  Optional[str]   = None
+    position:               Optional[str]   = None
+    department:             Optional[str]   = None
+    base_salary:            Optional[float] = None
+    vacation_days_per_month: Optional[int]  = None
+    farm_id:                Optional[int]   = None
+    is_active:              Optional[bool]  = None
 
 class AttendanceCreate(BaseModel):
     employee_id: int
@@ -259,10 +261,24 @@ def _employee_payload(employee: Employee) -> dict:
         "is_active": employee.is_active,
         "farm_id": employee.farm_id,
         "farm_name": farm.name if farm else None,
+        "vacation_days_per_month": getattr(employee, "vacation_days_per_month", 0) or 0,
         "attendance_auto_status": _normalize_auto_attendance_status(
             getattr(employee, "attendance_auto_status", None)
         ),
     }
+
+
+def _paid_days_and_rate(employee: Employee, working_days: int) -> tuple[Decimal, Decimal]:
+    """Return (paid_days, daily_rate) for an employee in a month.
+
+    paid_days = working_days_in_calendar - vacation_days_per_month
+    daily_rate = base_salary / paid_days
+    """
+    vacation = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
+    paid_days = _days(max(1, working_days - vacation))
+    base_salary = _money(employee.base_salary)
+    daily_rate = _money(base_salary / paid_days) if paid_days > 0 else Decimal("0")
+    return paid_days, daily_rate
 
 
 async def _loan_repaid_amounts(db: AsyncSession, loan_ids: list[int]) -> dict[int, Decimal]:
@@ -529,6 +545,7 @@ async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_asyn
         name=data.name, phone=data.phone,
         position=data.position, department=data.department,
         hire_date=hire, base_salary=data.base_salary,
+        vacation_days_per_month=max(0, int(data.vacation_days_per_month or 0)),
         farm_id=farm.id if farm else None,
     )
     db.add(e); await db.flush()
@@ -857,7 +874,12 @@ async def _payroll_preview_for_employee(
     already_run = _ar.scalar_one_or_none() is not None
 
     base_salary = _money(employee.base_salary)
-    daily_rate = _money(base_salary / Decimal(str(working_days))) if working_days > 0 else Decimal("0")
+    vacation = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
+    paid_days, daily_rate = _paid_days_and_rate(employee, working_days)
+
+    # Earned = days_present × daily_rate  (capped at base_salary)
+    earned = _money(min(daily_rate * _dec(days_present), base_salary))
+
     pending_day_days = Decimal("0")
     pending_day_amount = Decimal("0")
     pending_manual_amount = Decimal("0")
@@ -869,18 +891,20 @@ async def _payroll_preview_for_employee(
         )
     outstanding_loan_balance = await _employee_loan_balance(db, employee.id) if include_loans else None
     total_pending = _money(pending_day_amount + pending_manual_amount)
-    net_before_loan = _money(base_salary - total_pending)
+    net_before_loan = _money(earned - total_pending)
     return {
         "employee_id": employee.id,
         "employee": employee.name,
         "position": employee.position or "—",
         "base_salary": _as_float(base_salary),
+        "vacation_days": vacation,
+        "paid_days": _as_day_float(paid_days),
         "working_days": working_days,
         "days_elapsed": days_elapsed,
         "days_present": days_present,
         "days_absent": days_elapsed - days_present,
         "daily_rate": _as_float(daily_rate),
-        "earned": _as_float(base_salary),
+        "earned": _as_float(earned),
         "already_run": already_run,
         "outstanding_loan_balance": _as_float(outstanding_loan_balance) if outstanding_loan_balance is not None else None,
         "pending_day_deduction_days": _as_day_float(pending_day_days),
@@ -1160,7 +1184,9 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
                 existing_day_deductions = Decimal("0")
                 existing_manual_deductions = Decimal("0")
 
-            payroll.base_salary = _money(emp.base_salary)
+            paid_days_val, daily_rate_val = _paid_days_and_rate(emp, working_days)
+            earned_salary = _money(min(daily_rate_val * _dec(days_present), _money(emp.base_salary)))
+            payroll.base_salary = earned_salary   # store what was actually earned
             payroll.bonuses = bonus_amount
             payroll.days_worked = days_present
             payroll.working_days = working_days
@@ -1316,6 +1342,7 @@ async def clear_hr_data(
 
 @router.get("/api/summary")
 async def hr_summary(db: AsyncSession = Depends(get_async_session)):
+    from calendar import monthrange
     _te = await db.execute(select(func.count(Employee.id)).where(Employee.is_active == True))
     total_employees = _te.scalar() or 0
     today = date.today()
@@ -1331,11 +1358,30 @@ async def hr_summary(db: AsyncSession = Depends(get_async_session)):
     absent_today = _at.scalar() or 0
     _ts = await db.execute(select(func.sum(Employee.base_salary)).where(Employee.is_active == True))
     total_salary = _ts.scalar() or 0
+
+    # to_pay_today: sum of daily_rate for each present employee today
+    year, month = today.year, today.month
+    total_days = monthrange(year, month)[1]
+    working_days = sum(1 for d in range(1, total_days + 1) if date(year, month, d).weekday() < 5)
+
+    _present_emps = await db.execute(
+        select(Employee)
+        .join(Attendance, (Attendance.employee_id == Employee.id) & (Attendance.date == today) & (Attendance.status == "present"))
+        .where(Employee.is_active == True)
+    )
+    present_employees = _present_emps.scalars().all()
+    to_pay_today = sum(
+        float(_paid_days_and_rate(emp, working_days)[1])
+        for emp in present_employees
+    )
+
     return {
         "total_employees": total_employees,
         "present_today":   present_today,
         "absent_today":    absent_today,
         "total_salary":    float(total_salary),
+        "to_pay_today":    round(to_pay_today, 2),
+        "working_days":    working_days,
     }
 
 
@@ -1530,6 +1576,11 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="stat-label">Absent Today</div>
             <div class="stat-value warn" id="stat-absent">-</div>
         </div>
+        <div class="stat-card green">
+            <div class="stat-label">To Pay Today</div>
+            <div class="stat-value green" id="stat-today-pay" style="font-size:20px">-</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">based on present employees</div>
+        </div>
         <div class="stat-card purple">
             <div class="stat-label">Monthly Payroll</div>
             <div class="stat-value purple" id="stat-salary">-</div>
@@ -1648,7 +1699,9 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="fld"><label>Farm</label><select id="e-farm"><option value="">No farm selected</option></select></div>
             <div class="fld"><label>Phone</label><input id="e-phone" placeholder="+20 100 000 0000"></div>
             <div class="fld"><label>Hire Date</label><input id="e-hire" type="date"></div>
-            <div class="fld span2"><label>Base Salary</label><input id="e-salary" type="number" placeholder="0.00" min="0"></div>
+            <div class="fld"><label>Base Salary (EGP)</label><input id="e-salary" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
+            <div class="fld"><label>Vacation Days / Month</label><input id="e-vacation" type="number" placeholder="0" min="0" max="20" step="1" oninput="updateEmpDailyRatePreview()"></div>
+            <div class="fld span2" id="emp-rate-preview" style="color:var(--muted);font-size:13px;padding:6px 0"></div>
         </div>
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeEmpModal()">Cancel</button>
@@ -1926,10 +1979,11 @@ async function init(){
 
 async function loadSummary(){
     let d = await (await fetch("/hr/api/summary")).json();
-    document.getElementById("stat-total").innerText   = d.total_employees;
-    document.getElementById("stat-present").innerText = d.present_today;
-    document.getElementById("stat-absent").innerText  = d.absent_today;
-    document.getElementById("stat-salary").innerText  = d.total_salary.toFixed(2);
+    document.getElementById("stat-total").innerText     = d.total_employees;
+    document.getElementById("stat-present").innerText   = d.present_today;
+    document.getElementById("stat-absent").innerText    = d.absent_today;
+    document.getElementById("stat-today-pay").innerText = money(d.to_pay_today || 0) + " EGP";
+    document.getElementById("stat-salary").innerText    = money(d.total_salary) + " EGP";
 }
 
 /* ── TABS ── */
@@ -1980,7 +2034,7 @@ async function loadEmployees(){
             <td style="font-size:12px;color:var(--muted)">${displayText(e.hire_date)}</td>
             <td class="mono">${money(salary)}</td>
             <td style="display:flex;gap:6px">
-                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}">Edit</button>
+                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}" data-vacation="${numberValue(e.vacation_days_per_month)||0}">Edit</button>
                 ${(hasPermission("action_hr_view_loans") || hasPermission("action_hr_view_deductions"))?`<button class="action-btn purple" onclick="openLoanDeductionModalFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-salary="${salary}">Loans & Deductions</button>`:""}
                 ${hasPermission("action_hr_run_payroll")?`<button class="action-btn danger" onclick="deactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Remove</button>`:""}
             </td>
@@ -1996,7 +2050,8 @@ function openEditEmpFromButton(btn){
         btn.dataset.department || "",
         btn.dataset.phone || "",
         numberValue(btn.dataset.salary),
-        btn.dataset.farmId || ""
+        btn.dataset.farmId || "",
+        numberValue(btn.dataset.vacation) || 0
     );
 }
 
@@ -2007,13 +2062,14 @@ function deactivateEmployeeFromButton(btn){
 function openAddEmpModal(){
     editingEmpId = null;
     document.getElementById("emp-modal-title").innerText = "Add Employee";
-    ["e-name","e-position","e-department","e-phone","e-salary"].forEach(id=>document.getElementById(id).value="");
+    ["e-name","e-position","e-department","e-phone","e-salary","e-vacation"].forEach(id=>document.getElementById(id).value="");
+    updateEmpDailyRatePreview();
     document.getElementById("e-hire").value = "";
     fillEmployeeFarmSelect("");
     document.getElementById("emp-modal").classList.add("open");
 }
 
-function openEditEmpModal(id,name,position,department,phone,salary,farmId){
+function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacationDays){
     editingEmpId = id;
     document.getElementById("emp-modal-title").innerText = "Edit Employee";
     document.getElementById("e-name").value       = name;
@@ -2021,7 +2077,9 @@ function openEditEmpModal(id,name,position,department,phone,salary,farmId){
     document.getElementById("e-department").value = normalizeDashFallback(department);
     document.getElementById("e-phone").value      = normalizeDashFallback(phone);
     document.getElementById("e-salary").value     = salary;
+    document.getElementById("e-vacation").value   = vacationDays || 0;
     fillEmployeeFarmSelect(farmId || "");
+    updateEmpDailyRatePreview();
     document.getElementById("emp-modal").classList.add("open");
 }
 
@@ -2059,17 +2117,36 @@ async function readApiResponse(res){
     return data || {};
 }
 
+function updateEmpDailyRatePreview(){
+    const salary = parseFloat(document.getElementById("e-salary")?.value || 0);
+    const vacation = parseInt(document.getElementById("e-vacation")?.value || 0);
+    const preview = document.getElementById("emp-rate-preview");
+    if(!preview) return;
+    if(!salary){ preview.innerText = ""; return; }
+    // Estimate working days for current month
+    const now = new Date();
+    const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
+    let wd = 0;
+    for(let d=1; d<=daysInMonth; d++){
+        if(new Date(now.getFullYear(), now.getMonth(), d).getDay() % 6 !== 0) wd++;
+    }
+    const paidDays = Math.max(1, wd - (vacation || 0));
+    const dailyRate = salary / paidDays;
+    preview.innerHTML = `Daily rate: <b>${money(dailyRate)} EGP</b> &nbsp;(${salary.toFixed(2)} ÷ ${paidDays} paid days = ${wd} working − ${vacation||0} vacation)`;
+}
+
 async function saveEmployee(){
     let name = document.getElementById("e-name").value.trim();
     if(!name){ showToast("Name is required"); return; }
     let body = {
         name,
-        position:    document.getElementById("e-position").value.trim()||null,
-        department:  document.getElementById("e-department").value.trim()||null,
-        phone:       document.getElementById("e-phone").value.trim()||null,
-        hire_date:   document.getElementById("e-hire").value||null,
-        base_salary: parseFloat(document.getElementById("e-salary").value)||0,
-        farm_id:     parseInt(document.getElementById("e-farm").value)||null,
+        position:               document.getElementById("e-position").value.trim()||null,
+        department:             document.getElementById("e-department").value.trim()||null,
+        phone:                  document.getElementById("e-phone").value.trim()||null,
+        hire_date:              document.getElementById("e-hire").value||null,
+        base_salary:            parseFloat(document.getElementById("e-salary").value)||0,
+        vacation_days_per_month: parseInt(document.getElementById("e-vacation").value)||0,
+        farm_id:                parseInt(document.getElementById("e-farm").value)||null,
     };
     let url    = editingEmpId ? `/hr/api/employees/${editingEmpId}` : "/hr/api/employees";
     let method = editingEmpId ? "PUT" : "POST";
@@ -2473,10 +2550,11 @@ async function loadPayrollPreview(){
         const manDed  = numberValue(e.pending_manual_deductions);
         const base    = numberValue(e.base_salary);
         const net     = base - dayDed - manDed - loanBal;
+        const vacInfo = e.vacation_days > 0 ? ` · ${e.vacation_days}d vacation` : "";
         return `
         <tr>
-            <td class="name">${displayText(e.employee)}<br><span style="font-size:11px;color:var(--muted)">${displayText(e.position)} · ${numberValue(e.days_present)} present / ${numberValue(e.working_days)} working days</span></td>
-            <td style="font-family:var(--mono)">${money(base)}</td>
+            <td class="name">${displayText(e.employee)}<br><span style="font-size:11px;color:var(--muted)">${displayText(e.position)} · ${numberValue(e.days_present)} present / ${numberValue(e.paid_days||e.working_days)} paid days${vacInfo}</span></td>
+            <td style="font-family:var(--mono)" title="Daily rate: ${money(e.daily_rate)} EGP">${money(base)}<br><span style="font-size:10px;color:var(--muted)">${money(e.daily_rate)}/day</span></td>
             <td><input class="pay-bonus-input" data-emp-id="${numberValue(e.employee_id)}" type="number" min="0" step="0.01" value="0" style="width:86px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:6px" oninput="updatePayrollPreviewNet(this)"></td>
             <td style="font-family:var(--mono);color:var(--danger)" data-day-ded="${dayDed}">${numberValue(e.pending_day_deduction_days)}d / ${money(dayDed)}</td>
             <td style="font-family:var(--mono);color:var(--danger)" data-manual-ded="${manDed}">${money(manDed)}</td>

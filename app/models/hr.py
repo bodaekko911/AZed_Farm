@@ -16,6 +16,7 @@ class Employee(Base):
     base_salary = Column(Numeric(12, 2), default=0)
     farm_id     = Column(Integer, ForeignKey("farms.id"), nullable=True, index=True)
     is_active   = Column(Boolean, default=True)
+    vacation_days_per_month = Column(Integer, default=0, server_default="0", nullable=False)
     attendance_auto_status = Column(String(20), nullable=False, default="present", server_default="present")
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
