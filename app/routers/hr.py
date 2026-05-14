@@ -880,7 +880,7 @@ async def create_day_deduction(
     # Auto-calculate working days from the period calendar
     year, month = int(period.split("-")[0]), int(period.split("-")[1])
     total_days = monthrange(year, month)[1]
-    working_days = _days(sum(1 for d in range(1, total_days + 1) if date(year, month, d).weekday() < 5))
+    working_days = _days(total_days)   # all days in month, no weekend skip
     daily_rate = _money(base_salary / working_days) if working_days > 0 else Decimal("0")
     amount = _money(daily_rate * days)
     deduction = EmployeePayrollDeduction(
@@ -1003,11 +1003,12 @@ async def _payroll_preview_for_employee(
     base_salary  = _money(employee.base_salary)
     food_all     = _money(getattr(employee, "food_allowance", 0) or 0)
     trans_all    = _money(getattr(employee, "transportation_allowance", 0) or 0)
-    total_allowance_monthly = _money(food_all + trans_all)
-    # Allowance prorated by working days × days_present
-    allow_daily_rate = _money(total_allowance_monthly / Decimal(str(working_days))) if working_days > 0 else Decimal("0")
-    earned_allowance = _money(allow_daily_rate * _dec(days_present))
-    total_allowance  = earned_allowance   # what shows in preview
+    # Food: prorated by attendance (daily_rate × days_present)
+    food_daily   = _money(food_all / Decimal(str(working_days))) if working_days > 0 else Decimal("0")
+    earned_food  = _money(food_daily * _dec(days_present))
+    # Transport: full monthly (not prorated)
+    earned_allowance = _money(earned_food + trans_all)
+    total_allowance  = earned_allowance
     vacation     = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
     paid_days, daily_rate = _paid_days_and_rate(employee)
 
@@ -1265,13 +1266,11 @@ async def preview_payroll(
     year, month = int(period.split("-")[0]), int(period.split("-")[1])
     # Total working days in month (Mon-Fri)
     total_days   = monthrange(year, month)[1]
-    working_days = sum(1 for d in range(1, total_days+1)
-                       if date(year, month, d).weekday() < 5)
+    working_days = total_days   # all days in month
     # Days so far this month (up to today)
     today = date.today()
     if today.year == year and today.month == month:
-        days_elapsed = sum(1 for d in range(1, today.day+1)
-                           if date(year, month, d).weekday() < 5)
+        days_elapsed = today.day
     else:
         days_elapsed = working_days
 
@@ -1311,8 +1310,7 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
     period = _validate_period(data.period)
     year, month = int(period.split("-")[0]), int(period.split("-")[1])
     total_days   = monthrange(year, month)[1]
-    working_days = sum(1 for d in range(1, total_days+1)
-                       if date(year, month, d).weekday() < 5)
+    working_days = total_days   # all days in month
 
     emp_stmt = select(Employee).where(Employee.is_active == True)
     if data.emp_ids:
@@ -1549,7 +1547,7 @@ async def hr_summary(db: AsyncSession = Depends(get_async_session)):
     # to_pay_today: sum of daily_rate for each present employee today
     year, month = today.year, today.month
     total_days = monthrange(year, month)[1]
-    working_days = sum(1 for d in range(1, total_days + 1) if date(year, month, d).weekday() < 5)
+    working_days = total_days   # all days in month
 
     _present_emps = await db.execute(
         select(Employee)
@@ -1557,13 +1555,11 @@ async def hr_summary(db: AsyncSession = Depends(get_async_session)):
         .where(Employee.is_active == True)
     )
     present_employees = _present_emps.scalars().all()
-    # to_pay_today = salary daily rate + allowance daily rate (allowance / 30 per day)
+    # to_pay_today = salary daily rate + food daily rate (transport is full monthly, not daily)
     to_pay_today = sum(
         float(
             _paid_days_and_rate(emp)[1]
-            + _money((_money(getattr(emp, "food_allowance", 0) or 0)
-                     + _money(getattr(emp, "transportation_allowance", 0) or 0))
-                     / Decimal("30"))
+            + _money(_money(getattr(emp, "food_allowance", 0) or 0) / Decimal("30"))
         )
         for emp in present_employees
     )
