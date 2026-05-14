@@ -965,14 +965,18 @@ async def _payroll_preview_for_employee(
     base_salary  = _money(employee.base_salary)
     food_all     = _money(getattr(employee, "food_allowance", 0) or 0)
     trans_all    = _money(getattr(employee, "transportation_allowance", 0) or 0)
-    total_allowance = _money(food_all + trans_all)   # fixed, paid on 30 days
+    total_allowance_monthly = _money(food_all + trans_all)
+    # Allowance prorated by working days × days_present
+    allow_daily_rate = _money(total_allowance_monthly / Decimal(str(working_days))) if working_days > 0 else Decimal("0")
+    earned_allowance = _money(allow_daily_rate * _dec(days_present))
+    total_allowance  = earned_allowance   # what shows in preview
     vacation     = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
     paid_days, daily_rate = _paid_days_and_rate(employee)
 
     # Earned salary = days_present × daily_rate (capped at base_salary)
-    # Allowance is separate and fixed (not attendance-based)
+    # Allowance is prorated by attendance (working_days * days_present)
     earned_base  = _money(min(daily_rate * _dec(days_present), base_salary))
-    earned_total = _money(earned_base + total_allowance)
+    earned_total = _money(earned_base + earned_allowance)
 
     pending_day_days = Decimal("0")
     pending_day_amount = Decimal("0")
@@ -1803,9 +1807,9 @@ td.mono { font-family: var(--mono); color: var(--green); }
 
 <!-- ALLOWANCE TAB PANEL -->
 <div id="tab-panel-allowances" style="display:none">
-    <div class="table-wrap">
-        <table>
-            <thead><tr><th>Employee</th><th>Position</th><th>Food</th><th>Transport</th><th>Total / Month</th><th>Open Advances</th><th></th></tr></thead>
+    <div class="table-wrap" style="max-width:1100px;margin:0 auto">
+        <table style="margin:0 auto">
+            <thead><tr><th>Employee</th><th>Position</th><th style="text-align:center">Food</th><th style="text-align:center">Transport</th><th style="text-align:center">Total / Month</th><th style="text-align:center">Open Advances</th><th style="text-align:center"></th></tr></thead>
             <tbody id="allowance-body"></tbody>
         </table>
     </div>
