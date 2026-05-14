@@ -13,6 +13,8 @@ body { font-family: monospace; background:#060810; color:white; }
 .line { border-top:1px dashed #445066; margin:10px 0; }
 .total { font-size:20px; color:#00ff9d; font-weight:bold; }
 .btn { width:100%; padding:14px; margin-top:10px; background:linear-gradient(135deg,#00ff9d,#00d4ff); border:none; border-radius:10px; color:#021a10; font-size:15px; font-weight:800; cursor:pointer; }
+.btn:disabled { opacity:.55; cursor:not-allowed; }
+.btn-cash { background:#00ff9d; color:#021a10; }
 .btn-back { background:#151c30; color:#8899bb; margin-top:6px; }
 @media print {
     .btn { display:none; }
@@ -23,6 +25,31 @@ body { font-family: monospace; background:#060810; color:white; }
 }
 </style>
     <script src="/static/auth-guard.js"></script>
+    <script>
+    async function cashReceipt() {
+        const btn = document.getElementById("cash-receipt-btn");
+        if(btn) {
+            btn.disabled = true;
+            btn.textContent = "Cashing...";
+        }
+        try {
+            const res = await fetch("/invoice/{{ invoice.id }}/collect", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({payment_method: "cash"}),
+            });
+            const data = await res.json().catch(() => ({detail: `Request failed (${res.status})`}));
+            if(!res.ok || data.detail) throw new Error(data.detail || `Request failed (${res.status})`);
+            window.location.reload();
+        } catch(e) {
+            alert("Could not cash receipt: " + e.message);
+            if(btn) {
+                btn.disabled = false;
+                btn.textContent = "Cash Receipt";
+            }
+        }
+    }
+    </script>
 </head>
 <body>
 <div class="r">
@@ -50,6 +77,9 @@ body { font-family: monospace; background:#060810; color:white; }
     <div class="row"><span>Subtotal</span><span>{{ invoice.subtotal | egp }}</span></div>
     <div class="row"><span>Discount</span><span>{{ invoice.discount | egp }}</span></div>
     <div class="row total"><span>Total</span><span>{{ invoice.total | egp }}</span></div>
+    {% if invoice.status == "unpaid" %}
+    <button class="btn btn-cash" id="cash-receipt-btn" onclick="cashReceipt()">Cash Receipt</button>
+    {% endif %}
     <button class="btn" onclick="window.print()">&#128424; Print Receipt</button>
     <button class="btn btn-back" onclick="window.location.href='/pos'">&#8592; Back to POS</button>
 </div>

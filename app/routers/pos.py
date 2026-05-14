@@ -481,8 +481,10 @@ async def view_invoice(invoice_id: int, db: AsyncSession = Depends(get_async_ses
         </div>"""
 
     status_badge = ""
+    cash_action = ""
     if inv.status == "unpaid":
         status_badge = '<div style="background:rgba(255,181,71,.15);border:1px solid rgba(255,181,71,.3);color:#ffb547;border-radius:8px;padding:8px 12px;text-align:center;font-weight:700;margin-bottom:10px;">&#9203; UNPAID &#8212; Settle Later</div>'
+        cash_action = '<button class="btn btn-cash" id="cash-receipt-btn" onclick="cashReceipt()">Cash Receipt</button>'
 
     return f"""<!DOCTYPE html>
 <html>
@@ -500,6 +502,8 @@ body {{ font-family: monospace; background:#060810; color:white; }}
 .line {{ border-top:1px dashed #445066; margin:10px 0; }}
 .total {{ font-size:20px; color:#00ff9d; font-weight:bold; }}
 .btn {{ width:100%; padding:14px; margin-top:10px; background:linear-gradient(135deg,#00ff9d,#00d4ff); border:none; border-radius:10px; color:#021a10; font-size:15px; font-weight:800; cursor:pointer; }}
+.btn:disabled {{ opacity:.55; cursor:not-allowed; }}
+.btn-cash {{ background:#00ff9d; color:#021a10; }}
 .btn-back {{ background:#151c30; color:#8899bb; margin-top:6px; }}
 @media print {{
     .btn {{ display:none; }}
@@ -510,6 +514,31 @@ body {{ font-family: monospace; background:#060810; color:white; }}
 }}
 </style>
     <script src="/static/auth-guard.js"></script>
+    <script>
+    async function cashReceipt() {{
+        const btn = document.getElementById("cash-receipt-btn");
+        if(btn) {{
+            btn.disabled = true;
+            btn.textContent = "Cashing...";
+        }}
+        try {{
+            const res = await fetch("/invoice/{inv.id}/collect", {{
+                method: "POST",
+                headers: {{"Content-Type": "application/json"}},
+                body: JSON.stringify({{payment_method: "cash"}}),
+            }});
+            const data = await res.json().catch(() => ({{detail: `Request failed (${{res.status}})`}}));
+            if(!res.ok || data.detail) throw new Error(data.detail || `Request failed (${{res.status}})`);
+            window.location.reload();
+        }} catch(e) {{
+            alert("Could not cash receipt: " + e.message);
+            if(btn) {{
+                btn.disabled = false;
+                btn.textContent = "Cash Receipt";
+            }}
+        }}
+    }}
+    </script>
 </head>
 <body>
 <div class="r">
@@ -529,6 +558,7 @@ body {{ font-family: monospace; background:#060810; color:white; }}
     <div class="row"><span>Subtotal</span><span>{float(inv.subtotal):.2f}</span></div>
     <div class="row"><span>Discount</span><span>{float(inv.discount):.2f}</span></div>
     <div class="row total"><span>Total</span><span>{float(inv.total):.2f}</span></div>
+    {cash_action}
     <button class="btn" onclick="window.print()">&#128424; Print Receipt</button>
     <button class="btn btn-back" onclick="window.location.href='/pos'">&#8592; Back to POS</button>
 </div>
@@ -786,6 +816,8 @@ body.light #right{background:rgba(244,245,239,.92);}
 .inv-total-row{display:flex;justify-content:space-between;font-size:18px;font-weight:800;padding:10px 0 0;}
 .inv-modal-actions{display:flex;gap:8px;margin-top:14px;}
 .inv-print-btn{flex:1;padding:12px;background:linear-gradient(135deg,var(--green),#00d4ff);border:none;border-radius:10px;color:#021a10;font-family:var(--sans);font-size:13px;font-weight:800;cursor:pointer;}
+.inv-cash-btn{flex:1;padding:12px;background:rgba(0,255,157,.08);border:1px solid var(--green);border-radius:10px;color:var(--green);font-family:var(--sans);font-size:13px;font-weight:800;cursor:pointer;}
+.inv-cash-btn:hover{background:rgba(0,255,157,.18);}
 .inv-close-btn{flex:1;padding:12px;background:var(--card2);border:1px solid var(--border2);border-radius:10px;color:var(--sub);font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer;}
 .inv-close-btn:hover{border-color:var(--danger);color:var(--danger);}
 .unpaid-badge{background:rgba(255,181,71,.12);border:1px solid rgba(255,181,71,.3);color:var(--warn);border-radius:8px;padding:8px;text-align:center;font-weight:700;font-size:12px;margin-bottom:8px;}
@@ -991,6 +1023,7 @@ body.light .toast{background:var(--card);}
         <hr class="inv-divider">
         <div id="modal-totals"></div>
         <div class="inv-modal-actions">
+            <button class="inv-cash-btn" id="modal-cash-btn" onclick="collectCurrentInvoiceCash()">Cash Receipt</button>
             <button class="inv-print-btn" onclick="printInvoice()">🖨 Print Receipt</button>
             <button class="inv-close-btn" onclick="closeInvModal()">Close</button>
         </div>
@@ -1778,6 +1811,11 @@ async function collectPayment(invoiceId, invoiceNumber, method){
 }
 
 /* ── INVOICE DETAIL MODAL ── */
+function collectCurrentInvoiceCash(){
+    if(!currentInvoiceData) return;
+    collectPayment(currentInvoiceData.id, currentInvoiceData.invoice_number, "cash");
+}
+
 function openInvModal(inv){
     if(typeof inv === "string") inv = JSON.parse(inv);
     currentInvoiceData = inv;
@@ -1803,6 +1841,7 @@ function openInvModal(inv){
         ${inv.discount>0?`<div class="inv-row"><span class="label">Discount</span><span style="color:var(--danger)">-${inv.discount.toFixed(2)}</span></div>`:""}
         <div class="inv-total-row"><span>Total</span><span style="font-family:var(--mono);color:var(--warn)">${inv.total.toFixed(2)} EGP</span></div>
     `;
+    document.getElementById("modal-cash-btn").style.display = hasPermission("action_pos_settle_later") ? "" : "none";
 
     document.getElementById("inv-modal").classList.add("open");
 }

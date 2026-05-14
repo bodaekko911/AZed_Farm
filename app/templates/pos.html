@@ -204,6 +204,8 @@ body.light #right{background:rgba(244,245,239,.92);}
 .inv-total-row{display:flex;justify-content:space-between;font-size:18px;font-weight:800;padding:10px 0 0;}
 .inv-modal-actions{display:flex;gap:8px;margin-top:14px;}
 .inv-print-btn{flex:1;padding:12px;background:linear-gradient(135deg,var(--green),#00d4ff);border:none;border-radius:10px;color:#021a10;font-family:var(--sans);font-size:13px;font-weight:800;cursor:pointer;}
+.inv-cash-btn{flex:1;padding:12px;background:rgba(0,255,157,.08);border:1px solid var(--green);border-radius:10px;color:var(--green);font-family:var(--sans);font-size:13px;font-weight:800;cursor:pointer;}
+.inv-cash-btn:hover{background:rgba(0,255,157,.18);}
 .inv-close-btn{flex:1;padding:12px;background:var(--card2);border:1px solid var(--border2);border-radius:10px;color:var(--sub);font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer;}
 .inv-close-btn:hover{border-color:var(--danger);color:var(--danger);}
 .unpaid-badge{background:rgba(255,181,71,.12);border:1px solid rgba(255,181,71,.3);color:var(--warn);border-radius:8px;padding:8px;text-align:center;font-weight:700;font-size:12px;margin-bottom:8px;}
@@ -409,6 +411,7 @@ body.light .toast{background:var(--card);}
         <hr class="inv-divider">
         <div id="modal-totals"></div>
         <div class="inv-modal-actions">
+            <button class="inv-cash-btn" id="modal-cash-btn" onclick="collectCurrentInvoiceCash()">Cash Receipt</button>
             <button class="inv-print-btn" onclick="printInvoice()">🖨 Print Receipt</button>
             <button class="inv-close-btn" onclick="closeInvModal()">Close</button>
         </div>
@@ -1196,6 +1199,11 @@ async function collectPayment(invoiceId, invoiceNumber, method){
 }
 
 /* ── INVOICE DETAIL MODAL ── */
+function collectCurrentInvoiceCash(){
+    if(!currentInvoiceData) return;
+    collectPayment(currentInvoiceData.id, currentInvoiceData.invoice_number, "cash");
+}
+
 function openInvModal(inv){
     if(typeof inv === "string") inv = JSON.parse(inv);
     currentInvoiceData = inv;
@@ -1221,6 +1229,7 @@ function openInvModal(inv){
         ${inv.discount>0?`<div class="inv-row"><span class="label">Discount</span><span style="color:var(--danger)">-${inv.discount.toFixed(2)}</span></div>`:""}
         <div class="inv-total-row"><span>Total</span><span style="font-family:var(--mono);color:var(--warn)">${inv.total.toFixed(2)} EGP</span></div>
     `;
+    document.getElementById("modal-cash-btn").style.display = hasPermission("action_pos_settle_later") ? "" : "none";
 
     document.getElementById("inv-modal").classList.add("open");
 }
