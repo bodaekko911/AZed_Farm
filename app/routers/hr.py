@@ -1824,6 +1824,9 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="fld" style="margin:0;flex:0 0 180px">
                 <input id="att-period" type="month" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:10px 14px;background:linear-gradient(135deg,var(--green),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-family:var(--sans);font-size:14px;outline:none;" onchange="loadAttendance()">
             </div>
+            <div class="fld" style="margin:0;flex:1;max-width:280px;position:relative">
+                <input id="att-search" type="text" placeholder="Search employee…" autocomplete="off" oninput="filterAttendanceSearch()" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:10px 14px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%">
+            </div>
             <div class="fld" style="margin:0;flex:0 0 200px">
                 <select id="att-emp-filter" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:10px 14px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;" onchange="loadAttendance()">
                     <option value="">All Employees</option>
@@ -2783,19 +2786,22 @@ function initAttendanceTab(){
     loadAttendance();
 }
 
-async function loadAttendance(){
-    let period = document.getElementById("att-period").value;
-    let empId  = document.getElementById("att-emp-filter").value;
-    let url    = `/hr/api/attendance?period=${period}`;
-    if(empId) url += `&emp_id=${empId}`;
-    let records = await (await fetch(url)).json();
+let allAttendanceRecords = [];
 
+function filterAttendanceSearch(){
+    let query = (document.getElementById("att-search").value || "").toLowerCase().trim();
+    let filtered = query
+        ? allAttendanceRecords.filter(r => (r.employee||"").toLowerCase().includes(query))
+        : allAttendanceRecords;
+    renderAttendanceRows(filtered);
+}
+
+function renderAttendanceRows(records){
     if(!records.length){
         document.getElementById("att-body").innerHTML =
-            `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:40px">No attendance records for this period</td></tr>`;
+            `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:40px">No attendance records found</td></tr>`;
         return;
     }
-
     document.getElementById("att-body").innerHTML = records.map(r => {
         let status = String(r.status || "");
         let cls = `status-${safeStatusClass(status)}`;
@@ -2820,6 +2826,17 @@ async function loadAttendance(){
             <td>${canEdit ? `<button class="action-btn danger" onclick="deleteAttendance(${r.id})" style="font-size:11px;padding:3px 8px">✕</button>` : ""}</td>
         </tr>`;
     }).join("");
+}
+
+async function loadAttendance(){
+    let period = document.getElementById("att-period").value;
+    let empId  = document.getElementById("att-emp-filter").value;
+    let url    = `/hr/api/attendance?period=${period}`;
+    if(empId) url += `&emp_id=${empId}`;
+    let records = await (await fetch(url)).json();
+    allAttendanceRecords = records;
+    document.getElementById("att-search").value = "";
+    renderAttendanceRows(records);
 }
 
 async function editAttendanceStatus(attId, newStatus){
