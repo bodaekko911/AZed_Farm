@@ -1,3 +1,5 @@
+import logging
+
 from app.routers import (
     accounting,
     audit_log,
@@ -8,7 +10,6 @@ from app.routers import (
     dashboard,
     expenses_refactored,
     farm,
-    farm_dashboard,
     home,
     hr,
     import_data,
@@ -23,13 +24,28 @@ from app.routers import (
     users,
 )
 
-ROUTERS = (
+_log = logging.getLogger(__name__)
+
+# farm_dashboard is loaded defensively. If the file is missing on a partial
+# deployment, the app should still boot — the rest of the system stays usable
+# and only the Farm dashboard surface goes dark until the file lands.
+try:
+    from app.routers import farm_dashboard  # type: ignore
+    _farm_dashboard_router = farm_dashboard.router
+except Exception as exc:  # noqa: BLE001
+    _log.warning(
+        "Farm dashboard router could not be loaded (%s: %s). "
+        "App will start without it. Ensure app/routers/farm_dashboard.py is deployed.",
+        type(exc).__name__, exc,
+    )
+    _farm_dashboard_router = None
+
+_base_routers = (
     auth.router,
     home.router,
     pos.router,
     import_data.router,
     dashboard.router,
-    farm_dashboard.router,
     products.router,
     customers.router,
     receive.router,
@@ -47,5 +63,16 @@ ROUTERS = (
     expenses_refactored.router,
     audit_log.router,
 )
+
+if _farm_dashboard_router is not None:
+    # Slot the farm dashboard right after the sales dashboard for nav parity.
+    _ordered = []
+    for r in _base_routers:
+        _ordered.append(r)
+        if r is dashboard.router:
+            _ordered.append(_farm_dashboard_router)
+    ROUTERS = tuple(_ordered)
+else:
+    ROUTERS = _base_routers
 
 __all__ = ["ROUTERS"]
