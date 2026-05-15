@@ -1370,6 +1370,16 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
 
             paid_days_val, daily_rate_val = _paid_days_and_rate(emp)
             earned_base   = _money(min(daily_rate_val * _dec(days_present), _money(emp.base_salary)))
+
+            # Allowances — mirror the preview logic exactly:
+            #   Food allowance      → prorated by attendance (daily rate x days present)
+            #   Transport allowance → paid in full regardless of attendance
+            food_all         = _money(getattr(emp, "food_allowance", 0) or 0)
+            trans_all        = _money(getattr(emp, "transportation_allowance", 0) or 0)
+            food_daily       = _money(food_all / Decimal(str(working_days))) if working_days > 0 else Decimal("0")
+            earned_food      = _money(food_daily * _dec(days_present))
+            earned_allowance = _money(earned_food + trans_all)  # transport always in full
+
             payroll.base_salary = earned_base     # attendance-based salary only
             # Bonus = whatever the user entered in the run form (no auto-allowance injection)
             payroll.bonuses = bonus_amount
@@ -1382,8 +1392,8 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
             payroll.deductions = _money(
                 payroll.loan_deductions + payroll.day_deductions + payroll.manual_deductions
             )
-            # net_salary may be negative if deductions exceed salary — allowed by design
-            payroll.net_salary = _money(payroll.base_salary + payroll.bonuses - payroll.deductions)
+            # net_salary includes allowances: food (prorated) + transport (full)
+            payroll.net_salary = _money(payroll.base_salary + payroll.bonuses + earned_allowance - payroll.deductions)
             await db.flush()
             payroll_ids.append(payroll.id)
 
