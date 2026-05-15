@@ -1585,6 +1585,95 @@ async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = No
     total_refunds  = retail_refunds + b2b_refunds
     total_revenue  = round(pos_sales + b2b_sales - total_refunds, 2)
 
+    # ── Per-line entry drill-downs ──────────────────────
+    # Fetch individual invoice/refund rows so the frontend can expand each
+    # P&L line and show what's behind it.
+    from app.core.time_utils import app_tz
+    tz = app_tz()
+
+    def _local_date(dt) -> str:
+        if dt is None:
+            return ""
+        try:
+            return dt.astimezone(tz).strftime("%Y-%m-%d")
+        except Exception:
+            return dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else ""
+
+    # POS invoice entries
+    pos_entries: list[dict] = []
+    if abs(pos_sales) >= 0.01:
+        pos_rows = await db.execute(
+            select(Invoice.invoice_number, Invoice.total, Invoice.created_at)
+            .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to, Invoice.status == "paid")
+            .order_by(Invoice.created_at)
+        )
+        pos_entries = [
+            {
+                "date":        _local_date(r.created_at),
+                "ref_type":    "pos",
+                "description": f"Invoice {r.invoice_number or '—'}",
+                "amount":      round(float(r.total or 0), 2),
+            }
+            for r in pos_rows.all()
+        ]
+
+    # B2B invoice entries (with client name when available)
+    b2b_entries: list[dict] = []
+    if abs(b2b_sales) >= 0.01:
+        b2b_rows = await db.execute(
+            select(
+                B2BInvoice.invoice_number,
+                B2BInvoice.total,
+                B2BInvoice.created_at,
+                B2BClient.name.label("client_name"),
+            )
+            .join(B2BClient, B2BClient.id == B2BInvoice.client_id, isouter=True)
+            .where(
+                B2BInvoice.created_at >= d_from,
+                B2BInvoice.created_at <= d_to,
+                B2BInvoice.status == "paid",
+            )
+            .order_by(B2BInvoice.created_at)
+        )
+        for r in b2b_rows.all():
+            client = r.client_name or ""
+            desc = f"Invoice {r.invoice_number or '—'}" + (f" — {client}" if client else "")
+            b2b_entries.append({
+                "date":        _local_date(r.created_at),
+                "ref_type":    "b2b",
+                "description": desc,
+                "amount":      round(float(r.total or 0), 2),
+            })
+
+    # Refund entries (retail + B2B, shown as negative)
+    refund_entries: list[dict] = []
+    if abs(total_refunds) >= 0.01:
+        rr_rows = await db.execute(
+            select(RetailRefund.refund_number, RetailRefund.total, RetailRefund.created_at)
+            .where(RetailRefund.created_at >= d_from, RetailRefund.created_at <= d_to)
+            .order_by(RetailRefund.created_at)
+        )
+        for r in rr_rows.all():
+            refund_entries.append({
+                "date":        _local_date(r.created_at),
+                "ref_type":    "pos",
+                "description": f"POS refund {r.refund_number or '—'}",
+                "amount":      -round(float(r.total or 0), 2),
+            })
+        br_rows = await db.execute(
+            select(B2BRefund.refund_number, B2BRefund.total, B2BRefund.created_at)
+            .where(B2BRefund.created_at >= d_from, B2BRefund.created_at <= d_to)
+            .order_by(B2BRefund.created_at)
+        )
+        for r in br_rows.all():
+            refund_entries.append({
+                "date":        _local_date(r.created_at),
+                "ref_type":    "b2b",
+                "description": f"B2B refund {r.refund_number or '—'}",
+                "amount":      -round(float(r.total or 0), 2),
+            })
+        refund_entries.sort(key=lambda e: e["date"])
+
     # Build revenue_lines in the same shape the export and frontend expect:
     # [{code, name, amount, entries: [{date, ref_type, description, amount}]}]
     revenue_lines = []
@@ -1593,32 +1682,31 @@ async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = No
             "code": "POS",
             "name": "Paid POS Sales",
             "amount": round(pos_sales, 2),
-            "entries": [],   # line-level drill-down not available for invoice-aggregated view
+            "entries": pos_entries,
         })
     if abs(b2b_sales) >= 0.01:
         revenue_lines.append({
             "code": "B2B",
             "name": "Paid B2B Sales",
             "amount": round(b2b_sales, 2),
-            "entries": [],
+            "entries": b2b_entries,
         })
     if abs(total_refunds) >= 0.01:
         revenue_lines.append({
             "code": "REF",
             "name": "Refunds (deducted)",
             "amount": round(-total_refunds, 2),   # negative — reduces revenue
-            "entries": [],
+            "entries": refund_entries,
         })
 
     # ── Expenses ─────────────────────────────────────────
     # Grouped by expense category, filtered by expense_date (local date, no tz shift).
-    from app.core.time_utils import app_tz
-    tz          = app_tz()
     local_from  = d_from.astimezone(tz).date()
     local_to    = d_to.astimezone(tz).date()
 
     expense_rows = await db.execute(
         select(
+            ExpenseCategory.id.label("cat_id"),
             ExpenseCategory.account_code.label("code"),
             ExpenseCategory.name.label("name"),
             func.coalesce(func.sum(Expense.amount), 0).label("amount"),
@@ -1626,9 +1714,34 @@ async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = No
         .select_from(Expense)
         .join(ExpenseCategory, ExpenseCategory.id == Expense.category_id, isouter=True)
         .where(Expense.expense_date >= local_from, Expense.expense_date <= local_to)
-        .group_by(ExpenseCategory.account_code, ExpenseCategory.name)
+        .group_by(ExpenseCategory.id, ExpenseCategory.account_code, ExpenseCategory.name)
         .order_by(ExpenseCategory.name)
     )
+
+    # Individual expense entries per category, for drill-down
+    detail_rows = await db.execute(
+        select(
+            Expense.category_id,
+            Expense.ref_number,
+            Expense.expense_date,
+            Expense.amount,
+            Expense.vendor,
+            Expense.description,
+        )
+        .where(Expense.expense_date >= local_from, Expense.expense_date <= local_to)
+        .order_by(Expense.category_id, Expense.expense_date, Expense.id)
+    )
+    expenses_by_cat: dict[Optional[int], list[dict]] = {}
+    for r in detail_rows.all():
+        desc_parts = [f"{r.ref_number}"] if r.ref_number else []
+        if r.vendor:      desc_parts.append(str(r.vendor))
+        if r.description: desc_parts.append(str(r.description))
+        expenses_by_cat.setdefault(r.category_id, []).append({
+            "date":        r.expense_date.strftime("%Y-%m-%d") if r.expense_date else "",
+            "ref_type":    "manual",
+            "description": " — ".join(desc_parts) if desc_parts else "Expense",
+            "amount":      round(float(r.amount or 0), 2),
+        })
 
     expense_lines = []
     for row in expense_rows.mappings().all():
@@ -1639,7 +1752,7 @@ async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = No
             "code":    row["code"] or "OPC",
             "name":    row["name"] or "Operational Cost",
             "amount":  amt,
-            "entries": [],
+            "entries": expenses_by_cat.get(row["cat_id"], []),
         })
 
     total_expense = round(sum(e["amount"] for e in expense_lines), 2)
