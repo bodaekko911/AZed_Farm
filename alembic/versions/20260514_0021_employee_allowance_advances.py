@@ -1,6 +1,6 @@
 """add employee_allowance_advances table
 
-Revision ID: 20260514_0021_emp_allowance_advances
+Revision ID: 20260514_0021_emp_advances
 Revises: 20260514_0020_emp_allowances
 Create Date: 2026-05-14
 """
@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260514_0021_emp_allowance_advances"
+revision: str = "20260514_0021_emp_advances"
 down_revision: Union[str, None] = "20260514_0020_emp_allowances"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
