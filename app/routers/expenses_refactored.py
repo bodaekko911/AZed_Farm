@@ -8,7 +8,12 @@ from app.core.permissions import require_action, require_permission
 from app.database import get_async_session
 from app.models.user import User
 from app.routers.expenses import expenses_ui as legacy_expenses_ui
-from app.schemas.expense import ExpenseCategoryCreate, ExpenseCreate, ExpenseUpdate
+from app.schemas.expense import (
+    ExpenseCategoryCreate,
+    ExpenseCategoryUpdate,
+    ExpenseCreate,
+    ExpenseUpdate,
+)
 from app.services.expense_service import (
     archive_category,
     create_category,
@@ -16,8 +21,10 @@ from app.services.expense_service import (
     delete_expense_entry,
     get_cost_allocation,
     get_summary,
+    list_carbon_factors,
     list_categories,
     list_expenses,
+    update_category,
     update_expense_entry,
 )
 
@@ -42,6 +49,16 @@ async def create_expense_category(
     return await create_category(db, data)
 
 
+@router.put("/api/categories/{cat_id}")
+async def edit_expense_category(
+    cat_id: int,
+    data: ExpenseCategoryUpdate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(require_action("expenses", "expenses", "update")),
+):
+    return await update_category(db, cat_id, data, current_user)
+
+
 @router.delete("/api/categories/{cat_id}")
 async def delete_expense_category(
     cat_id: int,
@@ -49,6 +66,12 @@ async def delete_expense_category(
     _: User = Depends(require_action("expenses", "expenses", "delete")),
 ):
     return await archive_category(db, cat_id)
+
+
+@router.get("/api/carbon-factors")
+async def get_carbon_factors(db: AsyncSession = Depends(get_async_session)):
+    """Active carbon emission factors used to populate the category-edit dropdown."""
+    return await list_carbon_factors(db)
 
 
 @router.get("/api/list")

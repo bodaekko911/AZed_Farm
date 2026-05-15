@@ -10,10 +10,16 @@ from sqlalchemy.orm import selectinload
 
 from app.core.log import record
 from app.models.accounting import Account, Journal, JournalEntry
+from app.models.carbon import CarbonEmissionFactor, CarbonLog
 from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.user import User
-from app.schemas.expense import ExpenseCategoryCreate, ExpenseCreate, ExpenseUpdate
+from app.schemas.expense import (
+    ExpenseCategoryCreate,
+    ExpenseCategoryUpdate,
+    ExpenseCreate,
+    ExpenseUpdate,
+)
 
 SALARY_CATEGORY_NAME = "Salaries & Wages"
 SALARY_ACCOUNT_CODE = "5006"
@@ -190,6 +196,9 @@ async def list_categories(db: AsyncSession) -> list[dict]:
             "description": category.description or "",
             "count": len(category.expenses),
             "total": float(sum(expense.amount for expense in category.expenses)),
+            "unit_price": float(category.unit_price) if category.unit_price is not None else None,
+            "unit_name": category.unit_name,
+            "carbon_factor_key": category.carbon_factor_key or "",
         }
         for category in categories
     ]
@@ -220,11 +229,138 @@ async def create_category(db: AsyncSession, data: ExpenseCategoryCreate) -> dict
         name=category_name,
         account_code=account_code,
         description=_clean_text(data.description),
+        unit_price=(data.unit_price if data.unit_price and data.unit_price > 0 else None),
+        unit_name=_clean_text(data.unit_name),
+        carbon_factor_key=_clean_text(data.carbon_factor_key),
     )
     db.add(category)
     await db.commit()
     await db.refresh(category)
     return {"id": category.id, "name": category.name, "account_code": category.account_code}
+
+
+async def update_category(
+    db: AsyncSession,
+    category_id: int,
+    data: ExpenseCategoryUpdate,
+    current_user: User,
+) -> dict:
+    """Edit an existing expense category (name / unit pricing / carbon factor)."""
+    result = await db.execute(select(ExpenseCategory).where(ExpenseCategory.id == category_id))
+    category = result.scalar_one_or_none()
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+
+    if data.name is not None:
+        new_name = data.name.strip()
+        if new_name and new_name != category.name:
+            # uniqueness check
+            existing = await db.execute(
+                select(ExpenseCategory).where(
+                    ExpenseCategory.name == new_name,
+                    ExpenseCategory.id != category.id,
+                )
+            )
+            if existing.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="Category name already exists")
+            category.name = new_name
+    if data.description is not None:
+        category.description = _clean_text(data.description)
+    if data.unit_price is not None:
+        category.unit_price = data.unit_price if data.unit_price > 0 else None
+    if data.unit_name is not None:
+        category.unit_name = _clean_text(data.unit_name)
+    if data.carbon_factor_key is not None:
+        # Accept "" to clear; validate non-empty keys against the catalog.
+        key = data.carbon_factor_key.strip()
+        if key:
+            check = await db.execute(
+                select(CarbonEmissionFactor).where(
+                    CarbonEmissionFactor.source_key == key,
+                    CarbonEmissionFactor.is_active == True,
+                )
+            )
+            if not check.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown or inactive carbon factor: {key}",
+                )
+            category.carbon_factor_key = key
+        else:
+            category.carbon_factor_key = None
+
+    record(
+        db,
+        "Expenses",
+        "update_category",
+        f"Updated category {category.name}",
+        user=current_user,
+        ref_type="expense_category",
+        ref_id=category.id,
+    )
+    await db.commit()
+    await db.refresh(category)
+    return {
+        "ok": True,
+        "id": category.id,
+        "name": category.name,
+        "unit_price": float(category.unit_price) if category.unit_price is not None else None,
+        "unit_name": category.unit_name,
+        "carbon_factor_key": category.carbon_factor_key,
+    }
+
+
+async def list_carbon_factors(db: AsyncSession) -> list[dict]:
+    """Active carbon emission factors for the category-edit dropdown."""
+    result = await db.execute(
+        select(CarbonEmissionFactor)
+        .where(CarbonEmissionFactor.is_active == True)
+        .order_by(CarbonEmissionFactor.source_type, CarbonEmissionFactor.label)
+    )
+    return [
+        {
+            "source_key":  f.source_key,
+            "label":       f.label,
+            "unit":        f.unit,
+            "factor":      float(f.factor_kg_co2e_per_unit),
+            "source_type": f.source_type,
+        }
+        for f in result.scalars().all()
+    ]
+
+
+async def _create_carbon_log_for_expense(
+    db: AsyncSession,
+    expense: Expense,
+    category: ExpenseCategory,
+    consumption: float,
+    current_user: User,
+) -> None:
+    """Auto-create a CarbonLog when an expense's category has a mapped factor."""
+    if not category.carbon_factor_key or consumption <= 0:
+        return
+    result = await db.execute(
+        select(CarbonEmissionFactor).where(
+            CarbonEmissionFactor.source_key == category.carbon_factor_key,
+            CarbonEmissionFactor.is_active == True,
+        )
+    )
+    factor = result.scalar_one_or_none()
+    if not factor:
+        return
+    qty = Decimal(str(consumption))
+    kg_co2e = (qty * factor.factor_kg_co2e_per_unit).quantize(Decimal("0.0001"))
+    db.add(CarbonLog(
+        factor_id=factor.id,
+        farm_id=expense.farm_id,
+        user_id=current_user.id,
+        log_date=expense.expense_date,
+        quantity=qty,
+        kg_co2e=kg_co2e,
+        ref_type="expense",
+        ref_id=expense.id,
+        notes=f"Auto-logged from expense {expense.ref_number} ({category.name})",
+    ))
 
 
 async def archive_category(db: AsyncSession, category_id: int) -> dict:
@@ -364,6 +500,22 @@ async def create_expense_entry(db: AsyncSession, data: ExpenseCreate, current_us
     vendor = _clean_text(data.vendor)
     description = _clean_text(data.description)
 
+    # ── consumption + unit price snapshot ──
+    # If unit_price_used is provided on the entry, use it; otherwise fall back to
+    # the category's default unit_price. Then derive consumption from amount if the
+    # caller didn't supply one explicitly.
+    unit_price_used: Optional[float] = None
+    consumption: Optional[float] = None
+    if data.unit_price_used is not None and data.unit_price_used > 0:
+        unit_price_used = round(float(data.unit_price_used), 4)
+    elif category.unit_price is not None and float(category.unit_price) > 0:
+        unit_price_used = float(category.unit_price)
+
+    if data.consumption is not None and data.consumption > 0:
+        consumption = round(float(data.consumption), 4)
+    elif unit_price_used and unit_price_used > 0:
+        consumption = round(amount / unit_price_used, 4)
+
     journal = await _post_expense_journal(
         db,
         description=f"{category.name} expense - {reference_number}" + (f" - {vendor}" if vendor else ""),
@@ -384,13 +536,23 @@ async def create_expense_entry(db: AsyncSession, data: ExpenseCreate, current_us
         description=description,
         journal_id=journal.id,
         farm_id=data.farm_id or None,
+        consumption=consumption,
+        unit_price_used=unit_price_used,
     )
     db.add(expense)
+    await db.flush()  # need expense.id for the carbon log
+
+    # Auto-log to carbon footprint when the category has an emission factor
+    # mapped and we have a positive consumption quantity to apply it to.
+    if consumption and consumption > 0 and category.carbon_factor_key:
+        await _create_carbon_log_for_expense(db, expense, category, consumption, current_user)
+
     record(
         db,
         "Expenses",
         "add_expense",
-        f"{category.name} - {reference_number} - {amount:.2f} - {data.payment_method}",
+        f"{category.name} - {reference_number} - {amount:.2f} - {data.payment_method}"
+        + (f" - {consumption} {category.unit_name}" if consumption and category.unit_name else ""),
         user=current_user,
         ref_type="expense",
         ref_id=0,
@@ -402,6 +564,9 @@ async def create_expense_entry(db: AsyncSession, data: ExpenseCreate, current_us
         "ref_number": expense.ref_number,
         "amount": float(expense.amount),
         "category": category.name,
+        "consumption": float(expense.consumption) if expense.consumption is not None else None,
+        "unit_name": category.unit_name,
+        "carbon_logged": bool(consumption and consumption > 0 and category.carbon_factor_key),
     }
 
 

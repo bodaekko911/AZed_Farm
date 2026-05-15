@@ -7,6 +7,17 @@ class ExpenseCategoryCreate(BaseModel):
     name: str
     account_code: Optional[str] = None
     description: Optional[str] = None
+    unit_price: Optional[float] = None
+    unit_name: Optional[str] = None
+    carbon_factor_key: Optional[str] = None
+
+
+class ExpenseCategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    unit_price: Optional[float] = None
+    unit_name: Optional[str] = None
+    carbon_factor_key: Optional[str] = None
 
 
 class ExpenseCreate(BaseModel):
@@ -17,6 +28,8 @@ class ExpenseCreate(BaseModel):
     vendor: Optional[str] = None
     description: Optional[str] = None
     farm_id: Optional[int] = None
+    consumption: Optional[float] = None        # quantity in the category's unit
+    unit_price_used: Optional[float] = None    # snapshot at time of entry (optional override)
 
 
 class ExpenseUpdate(BaseModel):
@@ -27,3 +40,5 @@ class ExpenseUpdate(BaseModel):
     vendor: Optional[str] = None
     description: Optional[str] = None
     farm_id: Optional[int] = None
+    consumption: Optional[float] = None
+    unit_price_used: Optional[float] = None
