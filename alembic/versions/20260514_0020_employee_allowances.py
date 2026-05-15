@@ -1,7 +1,7 @@
-"""add employee_allowance_advances table
+"""add food and transportation allowance to employees
 
-Revision ID: 20260514_0021_emp_allowance_advances
-Revises: 20260514_0020_emp_allowances
+Revision ID: 20260514_0020_emp_allowances
+Revises: 20260514_0019_emp_vacation
 Create Date: 2026-05-14
 """
 from typing import Sequence, Union
@@ -10,60 +10,45 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260514_0021_emp_allowance_advances"
-down_revision: Union[str, None] = "20260514_0020_emp_allowances"
+revision: str = "20260514_0020_emp_allowances"
+down_revision: Union[str, None] = "20260514_0019_emp_vacation"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-def _has_table(table: str) -> bool:
+def _has_column(table: str, column: str) -> bool:
     bind = op.get_bind()
     insp = sa.inspect(bind)
-    return table in insp.get_table_names()
+    if table not in insp.get_table_names():
+        return False
+    return any(c["name"] == column for c in insp.get_columns(table))
 
 
 def upgrade() -> None:
-    if not _has_table("employee_allowance_advances"):
-        op.create_table(
-            "employee_allowance_advances",
-            sa.Column("id", sa.Integer(), primary_key=True, index=True),
+    if not _has_column("employees", "food_allowance"):
+        op.add_column(
+            "employees",
             sa.Column(
-                "employee_id",
-                sa.Integer(),
-                sa.ForeignKey("employees.id"),
+                "food_allowance",
+                sa.Numeric(12, 2),
                 nullable=False,
-                index=True,
+                server_default="0",
             ),
-            sa.Column("advance_date", sa.Date(), nullable=False),
-            sa.Column("amount", sa.Numeric(12, 2), nullable=False),
-            sa.Column("note", sa.Text(), nullable=True),
+        )
+    if not _has_column("employees", "transportation_allowance"):
+        op.add_column(
+            "employees",
             sa.Column(
-                "status",
-                sa.String(20),
+                "transportation_allowance",
+                sa.Numeric(12, 2),
                 nullable=False,
-                server_default="open",
-            ),
-            sa.Column(
-                "payroll_id",
-                sa.Integer(),
-                sa.ForeignKey("payroll.id"),
-                nullable=True,
-                index=True,
-            ),
-            sa.Column(
-                "created_by_user_id",
-                sa.Integer(),
-                sa.ForeignKey("users.id"),
-                nullable=True,
-            ),
-            sa.Column(
-                "created_at",
-                sa.DateTime(timezone=True),
-                server_default=sa.func.now(),
+                server_default="0",
             ),
         )
 
 
 def downgrade() -> None:
-    if _has_table("employee_allowance_advances"):
-        op.drop_table("employee_allowance_advances")
+    if _has_column("employees", "transportation_allowance"):
+        op.drop_column("employees", "transportation_allowance")
+    if _has_column("employees", "food_allowance"):
+        op.drop_column("employees", "food_allowance")
