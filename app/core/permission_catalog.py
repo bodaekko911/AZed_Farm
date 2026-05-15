@@ -39,6 +39,7 @@ PERMISSION_MATRIX = [
             {"action": "view_spoilage", "key": "tab_reports_spoilage", "label": "Spoilage tab"},
             {"action": "view_production", "key": "tab_reports_production", "label": "Production tab"},
             {"action": "view_hr", "key": "tab_reports_hr", "label": "HR tab"},
+            {"action": "view_utilities", "key": "tab_reports_utilities", "label": "Utilities tab"},
             {"action": "export", "key": "action_export_excel", "label": "Export to Excel"},
         ],
     },
@@ -264,6 +265,7 @@ ROLE_DEFINITIONS = {
             "tab_reports_farm",
             "tab_reports_spoilage",
             "tab_reports_production",
+            "tab_reports_utilities",
             "action_export_excel",
             "page_pos",
             "action_pos_create_sale",
@@ -365,6 +367,7 @@ ROLE_DEFINITIONS = {
             "tab_reports_farm",
             "tab_reports_spoilage",
             "tab_reports_production",
+            "tab_reports_utilities",
         },
     },
     "admin": {

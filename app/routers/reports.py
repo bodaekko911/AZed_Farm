@@ -1770,6 +1770,354 @@ async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = No
         "warning":        None,
     }
 
+
+# ── Utilities (Water / Gas / Electricity / Fuel ...) ───────────────────
+@router.get("/api/utilities")
+async def utilities_report(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(require_permission("tab_reports_utilities")),
+):
+    """
+    Consumption-tracked expense categories report.
+
+    Auto-detects any expense category that has a `unit_name` configured (e.g.
+    "m³", "kWh", "litre") and surfaces it as a utility line. Returns:
+      • totals by category (cost, consumption, EGP/unit)
+      • last-12-month trend per category
+      • per-farm breakdown
+      • carbon kg CO₂e if the category has an emission factor mapped
+    """
+    from app.core.time_utils import app_tz
+    from app.models.carbon import CarbonEmissionFactor, CarbonLog
+
+    d_from, d_to = parse_dates(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+
+    tz = app_tz()
+    local_from = d_from.astimezone(tz).date()
+    local_to   = d_to.astimezone(tz).date()
+
+    # 1) Pick up every active category that tracks consumption
+    cat_rows = await db.execute(
+        select(ExpenseCategory)
+        .where(
+            ExpenseCategory.is_active == "1",
+            ExpenseCategory.unit_name.isnot(None),
+            ExpenseCategory.unit_name != "",
+        )
+        .order_by(ExpenseCategory.name)
+    )
+    categories = cat_rows.scalars().all()
+
+    if not categories:
+        return {
+            "date_from": local_from.isoformat(),
+            "date_to":   local_to.isoformat(),
+            "utilities": [],
+            "trend":     [],
+            "by_farm":   [],
+            "totals":    {"cost": 0.0, "categories": 0, "carbon_kg_co2e": 0.0},
+            "warning":   "No expense categories have a unit name configured yet. "
+                         "Set a unit (e.g. m³, kWh, litre) on the category to track consumption.",
+        }
+
+    cat_ids   = [c.id for c in categories]
+    cat_by_id = {c.id: c for c in categories}
+
+    # 2) Per-category totals over the selected window
+    totals_rows = await db.execute(
+        select(
+            Expense.category_id,
+            func.coalesce(func.sum(Expense.amount), 0).label("cost"),
+            func.coalesce(func.sum(Expense.consumption), 0).label("consumption"),
+            func.count(Expense.id).label("entries"),
+        )
+        .where(
+            Expense.category_id.in_(cat_ids),
+            Expense.expense_date >= local_from,
+            Expense.expense_date <= local_to,
+        )
+        .group_by(Expense.category_id)
+    )
+    totals_by_cat = {
+        r.category_id: {"cost": float(r.cost or 0), "consumption": float(r.consumption or 0), "entries": int(r.entries or 0)}
+        for r in totals_rows.all()
+    }
+
+    # 3) Carbon kg CO₂e per category — sum CarbonLog rows for "expense" refs in window,
+    #    joined by ref_id back to expenses with this category.
+    carbon_rows = await db.execute(
+        select(
+            Expense.category_id,
+            func.coalesce(func.sum(CarbonLog.kg_co2e), 0).label("kg"),
+        )
+        .select_from(CarbonLog)
+        .join(Expense, Expense.id == CarbonLog.ref_id)
+        .where(
+            CarbonLog.ref_type == "expense",
+            Expense.category_id.in_(cat_ids),
+            CarbonLog.log_date >= local_from,
+            CarbonLog.log_date <= local_to,
+        )
+        .group_by(Expense.category_id)
+    )
+    carbon_by_cat = {r.category_id: float(r.kg or 0) for r in carbon_rows.all()}
+
+    # 4) Build the per-utility list
+    utilities = []
+    total_cost = 0.0
+    total_carbon = 0.0
+    for c in categories:
+        t = totals_by_cat.get(c.id, {"cost": 0.0, "consumption": 0.0, "entries": 0})
+        if t["cost"] == 0 and t["consumption"] == 0:
+            continue  # skip utilities with no activity in this window
+        cost_per_unit = (t["cost"] / t["consumption"]) if t["consumption"] > 0 else None
+        kg = carbon_by_cat.get(c.id, 0.0)
+        utilities.append({
+            "id":               c.id,
+            "name":             c.name,
+            "account_code":     c.account_code or "",
+            "unit_name":        c.unit_name,
+            "cost":             round(t["cost"], 2),
+            "consumption":      round(t["consumption"], 4),
+            "entries":          t["entries"],
+            "cost_per_unit":    round(cost_per_unit, 4) if cost_per_unit is not None else None,
+            "default_unit_price": float(c.unit_price) if c.unit_price is not None else None,
+            "carbon_factor_key": c.carbon_factor_key or "",
+            "carbon_kg_co2e":   round(kg, 4),
+        })
+        total_cost   += t["cost"]
+        total_carbon += kg
+
+    # 5) Last 12 months trend (rolling, anchored to today) for every active utility
+    from calendar import monthrange
+    today = date.today()
+    anchor = today.replace(day=1)
+    months: list[tuple[date, date, str]] = []
+    for i in range(11, -1, -1):
+        y, m = anchor.year, anchor.month - i
+        while m <= 0:
+            m += 12
+            y -= 1
+        m_start = date(y, m, 1)
+        m_end   = date(y, m, monthrange(y, m)[1])
+        months.append((m_start, m_end, m_start.strftime("%b %y")))
+
+    # one query covering all 12 months, group by (year, month, category)
+    if cat_ids and months:
+        earliest = months[0][0]
+        latest   = months[-1][1]
+        year_col  = func.extract("year",  Expense.expense_date)
+        month_col = func.extract("month", Expense.expense_date)
+        trend_rows = await db.execute(
+            select(
+                Expense.category_id,
+                year_col.label("y"),
+                month_col.label("m"),
+                func.coalesce(func.sum(Expense.amount), 0).label("cost"),
+                func.coalesce(func.sum(Expense.consumption), 0).label("consumption"),
+            )
+            .where(
+                Expense.category_id.in_(cat_ids),
+                Expense.expense_date >= earliest,
+                Expense.expense_date <= latest,
+            )
+            .group_by(Expense.category_id, year_col, month_col)
+        )
+        trend_idx: dict[tuple[int, int, int], dict] = {}
+        for r in trend_rows.all():
+            try:
+                key = (int(r.category_id), int(r.y), int(r.m))
+            except (TypeError, ValueError):
+                continue
+            trend_idx[key] = {
+                "cost": float(r.cost or 0),
+                "consumption": float(r.consumption or 0),
+            }
+    else:
+        trend_idx = {}
+
+    trend = []
+    for m_start, m_end, label in months:
+        entry = {"month": m_start.strftime("%Y-%m"), "label": label, "items": []}
+        for c in categories:
+            cell = trend_idx.get((c.id, m_start.year, m_start.month), {"cost": 0.0, "consumption": 0.0})
+            entry["items"].append({
+                "id":          c.id,
+                "name":        c.name,
+                "unit_name":   c.unit_name,
+                "cost":        round(cell["cost"], 2),
+                "consumption": round(cell["consumption"], 4),
+            })
+        trend.append(entry)
+
+    # 6) Per-farm breakdown over the selected window
+    farm_rows = await db.execute(
+        select(
+            Expense.category_id,
+            Expense.farm_id,
+            Farm.name.label("farm_name"),
+            func.coalesce(func.sum(Expense.amount), 0).label("cost"),
+            func.coalesce(func.sum(Expense.consumption), 0).label("consumption"),
+        )
+        .select_from(Expense)
+        .join(Farm, Farm.id == Expense.farm_id, isouter=True)
+        .where(
+            Expense.category_id.in_(cat_ids),
+            Expense.expense_date >= local_from,
+            Expense.expense_date <= local_to,
+        )
+        .group_by(Expense.category_id, Expense.farm_id, Farm.name)
+        .order_by(Farm.name)
+    )
+    by_farm: list[dict] = []
+    for r in farm_rows.all():
+        c = cat_by_id.get(r.category_id)
+        if c is None:
+            continue
+        by_farm.append({
+            "category_id":   c.id,
+            "category":      c.name,
+            "unit_name":     c.unit_name,
+            "farm_id":       r.farm_id,
+            "farm_name":     r.farm_name or "Unassigned",
+            "cost":          round(float(r.cost or 0), 2),
+            "consumption":   round(float(r.consumption or 0), 4),
+        })
+
+    return {
+        "date_from": local_from.isoformat(),
+        "date_to":   local_to.isoformat(),
+        "utilities": utilities,
+        "trend":     trend,
+        "by_farm":   by_farm,
+        "totals": {
+            "cost":           round(total_cost, 2),
+            "categories":     len(utilities),
+            "carbon_kg_co2e": round(total_carbon, 4),
+        },
+        "warning": None,
+    }
+
+
+@router.get("/export/utilities", dependencies=[Depends(require_permission("action_export_excel"))])
+async def export_utilities(
+    date_from: Optional[str] = None,
+    date_to:   Optional[str] = None,
+    db: AsyncSession = Depends(get_async_session),
+):
+    data = await utilities_report(date_from=date_from, date_to=date_to, db=db)
+    openpyxl, Font, PatternFill, Alignment, Border, Side, get_column_letter = _excel_dependencies()
+    wb = openpyxl.Workbook()
+
+    green_fill = PatternFill("solid", fgColor="2a7a2a")
+    head_font  = Font(bold=True, color="FFFFFF", size=11)
+    thin       = Side(style="thin", color="CCCCCC")
+    bord       = Border(left=thin, right=thin, top=thin, bottom=thin)
+    alt        = PatternFill("solid", fgColor="F5FAF5")
+
+    # Sheet 1 — Summary
+    ws = wb.active
+    ws.title = "Utilities Summary"
+    ws.append(["Utilities Consumption Report"])
+    ws["A1"].font = Font(bold=True, size=14, color="2a7a2a")
+    ws.append([f"Period: {data['date_from']} to {data['date_to']}"])
+    ws["A2"].font = Font(italic=True, size=10, color="666666")
+    ws.append([])
+
+    headers = ["Utility", "Unit", "Entries", "Consumption", "Cost (EGP)", "Cost / Unit", "Default Unit Price", "kg CO₂e"]
+    ws.append(headers)
+    for c_idx in range(1, len(headers) + 1):
+        cell = ws.cell(row=4, column=c_idx)
+        cell.fill = green_fill
+        cell.font = head_font
+        cell.border = bord
+        cell.alignment = Alignment(horizontal="center")
+
+    for i, u in enumerate(data["utilities"], start=5):
+        row = [
+            u["name"],
+            u["unit_name"] or "—",
+            u["entries"],
+            u["consumption"],
+            u["cost"],
+            u["cost_per_unit"] if u["cost_per_unit"] is not None else "—",
+            u["default_unit_price"] if u["default_unit_price"] is not None else "—",
+            u["carbon_kg_co2e"],
+        ]
+        for c_idx, val in enumerate(row, start=1):
+            cell = ws.cell(row=i, column=c_idx, value=val)
+            cell.border = bord
+            if i % 2 == 0:
+                cell.fill = alt
+            if c_idx >= 3 and isinstance(val, (int, float)):
+                cell.number_format = "#,##0.00" if c_idx in (4, 5, 6, 7, 8) else "#,##0"
+                cell.alignment = Alignment(horizontal="right")
+
+    for c_idx, width in enumerate([26, 8, 10, 14, 14, 14, 18, 14], start=1):
+        ws.column_dimensions[get_column_letter(c_idx)].width = width
+
+    # Sheet 2 — Monthly trend (one column per utility, cost-based)
+    ws2 = wb.create_sheet("Monthly Cost Trend")
+    ws2.append(["Month"] + [u["name"] for u in data["utilities"]])
+    for c_idx in range(1, len(data["utilities"]) + 2):
+        cell = ws2.cell(row=1, column=c_idx)
+        cell.fill = green_fill
+        cell.font = head_font
+        cell.border = bord
+        cell.alignment = Alignment(horizontal="center")
+    for i, m in enumerate(data["trend"], start=2):
+        ws2.cell(row=i, column=1, value=m["label"]).border = bord
+        # build a lookup so column order matches the summary sheet exactly
+        cost_by_id = {it["id"]: it["cost"] for it in m["items"]}
+        for c_idx, u in enumerate(data["utilities"], start=2):
+            cell = ws2.cell(row=i, column=c_idx, value=cost_by_id.get(u["id"], 0))
+            cell.number_format = "#,##0.00"
+            cell.border = bord
+            cell.alignment = Alignment(horizontal="right")
+            if i % 2 == 0:
+                cell.fill = alt
+    ws2.column_dimensions["A"].width = 12
+    for c_idx in range(2, len(data["utilities"]) + 2):
+        ws2.column_dimensions[get_column_letter(c_idx)].width = 18
+
+    # Sheet 3 — Per-farm breakdown
+    ws3 = wb.create_sheet("Per-Farm Breakdown")
+    headers3 = ["Utility", "Farm", "Consumption", "Unit", "Cost (EGP)"]
+    ws3.append(headers3)
+    for c_idx in range(1, len(headers3) + 1):
+        cell = ws3.cell(row=1, column=c_idx)
+        cell.fill = green_fill
+        cell.font = head_font
+        cell.border = bord
+        cell.alignment = Alignment(horizontal="center")
+    for i, r in enumerate(data["by_farm"], start=2):
+        row = [r["category"], r["farm_name"], r["consumption"], r["unit_name"] or "—", r["cost"]]
+        for c_idx, val in enumerate(row, start=1):
+            cell = ws3.cell(row=i, column=c_idx, value=val)
+            cell.border = bord
+            if i % 2 == 0:
+                cell.fill = alt
+            if c_idx in (3, 5):
+                cell.number_format = "#,##0.00"
+                cell.alignment = Alignment(horizontal="right")
+    for c_idx, width in enumerate([24, 22, 14, 8, 14], start=1):
+        ws3.column_dimensions[get_column_letter(c_idx)].width = width
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fn = f"utilities_{data['date_from']}_to_{data['date_to']}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={fn}"},
+    )
+
+
 @router.get("/export/pl", dependencies=[Depends(require_permission("action_export_excel"))])
 async def export_pl(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     data = await pl_report(date_from=date_from, date_to=date_to, db=db)
@@ -2864,6 +3212,7 @@ td.mono{font-family:var(--mono);}
         <button class="tab"        onclick="switchTab('spoilage')">🗑 Spoilage</button>
         <button class="tab"        onclick="switchTab('production')">⚙️ Production</button>
         <button class="tab"        onclick="switchTab('hr')">👥 HR</button>
+        <button class="tab"        onclick="switchTab('utilities')">💧 Utilities</button>
         <button class="tab"        onclick="switchTab('pl')">💰 P&amp;L</button>
     </div>
 
@@ -3190,6 +3539,63 @@ td.mono{font-family:var(--mono);}
         </div>
     </div>
 
+    <!-- ──────────── UTILITIES ──────────── -->
+    <div id="section-utilities" class="section">
+        <div class="print-header">
+            <div style="display:flex;align-items:center;gap:14px">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
+                <div>
+                    <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
+                    <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
+                </div>
+            </div>
+            <div style="text-align:right">
+                <div style="font-size:18px;font-weight:800;color:#2a7a2a">Utilities Consumption Report</div>
+                <div style="font-size:12px;color:#666;margin-top:4px" id="ph-util-dates"></div>
+            </div>
+        </div>
+        <div class="filter-bar no-print">
+            <label>From</label><input type="date" id="util-from">
+            <label>To</label>  <input type="date" id="util-to">
+            <div class="filter-sep"></div>
+            <button class="btn btn-lime"  onclick="loadUtilities()">Apply</button>
+            <button class="btn btn-excel" onclick="exportSection('utilities')">⬇ Excel</button>
+            <button class="btn btn-print" onclick="window.print()">🖨 Print</button>
+        </div>
+        <div class="stats-row">
+            <div class="stat-card sc-blue"><div class="stat-label">Total Spend</div>      <div class="stat-value sv-blue"   id="util-total-cost">—</div></div>
+            <div class="stat-card sc-green"><div class="stat-label">Utilities Tracked</div><div class="stat-value sv-green"  id="util-total-cats">—</div></div>
+            <div class="stat-card sc-orange"><div class="stat-label">Carbon Footprint</div><div class="stat-value sv-orange" id="util-total-carbon">—</div></div>
+        </div>
+        <div id="util-warning" style="display:none;font-size:13px;color:var(--warn);margin-bottom:12px"></div>
+        <div class="table-wrap">
+            <div class="table-title">Utility Summary</div>
+            <div style="overflow-x:auto">
+            <table><thead><tr>
+                <th>Utility</th><th>Unit</th><th>Entries</th><th>Consumption</th>
+                <th>Cost (EGP)</th><th>Cost / Unit</th><th>Default Unit Price</th><th>kg CO₂e</th>
+            </tr></thead>
+            <tbody id="util-summary-body"></tbody></table>
+            </div>
+        </div>
+        <div class="table-wrap">
+            <div class="table-title">Monthly Trend — Last 12 Months (Cost in EGP)</div>
+            <div style="overflow-x:auto">
+            <table id="util-trend-table"><thead id="util-trend-head"></thead>
+            <tbody id="util-trend-body"></tbody></table>
+            </div>
+        </div>
+        <div class="table-wrap">
+            <div class="table-title">Per-Farm Breakdown</div>
+            <div style="overflow-x:auto">
+            <table><thead><tr>
+                <th>Utility</th><th>Farm</th><th>Consumption</th><th>Unit</th><th>Cost (EGP)</th>
+            </tr></thead>
+            <tbody id="util-farm-body"></tbody></table>
+            </div>
+        </div>
+    </div>
+
     <!-- ──────────── P&L ──────────── -->
     <div id="section-pl" class="section">
         <div class="print-header">
@@ -3312,7 +3718,7 @@ function showToast(msg){
     clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove("show"),3000);
 }
 
-const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","hr","pl"];
+const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","hr","utilities","pl"];
 const REPORT_TAB_PERMISSIONS = {
     sales: "tab_reports_sales",
     transactions: "tab_reports_transactions",
@@ -3322,6 +3728,7 @@ const REPORT_TAB_PERMISSIONS = {
     spoilage: "tab_reports_spoilage",
     production: "tab_reports_production",
     hr: "tab_reports_hr",
+    utilities: "tab_reports_utilities",
     pl: "tab_reports_pl",
 };
 
@@ -3434,6 +3841,7 @@ async function exportSection(tab){
         spoilage:   ()=>{ let r=getRange("spl-from","spl-to");     return `/reports/export/spoilage?date_from=${r.from}&date_to=${r.to}`; },
         production: ()=>{ let r=getRange("prod-from","prod-to");   return `/reports/export/production?date_from=${r.from}&date_to=${r.to}`; },
         hr:         ()=>{ let r=getRange("hr-from","hr-to"); let p=document.getElementById("hr-period").value; let d=document.getElementById("hr-department").value.trim(); let f=document.getElementById("hr-farm-id").value; return `/reports/export/hr?date_from=${r.from}&date_to=${r.to}${p?"&period="+encodeURIComponent(p):""}${d?"&department="+encodeURIComponent(d):""}${f?"&farm_id="+encodeURIComponent(f):""}`; },
+        utilities:  ()=>{ let r=getRange("util-from","util-to"); return `/reports/export/utilities?date_from=${r.from}&date_to=${r.to}`; },
         pl:           ()=>{ let r=getRange("pl-from","pl-to");   return `/reports/export/pl?date_from=${r.from}&date_to=${r.to}`; },
         transactions: ()=>{ let r=getRange("tx-from","tx-to"); let s=document.getElementById("tx-source").value; return `/reports/export/transactions?date_from=${r.from}&date_to=${r.to}${s?"&source="+s:""}`; },
     };
@@ -4034,6 +4442,74 @@ async function loadHR(){
 }
 
 
+/* ── UTILITIES ── */
+async function loadUtilities(){
+    let r = getRange("util-from","util-to");
+    let data = await fetchReportJson(`/reports/api/utilities?date_from=${r.from}&date_to=${r.to}`);
+    setPrintDates("ph-util-dates", data.date_from, data.date_to);
+
+    document.getElementById("util-total-cost").innerText   = data.totals.cost.toFixed(2);
+    document.getElementById("util-total-cats").innerText   = data.totals.categories;
+    document.getElementById("util-total-carbon").innerText = data.totals.carbon_kg_co2e.toFixed(1) + " kg";
+
+    let warn = document.getElementById("util-warning");
+    if(data.warning){ warn.style.display = "block"; warn.innerText = data.warning; }
+    else            { warn.style.display = "none"; }
+
+    // Summary table
+    let utilsBody = document.getElementById("util-summary-body");
+    utilsBody.innerHTML = data.utilities.length
+        ? data.utilities.map(u => `<tr>
+            <td><strong>${u.name}</strong>${u.account_code?` <span style="color:var(--muted);font-size:11px">(${u.account_code})</span>`:""}</td>
+            <td>${u.unit_name || "—"}</td>
+            <td class="mono">${u.entries}</td>
+            <td class="mono">${u.consumption.toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+            <td class="mono">${u.cost.toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})}</td>
+            <td class="mono">${u.cost_per_unit !== null ? u.cost_per_unit.toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:4}) : "—"}</td>
+            <td class="mono">${u.default_unit_price !== null ? u.default_unit_price.toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:4}) : "—"}</td>
+            <td class="mono" style="color:${u.carbon_kg_co2e>0?"var(--orange,#cc7a00)":"var(--muted)"}">${u.carbon_kg_co2e>0 ? u.carbon_kg_co2e.toLocaleString(undefined,{maximumFractionDigits:1}) : "—"}</td>
+        </tr>`).join("")
+        : `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:20px">No utility consumption recorded in this period.</td></tr>`;
+
+    // Monthly trend — months along rows, utilities along columns
+    let trendHead = document.getElementById("util-trend-head");
+    let trendBody = document.getElementById("util-trend-body");
+    if(data.utilities.length){
+        trendHead.innerHTML = `<tr><th>Month</th>${data.utilities.map(u=>`<th>${u.name}<br><span style="color:var(--muted);font-size:10px;font-weight:500">${u.unit_name||""}</span></th>`).join("")}</tr>`;
+        trendBody.innerHTML = data.trend.map(m => {
+            let costByUtil = {};
+            let consByUtil = {};
+            m.items.forEach(it => { costByUtil[it.id] = it.cost; consByUtil[it.id] = it.consumption; });
+            return `<tr>
+                <td><strong>${m.label}</strong></td>
+                ${data.utilities.map(u => {
+                    let cost = costByUtil[u.id] || 0;
+                    let cons = consByUtil[u.id] || 0;
+                    let costStr = cost > 0 ? cost.toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2}) : "—";
+                    let consStr = cons > 0 ? `<div style="color:var(--muted);font-size:11px">${cons.toLocaleString(undefined,{maximumFractionDigits:2})} ${u.unit_name||""}</div>` : "";
+                    return `<td class="mono">${costStr}${consStr}</td>`;
+                }).join("")}
+            </tr>`;
+        }).join("");
+    } else {
+        trendHead.innerHTML = `<tr><th>Month</th></tr>`;
+        trendBody.innerHTML = `<tr><td style="text-align:center;color:var(--muted);padding:20px">No data.</td></tr>`;
+    }
+
+    // Per-farm breakdown
+    let farmBody = document.getElementById("util-farm-body");
+    farmBody.innerHTML = data.by_farm.length
+        ? data.by_farm.map(r => `<tr>
+            <td>${r.category}</td>
+            <td>${r.farm_name}</td>
+            <td class="mono">${r.consumption.toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+            <td>${r.unit_name || "—"}</td>
+            <td class="mono">${r.cost.toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})}</td>
+        </tr>`).join("")
+        : `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:20px">No farm-tagged utility expenses in this period.</td></tr>`;
+}
+
+
 /* ── P&L ── */
 async function loadPL(){
     let r = getRange("pl-from","pl-to");
@@ -4117,6 +4593,7 @@ const __rawReportLoaders = {
     spoilage: loadSpoilage,
     production: loadProduction,
     hr: loadHR,
+    utilities: loadUtilities,
     pl: loadPL,
 };
 
@@ -4128,6 +4605,7 @@ loadFarm = () => runReportLoader("farm", __rawReportLoaders.farm);
 loadSpoilage = () => runReportLoader("spoilage", __rawReportLoaders.spoilage);
 loadProduction = () => runReportLoader("production", __rawReportLoaders.production);
 loadHR = () => runReportLoader("hr", __rawReportLoaders.hr);
+loadUtilities = () => runReportLoader("utilities", __rawReportLoaders.utilities);
 loadPL = () => runReportLoader("pl", __rawReportLoaders.pl);
 
 function togglePLDetail(id){
@@ -4150,6 +4628,7 @@ function togglePLDetail(id){
     setEl("prod-from",  m); setEl("prod-to",   t);
     setEl("hr-from",    m); setEl("hr-to",     t);
     setEl("hr-period",  t.slice(0,7));
+    setEl("util-from",  m); setEl("util-to",   t);
     setEl("pl-from",    y); setEl("pl-to",     t);
     const invMode = document.getElementById("inv-mode");
     const invFrom = document.getElementById("inv-from");
