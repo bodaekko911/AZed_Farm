@@ -1,13 +1,5 @@
 /* ───────────────────────────────────────────────────────────────────
    Farm Dashboard — front-end controller.
-
-   Uses the exact class vocabulary from /static/dashboard.css so the
-   visuals match the Sales dashboard 1:1.
-
-   Number cards:  .number-card-button > .number-label / .number-value /
-                  .number-meta / .number-breakdown
-   List rows:     .list-row > .row-main > .row-title + .row-value
-                  + optional .row-bar > span
    ─────────────────────────────────────────────────────────────────── */
 
 (function () {
@@ -29,12 +21,12 @@
     activeExpTab: "category",
     chart:  null,
     currentUser: null,
+    loaded: false,   // true after first successful load — suppresses spinner on refresh
   };
 
   // ── helpers ─────────────────────────────────────────────────────
   function $id(id) { return document.getElementById(id); }
   function setText(id, val) { const n = $id(id); if (n) n.textContent = val; }
-  function setHTML(id, html) { const n = $id(id); if (n) n.innerHTML = html; }
   function fmtMoney(n) { return FMT_MONEY.format(Math.round(Number(n) || 0)); }
   function fmtQty(n)   { return FMT_QTY.format(Number(n) || 0); }
   function fmtInt(n)   { return FMT_INT.format(Math.round(Number(n) || 0)); }
@@ -70,7 +62,6 @@
     setText("greeting", `${g}${name}`);
   }
 
-  // ── header strip ────────────────────────────────────────────────
   function paintHeader() {
     setText("date-display", longDateLabel());
     const n = $id("last-updated");
@@ -82,12 +73,12 @@
     }
   }
 
-  // ── number cards (matches Sales dashboard markup) ───────────────
+  // ── number cards ────────────────────────────────────────────────
   function renderNumberCards(d) {
-    const dl = d.deliveries || {};
-    const sp = d.spoilage   || {};
-    const ex = d.expenses   || {};
-    const cad = d.cadence   || {};
+    const dl  = d.deliveries || {};
+    const sp  = d.spoilage   || {};
+    const ex  = d.expenses   || {};
+    const cad = d.cadence    || {};
 
     const specs = {
       deliveries: {
@@ -142,12 +133,12 @@
     });
   }
 
-  // ── briefing card ───────────────────────────────────────────────
+  // ── briefing card ────────────────────────────────────────────────
   function renderBriefing(d) {
-    const dl = d.deliveries || {};
-    const sp = d.spoilage   || {};
-    const range = d.range || {};
-    const sx = d.season_peaks || {};
+    const dl    = d.deliveries   || {};
+    const sp    = d.spoilage     || {};
+    const range = d.range        || {};
+    const sx    = d.season_peaks || {};
 
     let lead = `${range.label || ""} — ${fmtQty(dl.qty || 0)} units intaken across ${fmtInt(dl.count || 0)} deliveries.`;
     if (dl.qty_delta !== null && dl.qty_delta !== undefined) {
@@ -155,23 +146,19 @@
     }
 
     const bodyParts = [];
-    if (sp.rate_pct != null) bodyParts.push(`Spoilage running at ${sp.rate_pct}%.`);
-    if (sx.peak_month)       bodyParts.push(`Strongest month in the last 12: ${sx.peak_month}.`);
-    if ((d.dormant_count || 0) > 0) bodyParts.push(`${d.dormant_count} active farm(s) had no deliveries.`);
+    if (sp.rate_pct != null)          bodyParts.push(`Spoilage running at ${sp.rate_pct}%.`);
+    if (sx.peak_month)                bodyParts.push(`Strongest month in the last 12: ${sx.peak_month}.`);
+    if ((d.dormant_count || 0) > 0)   bodyParts.push(`${d.dormant_count} active farm(s) had no deliveries.`);
 
     setText("briefing-lead", lead);
     setText("briefing-body", bodyParts.join(" "));
   }
 
-  // ── season chart ────────────────────────────────────────────────
+  // ── season chart ─────────────────────────────────────────────────
   function renderSeasonChart(d) {
     const ctx = $id("season-chart");
     if (!ctx || !window.Chart) return;
     const season = d.season || [];
-    const labels = season.map((m) => m.label);
-    const intake = season.map((m) => m.qty);
-    const spoil  = season.map((m) => m.spoilage);
-    const exp    = season.map((m) => m.expenses);
 
     if (state.chart) {
       try { state.chart.destroy(); } catch (_) {}
@@ -179,11 +166,11 @@
     state.chart = new Chart(ctx, {
       type: "bar",
       data: {
-        labels,
+        labels: season.map((m) => m.label),
         datasets: [
           {
             label: "Intake qty",
-            data: intake,
+            data: season.map((m) => m.qty),
             backgroundColor: "rgba(74, 222, 128, .55)",
             borderColor: "#4ade80",
             borderWidth: 1,
@@ -192,7 +179,7 @@
           },
           {
             label: "Spoilage qty",
-            data: spoil,
+            data: season.map((m) => m.spoilage),
             backgroundColor: "rgba(248, 113, 113, .55)",
             borderColor: "#f87171",
             borderWidth: 1,
@@ -201,7 +188,7 @@
           },
           {
             label: "Farm expenses (EGP)",
-            data: exp,
+            data: season.map((m) => m.expenses),
             type: "line",
             borderColor: "#38bdf8",
             backgroundColor: "rgba(56, 189, 248, .12)",
@@ -236,11 +223,11 @@
     }
   }
 
-  // ── list rendering using .list-row pattern ──────────────────────
+  // ── shared list-row builder ──────────────────────────────────────
   function listRow({ title, sub, value, valueSub, bar, barClass }) {
-    const subHtml = sub ? `<span class="row-sub">${escHtml(sub)}</span>` : "";
+    const subHtml    = sub      ? `<span class="row-sub">${escHtml(sub)}</span>`           : "";
     const valSubHtml = valueSub ? `<span class="row-sub mono">${escHtml(valueSub)}</span>` : "";
-    const barHtml = (bar !== null && bar !== undefined)
+    const barHtml    = (bar !== null && bar !== undefined)
       ? `<span class="row-bar ${barClass || ""}"><span style="width:${Math.max(2, Math.min(100, bar))}%"></span></span>`
       : "";
     return `
@@ -264,141 +251,127 @@
     return `<div class="empty-state">${escHtml(msg)}</div>`;
   }
 
-  // ── top farms panel ─────────────────────────────────────────────
+  // ── top farms panel ──────────────────────────────────────────────
   function renderTopFarms() {
-    const d = state.data;
-    if (!d) return;
+    const d = state.data; if (!d) return;
     const byQty = state.activeFarmTab === "qty";
-    const list = byQty ? (d.top_farms_by_qty || []) : (d.top_farms_by_value || []);
-    const target = $id("top-farms-list");
-    if (!target) return;
-    if (!list.length) {
-      target.innerHTML = emptyState("No farm deliveries in this window.");
-      return;
-    }
+    const list  = byQty ? (d.top_farms_by_qty || []) : (d.top_farms_by_value || []);
+    const target = $id("top-farms-list"); if (!target) return;
+    if (!list.length) { target.innerHTML = emptyState("No farm deliveries in this window."); return; }
+
     const maxV = Math.max(1, ...list.map((r) => byQty ? Number(r.qty || 0) : Number(r.value || 0)));
     target.innerHTML = list.map((row) => {
+      const v         = byQty ? Number(row.qty || 0) : Number(row.value || 0);
       const primary   = byQty ? `${fmtQty(row.qty)} units` : fmtMoney(row.value);
-      const secondary = byQty ? fmtMoney(row.value)        : `${fmtQty(row.qty)} units`;
-      const v = byQty ? Number(row.qty || 0) : Number(row.value || 0);
-      const bar = (v / maxV) * 100;
+      const secondary = byQty ? fmtMoney(row.value) : `${fmtQty(row.qty)} units`;
       return listRow({
         title: row.farm,
         sub: `${fmtInt(row.deliveries || 0)} deliveries`,
         value: primary,
         valueSub: secondary,
-        bar,
+        bar: (v / maxV) * 100,
       });
     }).join("");
   }
 
-  // ── top crops panel ─────────────────────────────────────────────
-  function renderTopCrops() {
-    const list = (state.data && state.data.top_crops) || [];
-    const target = $id("top-crops-list");
-    if (!target) return;
-    if (!list.length) {
-      target.innerHTML = emptyState("No crop intake in this window.");
+  // ── top products by intake panel ─────────────────────────────────
+  // Shows products ranked by delivered qty, with their spoilage rate
+  // alongside so you can spot high-waste items at a glance.
+  function renderTopProducts() {
+    const d = state.data; if (!d) return;
+    const target = $id("top-crops-list"); if (!target) return;
+
+    const intakeList  = d.top_crops || [];           // products by delivery qty
+    const spoilByPid  = {};                           // build spoilage rate lookup
+    (d.spoilage?.by_crop || []).forEach((sc) => {
+      spoilByPid[sc.product_id] = sc.rate_pct;
+    });
+
+    if (!intakeList.length) {
+      target.innerHTML = emptyState("No product intake in this window.");
       return;
     }
-    const maxV = Math.max(1, ...list.map((r) => Number(r.value || 0)));
-    target.innerHTML = list.map((row) => {
-      const bar = (Number(row.value || 0) / maxV) * 100;
+
+    // Sort by qty (most delivered first)
+    const sorted = [...intakeList].sort((a, b) => Number(b.qty || 0) - Number(a.qty || 0));
+    const maxQty = Math.max(1, ...sorted.map((r) => Number(r.qty || 0)));
+
+    target.innerHTML = sorted.map((row) => {
+      const spoilRate = spoilByPid[row.product_id];
+      const spoilText = spoilRate != null ? `${spoilRate}% spoilage` : "no spoilage data";
+      const spoilCls  = spoilRate >= 10 ? " (high ⚠)" : "";
       return listRow({
-        title: row.name,
-        sub: null,
-        value: fmtMoney(row.value),
-        valueSub: `${fmtQty(row.qty)} units`,
-        bar,
+        title:    row.name,
+        sub:      `${spoilText}${spoilCls}`,
+        value:    `${fmtQty(row.qty)} units`,
+        valueSub: fmtMoney(row.value),
+        bar:      (Number(row.qty || 0) / maxQty) * 100,
+        barClass: spoilRate >= 10 ? "negative" : "",
       });
     }).join("");
   }
 
-  // ── spoilage panel ──────────────────────────────────────────────
+  // ── spoilage panel ───────────────────────────────────────────────
   function renderSpoilage() {
     const d = state.data; if (!d) return;
-    const sp = d.spoilage || {};
-    const target = $id("spoilage-list");
-    if (!target) return;
+    const sp     = d.spoilage || {};
+    const target = $id("spoilage-list"); if (!target) return;
 
     if (state.activeSpoilageTab === "reasons") {
       const list = sp.top_reasons || [];
-      if (!list.length) {
-        target.innerHTML = emptyState("No spoilage records in this window.");
-        return;
-      }
+      if (!list.length) { target.innerHTML = emptyState("No spoilage records in this window."); return; }
       const maxV = Math.max(1, ...list.map((r) => Number(r.value || 0)));
-      target.innerHTML = list.map((row) => {
-        const bar = (Number(row.value || 0) / maxV) * 100;
-        return listRow({
-          title: row.reason,
-          sub: `${fmtInt(row.count || 0)} record(s)`,
-          value: fmtMoney(row.value),
-          valueSub: `${fmtQty(row.qty)} units`,
-          bar,
-          barClass: "negative",
-        });
-      }).join("");
+      target.innerHTML = list.map((row) => listRow({
+        title:    row.reason,
+        sub:      `${fmtInt(row.count || 0)} record(s)`,
+        value:    fmtMoney(row.value),
+        valueSub: `${fmtQty(row.qty)} units`,
+        bar:      (Number(row.value || 0) / maxV) * 100,
+        barClass: "negative",
+      })).join("");
     } else {
       const list = sp.by_crop || [];
-      if (!list.length) {
-        target.innerHTML = emptyState("No spoilage records in this window.");
-        return;
-      }
+      if (!list.length) { target.innerHTML = emptyState("No spoilage records in this window."); return; }
       const maxRate = Math.max(1, ...list.map((r) => Number(r.rate_pct || 0)));
-      target.innerHTML = list.map((row) => {
-        const bar = (Number(row.rate_pct || 0) / maxRate) * 100;
-        return listRow({
-          title: row.name,
-          sub: `${fmtQty(row.spoiled)} spoiled / ${fmtQty(row.delivered + row.spoiled)} handled`,
-          value: `${row.rate_pct}%`,
-          valueSub: null,
-          bar,
-          barClass: "negative",
-        });
-      }).join("");
+      target.innerHTML = list.map((row) => listRow({
+        title:    row.name,
+        sub:      `${fmtQty(row.spoiled)} spoiled / ${fmtQty(row.delivered + row.spoiled)} handled`,
+        value:    `${row.rate_pct}%`,
+        valueSub: null,
+        bar:      (Number(row.rate_pct || 0) / maxRate) * 100,
+        barClass: "negative",
+      })).join("");
     }
   }
 
-  // ── expenses panel ──────────────────────────────────────────────
+  // ── expenses panel ───────────────────────────────────────────────
   function renderExpenses() {
     const d = state.data; if (!d) return;
-    const ex = d.expenses || {};
-    const target = $id("expenses-list");
-    if (!target) return;
-    const list = state.activeExpTab === "farm" ? (ex.by_farm || []) : (ex.by_category || []);
-    if (!list.length) {
-      target.innerHTML = emptyState("No farm-tagged expenses in this window.");
-      return;
-    }
+    const ex     = d.expenses || {};
+    const target = $id("expenses-list"); if (!target) return;
+    const list   = state.activeExpTab === "farm" ? (ex.by_farm || []) : (ex.by_category || []);
+    if (!list.length) { target.innerHTML = emptyState("No farm-tagged expenses in this window."); return; }
     const maxV = Math.max(1, ...list.map((r) => Number(r.amount || 0)));
-    target.innerHTML = list.map((row) => {
-      const bar = (Number(row.amount || 0) / maxV) * 100;
-      return listRow({
-        title: row.category || row.farm,
-        sub: `${fmtInt(row.count || 0)} entries`,
-        value: fmtMoney(row.amount),
-        valueSub: null,
-        bar,
-      });
-    }).join("");
+    target.innerHTML = list.map((row) => listRow({
+      title:    row.category || row.farm,
+      sub:      `${fmtInt(row.count || 0)} entries`,
+      value:    fmtMoney(row.amount),
+      valueSub: null,
+      bar:      (Number(row.amount || 0) / maxV) * 100,
+    })).join("");
   }
 
-  // ── contribution panel ──────────────────────────────────────────
+  // ── contribution panel ───────────────────────────────────────────
   function renderContribution() {
-    const list = (state.data && state.data.contribution) || [];
-    const target = $id("contribution-list");
-    if (!target) return;
-    if (!list.length) {
-      target.innerHTML = emptyState("No data to compute contribution yet.");
-      return;
-    }
+    const list   = (state.data && state.data.contribution) || [];
+    const target = $id("contribution-list"); if (!target) return;
+    if (!list.length) { target.innerHTML = emptyState("No data to compute contribution yet."); return; }
     const maxAbs = Math.max(1, ...list.map((r) => Math.abs(Number(r.net || 0))));
     target.innerHTML = list.map((row) => {
       const net = Number(row.net || 0);
       const cls = net >= 0 ? "positive" : "negative";
       const bar = (Math.abs(net) / maxAbs) * 100;
-      const sub = `+${fmtMoney(row.delivered_value)} · −${fmtMoney(row.expenses)} exp · −${fmtMoney(row.spoiled_value)} spoiled`;
+      const sub = `+${fmtMoney(row.delivered_value)} − ${fmtMoney(row.expenses)} exp − ${fmtMoney(row.spoiled_value)} spoiled`;
       return `
         <div class="list-row">
           <div class="row-main">
@@ -416,15 +389,11 @@
     }).join("");
   }
 
-  // ── signals panel ───────────────────────────────────────────────
+  // ── signals panel ────────────────────────────────────────────────
   function renderSignals() {
-    const list = (state.data && state.data.insights) || [];
-    const target = $id("signals-list");
-    if (!target) return;
-    if (!list.length) {
-      target.innerHTML = emptyState("No notable signals — things look steady.");
-      return;
-    }
+    const list   = (state.data && state.data.insights) || [];
+    const target = $id("signals-list"); if (!target) return;
+    if (!list.length) { target.innerHTML = emptyState("No notable signals — things look steady."); return; }
     target.innerHTML = list.map((row) => {
       const kind = row.kind || "info";
       return `
@@ -443,22 +412,22 @@
     }).join("");
   }
 
-  // ── error banner ────────────────────────────────────────────────
+  // ── error banner ─────────────────────────────────────────────────
   function showError(message) {
     const banner = $id("error-banner");
-    if (!banner) return;
-    banner.innerHTML = `<div class="error-banner load-error" role="alert"><div class="error-banner-text">${escHtml(message)}</div></div>`;
+    if (banner) banner.innerHTML = `<div class="error-banner load-error" role="alert"><div class="error-banner-text">${escHtml(message)}</div></div>`;
   }
   function clearError() {
     const banner = $id("error-banner");
     if (banner) banner.innerHTML = "";
   }
 
-  // ── fetch + paint ───────────────────────────────────────────────
-  async function load() {
-    paintHeader();
+  // ── fetch + paint ─────────────────────────────────────────────────
+  // silent=true → skip the full-page spinner (used for background refresh)
+  async function load(silent) {
     const loading = $id("loading");
-    if (loading) loading.style.display = "flex";
+    // Only show the blocking spinner on the very first load
+    if (!silent && !state.loaded && loading) loading.style.display = "flex";
 
     const params = new URLSearchParams();
     params.set("range", state.range);
@@ -476,13 +445,14 @@
         throw new Error(`HTTP ${r.status}`);
       }
       const data = await r.json();
-      state.data = data;
+      state.data   = data;
+      state.loaded = true;
       clearError();
       renderNumberCards(data);
       renderBriefing(data);
       renderSeasonChart(data);
       renderTopFarms();
-      renderTopCrops();
+      renderTopProducts();
       renderSpoilage();
       renderExpenses();
       renderContribution();
@@ -490,7 +460,7 @@
       paintHeader();
     } catch (err) {
       console.error("farm-dashboard load failed", err);
-      showError("Couldn't load farm dashboard. Please refresh.");
+      if (!silent) showError("Couldn't load farm dashboard. Please refresh.");
       const stale = $id("last-updated");
       if (stale) stale.classList.add("last-updated-error");
     } finally {
@@ -498,7 +468,7 @@
     }
   }
 
-  // ── range picker wiring ─────────────────────────────────────────
+  // ── range picker ─────────────────────────────────────────────────
   function setRange(range) {
     state.range = range;
     document.querySelectorAll(".range-btn").forEach((b) => {
@@ -517,8 +487,8 @@
     const err = $id("custom-range-error"); if (err) err.hidden = true;
   }
   function applyCustomRange() {
-    const s = $id("custom-range-start")?.value;
-    const e = $id("custom-range-end")?.value;
+    const s   = $id("custom-range-start")?.value;
+    const e   = $id("custom-range-end")?.value;
     const err = $id("custom-range-error");
     if (!s || !e) {
       if (err) { err.textContent = "Please pick a start and end date."; err.hidden = false; }
@@ -532,10 +502,10 @@
     state.end   = e;
     setRange("custom");
     closeCustomRange();
-    load();
+    load(false);
   }
 
-  // ── account / user wiring (mirror Sales dashboard) ──────────────
+  // ── account / user wiring ────────────────────────────────────────
   async function initUser() {
     try {
       const r = await fetch("/auth/me");
@@ -551,9 +521,9 @@
   }
 
   function bindAccountMenu() {
-    const trigger = $id("account-trigger");
+    const trigger  = $id("account-trigger");
     const dropdown = $id("account-dropdown");
-    const signout = $id("signout-btn");
+    const signout  = $id("signout-btn");
     if (!trigger || !dropdown) return;
 
     trigger.addEventListener("click", (event) => {
@@ -586,7 +556,7 @@
     });
   }
 
-  // ── bootstrap ───────────────────────────────────────────────────
+  // ── bootstrap ─────────────────────────────────────────────────────
   document.addEventListener("DOMContentLoaded", () => {
     setRange(state.range);
 
@@ -595,7 +565,7 @@
         const r = btn.dataset.range;
         if (r === "custom") { openCustomRange(); return; }
         setRange(r);
-        load();
+        load(false);
       });
     });
 
@@ -639,7 +609,7 @@
     }
 
     initUser();
-    load();
-    setInterval(load, 60000);
+    load(false);                              // first load — shows spinner
+    setInterval(() => load(true), 60000);    // background refresh — no flicker
   });
 })();

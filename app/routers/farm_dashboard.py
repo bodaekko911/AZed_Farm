@@ -775,9 +775,9 @@ def farm_dashboard_ui(current_user: User = Depends(get_current_user)):
       <div id="top-farms-list" class="panel-body"></div>
     </section>
 
-    <section class="card panel-card" aria-label="Top crops">
+    <section class="card panel-card" aria-label="Top products by intake">
       <div class="panel-head">
-        <h2>Top crops</h2>
+        <h2>Top products by intake</h2>
       </div>
       <div id="top-crops-list" class="panel-body"></div>
     </section>
