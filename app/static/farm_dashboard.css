@@ -1,159 +1,120 @@
 /* ───────────────────────────────────────────────────────────────────
-   Farm dashboard styles — extends /static/dashboard.css.
-   Only contains farm-specific tweaks (warm/green accents, list layouts,
-   contribution rows, signals).
+   Farm dashboard — supplemental styles only.
+
+   The page reuses /static/dashboard.css for layout, cards, lists,
+   number cards, range picker, and panel chrome. This file only adds:
+     • row-left / row-right split inside .row-main
+     • row-sub muted secondary text
+     • row-bar.negative variant (for spoilage/expenses lists)
+     • signal dot + signal-row tweaks
+     • empty-state inside panel-card
    ─────────────────────────────────────────────────────────────────── */
 
-.panel-hint {
-  font-size: 11px;
-  color: var(--text-sub, #94a3b8);
-  font-weight: 500;
-  letter-spacing: .2px;
+/* Split the row into left (title+sub stacked) and right (value+sub stacked) */
+.row-main {
+  align-items: flex-start;
 }
-
-/* Farm/crop list rows */
-.farm-row,
-.crop-row,
-.spoil-row,
-.exp-row,
-.contrib-row,
-.signal-row {
-  display: grid;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 4px;
-  border-bottom: 1px solid var(--border, rgba(255, 255, 255, .06));
+.row-left,
+.row-right {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
-.farm-row:last-child,
-.crop-row:last-child,
-.spoil-row:last-child,
-.exp-row:last-child,
-.contrib-row:last-child,
-.signal-row:last-child { border-bottom: 0; }
-
-.farm-row    { grid-template-columns: 24px 1fr auto auto; }
-.crop-row    { grid-template-columns: 24px 1fr auto auto; }
-.spoil-row   { grid-template-columns: 1fr auto auto; }
-.exp-row     { grid-template-columns: 1fr auto auto; }
-.contrib-row { grid-template-columns: 1fr auto auto auto auto; }
-.signal-row  { grid-template-columns: 28px 1fr; align-items: flex-start; }
-
-.row-rank {
-  font-family: var(--font-mono, "DM Mono", monospace);
-  font-size: 11px;
-  color: var(--text-sub, #94a3b8);
-  font-weight: 700;
-  text-align: right;
-}
-.row-name {
-  font-weight: 600;
-  color: var(--text, #f0f4ff);
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.row-right {
+  align-items: flex-end;
+  text-align: end;
+  flex: 0 0 auto;
   white-space: nowrap;
 }
+.row-left { flex: 1 1 auto; }
+
+/* Secondary muted text used under titles or values */
 .row-sub {
   font-size: 11px;
-  color: var(--text-sub, #94a3b8);
+  color: var(--text-muted, var(--text-sub, #94a3b8));
   font-weight: 500;
-  margin-top: 2px;
-}
-.row-metric {
-  font-family: var(--font-mono, "DM Mono", monospace);
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text, #f0f4ff);
-  text-align: right;
+  line-height: 1.3;
   white-space: nowrap;
-}
-.row-metric.muted {
-  color: var(--text-sub, #94a3b8);
-  font-weight: 500;
-}
-.row-metric.neg {
-  color: var(--negative, #f87171);
-}
-.row-metric.pos {
-  color: var(--positive, #4ade80);
-}
-.row-metric .unit {
-  font-size: 10px;
-  font-weight: 500;
-  color: var(--text-sub, #94a3b8);
-  margin-left: 3px;
-}
-
-/* Spoilage rate inline bar */
-.rate-bar {
-  position: relative;
-  width: 80px;
-  height: 6px;
-  background: var(--surface-raised, rgba(255, 255, 255, .06));
-  border-radius: 3px;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
-.rate-bar > span {
-  display: block;
-  height: 100%;
-  background: linear-gradient(90deg, #f59e0b, #ef4444);
-  border-radius: 3px;
+.row-sub.mono {
+  font-family: var(--font-mono, "DM Mono", monospace);
 }
 
-/* Signal cards (insights from API) */
-.signal-row {
-  padding: 12px 4px;
+/* Negative variant for the row-bar (spoilage, deficit contribution) */
+.row-bar.negative span {
+  background: color-mix(in srgb, #ef4444 80%, transparent);
+}
+.row-bar.positive span {
+  background: color-mix(in srgb, #22c55e 80%, transparent);
+}
+
+/* Tabs in panel-head are already styled by dashboard.css (.tab-btn).
+   Nothing to add for those. */
+
+/* Signal rows — slimmer left dot, multi-line content */
+.signal-row .row-left {
+  flex-direction: row;
+  gap: 10px;
+  align-items: flex-start;
+}
+.signal-row .row-title-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.signal-row .row-sub {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.45;
 }
 .signal-dot {
+  display: inline-block;
   width: 10px;
   height: 10px;
   border-radius: 50%;
   margin-top: 5px;
   flex: 0 0 auto;
 }
-.signal-dot.good { background: #4ade80; box-shadow: 0 0 12px rgba(74, 222, 128, .5); }
-.signal-dot.warn { background: #f59e0b; box-shadow: 0 0 12px rgba(245, 158, 11, .5); }
-.signal-dot.info { background: #38bdf8; box-shadow: 0 0 12px rgba(56, 189, 248, .5); }
+.signal-dot-good { background: #22c55e; box-shadow: 0 0 10px rgba(34,197,94,.45); }
+.signal-dot-warn { background: #f59e0b; box-shadow: 0 0 10px rgba(245,158,11,.45); }
+.signal-dot-info { background: #38bdf8; box-shadow: 0 0 10px rgba(56,189,248,.45); }
 
-.signal-title {
-  font-weight: 700;
-  color: var(--text, #f0f4ff);
-  font-size: 13px;
-  margin-bottom: 3px;
-}
-.signal-body {
-  font-size: 12px;
-  color: var(--text-sub, #cbd5e1);
-  line-height: 1.45;
-}
-
-.empty-state {
+/* Generic empty-state inside a panel-body */
+.panel-card .empty-state {
   padding: 28px 8px;
   text-align: center;
-  color: var(--text-sub, #94a3b8);
+  color: var(--text-muted, var(--text-sub, #94a3b8));
   font-size: 13px;
   font-style: italic;
 }
 
-/* Light theme parity */
-html[data-theme="light"] .farm-row,
-html[data-theme="light"] .crop-row,
-html[data-theme="light"] .spoil-row,
-html[data-theme="light"] .exp-row,
-html[data-theme="light"] .contrib-row,
-html[data-theme="light"] .signal-row,
-body[data-theme="light"] .farm-row,
-body[data-theme="light"] .crop-row,
-body[data-theme="light"] .spoil-row,
-body[data-theme="light"] .exp-row,
-body[data-theme="light"] .contrib-row,
-body[data-theme="light"] .signal-row {
-  border-bottom-color: rgba(15, 23, 42, .08);
+/* Number-card delta colour helpers (some themes might not style these on
+   .number-breakdown — make sure positive/negative read correctly). */
+.number-breakdown.positive { color: var(--positive, #22c55e); }
+.number-breakdown.negative { color: var(--negative, #ef4444); }
+
+/* Make values inside contribution list pick up signed colour */
+.row-value.positive { color: var(--positive, #22c55e); }
+.row-value.negative { color: var(--negative, #ef4444); }
+
+/* Mono helper for numeric values where dashboard.css doesn't already apply it */
+.row-value.mono {
+  font-family: var(--font-mono, "DM Mono", monospace);
+  font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 720px) {
-  .farm-row,
-  .crop-row    { grid-template-columns: 22px 1fr auto; }
-  .contrib-row { grid-template-columns: 1fr auto auto; }
-  .contrib-row .col-mid { display: none; }
+  .row-main {
+    flex-wrap: wrap;
+  }
+  .row-right {
+    align-items: flex-start;
+    text-align: start;
+    width: 100%;
+  }
 }

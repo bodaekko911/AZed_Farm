@@ -1,10 +1,13 @@
 /* ───────────────────────────────────────────────────────────────────
    Farm Dashboard — front-end controller.
 
-   Talks to:   GET /farm-dashboard/summary?range=...&start=...&end=...
-   Renders:    number cards, season chart, leaderboards, signals.
-   Reuses the dashboard.css visual language for parity with the Sales
-   dashboard.
+   Uses the exact class vocabulary from /static/dashboard.css so the
+   visuals match the Sales dashboard 1:1.
+
+   Number cards:  .number-card-button > .number-label / .number-value /
+                  .number-meta / .number-breakdown
+   List rows:     .list-row > .row-main > .row-title + .row-value
+                  + optional .row-bar > span
    ─────────────────────────────────────────────────────────────────── */
 
 (function () {
@@ -25,30 +28,46 @@
     activeSpoilageTab: "reasons",
     activeExpTab: "category",
     chart:  null,
+    currentUser: null,
   };
 
   // ── helpers ─────────────────────────────────────────────────────
-  function $(sel) { return document.querySelector(sel); }
   function $id(id) { return document.getElementById(id); }
   function setText(id, val) { const n = $id(id); if (n) n.textContent = val; }
+  function setHTML(id, html) { const n = $id(id); if (n) n.innerHTML = html; }
   function fmtMoney(n) { return FMT_MONEY.format(Math.round(Number(n) || 0)); }
   function fmtQty(n)   { return FMT_QTY.format(Number(n) || 0); }
   function fmtInt(n)   { return FMT_INT.format(Math.round(Number(n) || 0)); }
+  function escHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
 
   function fmtDelta(pct) {
-    if (pct === null || pct === undefined) return "—";
+    if (pct === null || pct === undefined) return "";
     const sign = pct > 0 ? "▲" : pct < 0 ? "▼" : "•";
     return `${sign} ${Math.abs(pct).toFixed(1)}%`;
   }
   function deltaClass(pct, invert) {
-    if (pct === null || pct === undefined || pct === 0) return "muted";
+    if (pct === null || pct === undefined || pct === 0) return "";
     const positive = invert ? pct < 0 : pct > 0;
-    return positive ? "pos" : "neg";
+    return positive ? "positive" : "negative";
   }
 
   function longDateLabel() {
-    const opts = { weekday: "long", year: "numeric", month: "long", day: "numeric" };
-    return new Date().toLocaleDateString("en-GB", opts);
+    return new Date().toLocaleDateString("en-GB", {
+      weekday: "long", year: "numeric", month: "long", day: "numeric",
+    });
+  }
+
+  function setGreeting() {
+    const hour = new Date().getHours();
+    let g = "Good evening";
+    if (hour < 12) g = "Good morning";
+    else if (hour < 18) g = "Good afternoon";
+    const name = state.currentUser?.name ? `, ${state.currentUser.name.split(" ")[0]}` : "";
+    setText("greeting", `${g}${name}`);
   }
 
   // ── header strip ────────────────────────────────────────────────
@@ -63,59 +82,61 @@
     }
   }
 
-  // ── number cards ────────────────────────────────────────────────
+  // ── number cards (matches Sales dashboard markup) ───────────────
   function renderNumberCards(d) {
     const dl = d.deliveries || {};
     const sp = d.spoilage   || {};
     const ex = d.expenses   || {};
     const cad = d.cadence   || {};
 
-    const cards = {
+    const specs = {
       deliveries: {
-        label: "Deliveries",
-        big: fmtInt(dl.count || 0),
-        sub: `${cad.deliveries_per_day || 0}/day · ${cad.active_days || 0} active days`,
-        delta: dl.count_delta,
+        label:     "Deliveries",
+        value:     fmtInt(dl.count || 0),
+        meta:      `${cad.deliveries_per_day || 0}/day · ${cad.active_days || 0} active days`,
+        breakdown: fmtDelta(dl.count_delta),
+        deltaCls:  deltaClass(dl.count_delta, false),
       },
       intake_qty: {
-        label: "Intake quantity",
-        big:   fmtQty(dl.qty || 0),
-        sub: `${fmtQty(cad.qty_per_day || 0)} avg per day`,
-        delta: dl.qty_delta,
+        label:     "Intake quantity",
+        value:     fmtQty(dl.qty || 0),
+        meta:      `${fmtQty(cad.qty_per_day || 0)} avg per day`,
+        breakdown: fmtDelta(dl.qty_delta),
+        deltaCls:  deltaClass(dl.qty_delta, false),
       },
       intake_value: {
-        label: "Intake value",
-        big: fmtMoney(dl.value || 0),
-        sub: `Estimated at product cost`,
-        delta: dl.value_delta,
+        label:     "Intake value",
+        value:     fmtMoney(dl.value || 0),
+        meta:      "Estimated at product cost",
+        breakdown: fmtDelta(dl.value_delta),
+        deltaCls:  deltaClass(dl.value_delta, false),
       },
       spoilage: {
-        label: "Spoilage",
-        big: fmtQty(sp.qty || 0),
-        sub: `${sp.rate_pct || 0}% rate · ${fmtMoney(sp.value || 0)} lost`,
-        delta: sp.qty_delta,
-        invert: true,
+        label:     "Spoilage",
+        value:     fmtQty(sp.qty || 0),
+        meta:      `${sp.rate_pct || 0}% rate · ${fmtMoney(sp.value || 0)} lost`,
+        breakdown: fmtDelta(sp.qty_delta),
+        deltaCls:  deltaClass(sp.qty_delta, true),
       },
       farm_expenses: {
-        label: "Farm expenses",
-        big: fmtMoney(ex.farm_total || 0),
-        sub: `${ex.farm_share_pct || 0}% of company spend (${fmtMoney(ex.company_total || 0)})`,
-        delta: ex.farm_delta,
-        invert: true,
+        label:     "Farm expenses",
+        value:     fmtMoney(ex.farm_total || 0),
+        meta:      `${ex.farm_share_pct || 0}% of company spend`,
+        breakdown: fmtDelta(ex.farm_delta),
+        deltaCls:  deltaClass(ex.farm_delta, true),
       },
     };
 
-    Object.keys(cards).forEach((key) => {
+    Object.keys(specs).forEach((key) => {
       const card = document.querySelector(`[data-card="${key}"]`);
       if (!card) return;
-      const c = cards[key];
-      const cls = deltaClass(c.delta, c.invert);
+      const s = specs[key];
       card.innerHTML = `
-        <div class="number-label">${c.label}</div>
-        <div class="number-big">${c.big}</div>
-        <div class="number-foot">
-          <span class="number-sub">${c.sub}</span>
-          <span class="number-delta ${cls}">${fmtDelta(c.delta)}</span>
+        <div class="number-card-button">
+          <span class="number-label">${escHtml(s.label)}</span>
+          <strong class="number-value">${escHtml(s.value)}</strong>
+          <span class="number-meta">${escHtml(s.meta)}</span>
+          <span class="number-breakdown ${s.deltaCls}">${escHtml(s.breakdown)}</span>
         </div>
       `;
     });
@@ -205,46 +226,69 @@
       },
     });
 
-    // Accessible table for screen readers
     const table = $id("chart-table");
     if (table) {
       table.innerHTML =
         "<thead><tr><th>Month</th><th>Intake</th><th>Spoilage</th><th>Expenses</th></tr></thead>" +
         "<tbody>" + season.map((m) =>
-          `<tr><td>${m.label}</td><td>${fmtQty(m.qty)}</td><td>${fmtQty(m.spoilage)}</td><td>${fmtMoney(m.expenses)}</td></tr>`
+          `<tr><td>${escHtml(m.label)}</td><td>${fmtQty(m.qty)}</td><td>${fmtQty(m.spoilage)}</td><td>${fmtMoney(m.expenses)}</td></tr>`
         ).join("") + "</tbody>";
     }
+  }
+
+  // ── list rendering using .list-row pattern ──────────────────────
+  function listRow({ title, sub, value, valueSub, bar, barClass }) {
+    const subHtml = sub ? `<span class="row-sub">${escHtml(sub)}</span>` : "";
+    const valSubHtml = valueSub ? `<span class="row-sub mono">${escHtml(valueSub)}</span>` : "";
+    const barHtml = (bar !== null && bar !== undefined)
+      ? `<span class="row-bar ${barClass || ""}"><span style="width:${Math.max(2, Math.min(100, bar))}%"></span></span>`
+      : "";
+    return `
+      <div class="list-row">
+        <div class="row-main">
+          <div class="row-left">
+            <div class="row-title">${escHtml(title)}</div>
+            ${subHtml}
+          </div>
+          <div class="row-right">
+            <strong class="row-value mono">${escHtml(value)}</strong>
+            ${valSubHtml}
+          </div>
+        </div>
+        ${barHtml}
+      </div>
+    `;
+  }
+
+  function emptyState(msg) {
+    return `<div class="empty-state">${escHtml(msg)}</div>`;
   }
 
   // ── top farms panel ─────────────────────────────────────────────
   function renderTopFarms() {
     const d = state.data;
     if (!d) return;
-    const list = state.activeFarmTab === "qty" ? (d.top_farms_by_qty || []) : (d.top_farms_by_value || []);
+    const byQty = state.activeFarmTab === "qty";
+    const list = byQty ? (d.top_farms_by_qty || []) : (d.top_farms_by_value || []);
     const target = $id("top-farms-list");
     if (!target) return;
     if (!list.length) {
-      target.innerHTML = `<div class="empty-state">No farm deliveries in this window.</div>`;
+      target.innerHTML = emptyState("No farm deliveries in this window.");
       return;
     }
-    target.innerHTML = list.map((row, i) => {
-      const primary   = state.activeFarmTab === "qty"
-        ? `<span>${fmtQty(row.qty)}<span class="unit">units</span></span>`
-        : fmtMoney(row.value);
-      const secondary = state.activeFarmTab === "qty"
-        ? fmtMoney(row.value)
-        : `<span>${fmtQty(row.qty)}<span class="unit">units</span></span>`;
-      return `
-        <div class="farm-row">
-          <div class="row-rank">${i + 1}</div>
-          <div>
-            <div class="row-name">${escapeHtml(row.farm)}</div>
-            <div class="row-sub">${fmtInt(row.deliveries || 0)} deliveries</div>
-          </div>
-          <div class="row-metric">${primary}</div>
-          <div class="row-metric muted">${secondary}</div>
-        </div>
-      `;
+    const maxV = Math.max(1, ...list.map((r) => byQty ? Number(r.qty || 0) : Number(r.value || 0)));
+    target.innerHTML = list.map((row) => {
+      const primary   = byQty ? `${fmtQty(row.qty)} units` : fmtMoney(row.value);
+      const secondary = byQty ? fmtMoney(row.value)        : `${fmtQty(row.qty)} units`;
+      const v = byQty ? Number(row.qty || 0) : Number(row.value || 0);
+      const bar = (v / maxV) * 100;
+      return listRow({
+        title: row.farm,
+        sub: `${fmtInt(row.deliveries || 0)} deliveries`,
+        value: primary,
+        valueSub: secondary,
+        bar,
+      });
     }).join("");
   }
 
@@ -254,19 +298,20 @@
     const target = $id("top-crops-list");
     if (!target) return;
     if (!list.length) {
-      target.innerHTML = `<div class="empty-state">No crop intake in this window.</div>`;
+      target.innerHTML = emptyState("No crop intake in this window.");
       return;
     }
-    target.innerHTML = list.map((row, i) => `
-      <div class="crop-row">
-        <div class="row-rank">${i + 1}</div>
-        <div>
-          <div class="row-name">${escapeHtml(row.name)}</div>
-        </div>
-        <div class="row-metric">${fmtMoney(row.value)}</div>
-        <div class="row-metric muted">${fmtQty(row.qty)}<span class="unit">units</span></div>
-      </div>
-    `).join("");
+    const maxV = Math.max(1, ...list.map((r) => Number(r.value || 0)));
+    target.innerHTML = list.map((row) => {
+      const bar = (Number(row.value || 0) / maxV) * 100;
+      return listRow({
+        title: row.name,
+        sub: null,
+        value: fmtMoney(row.value),
+        valueSub: `${fmtQty(row.qty)} units`,
+        bar,
+      });
+    }).join("");
   }
 
   // ── spoilage panel ──────────────────────────────────────────────
@@ -279,35 +324,38 @@
     if (state.activeSpoilageTab === "reasons") {
       const list = sp.top_reasons || [];
       if (!list.length) {
-        target.innerHTML = `<div class="empty-state">No spoilage records in this window.</div>`;
+        target.innerHTML = emptyState("No spoilage records in this window.");
         return;
       }
-      target.innerHTML = list.map((row) => `
-        <div class="spoil-row">
-          <div class="row-name">${escapeHtml(row.reason)}</div>
-          <div class="row-metric">${fmtMoney(row.value)}</div>
-          <div class="row-metric muted">${fmtQty(row.qty)}<span class="unit">units</span></div>
-        </div>
-      `).join("");
+      const maxV = Math.max(1, ...list.map((r) => Number(r.value || 0)));
+      target.innerHTML = list.map((row) => {
+        const bar = (Number(row.value || 0) / maxV) * 100;
+        return listRow({
+          title: row.reason,
+          sub: `${fmtInt(row.count || 0)} record(s)`,
+          value: fmtMoney(row.value),
+          valueSub: `${fmtQty(row.qty)} units`,
+          bar,
+          barClass: "negative",
+        });
+      }).join("");
     } else {
       const list = sp.by_crop || [];
       if (!list.length) {
-        target.innerHTML = `<div class="empty-state">No spoilage records in this window.</div>`;
+        target.innerHTML = emptyState("No spoilage records in this window.");
         return;
       }
-      const maxRate = Math.max(1, ...list.map((r) => r.rate_pct || 0));
+      const maxRate = Math.max(1, ...list.map((r) => Number(r.rate_pct || 0)));
       target.innerHTML = list.map((row) => {
-        const widthPct = Math.min(100, (row.rate_pct / maxRate) * 100);
-        return `
-          <div class="spoil-row">
-            <div>
-              <div class="row-name">${escapeHtml(row.name)}</div>
-              <div class="row-sub">${fmtQty(row.spoiled)} spoiled of ${fmtQty(row.delivered + row.spoiled)}</div>
-            </div>
-            <div class="rate-bar"><span style="width:${widthPct}%"></span></div>
-            <div class="row-metric neg">${row.rate_pct}%</div>
-          </div>
-        `;
+        const bar = (Number(row.rate_pct || 0) / maxRate) * 100;
+        return listRow({
+          title: row.name,
+          sub: `${fmtQty(row.spoiled)} spoiled / ${fmtQty(row.delivered + row.spoiled)} handled`,
+          value: `${row.rate_pct}%`,
+          valueSub: null,
+          bar,
+          barClass: "negative",
+        });
       }).join("");
     }
   }
@@ -320,16 +368,20 @@
     if (!target) return;
     const list = state.activeExpTab === "farm" ? (ex.by_farm || []) : (ex.by_category || []);
     if (!list.length) {
-      target.innerHTML = `<div class="empty-state">No farm-tagged expenses in this window.</div>`;
+      target.innerHTML = emptyState("No farm-tagged expenses in this window.");
       return;
     }
-    target.innerHTML = list.map((row) => `
-      <div class="exp-row">
-        <div class="row-name">${escapeHtml(row.category || row.farm)}</div>
-        <div class="row-metric">${fmtMoney(row.amount)}</div>
-        <div class="row-metric muted">${fmtInt(row.count || 0)} entries</div>
-      </div>
-    `).join("");
+    const maxV = Math.max(1, ...list.map((r) => Number(r.amount || 0)));
+    target.innerHTML = list.map((row) => {
+      const bar = (Number(row.amount || 0) / maxV) * 100;
+      return listRow({
+        title: row.category || row.farm,
+        sub: `${fmtInt(row.count || 0)} entries`,
+        value: fmtMoney(row.amount),
+        valueSub: null,
+        bar,
+      });
+    }).join("");
   }
 
   // ── contribution panel ──────────────────────────────────────────
@@ -338,18 +390,27 @@
     const target = $id("contribution-list");
     if (!target) return;
     if (!list.length) {
-      target.innerHTML = `<div class="empty-state">No data to compute contribution yet.</div>`;
+      target.innerHTML = emptyState("No data to compute contribution yet.");
       return;
     }
+    const maxAbs = Math.max(1, ...list.map((r) => Math.abs(Number(r.net || 0))));
     target.innerHTML = list.map((row) => {
-      const cls = row.net >= 0 ? "pos" : "neg";
+      const net = Number(row.net || 0);
+      const cls = net >= 0 ? "positive" : "negative";
+      const bar = (Math.abs(net) / maxAbs) * 100;
+      const sub = `+${fmtMoney(row.delivered_value)} · −${fmtMoney(row.expenses)} exp · −${fmtMoney(row.spoiled_value)} spoiled`;
       return `
-        <div class="contrib-row">
-          <div class="row-name">${escapeHtml(row.farm)}</div>
-          <div class="row-metric muted col-mid">+${fmtMoney(row.delivered_value)}</div>
-          <div class="row-metric muted col-mid">−${fmtMoney(row.expenses)}</div>
-          <div class="row-metric muted col-mid">−${fmtMoney(row.spoiled_value)}</div>
-          <div class="row-metric ${cls}">${fmtMoney(row.net)}</div>
+        <div class="list-row">
+          <div class="row-main">
+            <div class="row-left">
+              <div class="row-title">${escHtml(row.farm)}</div>
+              <span class="row-sub">${escHtml(sub)}</span>
+            </div>
+            <div class="row-right">
+              <strong class="row-value mono ${cls}">${escHtml(fmtMoney(net))}</strong>
+            </div>
+          </div>
+          <span class="row-bar ${cls}"><span style="width:${Math.max(2, Math.min(100, bar))}%"></span></span>
         </div>
       `;
     }).join("");
@@ -361,39 +422,36 @@
     const target = $id("signals-list");
     if (!target) return;
     if (!list.length) {
-      target.innerHTML = `<div class="empty-state">No notable signals — things look steady.</div>`;
+      target.innerHTML = emptyState("No notable signals — things look steady.");
       return;
     }
-    target.innerHTML = list.map((row) => `
-      <div class="signal-row">
-        <div class="signal-dot ${escapeHtml(row.kind || "info")}"></div>
-        <div>
-          <div class="signal-title">${escapeHtml(row.title || "")}</div>
-          <div class="signal-body">${escapeHtml(row.body || "")}</div>
+    target.innerHTML = list.map((row) => {
+      const kind = row.kind || "info";
+      return `
+        <div class="list-row signal-row">
+          <div class="row-main">
+            <div class="row-left">
+              <span class="signal-dot signal-dot-${escHtml(kind)}"></span>
+              <div class="row-title-stack">
+                <div class="row-title">${escHtml(row.title || "")}</div>
+                <span class="row-sub">${escHtml(row.body || "")}</span>
+              </div>
+            </div>
+          </div>
         </div>
-      </div>
-    `).join("");
+      `;
+    }).join("");
   }
 
   // ── error banner ────────────────────────────────────────────────
   function showError(message) {
     const banner = $id("error-banner");
     if (!banner) return;
-    banner.innerHTML = `<div class="card error-card" role="alert">${escapeHtml(message)}</div>`;
+    banner.innerHTML = `<div class="error-banner load-error" role="alert"><div class="error-banner-text">${escHtml(message)}</div></div>`;
   }
   function clearError() {
     const banner = $id("error-banner");
     if (banner) banner.innerHTML = "";
-  }
-
-  // ── escape ──────────────────────────────────────────────────────
-  function escapeHtml(s) {
-    return String(s == null ? "" : s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
   }
 
   // ── fetch + paint ───────────────────────────────────────────────
@@ -477,6 +535,57 @@
     load();
   }
 
+  // ── account / user wiring (mirror Sales dashboard) ──────────────
+  async function initUser() {
+    try {
+      const r = await fetch("/auth/me");
+      if (r.ok) state.currentUser = await r.json();
+    } catch (_) {}
+    const name   = state.currentUser?.name  || "Admin";
+    const email  = state.currentUser?.email || "—";
+    const avatar = (name.trim()[0] || "A").toUpperCase();
+    setText("user-name", name);
+    setText("user-email", email);
+    setText("user-avatar", avatar);
+    setGreeting();
+  }
+
+  function bindAccountMenu() {
+    const trigger = $id("account-trigger");
+    const dropdown = $id("account-dropdown");
+    const signout = $id("signout-btn");
+    if (!trigger || !dropdown) return;
+
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const open = dropdown.classList.toggle("open");
+      trigger.classList.toggle("open", open);
+      trigger.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+
+    if (signout) {
+      signout.addEventListener("click", async () => {
+        await fetch("/auth/logout", { method: "POST" });
+        window.location.href = "/";
+      });
+    }
+
+    document.addEventListener("click", (event) => {
+      if (dropdown.contains(event.target) || trigger.contains(event.target)) return;
+      dropdown.classList.remove("open");
+      trigger.classList.remove("open");
+      trigger.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  function bindThemeToggle() {
+    const btn = $id("mode-btn");
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+      if (typeof window.toggleTheme === "function") window.toggleTheme();
+    });
+  }
+
   // ── bootstrap ───────────────────────────────────────────────────
   document.addEventListener("DOMContentLoaded", () => {
     setRange(state.range);
@@ -524,8 +633,13 @@
       if (e.target.id === "custom-range-modal") closeCustomRange();
     });
 
+    if (!window.__appNav) {
+      bindAccountMenu();
+      bindThemeToggle();
+    }
+
+    initUser();
     load();
-    // Auto-refresh every 60 seconds
     setInterval(load, 60000);
   });
 })();

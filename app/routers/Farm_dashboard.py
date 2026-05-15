@@ -24,14 +24,13 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.log import logger
-from app.core.navigation import render_app_header
 from app.core.permissions import require_permission
 from app.core.security import get_current_user
 from app.database import get_async_session
@@ -52,7 +51,6 @@ router = APIRouter(
 # ── helpers ───────────────────────────────────────────────────────────
 
 def _parse_range(range_param: str, start: Optional[str], end: Optional[str]) -> tuple[date, date, str]:
-    """Resolve a range token (or custom start/end) into (start_date, end_date, label)."""
     today = date.today()
     if range_param == "today":
         return today, today, "Today"
@@ -82,7 +80,6 @@ def _parse_range(range_param: str, start: Optional[str], end: Optional[str]) -> 
 
 
 def _prev_window(s: date, e: date) -> tuple[date, date]:
-    """Equal-length window immediately preceding [s, e]."""
     span = (e - s).days + 1
     return s - timedelta(days=span), s - timedelta(days=1)
 
@@ -154,8 +151,8 @@ async def farm_dashboard_summary(
     by_farm: dict[int, dict] = {}
     by_crop: dict[int, dict] = {}
     deliveries_by_day: dict[str, dict] = {}
+    active_days = 0
     try:
-        # Pull deliveries in range with their items joined
         rows = await db.execute(
             select(
                 FarmDelivery.id,
@@ -167,15 +164,12 @@ async def farm_dashboard_summary(
             .join(FarmDeliveryItem, FarmDeliveryItem.delivery_id == FarmDelivery.id, isouter=True)
             .where(FarmDelivery.delivery_date >= s_date, FarmDelivery.delivery_date <= e_date)
         )
-        seen_deliveries: set[int] = set()
         for r in rows.all():
-            seen_deliveries.add(int(r.id))
             qty = float(r.qty or 0)
             val = qty * _prod_cost(r.product_id)
             delivered_qty   += qty
             delivered_value += val
 
-            # by farm
             farm_id = int(r.farm_id) if r.farm_id else 0
             entry = by_farm.setdefault(farm_id, {
                 "farm_id": farm_id,
@@ -185,7 +179,6 @@ async def farm_dashboard_summary(
             entry["qty"]   += qty
             entry["value"] += val
 
-            # by crop / product
             pid = int(r.product_id) if r.product_id else 0
             crop = by_crop.setdefault(pid, {
                 "product_id": pid,
@@ -195,13 +188,11 @@ async def farm_dashboard_summary(
             crop["qty"]   += qty
             crop["value"] += val
 
-            # by day (for trend chart)
             day_key = r.delivery_date.isoformat() if r.delivery_date else "—"
             day = deliveries_by_day.setdefault(day_key, {"date": day_key, "qty": 0.0, "value": 0.0, "deliveries": 0})
             day["qty"]   += qty
             day["value"] += val
 
-        # delivery counts per farm (distinct delivery IDs)
         farm_deliv_count = await db.execute(
             select(FarmDelivery.farm_id, func.count(FarmDelivery.id))
             .where(FarmDelivery.delivery_date >= s_date, FarmDelivery.delivery_date <= e_date)
@@ -218,14 +209,10 @@ async def farm_dashboard_summary(
                     "qty": 0.0, "value": 0.0,
                 }
 
-        # distinct delivery dates → cadence
         dates_in_range = await db.execute(
             select(func.count(func.distinct(FarmDelivery.delivery_date)))
             .where(FarmDelivery.delivery_date >= s_date, FarmDelivery.delivery_date <= e_date)
         )
-        deliveries_count = len(seen_deliveries)
-
-        # If a delivery had no items it still wouldn't show above; count separately:
         dc_total = await db.execute(
             select(func.count(FarmDelivery.id))
             .where(FarmDelivery.delivery_date >= s_date, FarmDelivery.delivery_date <= e_date)
@@ -235,7 +222,6 @@ async def farm_dashboard_summary(
     except Exception:
         logger.exception("farm_dashboard: deliveries section failed")
         _errors.append({"section": "deliveries", "reason": "query failed"})
-        active_days = 0
 
     # deliveries previous-window totals for delta
     prev_delivered_qty = prev_delivered_value = 0.0
@@ -257,7 +243,6 @@ async def farm_dashboard_summary(
         prev_deliveries_count = int(r.scalar() or 0)
     except Exception:
         logger.exception("farm_dashboard: previous-window deliveries failed")
-        _errors.append({"section": "deliveries_prev", "reason": "query failed"})
 
     out["deliveries"] = {
         "count":        deliveries_count,
@@ -347,7 +332,6 @@ async def farm_dashboard_summary(
     except Exception:
         logger.exception("farm_dashboard: previous spoilage failed")
 
-    # spoilage rate = spoilage qty / (delivered qty + spoilage qty), per crop
     spoilage_rate_by_crop: list[dict] = []
     for pid, sc in spoilage_by_crop.items():
         delivered = float(by_crop.get(pid, {}).get("qty", 0.0))
@@ -391,7 +375,6 @@ async def farm_dashboard_summary(
     exp_by_category: dict[str, dict] = {}
     exp_by_farm: dict[int, dict] = {}
     try:
-        # farm-tagged expenses with category names
         rows = await db.execute(
             select(Expense.amount, Expense.farm_id, ExpenseCategory.name)
             .join(ExpenseCategory, Expense.category_id == ExpenseCategory.id, isouter=True)
@@ -420,7 +403,6 @@ async def farm_dashboard_summary(
             ef["amount"] += amt
             ef["count"]  += 1
 
-        # grand total of all expenses (to show % of overall budget that is farm-related)
         r = await db.execute(
             select(func.sum(Expense.amount), func.count(Expense.id))
             .where(Expense.expense_date >= s_date, Expense.expense_date <= e_date)
@@ -433,7 +415,6 @@ async def farm_dashboard_summary(
         logger.exception("farm_dashboard: expenses section failed")
         _errors.append({"section": "expenses", "reason": "query failed"})
 
-    # previous-window farm expenses
     prev_farm_exp = 0.0
     try:
         r = await db.execute(
@@ -470,9 +451,7 @@ async def farm_dashboard_summary(
         )[:10],
     }
 
-    # ── NET CONTRIBUTION (per farm: delivered value - tagged expenses - spoiled value) ──
-    # Note: spoiled value is allocated only at the company level here, since SpoilageRecord
-    # stores farm_id but most data may leave it null. Per-farm breakdown is best-effort.
+    # ── NET CONTRIBUTION (per farm) ──────────────────────────────────
     contribution: list[dict] = []
     spoiled_by_farm: dict[int, float] = {}
     try:
@@ -543,9 +522,8 @@ async def farm_dashboard_summary(
         _errors.append({"section": "weather", "reason": "query failed"})
     out["weather"] = weather
 
-    # ── PRODUCTION SIDE-CAR (batches in window) ───────────────────────
+    # ── PRODUCTION SIDE-CAR ───────────────────────────────────────────
     try:
-        # ProductionBatch uses created_at (timestamp). Filter by date range.
         from datetime import datetime, time, timezone
         s_dt = datetime.combine(s_date, time.min, tzinfo=timezone.utc)
         e_dt = datetime.combine(e_date, time.max, tzinfo=timezone.utc)
@@ -559,27 +537,23 @@ async def farm_dashboard_summary(
         _errors.append({"section": "batches", "reason": "query failed"})
         out["batches_count"] = 0
 
-    # ── SEASON ANALYSIS (last 12 months, rolling, by month) ───────────
+    # ── SEASON ANALYSIS ──────────────────────────────────────────────
     season: list[dict] = []
     try:
         today = date.today()
-        # Build last 12 month buckets (anchored to today)
         anchor = today.replace(day=1)
         for i in range(11, -1, -1):
-            # step i months back
             y = anchor.year
             m = anchor.month - i
             while m <= 0:
                 m += 12
                 y -= 1
             m_start = date(y, m, 1)
-            # m_end = last day of month
             if m == 12:
                 m_end = date(y, 12, 31)
             else:
                 m_end = date(y, m + 1, 1) - timedelta(days=1)
 
-            # delivered qty for this month
             qty_row = await db.execute(
                 select(func.sum(FarmDeliveryItem.qty))
                 .join(FarmDelivery, FarmDeliveryItem.delivery_id == FarmDelivery.id)
@@ -587,14 +561,12 @@ async def farm_dashboard_summary(
             )
             q = float(qty_row.scalar() or 0)
 
-            # spoilage qty for this month
             sp_row = await db.execute(
                 select(func.sum(SpoilageRecord.qty))
                 .where(SpoilageRecord.spoilage_date >= m_start, SpoilageRecord.spoilage_date <= m_end)
             )
             sp = float(sp_row.scalar() or 0)
 
-            # farm-tagged expense total for this month
             ex_row = await db.execute(
                 select(func.sum(Expense.amount))
                 .where(
@@ -618,7 +590,6 @@ async def farm_dashboard_summary(
 
     out["season"] = season
 
-    # peak / quiet months from season data
     try:
         if season:
             peak  = max(season, key=lambda d: d["qty"])
@@ -634,7 +605,7 @@ async def farm_dashboard_summary(
     except Exception:
         out["season_peaks"] = {"peak_month": None, "peak_qty": 0, "quiet_month": None, "quiet_qty": 0}
 
-    # ── INSIGHTS (lightweight rule-based) ─────────────────────────────
+    # ── INSIGHTS ──────────────────────────────────────────────────────
     insights: list[dict] = []
     try:
         if out["deliveries"]["qty_delta"] is not None and out["deliveries"]["qty_delta"] < -15:
@@ -696,7 +667,6 @@ async def farm_dashboard_summary(
 @router.get("/farm-dashboard", response_class=HTMLResponse)
 def farm_dashboard_ui(current_user: User = Depends(get_current_user)):
     locale_dir = getattr(settings, "APP_LOCALE_DIR", "ltr")
-    header = render_app_header(current_user, "page_farm_dashboard")
     return f"""<!DOCTYPE html>
 <html lang="en" dir="{locale_dir}">
 <head>
@@ -721,7 +691,37 @@ def farm_dashboard_ui(current_user: User = Depends(get_current_user)):
 </div>
 <div class="bg-grain"></div>
 <div id="loading"><div class="spinner"></div></div>
-{header}
+<nav class="top-nav" aria-label="Primary">
+  <a href="/home" class="logo navbar-brand">
+    <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
+  </a>
+  <div class="nav-links">
+    <a href="/dashboard" class="nav-link">Sales dashboard</a>
+    <a href="/farm-dashboard" class="nav-link active">Farm dashboard</a>
+    <a href="/pos" class="nav-link">POS</a>
+    <a href="/b2b/" class="nav-link">B2B</a>
+    <a href="/reports/" class="nav-link">Reports</a>
+    <a href="/inventory/" class="nav-link">Inventory</a>
+  </div>
+  <div class="nav-actions">
+    <button class="mode-btn app-theme-toggle" id="mode-btn" type="button" data-theme-toggle aria-label="Switch color theme" title="Switch color theme" aria-pressed="false">&#127769;</button>
+    <div class="account-menu">
+      <button class="user-pill" id="account-trigger" type="button" aria-haspopup="menu" aria-expanded="false">
+        <div class="user-avatar" id="user-avatar">A</div>
+        <span class="user-name" id="user-name">Admin</span>
+        <span class="menu-caret">&#9662;</span>
+      </button>
+      <div class="account-dropdown" id="account-dropdown" role="menu">
+        <div class="account-head">
+          <div class="account-label">Signed in as</div>
+          <div class="account-email" id="user-email">&#8212;</div>
+        </div>
+        <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
+        <button class="account-item danger" id="signout-btn" type="button" role="menuitem">Sign out</button>
+      </div>
+    </div>
+  </div>
+</nav>
 <main class="page-shell">
   <header class="header-strip">
     <div>
@@ -811,7 +811,6 @@ def farm_dashboard_ui(current_user: User = Depends(get_current_user)):
     <section class="card panel-card" aria-label="Net contribution per farm">
       <div class="panel-head">
         <h2>Net contribution per farm</h2>
-        <span class="panel-hint">Delivered value − farm expenses − spoiled value</span>
       </div>
       <div id="contribution-list" class="panel-body"></div>
     </section>
