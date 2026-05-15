@@ -1,11 +1,11 @@
 """supplier accounts payable
 
 Adds:
-- product_receipts.supplier_id  (nullable FK → suppliers.id)
+- product_receipts.supplier_id  (nullable FK -> suppliers.id)
 - product_receipts.amount_paid  (numeric, default 0)
 - supplier_payments             (new table for payments against supplier balance)
 
-Revision ID: 20260513_0019
+Revision ID: 20260513_0019_supplier_ap
 Revises: a5ad9f786549
 Create Date: 2026-05-13
 """
@@ -15,7 +15,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260513_0019"
+revision: str = "20260513_0019_supplier_ap"
 down_revision: Union[str, None] = "a5ad9f786549"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -24,14 +24,31 @@ depends_on: Union[str, Sequence[str], None] = None
 def _has_column(table: str, column: str) -> bool:
     bind = op.get_bind()
     insp = sa.inspect(bind)
-    cols = [c["name"] for c in insp.get_columns(table)]
-    return column in cols
+    if table not in insp.get_table_names():
+        return False
+    return any(c["name"] == column for c in insp.get_columns(table))
 
 
 def _has_table(table: str) -> bool:
     bind = op.get_bind()
     insp = sa.inspect(bind)
     return table in insp.get_table_names()
+
+
+def _has_index(table: str, name: str) -> bool:
+    bind = op.get_bind()
+    insp = sa.inspect(bind)
+    if table not in insp.get_table_names():
+        return False
+    return any(ix["name"] == name for ix in insp.get_indexes(table))
+
+
+def _has_fk(table: str, name: str) -> bool:
+    bind = op.get_bind()
+    insp = sa.inspect(bind)
+    if table not in insp.get_table_names():
+        return False
+    return any(fk.get("name") == name for fk in insp.get_foreign_keys(table))
 
 
 def upgrade() -> None:
@@ -41,19 +58,21 @@ def upgrade() -> None:
             "product_receipts",
             sa.Column("supplier_id", sa.Integer(), nullable=True),
         )
-        op.create_foreign_key(
-            "fk_product_receipts_supplier_id",
-            "product_receipts",
-            "suppliers",
-            ["supplier_id"],
-            ["id"],
-            ondelete="SET NULL",
-        )
-        op.create_index(
-            "ix_product_receipts_supplier_id",
-            "product_receipts",
-            ["supplier_id"],
-        )
+        if not _has_fk("product_receipts", "fk_product_receipts_supplier_id"):
+            op.create_foreign_key(
+                "fk_product_receipts_supplier_id",
+                "product_receipts",
+                "suppliers",
+                ["supplier_id"],
+                ["id"],
+                ondelete="SET NULL",
+            )
+        if not _has_index("product_receipts", "ix_product_receipts_supplier_id"):
+            op.create_index(
+                "ix_product_receipts_supplier_id",
+                "product_receipts",
+                ["supplier_id"],
+            )
 
     # 2. product_receipts.amount_paid
     if _has_table("product_receipts") and not _has_column("product_receipts", "amount_paid"):
@@ -67,7 +86,7 @@ def upgrade() -> None:
             ),
         )
 
-    # 3. supplier_payments
+    # 3. supplier_payments table
     if not _has_table("supplier_payments"):
         op.create_table(
             "supplier_payments",
@@ -113,7 +132,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     if _has_table("supplier_payments"):
         op.drop_table("supplier_payments")
-
     if _has_table("product_receipts"):
         if _has_column("product_receipts", "amount_paid"):
             op.drop_column("product_receipts", "amount_paid")
