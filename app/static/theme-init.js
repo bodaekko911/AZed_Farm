@@ -71,6 +71,67 @@
       document.documentElement.classList.add("light");
     }
   } catch (_e) {}
+
+  // ── EARLIEST POSSIBLE HIDE ────────────────────────────────────────────
+  // Inject a critical <style> right now (we're in <head>, before <body>
+  // opens), so the moment the browser parses <body> it already knows to
+  // keep it invisible. Without this, there's a microsecond window between
+  // <body> opening and the splash CSS being installed below, during which
+  // the page is briefly visible. The full splash style block below
+  // overrides this once installed; the splash itself is exempt by id.
+  try {
+    var _earlyHide = document.createElement("style");
+    _earlyHide.id = "app-early-hide";
+    _earlyHide.textContent = "html:not(.app-ready) > body > *:not(#app-splash) { visibility: hidden !important; }";
+    (document.head || document.documentElement).appendChild(_earlyHide);
+    document.documentElement.classList.add("app-fading");
+  } catch (_e) {}
+  // ───────────────────────────────────────────────────────────────────────
+
+  // ── EARLIEST POSSIBLE SPLASH MOUNT ────────────────────────────────────
+  // Inject the splash's critical CSS (positioning + base look) and mount
+  // the splash element NOW, before any other code runs. This way the
+  // splash is visible the instant <body> opens. The richer theme styles
+  // and fade-in coordinator installed below add behavior on top, but the
+  // splash itself paints immediately.
+  try {
+    var _earlyBgChoice = (typeof _earlyTheme !== "undefined" && _earlyTheme === "light") ? "#f4f5ef" : "#060810";
+    var _earlySplashStyle = document.createElement("style");
+    _earlySplashStyle.id = "app-splash-critical-style";
+    _earlySplashStyle.textContent =
+      "#app-splash{position:fixed;inset:0;z-index:2147483600;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;background:" + _earlyBgChoice + ";opacity:1;transition:opacity 380ms ease-out;}" +
+      "#app-splash.app-splash-hide{opacity:0;pointer-events:none;}" +
+      "#app-splash .splash-logo{min-width:220px;height:96px;padding:0 28px;border-radius:22px;background:" + (_earlyTheme === "light" ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.04)") + ";border:1px solid " + (_earlyTheme === "light" ? "rgba(0,0,0,0.06)" : "rgba(255,255,255,0.08)") + ";display:flex;align-items:center;justify-content:center;box-shadow:0 20px 50px rgba(0,0,0,0.35);}" +
+      "#app-splash .splash-logo img{height:56px;width:auto;object-fit:contain;display:block;}" +
+      "#app-splash .splash-name{font-family:'Outfit',-apple-system,BlinkMacSystemFont,sans-serif;font-size:13px;letter-spacing:4px;font-weight:600;text-transform:uppercase;color:" + (_earlyTheme === "light" ? "rgba(26,30,20,0.55)" : "rgba(240,244,255,0.55)") + ";}" +
+      "#app-splash .splash-bar{width:140px;height:2px;border-radius:2px;background:linear-gradient(90deg,transparent,#00E5FF,#d97706,transparent);background-size:200% 100%;animation:splashBar 1400ms ease-in-out infinite;opacity:.85;}" +
+      "@keyframes splashBar{0%{background-position:100% 50%;}100%{background-position:-100% 50%;}}" +
+      "@media print{#app-splash{display:none!important;}}";
+    (document.head || document.documentElement).appendChild(_earlySplashStyle);
+
+    // Mount the splash element. If <body> exists, attach directly.
+    // Otherwise watch with rAF until <body> opens.
+    var _earlySplash = document.createElement("div");
+    _earlySplash.id = "app-splash";
+    _earlySplash.setAttribute("aria-hidden", "true");
+    _earlySplash.innerHTML =
+      '<div class="splash-logo"><img src="/static/ERP_logo.png" alt="AZed ERP" /></div>' +
+      '<div class="splash-name">Enterprise Resource Planning</div>' +
+      '<div class="splash-bar"></div>';
+    if (document.body) {
+      document.body.insertBefore(_earlySplash, document.body.firstChild);
+    } else {
+      var _waitForBody = function () {
+        if (document.body) {
+          document.body.insertBefore(_earlySplash, document.body.firstChild);
+        } else {
+          requestAnimationFrame(_waitForBody);
+        }
+      };
+      requestAnimationFrame(_waitForBody);
+    }
+  } catch (_e) {}
+  // ───────────────────────────────────────────────────────────────────────
   // ───────────────────────────────────────────────────────────────────────
 
   // ── FLICKER SUPPRESSION + BRANDED SPLASH ──────────────────────────────
@@ -181,9 +242,6 @@
 
   function mountSplash() {
     if (document.getElementById("app-splash")) return;
-    // We have to mount into <html> if <body> doesn't exist yet (we run in
-    // <head>, before body parses). The element is appended to <body>
-    // later once it exists; until then it lives directly on <html>.
     var splash = document.createElement("div");
     splash.id = "app-splash";
     splash.setAttribute("aria-hidden", "true");
@@ -191,7 +249,24 @@
       '<div class="splash-logo"><img src="/static/ERP_logo.png" alt="AZed ERP" /></div>' +
       '<div class="splash-name">Enterprise Resource Planning</div>' +
       '<div class="splash-bar"></div>';
-    (document.body || document.documentElement).appendChild(splash);
+    // If <body> exists, mount there directly so the splash paints
+    // immediately. Otherwise, watch with rAF until <body> appears (which
+    // happens within microseconds of <head> closing) and mount the
+    // instant it does. DO NOT wait for DOMContentLoaded — that fires
+    // AFTER the whole page parses, by which point the user has already
+    // seen the half-loaded page.
+    if (document.body) {
+      document.body.insertBefore(splash, document.body.firstChild);
+      return;
+    }
+    var waitForBody = function () {
+      if (document.body) {
+        document.body.insertBefore(splash, document.body.firstChild);
+      } else {
+        requestAnimationFrame(waitForBody);
+      }
+    };
+    requestAnimationFrame(waitForBody);
   }
 
   function installFadeInCoordinator() {
@@ -200,14 +275,6 @@
 
     document.documentElement.classList.add("app-fading");
     mountSplash();
-    // If body wasn't ready yet, re-anchor the splash inside <body> once
-    // it parses (keeps DOM tidy and stacking contexts predictable).
-    if (!document.body) {
-      document.addEventListener("DOMContentLoaded", function () {
-        var s = document.getElementById("app-splash");
-        if (s && s.parentNode !== document.body) document.body.appendChild(s);
-      }, { once: true });
-    }
 
     var revealed = false;
     var inflight = 0;
