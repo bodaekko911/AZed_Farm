@@ -3698,7 +3698,7 @@ function switchTab(tab){
     const section = document.getElementById("section-"+tab);
     if(!section) return;
     section.classList.add("active");
-    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, pl:loadPL};
+    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, utilities:loadUtilities, pl:loadPL};
     if(loaders[tab]){
         loaders[tab]();
     } else {
