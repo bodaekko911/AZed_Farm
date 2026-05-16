@@ -73,6 +73,42 @@
   } catch (_e) {}
   // ───────────────────────────────────────────────────────────────────────
 
+  // ── FLICKER SUPPRESSION ───────────────────────────────────────────────
+  // Many pages re-render tables/grids by doing `el.innerHTML = ""` then
+  // immediately re-assigning new HTML. The empty moment exposes the dark
+  // body background and reads as a black flash, especially when multiple
+  // API calls land in quick succession 1–3s after page load.
+  //
+  // The rule below paints every common container with the same surface
+  // colour as the page card so the "empty" moment is invisible, and adds
+  // a 120ms cross-fade so newly inserted rows don't pop in harshly.
+  function installFlickerSuppressionStyle() {
+    if (document.getElementById("app-flicker-suppression-style")) return;
+    var style = document.createElement("style");
+    style.id = "app-flicker-suppression-style";
+    style.textContent = [
+      // Containers that get cleared+refilled keep showing the card color
+      // (not the body bg) during the rewrite gap.
+      "tbody, .cat-grid, .grid, #grid, #rows-body, #inv-items, #refund-items, #po-items, #delivery-items, #je-entries, #tb-foot, #cat-grid, #side-body {",
+      "  background-color: var(--card, var(--surface, transparent));",
+      "  transition: opacity 120ms ease;",
+      "}",
+      // Empty containers (innerHTML='') keep the card color and a soft
+      // opacity so the flash isn't visible against the page.
+      "tbody:empty, .cat-grid:empty, .grid:empty, #grid:empty, #rows-body:empty,",
+      "#inv-items:empty, #refund-items:empty, #po-items:empty, #delivery-items:empty,",
+      "#je-entries:empty, #tb-foot:empty, #cat-grid:empty, #side-body:empty {",
+      "  opacity: 0.92;",
+      "  background-color: var(--card, var(--surface, transparent));",
+      "}",
+      // Body itself never flashes — it has the theme bg from the inline",
+      // style we set on <html>, and a stable solid bg layered behind any",
+      // late CSS.",
+      "html, body { background-color: var(--bg, " + (appliedTheme === "light" ? "#f4f5ef" : "#060810") + "); }"
+    ].join("\n");
+    (document.head || document.documentElement).appendChild(style);
+  }
+
   function installDashboardPaletteStyle() {
     if (document.getElementById("app-dashboard-palette-style")) return;
 
@@ -367,6 +403,7 @@
     installLogoThemeStyle();
     installControlThemeStyle();
     installHeaderThemeStyle();
+    installFlickerSuppressionStyle();
     applyTheme(theme, { persist: false, dispatch: false });
     window.__appThemePalette = palettes[theme];
   } catch (_) {
@@ -375,6 +412,7 @@
     installLogoThemeStyle();
     installControlThemeStyle();
     installHeaderThemeStyle();
+    installFlickerSuppressionStyle();
     applyTheme("dark", { persist: false, dispatch: false });
     window.__appThemePalette = palettes.dark;
   }
