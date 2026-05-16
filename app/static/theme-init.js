@@ -42,6 +42,37 @@
   };
   var appliedTheme = "dark";
 
+  // ── INSTANT PAINT ──────────────────────────────────────────────────────
+  // Before any stylesheet parses, read the stored theme and paint the
+  // background + color-scheme directly on <html>. This eliminates the
+  // white flash that used to appear during page navigation, because
+  // browsers paint <html>'s inline style immediately, well before the
+  // page's <style> block (where body{background:var(--bg)} lives) is
+  // parsed. This runs synchronously in <head>, so there is no FOUC.
+  try {
+    var _earlyTheme = "dark";
+    try {
+      var _earlyStored = localStorage.getItem(THEME_KEY);
+      if (!_earlyStored) {
+        for (var _i = 0; _i < LEGACY_KEYS.length; _i += 1) {
+          var _legacy = localStorage.getItem(LEGACY_KEYS[_i]);
+          if (_legacy) { _earlyStored = _legacy; break; }
+        }
+      }
+      if (_earlyStored === "light") _earlyTheme = "light";
+    } catch (_e) {}
+    var _earlyBg = _earlyTheme === "light" ? "#f4f5ef" : "#060810";
+    var _earlyFg = _earlyTheme === "light" ? "#1a1e14" : "#f0f4ff";
+    document.documentElement.style.background = _earlyBg;
+    document.documentElement.style.color = _earlyFg;
+    document.documentElement.style.colorScheme = _earlyTheme;
+    document.documentElement.setAttribute("data-theme", _earlyTheme);
+    if (_earlyTheme === "light") {
+      document.documentElement.classList.add("light");
+    }
+  } catch (_e) {}
+  // ───────────────────────────────────────────────────────────────────────
+
   function installDashboardPaletteStyle() {
     if (document.getElementById("app-dashboard-palette-style")) return;
 
