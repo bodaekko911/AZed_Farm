@@ -31,6 +31,7 @@ from app.core.security import (
 )
 from app.core.log import ActivityLog
 from app.core.navigation import render_app_header
+from app.core.time_utils import format_app_datetime
 from app.schemas.user import AdminResetPassword, AdminUserCreate, ChangePasswordData, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -114,7 +115,7 @@ async def get_logs(
             "description": l.description,
             "ref_type":    l.ref_type or "",
             "ref_id":      l.ref_id   or "",
-            "created_at":  l.created_at.strftime("%Y-%m-%d %H:%M:%S") if l.created_at else "—",
+            "created_at":  format_app_datetime(l.created_at),
         }
         for l in logs
     ]

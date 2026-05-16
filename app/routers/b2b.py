@@ -284,7 +284,7 @@ async def _reverse_refund_effects(refund, db: AsyncSession, current_user: User):
 
 # ── SEED DEFERRED REVENUE ──────────────────────────────
 @router.post("/api/seed-accounts")
-async def seed_accounts(db: AsyncSession = Depends(get_async_session)):
+async def seed_accounts(db: AsyncSession = Depends(get_async_session), _: User = Depends(require_admin)):
     await _seed_deferred_revenue(db)
     return {"ok": True}
 
@@ -1216,7 +1216,7 @@ class ClientPriceUpsert(BaseModel):
     product_id: int
     price:      float
 
-@router.put("/api/clients/{client_id}/prices")
+@router.put("/api/clients/{client_id}/prices", dependencies=[Depends(require_permission("action_b2b_clients_update"))])
 async def upsert_client_price(client_id: int, data: ClientPriceUpsert,
                                db: AsyncSession = Depends(get_async_session),
                                current_user: User = Depends(get_current_user)):
@@ -1239,7 +1239,7 @@ async def upsert_client_price(client_id: int, data: ClientPriceUpsert,
     return {"ok": True}
 
 
-@router.delete("/api/clients/{client_id}/prices/{product_id}")
+@router.delete("/api/clients/{client_id}/prices/{product_id}", dependencies=[Depends(require_permission("action_b2b_clients_update"))])
 async def delete_client_price(client_id: int, product_id: int,
                                db: AsyncSession = Depends(get_async_session),
                                current_user: User = Depends(get_current_user)):

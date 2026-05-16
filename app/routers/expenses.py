@@ -209,7 +209,7 @@ async def list_categories(db: AsyncSession = Depends(get_async_session)):
     ]
 
 
-@router.post("/api/categories")
+@router.post("/api/categories", dependencies=[Depends(require_permission("action_expenses_create"))])
 async def create_category(
     data: CategoryCreate,
     db: AsyncSession = Depends(get_async_session),
@@ -269,7 +269,7 @@ async def list_carbon_factors(db: AsyncSession = Depends(get_async_session)):
     ]
 
 
-@router.put("/api/categories/{cat_id}")
+@router.put("/api/categories/{cat_id}", dependencies=[Depends(require_permission("action_expenses_update"))])
 async def update_category(
     cat_id: int,
     data: CategoryUpdate,
@@ -294,7 +294,7 @@ async def update_category(
     return {"ok": True, "id": cat.id, "name": cat.name}
 
 
-@router.delete("/api/categories/{cat_id}")
+@router.delete("/api/categories/{cat_id}", dependencies=[Depends(require_permission("action_expenses_delete"))])
 async def delete_category(
     cat_id: int,
     db: AsyncSession = Depends(get_async_session),
@@ -420,7 +420,7 @@ async def expense_summary(db: AsyncSession = Depends(get_async_session)):
     }
 
 
-@router.post("/api/add")
+@router.post("/api/add", dependencies=[Depends(require_permission("action_expenses_create"))])
 async def add_expense(
     data: ExpenseCreate,
     db: AsyncSession = Depends(get_async_session),
@@ -508,7 +508,7 @@ async def add_expense(
     }
 
 
-@router.put("/api/edit/{expense_id}")
+@router.put("/api/edit/{expense_id}", dependencies=[Depends(require_permission("action_expenses_update"))])
 async def edit_expense(
     expense_id: int,
     data: ExpenseUpdate,

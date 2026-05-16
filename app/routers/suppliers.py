@@ -59,13 +59,13 @@ async def get_suppliers(q: str = "", db: AsyncSession = Depends(get_async_sessio
         for s in items
     ]
 
-@router.post("/api/add")
+@router.post("/api/add", dependencies=[Depends(require_permission("action_suppliers_create"))])
 async def add_supplier(data: SupplierCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     s = Supplier(**data.model_dump())
     db.add(s); await db.commit(); await db.refresh(s)
     return {"id": s.id, "name": s.name}
 
-@router.put("/api/edit/{supplier_id}")
+@router.put("/api/edit/{supplier_id}", dependencies=[Depends(require_permission("action_suppliers_update"))])
 async def edit_supplier(supplier_id: int, data: SupplierUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Supplier).where(Supplier.id == supplier_id))
     s = result.scalar_one_or_none()
@@ -76,7 +76,7 @@ async def edit_supplier(supplier_id: int, data: SupplierUpdate, db: AsyncSession
     await db.commit()
     return {"ok": True}
 
-@router.delete("/api/delete/{supplier_id}")
+@router.delete("/api/delete/{supplier_id}", dependencies=[Depends(require_permission("action_suppliers_delete"))])
 async def delete_supplier(supplier_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Supplier).where(Supplier.id == supplier_id))
     s = result.scalar_one_or_none()
@@ -96,7 +96,7 @@ async def supplier_account(
     return await supplier_account_statement(db, supplier_id)
 
 
-@router.post("/api/{supplier_id}/pay")
+@router.post("/api/{supplier_id}/pay", dependencies=[Depends(require_permission("action_suppliers_pay"))])
 async def supplier_pay(
     supplier_id: int,
     data: SupplierPaymentCreate,
@@ -177,7 +177,7 @@ async def get_purchase(purchase_id: int, db: AsyncSession = Depends(get_async_se
         ],
     }
 
-@router.post("/api/purchase/create")
+@router.post("/api/purchase/create", dependencies=[Depends(require_permission("action_suppliers_purchase_create"))])
 async def create_purchase(data: PurchaseCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     if not data.items:
         raise HTTPException(status_code=400, detail="Purchase must have at least one item")

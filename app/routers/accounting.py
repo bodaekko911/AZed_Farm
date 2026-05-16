@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from app.database import get_async_session
 from app.core.config import settings
-from app.core.permissions import get_current_user, require_permission
+from app.core.permissions import get_current_user, require_admin, require_permission
 from app.core.log import record
 from app.core.navigation import render_app_header
 from app.models.accounting import Account, Journal, JournalEntry
@@ -69,7 +69,7 @@ async def get_accounts(db: AsyncSession = Depends(get_async_session)):
     ]
 
 @router.post("/api/accounts")
-async def create_account(data: AccountCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+async def create_account(data: AccountCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(require_admin)):
     result = await db.execute(select(Account).where(Account.code == data.code))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Account code already exists")
@@ -78,7 +78,7 @@ async def create_account(data: AccountCreate, db: AsyncSession = Depends(get_asy
     return {"id": a.id, "code": a.code, "name": a.name}
 
 @router.delete("/api/accounts/{account_id}")
-async def delete_account(account_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+async def delete_account(account_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(require_admin)):
     result = await db.execute(select(Account).options(selectinload(Account.entries)).where(Account.id == account_id))
     a = result.scalar_one_or_none()
     if not a:
@@ -89,7 +89,7 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_async_s
     return {"ok": True}
 
 @router.post("/api/accounts/seed")
-async def seed_accounts(db: AsyncSession = Depends(get_async_session)):
+async def seed_accounts(db: AsyncSession = Depends(get_async_session), _: User = Depends(require_admin)):
     """Create a standard chart of accounts if none exist."""
     cnt_result = await db.execute(select(func.count()).select_from(Account))
     if cnt_result.scalar() > 0:
@@ -689,7 +689,7 @@ async def get_accounting_b2b_clients(
         for c, computed_outstanding in rows
     ]
 
-@router.post("/api/b2b-invoices/{invoice_id}/collect")
+@router.post("/api/b2b-invoices/{invoice_id}/collect", dependencies=[Depends(require_permission("action_b2b_collect"))])
 async def collect_b2b_payment(
     invoice_id: int,
     data: B2BPaymentRequest,
@@ -844,7 +844,7 @@ async def _record_consignment_client_payment(
     }
 
 
-@router.post("/api/b2b-clients/{client_id}/consignment-payment")
+@router.post("/api/b2b-clients/{client_id}/consignment-payment", dependencies=[Depends(require_permission("action_b2b_consignment_settle"))])
 async def accounting_client_consignment_payment(
     client_id: int,
     data: B2BPaymentRequest,
@@ -869,7 +869,7 @@ async def accounting_client_consignment_payment(
     return payload
 
 
-@router.post("/api/b2b-invoices/{invoice_id}/consignment-payment")
+@router.post("/api/b2b-invoices/{invoice_id}/consignment-payment", dependencies=[Depends(require_permission("action_b2b_consignment_settle"))])
 async def accounting_consignment_payment(
     invoice_id: int,
     data: B2BPaymentRequest,
@@ -901,7 +901,7 @@ async def accounting_consignment_payment(
     return payload
 
 
-@router.post("/api/b2b-clients/{client_id}/refund")
+@router.post("/api/b2b-clients/{client_id}/refund", dependencies=[Depends(require_permission("action_b2b_refund"))])
 async def refund_b2b_client_account(client_id: int, data: B2BRefundIn, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     client_result = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
     client = client_result.scalar_one_or_none()

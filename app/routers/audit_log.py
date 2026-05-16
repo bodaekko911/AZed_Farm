@@ -95,7 +95,7 @@ async def audit_log_meta(db: AsyncSession = Depends(get_async_session), _=Depend
 # ── HTML UI ───────────────────────────────────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse)
-def audit_log_ui():
+def audit_log_ui(_=Depends(require_admin)):
     return """<!DOCTYPE html>
 <html lang="en">
 <head>

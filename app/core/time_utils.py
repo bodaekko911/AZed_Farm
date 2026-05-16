@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
@@ -25,3 +25,16 @@ def utc_bounds(local_start: date, local_end: date) -> tuple[datetime, datetime]:
     e = datetime(local_end.year, local_end.month, local_end.day,
                  23, 59, 59, 999999, tzinfo=tz).astimezone(utc)
     return s, e
+
+
+def to_app_tz(value: datetime) -> datetime:
+    """Return a datetime in APP_TIMEZONE, treating naive DB values as UTC."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(app_tz())
+
+
+def format_app_datetime(value: datetime | None, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    if not value:
+        return "—"
+    return to_app_tz(value).strftime(fmt)

@@ -969,7 +969,7 @@ async def api_list_logs(
     ]
 
 
-@router.post("/api/logs", status_code=201)
+@router.post("/api/logs", status_code=201, dependencies=[Depends(require_permission("action_carbon_log"))])
 async def api_create_log(
     payload: LogCreate,
     db: AsyncSession = Depends(get_async_session),
@@ -1008,7 +1008,7 @@ async def api_create_log(
     return {"id": lg.id, "kg_co2e": _as_float(lg.kg_co2e)}
 
 
-@router.delete("/api/logs/{log_id}", status_code=204)
+@router.delete("/api/logs/{log_id}", status_code=204, dependencies=[Depends(require_permission("action_carbon_log"))])
 async def api_delete_log(
     log_id: int,
     db: AsyncSession = Depends(get_async_session),
@@ -1045,7 +1045,7 @@ async def api_list_factors(db: AsyncSession = Depends(get_async_session)):
     ]
 
 
-@router.post("/api/factors", status_code=201)
+@router.post("/api/factors", status_code=201, dependencies=[Depends(require_permission("action_carbon_factors"))])
 async def api_create_factor(
     payload: FactorCreate,
     db: AsyncSession = Depends(get_async_session),
@@ -1065,7 +1065,7 @@ async def api_create_factor(
     return {"id": f.id}
 
 
-@router.patch("/api/factors/{factor_id}")
+@router.patch("/api/factors/{factor_id}", dependencies=[Depends(require_permission("action_carbon_factors"))])
 async def api_update_factor(
     factor_id: int,
     payload: FactorUpdate,
@@ -1100,7 +1100,7 @@ async def api_list_targets(db: AsyncSession = Depends(get_async_session)):
     ]
 
 
-@router.post("/api/targets", status_code=201)
+@router.post("/api/targets", status_code=201, dependencies=[Depends(require_permission("action_carbon_factors"))])
 async def api_create_target(
     payload: TargetCreate,
     db: AsyncSession = Depends(get_async_session),
@@ -1132,7 +1132,7 @@ async def api_create_target(
     return {"id": t.id}
 
 
-@router.delete("/api/targets/{target_id}", status_code=204)
+@router.delete("/api/targets/{target_id}", status_code=204, dependencies=[Depends(require_permission("action_carbon_factors"))])
 async def api_delete_target(
     target_id: int,
     db: AsyncSession = Depends(get_async_session),
@@ -1148,7 +1148,7 @@ async def api_delete_target(
 
 # ── API: Auto-log from Farm Delivery ─────────────────────────────────────────
 
-@router.post("/api/auto-log/farm-delivery/{delivery_id}", status_code=201)
+@router.post("/api/auto-log/farm-delivery/{delivery_id}", status_code=201, dependencies=[Depends(require_permission("action_carbon_log"))])
 async def api_auto_log_farm_delivery(
     delivery_id: int,
     distance_km: float,

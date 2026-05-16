@@ -253,7 +253,7 @@ async def customer_profile(customer_id: int, db: AsyncSession = Depends(get_asyn
     }
 
 
-@router.post("/api/add")
+@router.post("/api/add", dependencies=[Depends(require_permission("action_customers_create"))])
 async def add_customer(data: CustomerCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     if data.phone:
         phone_result = await db.execute(select(Customer).where(Customer.phone == data.phone))
@@ -270,7 +270,7 @@ async def add_customer(data: CustomerCreate, db: AsyncSession = Depends(get_asyn
     return {"id": c.id, "name": c.name}
 
 
-@router.put("/api/edit/{customer_id}")
+@router.put("/api/edit/{customer_id}", dependencies=[Depends(require_permission("action_customers_update"))])
 async def edit_customer(customer_id: int, data: CustomerUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Customer).where(Customer.id == customer_id))
     c = result.scalar_one_or_none()
@@ -285,7 +285,7 @@ async def edit_customer(customer_id: int, data: CustomerUpdate, db: AsyncSession
     return {"ok": True}
 
 
-@router.delete("/api/delete/{customer_id}")
+@router.delete("/api/delete/{customer_id}", dependencies=[Depends(require_permission("action_customers_delete"))])
 async def delete_customer(customer_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Customer).where(Customer.id == customer_id))
     c = result.scalar_one_or_none()

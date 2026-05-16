@@ -584,7 +584,7 @@ async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_sessio
     emps = _r.scalars().all()
     return [_employee_payload(e) for e in emps]
 
-@router.post("/api/employees")
+@router.post("/api/employees", dependencies=[Depends(require_permission("action_hr_manage_employees"))])
 async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     hire = _parse_optional_iso_date(data.hire_date, "hire_date")
     farm = await _get_active_farm_or_404(db, data.farm_id)
@@ -611,7 +611,7 @@ async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_asyn
         e.farm = farm
     return _employee_payload(e)
 
-@router.put("/api/employees/{emp_id}")
+@router.put("/api/employees/{emp_id}", dependencies=[Depends(require_permission("action_hr_manage_employees"))])
 async def edit_employee(emp_id: int, data: EmployeeUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     _r = await db.execute(select(Employee).options(selectinload(Employee.farm)).where(Employee.id == emp_id))
     e = _r.scalar_one_or_none()
@@ -630,7 +630,7 @@ async def edit_employee(emp_id: int, data: EmployeeUpdate, db: AsyncSession = De
     await db.commit()
     return {"ok": True, **_employee_payload(e)}
 
-@router.delete("/api/employees/{emp_id}")
+@router.delete("/api/employees/{emp_id}", dependencies=[Depends(require_permission("action_hr_manage_employees"))])
 async def deactivate_employee(emp_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     _r = await db.execute(select(Employee).where(Employee.id == emp_id))
     e = _r.scalar_one_or_none()
@@ -788,7 +788,7 @@ async def get_allowance_advances(employee_id: int, db: AsyncSession = Depends(ge
     return [_allowance_advance_payload(a) for a in advances]
 
 
-@router.post("/api/employees/{employee_id}/allowance-advances")
+@router.post("/api/employees/{employee_id}/allowance-advances", dependencies=[Depends(require_permission("action_hr_manage_allowances"))])
 async def create_allowance_advance(
     employee_id: int,
     data: AllowanceAdvanceCreate,
@@ -818,7 +818,7 @@ async def create_allowance_advance(
     return {"ok": True, **_allowance_advance_payload(advance)}
 
 
-@router.post("/api/allowance-advances/{advance_id}/cancel")
+@router.post("/api/allowance-advances/{advance_id}/cancel", dependencies=[Depends(require_permission("action_hr_manage_allowances"))])
 async def cancel_allowance_advance(
     advance_id: int,
     db: AsyncSession = Depends(get_async_session),
@@ -1086,7 +1086,7 @@ async def get_attendance(emp_id: int = None, period: str = None, db: AsyncSessio
         for r in records
     ]
 
-@router.post("/api/attendance")
+@router.post("/api/attendance", dependencies=[Depends(require_permission("action_hr_log_attendance"))])
 async def log_attendance(data: AttendanceCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     attendance_date = date.fromisoformat(data.date)
     status = _normalize_attendance_status(data.status)
@@ -1148,7 +1148,7 @@ async def delete_attendance(
     return {"ok": True}
 
 
-@router.post("/api/attendance/auto-today")
+@router.post("/api/attendance/auto-today", dependencies=[Depends(require_permission("action_hr_log_attendance"))])
 async def auto_mark_today(db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """Auto-log all active employees today using their persistent attendance mode."""
     today = date.today()
@@ -1176,7 +1176,7 @@ async def auto_mark_today(db: AsyncSession = Depends(get_async_session), current
         "date": str(today),
     }
 
-@router.post("/api/attendance/mark-absent")
+@router.post("/api/attendance/mark-absent", dependencies=[Depends(require_permission("action_hr_log_attendance"))])
 async def mark_absent_today(data: AttendanceCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """Keep an employee absent every day until they are manually marked present."""
     today = date.today()
@@ -1196,7 +1196,7 @@ async def mark_absent_today(data: AttendanceCreate, db: AsyncSession = Depends(g
         "auto_status": employee.attendance_auto_status,
     }
 
-@router.post("/api/attendance/mark-present")
+@router.post("/api/attendance/mark-present", dependencies=[Depends(require_permission("action_hr_log_attendance"))])
 async def mark_present_today(data: AttendanceCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """Return an employee to the default auto-present mode."""
     today = date.today()

@@ -85,7 +85,7 @@ def normalize_item_type(value):
 
 
 # ── PREVIEW ────────────────────────────────────────────
-@router.post("/api/preview")
+@router.post("/api/preview", dependencies=[Depends(require_permission("action_import_preview"))])
 async def preview_file(file: UploadFile = File(...)):
     contents = await file.read()
     wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
@@ -99,7 +99,7 @@ async def preview_file(file: UploadFile = File(...)):
 
 
 # ── PRODUCTS ───────────────────────────────────────────
-@router.post("/api/products")
+@router.post("/api/products", dependencies=[Depends(require_permission("action_import_products"))])
 async def import_products(file: UploadFile = File(...), db: AsyncSession = Depends(get_async_session)):
     contents = await file.read()
     wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
@@ -185,7 +185,7 @@ async def import_products(file: UploadFile = File(...), db: AsyncSession = Depen
 
 
 # ── STOCK ──────────────────────────────────────────────
-@router.post("/api/stock")
+@router.post("/api/stock", dependencies=[Depends(require_permission("action_import_stock"))])
 async def import_stock(file: UploadFile = File(...), db: AsyncSession = Depends(get_async_session)):
     contents = await file.read()
     wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
@@ -257,7 +257,7 @@ async def import_stock(file: UploadFile = File(...), db: AsyncSession = Depends(
 
 
 # ── CUSTOMERS ──────────────────────────────────────────
-@router.post("/api/customers")
+@router.post("/api/customers", dependencies=[Depends(require_permission("action_import_customers"))])
 async def import_customers(file: UploadFile = File(...), db: AsyncSession = Depends(get_async_session)):
     contents = await file.read()
     wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
@@ -309,7 +309,7 @@ async def import_customers(file: UploadFile = File(...), db: AsyncSession = Depe
 
 # ── SALES IMPORT ───────────────────────────────────────
 
-@router.post("/api/sales")
+@router.post("/api/sales", dependencies=[Depends(require_permission("action_import_sales"))])
 async def import_sales_endpoint(
     file: UploadFile = File(...),
     dry_run: bool = Form(True),
@@ -443,7 +443,7 @@ def _extract_filename(notes: str | None) -> str:
         return notes[:40] if notes else ""
 
 
-@router.delete("/api/sales/batch/{batch_id}")
+@router.delete("/api/sales/batch/{batch_id}", dependencies=[Depends(require_permission("action_import_delete_batch"))])
 async def delete_import_batch(
     batch_id: str,
     db: AsyncSession = Depends(get_async_session),
@@ -551,7 +551,7 @@ async def delete_import_batch(
 
 # ── B2B SALES IMPORT ────────────────────────────────────────────────────────
 
-@router.post("/api/b2b-sales")
+@router.post("/api/b2b-sales", dependencies=[Depends(require_permission("action_import_b2b_sales"))])
 async def import_b2b_sales_endpoint(
     file: UploadFile = File(...),
     dry_run: bool = Form(True),
@@ -665,7 +665,7 @@ async def list_b2b_import_batches(
     return {"batches": batches}
 
 
-@router.delete("/api/b2b-sales/batch/{batch_id}")
+@router.delete("/api/b2b-sales/batch/{batch_id}", dependencies=[Depends(require_permission("action_import_delete_batch"))])
 async def delete_b2b_import_batch(
     batch_id: str,
     db: AsyncSession = Depends(get_async_session),
@@ -769,7 +769,7 @@ async def delete_b2b_import_batch(
 
 
 # ── UI ─────────────────────────────────────────────────
-@router.post("/api/farm-intake")
+@router.post("/api/farm-intake", dependencies=[Depends(require_permission("action_import_farm_intake"))])
 async def import_farm_intake_endpoint(
     file: UploadFile = File(...),
     dry_run: bool = Form(True),
@@ -844,7 +844,7 @@ async def download_farm_intake_template(_=Depends(get_current_user)):
     )
 
 
-@router.post("/api/expenses")
+@router.post("/api/expenses", dependencies=[Depends(require_permission("action_import_expenses"))])
 async def import_expenses_endpoint(
     file: UploadFile = File(...),
     dry_run: bool = Form(True),
@@ -924,7 +924,7 @@ async def list_expenses_batches(
     return await list_expense_import_batches(db)
 
 
-@router.delete("/api/expenses/batch/{batch_id}")
+@router.delete("/api/expenses/batch/{batch_id}", dependencies=[Depends(require_permission("action_import_delete_batch"))])
 async def delete_expenses_batch(
     batch_id: str,
     db: AsyncSession = Depends(get_async_session),
@@ -933,7 +933,7 @@ async def delete_expenses_batch(
     return await revert_expense_import_batch(db, batch_id, current_user)
 
 
-@router.post("/api/receive-products")
+@router.post("/api/receive-products", dependencies=[Depends(require_permission("action_import_receive_products"))])
 async def import_receive_products_endpoint(
     file: UploadFile = File(...),
     dry_run: bool = Form(True),
@@ -1015,7 +1015,7 @@ async def list_receive_products_batches(
     return await list_receive_import_batches(db)
 
 
-@router.delete("/api/receive-products/batch/{batch_id}")
+@router.delete("/api/receive-products/batch/{batch_id}", dependencies=[Depends(require_permission("action_import_delete_batch"))])
 async def delete_receive_products_batch(
     batch_id: str,
     db: AsyncSession = Depends(get_async_session),
@@ -1032,7 +1032,7 @@ async def list_farm_batches(
     return await list_farm_intake_import_batches(db)
 
 
-@router.delete("/api/farm-intake/batch/{batch_id}")
+@router.delete("/api/farm-intake/batch/{batch_id}", dependencies=[Depends(require_permission("action_import_delete_batch"))])
 async def delete_farm_batch(
     batch_id: str,
     db: AsyncSession = Depends(get_async_session),

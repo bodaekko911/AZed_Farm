@@ -180,7 +180,7 @@ async def get_low_stock_products(
     }
 
 
-@router.post("/api/low-stock/draft-purchases")
+@router.post("/api/low-stock/draft-purchases", dependencies=[Depends(require_permission("action_suppliers_purchase_create"))])
 async def create_low_stock_draft_purchases(
     data: LowStockDraftRequest,
     db: AsyncSession = Depends(get_async_session),

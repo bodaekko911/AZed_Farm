@@ -9,7 +9,7 @@ from datetime import date
 
 from app.database import get_async_session
 from app.core.log import record
-from app.core.permissions import get_current_user, require_permission
+from app.core.permissions import get_current_user, require_admin, require_permission
 from app.core.navigation import render_app_header
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, WeatherLog
 from app.models.product import Product
@@ -41,7 +41,7 @@ class DeliveryCreate(BaseModel):
 
 # ── SEED FARMS ─────────────────────────────────────────
 @router.post("/api/seed-farms")
-async def seed_farms(db: AsyncSession = Depends(get_async_session)):
+async def seed_farms(db: AsyncSession = Depends(get_async_session), _: User = Depends(require_admin)):
     cnt_result = await db.execute(select(func.count()).select_from(Farm))
     count = cnt_result.scalar()
     if count > 0:
@@ -70,7 +70,7 @@ async def get_farms(db: AsyncSession = Depends(get_async_session)):
         for f in farms
     ]
 
-@router.post("/api/farms")
+@router.post("/api/farms", dependencies=[Depends(require_permission("action_farm_create"))])
 async def create_farm(name: str, location: str = "", notes: str = "", db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     name = name.strip()
     if not name:
