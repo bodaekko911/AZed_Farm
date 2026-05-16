@@ -2236,10 +2236,24 @@ function renderB2BClients(clients){
             <td class="mono" style="font-size:12px">${client.credit_limit.toFixed(2)}</td>
             <td class="mono" style="font-size:12px">${client.discount_pct.toFixed(2)}%</td>
             <td>
-                <button style="background:transparent;border:1px solid var(--border2);color:var(--sub);font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;font-family:var(--sans);"
-                    onmouseenter="this.style.borderColor='var(--blue)';this.style.color='var(--blue)'"
-                    onmouseleave="this.style.borderColor='var(--border2)';this.style.color='var(--sub)'"
-                    onclick="openB2BClientStatement(${client.id})">Statement</button>
+                <div style="display:flex;gap:5px;flex-wrap:wrap">
+                    <button style="background:transparent;border:1px solid var(--border2);color:var(--sub);font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;font-family:var(--sans);"
+                        onmouseenter="this.style.borderColor='var(--blue)';this.style.color='var(--blue)'"
+                        onmouseleave="this.style.borderColor='var(--border2)';this.style.color='var(--sub)'"
+                        onclick="openB2BClientStatement(${client.id})">Statement</button>
+                    ${client.is_consignment && client.outstanding > 0.01
+                        ? `<button style="background:transparent;border:1px solid var(--border2);color:var(--sub);font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;font-family:var(--sans);"
+                            onmouseenter="this.style.borderColor='var(--teal)';this.style.color='var(--teal)'"
+                            onmouseleave="this.style.borderColor='var(--border2)';this.style.color='var(--sub)'"
+                            onclick="openConsModal(${client.id},'${client.name.replace(/'/g,"\\'")}',${client.outstanding})">💰 Record Payment</button>`
+                        : ""}
+                    ${client.outstanding > 0.01
+                        ? `<button style="background:transparent;border:1px solid var(--border2);color:var(--sub);font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;font-family:var(--sans);"
+                            onmouseenter="this.style.borderColor='var(--danger)';this.style.color='var(--danger)'"
+                            onmouseleave="this.style.borderColor='var(--border2)';this.style.color='var(--sub)'"
+                            onclick="openRefundModal(${client.id},'${client.name.replace(/'/g,"\\'")}',${client.outstanding})">Client Refund</button>`
+                        : ""}
+                </div>
             </td>
         </tr>`).join("");
 }
@@ -2316,12 +2330,6 @@ function renderB2BInvoices(invoices){
                     onmouseenter="this.style.borderColor='var(--warn)';this.style.color='var(--warn)'"
                     onmouseleave="this.style.borderColor='var(--border2)';this.style.color='var(--sub)'"
                     onclick="openCollectModal(${i.id},'${i.invoice_number}',${i.balance_due})">💵 Collect</button>`
-                : ""}
-            ${isCons && !isPaid
-                ? `<button style="background:transparent;border:1px solid var(--border2);color:var(--sub);font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;font-family:var(--sans);"
-                    onmouseenter="this.style.borderColor='var(--teal)';this.style.color='var(--teal)'"
-                    onmouseleave="this.style.borderColor='var(--border2)';this.style.color='var(--sub)'"
-                    onclick="openConsModal(${i.client_id},'${i.client.replace(/'/g,"\\'")}',${i.client_outstanding})">💰 Record Client Payment</button>`
                 : ""}
             ${i.client_outstanding > 0.01
                 ? `<button style="background:transparent;border:1px solid var(--border2);color:var(--sub);font-size:12px;font-weight:600;padding:5px 10px;border-radius:7px;cursor:pointer;font-family:var(--sans);"

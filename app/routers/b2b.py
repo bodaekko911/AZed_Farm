@@ -2057,28 +2057,7 @@ td.name{color:var(--text);font-weight:600;}
     </div>
 </div>
 
-<!-- PAYMENT MODAL -->
-<div class="modal-bg" id="pay-modal">
-    <div class="modal" style="width:420px">
-        <div class="modal-title">Record Payment</div>
-        <div class="modal-sub" id="pay-modal-sub">Invoice</div>
-        <div style="background:rgba(0,255,157,.06);border:1px solid rgba(0,255,157,.15);border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:12px;color:var(--green);">
-            Recording this payment will move the amount from <b>Deferred Revenue → Sales Revenue</b>
-        </div>
-        <div class="fld"><label>Amount *</label><input id="pay-amount" type="number" placeholder="0.00" min="0.01" step="any"></div>
-        <div class="fld"><label>Method</label>
-            <select id="pay-method">
-                <option value="cash">Cash</option>
-                <option value="transfer">Bank Transfer</option>
-                <option value="check">Check</option>
-            </select>
-        </div>
-        <div class="modal-actions">
-            <button class="btn-cancel" onclick="document.getElementById('pay-modal').classList.remove('open')">Cancel</button>
-            <button class="btn btn-warn" onclick="savePayment()">Record Payment</button>
-        </div>
-    </div>
-</div>
+<!-- PAYMENT MODAL REMOVED — payment collection happens in Accounting → B2B Clients -->
 
 <!-- CONSIGNMENT SETTLE PANEL -->
 <div class="side-bg" id="side-bg" onclick="closeSide()"></div>
@@ -2090,35 +2069,7 @@ td.name{color:var(--text);font-weight:600;}
     <div class="side-body" id="side-body"></div>
 </div>
 
-<!-- CONSIGNMENT PAYMENT MODAL -->
-<div class="modal-bg" id="cons-pay-modal">
-    <div class="modal" style="width:440px">
-        <div class="modal-title">💰 Record Consignment Payment</div>
-        <div class="modal-sub" id="cons-pay-sub">Invoice</div>
-        <div style="background:rgba(45,212,191,.06);border:1px solid rgba(45,212,191,.15);border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:12px;color:var(--teal);">
-            This records cash received from the consignment client.<br>
-            Amount moves from <b>Deferred Revenue → Sales Revenue</b>.
-        </div>
-        <div class="fld">
-            <label>Amount Paid *</label>
-            <input id="cons-pay-amount" type="number" placeholder="0.00" min="0.01" step="any">
-        </div>
-        <div class="fld">
-            <label>For which month's sales?</label>
-            <select id="cons-pay-month">
-                <option value="">General payment (no specific month)</option>
-            </select>
-        </div>
-        <div class="fld">
-            <label>Notes</label>
-            <input id="cons-pay-notes" placeholder="Optional notes...">
-        </div>
-        <div class="modal-actions">
-            <button class="btn-cancel" onclick="document.getElementById('cons-pay-modal').classList.remove('open')">Cancel</button>
-            <button class="btn btn-teal" onclick="saveConsPayment()">Record Payment & Recognize Revenue</button>
-        </div>
-    </div>
-</div>
+<!-- CONSIGNMENT PAYMENT MODAL REMOVED — consignment payments are recorded in Accounting → B2B Clients on the client account, not against a specific invoice -->
 
 <div class="toast" id="toast"></div>
 
@@ -2209,7 +2160,6 @@ let clientAnalysis = null;
 let selectedType  = "cash";
 let editingClientId  = null;
 let editingInvoiceId = null;
-let payingInvoiceId  = null;
 let settlingConsId   = null;
 let searchTimer      = null;
 let isAdmin = false; // set by initUser() via configureB2BPermissions(u)
@@ -3046,8 +2996,8 @@ function renderInvoices(invoices){
     }
     const typeLabel={cash:"💵 Cash",full_payment:"📋 Full Payment",consignment:"🔄 Consignment"};
     document.getElementById("invoices-body").innerHTML = invoices.map(i=>{
+        // Payment collection is recorded in Accounting → B2B Clients, not from the B2B invoices list.
         let actionBtns=`<div style="display:flex;gap:5px;flex-wrap:wrap">
-            ${i.balance_due > 0 && (isAdmin || hasPermission("action_b2b_approve")) ? `<button class="action-btn green" onclick="openPayModal(${i.id},'${i.invoice_number}',${i.balance_due})">Collect</button>` : ""}
             <button class="action-btn" onclick="window.open('/b2b/invoice/${i.id}/print','_blank')">🖨 Print</button>
             ${(isAdmin || hasPermission("action_b2b_delete"))?`<button class="action-btn danger" onclick="deleteInvoice(${i.id},'${i.invoice_number}')">Delete</button>`:""}
         </div>`;
@@ -3065,65 +3015,9 @@ function renderInvoices(invoices){
     }).join("");
 }
 
-/* ── PAYMENT ── */
-function openPayModal(id,num,balance){
-    payingInvoiceId=id;
-    document.getElementById("pay-modal-sub").innerText=`${num} — Balance: ${balance.toFixed(2)} EGP`;
-    document.getElementById("pay-amount").value=balance.toFixed(2);
-    document.getElementById("pay-modal").classList.add("open");
-}
+/* ── PAYMENT ── Removed: payment collection happens in Accounting → B2B Clients */
 
-async function savePayment(){
-    let amount=parseFloat(document.getElementById("pay-amount").value)||0;
-    if(amount<=0){ showToast("Enter a valid amount"); return; }
-    let res=await fetch(`/b2b/api/invoices/${payingInvoiceId}/pay`,{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({amount,method:document.getElementById("pay-method").value}),
-    });
-    let data=await res.json();
-    if(data.detail){ showToast("Error: "+data.detail); return; }
-    document.getElementById("pay-modal").classList.remove("open");
-    showToast(`Payment recorded ✓ — Revenue recognized! Status: ${data.status}`);
-    loadInvoices(); loadClients(); loadStats();
-}
-
-/* ── CONSIGNMENT PAYMENT ── */
-let consPayingInvoiceId = null;
-
-function openConsPayModal(id, num, balance){
-    consPayingInvoiceId = id;
-    document.getElementById("cons-pay-sub").innerText = `${num} — Balance: ${balance.toFixed(2)} EGP`;
-    document.getElementById("cons-pay-amount").value  = balance.toFixed(2);
-    document.getElementById("cons-pay-notes").value   = "";
-
-    // Fill month selector with last 12 months
-    let sel = document.getElementById("cons-pay-month");
-    sel.innerHTML = '<option value="">General payment (no specific month)</option>';
-    let d = new Date();
-    for(let i=0; i<12; i++){
-        let label = d.toLocaleDateString("en-GB",{month:"long",year:"numeric"});
-        sel.innerHTML += `<option value="${label}">${label}</option>`;
-        d.setMonth(d.getMonth()-1);
-    }
-
-    document.getElementById("cons-pay-modal").classList.add("open");
-}
-
-async function saveConsPayment(){
-    let amount = parseFloat(document.getElementById("cons-pay-amount").value)||0;
-    if(amount<=0){ showToast("Enter a valid amount"); return; }
-    let month  = document.getElementById("cons-pay-month").value;
-    let notes  = document.getElementById("cons-pay-notes").value.trim()||null;
-    let res    = await fetch(`/b2b/api/invoices/${consPayingInvoiceId}/consignment-payment`,{
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({amount, month_label:month||null, notes}),
-    });
-    let data = await res.json();
-    if(data.detail){ showToast("Error: "+data.detail); return; }
-    document.getElementById("cons-pay-modal").classList.remove("open");
-    showToast(`✓ ${data.amount.toFixed(2)} EGP recorded — Revenue recognized! ${month?"("+month+")":""}`);
-    loadInvoices(); loadClients(); loadStats();
-}
+/* ── CONSIGNMENT PAYMENT ── Removed: consignment payments are recorded on the client account in Accounting → B2B Clients */
 
 /* ── CONSIGNMENTS ── */
 async function loadConsignments(){
@@ -3238,8 +3132,9 @@ async function saveSettle(){
     loadConsignments(); loadClients(); loadStats();
 }
 
-["client-modal","invoice-modal","pay-modal","cons-pay-modal","pl-modal"].forEach(id=>{
-    document.getElementById(id).addEventListener("click",function(e){ if(e.target===this) this.classList.remove("open"); });
+["client-modal","invoice-modal","pl-modal"].forEach(id=>{
+    let el = document.getElementById(id);
+    if(el) el.addEventListener("click",function(e){ if(e.target===this) this.classList.remove("open"); });
 });
 
 let toastTimer=null;
