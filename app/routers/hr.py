@@ -2214,9 +2214,11 @@ function safeStatusClass(value){
 async function init(){
     // Auto-mark all present today on page load
     await fetch("/hr/api/attendance/auto-today", {method:"POST"});
-    await loadSummary();
+    // Employees first — the Monthly Allowances stat is derived from this
+    // array, so loadSummary() must run AFTER it's populated.
     await loadEmployeeFarms();
     await loadEmployees();
+    await loadSummary();
 }
 
 async function loadSummary(){
@@ -2268,6 +2270,7 @@ async function loadEmployees(){
     if(!employees.length){
         document.getElementById("emp-body").innerHTML =
             `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No employees found</td></tr>`;
+        updateAllowanceStat();
         return;
     }
 
@@ -2290,6 +2293,10 @@ async function loadEmployees(){
             </td>
         </tr>`;
     }).join("");
+
+    // Refresh the Monthly Allowances stat whenever the employees array
+    // changes — without this, the box stays at "0 EGP" on first load.
+    updateAllowanceStat();
 }
 
 function openEditEmpFromButton(btn){
