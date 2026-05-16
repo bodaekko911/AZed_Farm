@@ -73,16 +73,16 @@
   } catch (_e) {}
   // ───────────────────────────────────────────────────────────────────────
 
-  // ── FLICKER SUPPRESSION (page-level fade-in) ───────────────────────────
+  // ── FLICKER SUPPRESSION + BRANDED SPLASH ──────────────────────────────
   // Every page makes 3-5 parallel API calls (/me, /customers, /products-
   // cache, /unpaid-invoices, etc.) and each response paints into a
-  // different section of the page. To the user this looks like multiple
-  // fast black flashes 1-3 seconds after load — sections snapping into
-  // existence one by one against the dark card background.
+  // different section of the page. Without coordination this shows as
+  // multiple black flickers as sections snap into existence one by one.
   //
-  // Fix: keep the body invisible (opacity 0) for the first moment of the
-  // page, then fade in smoothly once the network goes quiet. This shows
-  // the user a single coordinated reveal instead of N staggered pops.
+  // Fix: keep the body invisible during the initial load, but cover the
+  // page with a branded splash (logo + pulsing accent line) so the user
+  // sees an intentional, elegant loading moment instead of a blank
+  // screen. Once the network goes quiet, the splash and body cross-fade.
   //
   // Safety: a hard 1500ms cap guarantees the page is always visible,
   // even if a request hangs.
@@ -90,17 +90,108 @@
     if (document.getElementById("app-flicker-suppression-style")) return;
     var style = document.createElement("style");
     style.id = "app-flicker-suppression-style";
+    var bgDark = "#060810";
+    var bgLight = "#f4f5ef";
+    var bg = appliedTheme === "light" ? bgLight : bgDark;
     style.textContent = [
       // Body starts invisible. The .app-ready class fades it in.
       "html.app-fading body { opacity: 0; }",
-      "html.app-fading.app-ready body { opacity: 1; transition: opacity 220ms ease-out; }",
-      // Make sure the html itself stays the correct theme color during
-      // the invisible moment, so it's never a blank white screen.
-      "html { background-color: var(--bg, " + (appliedTheme === "light" ? "#f4f5ef" : "#060810") + "); }",
-      // Print: never fade, never hide.
-      "@media print { html.app-fading body { opacity: 1 !important; } }"
+      "html.app-fading.app-ready body { opacity: 1; transition: opacity 320ms ease-out; }",
+      // Keep <html> the correct theme color the whole time.
+      "html { background-color: var(--bg, " + bg + "); }",
+
+      // ── Splash overlay ──",
+      "#app-splash {",
+      "  position: fixed; inset: 0; z-index: 2147483600;",
+      "  display: flex; flex-direction: column; align-items: center; justify-content: center;",
+      "  gap: 28px;",
+      "  background: " + bg + ";",
+      "  background-image: radial-gradient(ellipse at 50% 40%, rgba(0,229,255,0.06), transparent 55%), radial-gradient(ellipse at 50% 70%, rgba(217,119,6,0.05), transparent 60%);",
+      "  opacity: 1; transition: opacity 380ms ease-out;",
+      "  pointer-events: auto;",
+      "}",
+      'html[data-theme="light"] #app-splash {',
+      "  background: " + bgLight + ";",
+      "  background-image: radial-gradient(ellipse at 50% 40%, rgba(0,184,212,0.08), transparent 55%), radial-gradient(ellipse at 50% 70%, rgba(217,119,6,0.06), transparent 60%);",
+      "}",
+      "#app-splash.app-splash-hide { opacity: 0; pointer-events: none; }",
+
+      // Logo card — horizontal, sized for the AZed wordmark lockup.
+      "#app-splash .splash-logo {",
+      "  min-width: 220px; height: 96px;",
+      "  padding: 0 28px;",
+      "  border-radius: 22px;",
+      "  background: rgba(255,255,255,0.04);",
+      "  border: 1px solid rgba(255,255,255,0.08);",
+      "  display: flex; align-items: center; justify-content: center;",
+      "  box-shadow: 0 20px 50px rgba(0,0,0,0.35), 0 0 0 1px rgba(0,229,255,0.08);",
+      "  animation: splashLogoIn 520ms cubic-bezier(.22,.9,.3,1.2) both;",
+      "}",
+      'html[data-theme="light"] #app-splash .splash-logo {',
+      "  background: rgba(255,255,255,0.85);",
+      "  border-color: rgba(0,0,0,0.06);",
+      "  box-shadow: 0 18px 44px rgba(15,23,42,0.12);",
+      "}",
+      "#app-splash .splash-logo img { height: 56px; width: auto; object-fit: contain; display: block; }",
+
+      // Word-mark
+      "#app-splash .splash-name {",
+      "  font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;",
+      "  font-size: 13px; letter-spacing: 4px; font-weight: 600;",
+      "  text-transform: uppercase;",
+      "  color: rgba(240,244,255,0.55);",
+      "  animation: splashFadeUp 600ms ease-out 120ms both;",
+      "}",
+      'html[data-theme="light"] #app-splash .splash-name { color: rgba(26,30,20,0.55); }',
+
+      // Pulsing accent bar
+      "#app-splash .splash-bar {",
+      "  width: 140px; height: 2px; border-radius: 2px;",
+      "  background: linear-gradient(90deg, transparent, #00E5FF, #d97706, transparent);",
+      "  background-size: 200% 100%;",
+      "  animation: splashBar 1400ms ease-in-out infinite, splashFadeUp 600ms ease-out 220ms both;",
+      "  opacity: 0.85;",
+      "}",
+      'html[data-theme="light"] #app-splash .splash-bar { background: linear-gradient(90deg, transparent, #00B8D4, #b45309, transparent); background-size: 200% 100%; }',
+
+      "@keyframes splashLogoIn {",
+      "  0% { opacity: 0; transform: scale(0.86) translateY(6px); }",
+      "  100% { opacity: 1; transform: scale(1) translateY(0); }",
+      "}",
+      "@keyframes splashFadeUp {",
+      "  0% { opacity: 0; transform: translateY(6px); }",
+      "  100% { opacity: 1; transform: translateY(0); }",
+      "}",
+      "@keyframes splashBar {",
+      "  0% { background-position: 100% 50%; }",
+      "  100% { background-position: -100% 50%; }",
+      "}",
+
+      // Respect users who don't want motion.
+      "@media (prefers-reduced-motion: reduce) {",
+      "  #app-splash, #app-splash .splash-logo, #app-splash .splash-name, #app-splash .splash-bar { animation: none !important; transition: opacity 200ms linear !important; }",
+      "  html.app-fading.app-ready body { transition: opacity 200ms linear; }",
+      "}",
+
+      // Print: never show splash or hide body.
+      "@media print { html.app-fading body { opacity: 1 !important; } #app-splash { display: none !important; } }"
     ].join("\n");
     (document.head || document.documentElement).appendChild(style);
+  }
+
+  function mountSplash() {
+    if (document.getElementById("app-splash")) return;
+    // We have to mount into <html> if <body> doesn't exist yet (we run in
+    // <head>, before body parses). The element is appended to <body>
+    // later once it exists; until then it lives directly on <html>.
+    var splash = document.createElement("div");
+    splash.id = "app-splash";
+    splash.setAttribute("aria-hidden", "true");
+    splash.innerHTML =
+      '<div class="splash-logo"><img src="/static/ERP_logo.png" alt="AZed ERP" /></div>' +
+      '<div class="splash-name">Enterprise Resource Planning</div>' +
+      '<div class="splash-bar"></div>';
+    (document.body || document.documentElement).appendChild(splash);
   }
 
   function installFadeInCoordinator() {
@@ -108,21 +199,37 @@
     window.__appFadeInInstalled = true;
 
     document.documentElement.classList.add("app-fading");
+    mountSplash();
+    // If body wasn't ready yet, re-anchor the splash inside <body> once
+    // it parses (keeps DOM tidy and stacking contexts predictable).
+    if (!document.body) {
+      document.addEventListener("DOMContentLoaded", function () {
+        var s = document.getElementById("app-splash");
+        if (s && s.parentNode !== document.body) document.body.appendChild(s);
+      }, { once: true });
+    }
 
     var revealed = false;
     var inflight = 0;
     var quietTimer = null;
     var hardCap = null;
 
+    function hideSplash() {
+      var s = document.getElementById("app-splash");
+      if (!s) return;
+      s.classList.add("app-splash-hide");
+      // Remove from DOM after the fade completes so it never blocks input.
+      setTimeout(function () { if (s && s.parentNode) s.parentNode.removeChild(s); }, 450);
+    }
+
     function reveal() {
       if (revealed) return;
       revealed = true;
       if (quietTimer) { clearTimeout(quietTimer); quietTimer = null; }
       if (hardCap) { clearTimeout(hardCap); hardCap = null; }
-      // Wait one animation frame so any pending DOM writes settle, then
-      // add the class that triggers the fade.
       requestAnimationFrame(function () {
         document.documentElement.classList.add("app-ready");
+        hideSplash();
       });
     }
 
@@ -135,9 +242,7 @@
       }, 300);
     }
 
-    // Wrap fetch to track in-flight requests. We intentionally install
-    // this BEFORE auth-guard.js wraps fetch, so auth-guard's wrapper
-    // sits on top of ours — both still work.
+    // Wrap fetch to track in-flight requests.
     var _origFetch = window.fetch;
     window.fetch = function () {
       inflight += 1;
@@ -160,15 +265,37 @@
       });
     };
 
-    // Hard cap: never leave the page invisible longer than 1.5s,
-    // regardless of network state.
-    hardCap = setTimeout(reveal, 1500);
+    // Minimum splash time so the brand moment feels intentional, not
+    // flashy. Without this, a fully-cached page reveals so fast the
+    // splash looks like a glitch. 380ms is the sweet spot — long enough
+    // to read as "loading," short enough to never feel slow.
+    var minSplashMs = 380;
+    var pageStart = Date.now();
+    function revealWithMinimum() {
+      var elapsed = Date.now() - pageStart;
+      if (elapsed >= minSplashMs) {
+        reveal();
+      } else {
+        setTimeout(reveal, minSplashMs - elapsed);
+      }
+    }
 
-    // Also reveal once DOMContentLoaded fires AND a short quiet window
-    // has passed, in case no fetches are made at all (rare).
+    // Override reveal so it always respects the minimum.
+    var _originalReveal = reveal;
+    reveal = function () {
+      var elapsed = Date.now() - pageStart;
+      if (elapsed >= minSplashMs) {
+        _originalReveal();
+      } else {
+        setTimeout(_originalReveal, minSplashMs - elapsed);
+      }
+    };
+
+    // Hard cap: never leave the page invisible longer than 1.5s.
+    hardCap = setTimeout(function () { _originalReveal(); }, 1500);
+
+    // Reveal once DOM is ready AND quiet, in case no fetches happen.
     function onReady() {
-      // Give the page 250ms to kick off its initial fetches; if it
-      // doesn't, reveal anyway.
       setTimeout(function () {
         if (inflight === 0) reveal();
       }, 250);
