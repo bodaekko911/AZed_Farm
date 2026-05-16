@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update, delete as sql_delete
 from pydantic import BaseModel
 from typing import Optional
 
@@ -212,11 +212,74 @@ async def delete_user(user_id: int, db: AsyncSession = Depends(get_async_session
     if u.role == "admin" and u.is_active and await _active_admin_count(db) <= 1:
         raise HTTPException(status_code=400, detail="Cannot delete the only active admin")
     name = u.name
-    u.is_active = False
+    email = u.email
+
+    # Hard delete. To preserve historical records (invoices, journals, etc.),
+    # null out the user_id on every table that references this user. Tables
+    # with ondelete=CASCADE (e.g. refresh_tokens) are removed automatically by
+    # the database when the user row is deleted.
+    #
+    # Import inside the function to avoid any circular-import risk at module load.
+    from app.models.accounting import Journal
+    from app.models.b2b import B2BInvoice, Consignment, B2BRefund
+    from app.models.carbon import CarbonLog
+    from app.models.expense import Expense
+    from app.models.farm import FarmDelivery
+    from app.models.hr import (
+        EmployeeLoan,
+        EmployeeLoanRepayment,
+        EmployeeAllowanceAdvance,
+        EmployeePayrollDeduction,
+    )
+    from app.models.inventory import StockTransfer, StockMove
+    from app.models.invoice import Invoice
+    from app.models.production import ProductionBatch
+    from app.models.receipt import ProductReceipt
+    from app.models.refund import RetailRefund
+    from app.models.spoilage import SpoilageRecord
+    from app.models.supplier import Purchase, SupplierPayment
+
+    user_id_tables = [
+        (Journal, "user_id"),
+        (B2BInvoice, "user_id"),
+        (Consignment, "user_id"),
+        (B2BRefund, "user_id"),
+        (CarbonLog, "user_id"),
+        (Expense, "user_id"),
+        (FarmDelivery, "user_id"),
+        (EmployeeLoan, "created_by_user_id"),
+        (EmployeeLoanRepayment, "created_by_user_id"),
+        (EmployeeAllowanceAdvance, "created_by_user_id"),
+        (EmployeePayrollDeduction, "created_by_user_id"),
+        (StockTransfer, "user_id"),
+        (StockMove, "user_id"),
+        (Invoice, "user_id"),
+        (ProductionBatch, "user_id"),
+        (ProductReceipt, "user_id"),
+        (RetailRefund, "user_id"),
+        (SpoilageRecord, "user_id"),
+        (Purchase, "user_id"),
+        (SupplierPayment, "user_id"),
+    ]
+
+    for model, column_name in user_id_tables:
+        column = getattr(model, column_name)
+        await db.execute(
+            update(model)
+            .where(column == user_id)
+            .values({column_name: None})
+        )
+
+    # Activity logs (app/core/log.py ActivityLog) keep their user_id snapshot;
+    # the column has no FK constraint, so it stays valid history.
+
+    # Now delete the user row itself. refresh_tokens cascades automatically.
+    await db.execute(sql_delete(User).where(User.id == user_id))
     await db.commit()
+
     log = ActivityLog(user_id=admin.id, user_name=admin.name, user_role=admin.role,
         action="DELETE_USER", module="USERS",
-        description=f"Deactivated user {name}", ref_type="user", ref_id=str(user_id))
+        description=f"Deleted user {name} ({email})", ref_type="user", ref_id=str(user_id))
     db.add(log); await db.commit()
     return {"ok": True}
 
@@ -668,7 +731,6 @@ td.name{color:var(--text);font-weight:600;}
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
         <div class="tabs">
             <button class="tab active" id="tab-users"  onclick="switchTab('users')">Users</button>
-            <button class="tab"        id="tab-logs"   onclick="switchTab('logs')">Activity Log</button>
             <button class="tab"        id="tab-mypass" onclick="switchTab('mypass')">My Password</button>
         </div>
         <div id="add-btn-wrap">
@@ -681,7 +743,7 @@ td.name{color:var(--text);font-weight:600;}
         <div class="toolbar">
             <div class="search-box">
                 <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                <input id="user-search" placeholder="Search name, email, role..." oninput="filterUsers()">
+                <input id="user-search" type="search" name="user-list-filter" autocomplete="search-no-autofill" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Search name, email, role..." oninput="filterUsers()">
             </div>
         </div>
         <div class="table-wrap"><table>
@@ -695,43 +757,7 @@ td.name{color:var(--text);font-weight:600;}
         </table></div>
     </div>
 
-    <!-- ACTIVITY LOG -->
-    <div class="section" id="section-logs">
-        <div class="toolbar">
-            <div class="search-box">
-                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                <input id="log-search" placeholder="Search logs..." oninput="filterLogs()">
-            </div>
-            <select class="sel" id="log-module" onchange="loadLogs()">
-                <option value="">All Modules</option>
-                <option value="Auth">Auth</option>
-                <option value="POS">POS</option>
-                <option value="Refunds">Refunds</option>
-                <option value="B2B">B2B</option>
-                <option value="Customers">Customers</option>
-                <option value="Suppliers">Suppliers</option>
-                <option value="Products">Products</option>
-                <option value="Inventory">Inventory</option>
-                <option value="Production">Production</option>
-                <option value="Farm">Farm</option>
-                <option value="HR">HR</option>
-                <option value="Accounting">Accounting</option>
-                <option value="Users">Users</option>
-            </select>
-            <select class="sel" id="log-user" onchange="loadLogs()">
-                <option value="">All Users</option>
-            </select>
-        </div>
-        <div class="table-wrap"><table>
-            <thead><tr>
-                <th>Date / Time</th><th>User</th><th>Role</th>
-                <th>Module</th><th>Action</th><th>Description</th><th>Reference</th>
-            </tr></thead>
-            <tbody id="logs-body">
-                <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr>
-            </tbody>
-        </table></div>
-    </div>
+    <!-- ACTIVITY LOG TAB REMOVED -->
 
     <!-- MY PASSWORD -->
     <div class="section" id="section-mypass">
@@ -858,7 +884,7 @@ const H = {"Content-Type":"application/json"};
 initializeColorMode();
 initUser();
 
-let allUsers = [], allLogs = [], editingId = null, resetUserId = null;
+let allUsers = [], editingId = null, resetUserId = null;
 let permissionCatalog = {pages: [], roles: []};
 let PAGE_TREE = [];
 let roleDesc = {};
@@ -898,12 +924,11 @@ const roleHighlights = {
 };
 
 function switchTab(tab){
-    ["users","logs","mypass"].forEach(t=>{
+    ["users","mypass"].forEach(t=>{
         document.getElementById("section-"+t).classList.toggle("active", t===tab);
         document.getElementById("tab-"+t).classList.toggle("active", t===tab);
     });
     document.getElementById("add-btn-wrap").style.display = tab==="users"?"":"none";
-    if(tab==="logs") loadLogs();
 }
 
 function hydratePermissionCatalog(catalog){
@@ -948,9 +973,6 @@ async function loadUsers(){
     if(!res.ok){ showToast("Failed to load users"); return; }
     allUsers = await res.json();
     renderUsers(allUsers);
-    let sel = document.getElementById("log-user");
-    sel.innerHTML = `<option value="">All Users</option>` +
-        allUsers.map(u=>`<option value="${u.id}">${u.name}</option>`).join("");
 }
 
 function filterUsers(){
@@ -1357,43 +1379,9 @@ async function changeMyPassword(){
     showToast("✓ Password changed. Please log in again next time with your new password.");
 }
 
-// ── ACTIVITY LOGS ──────────────────────────────────────
-async function loadLogs(){
-    let module = document.getElementById("log-module").value;
-    let uid    = document.getElementById("log-user").value;
-    let url    = "/users/api/logs?limit=500";
-    if(module) url += `&module=${module}`;
-    if(uid)    url += `&user_id=${uid}`;
-    let res = await fetch(url, {headers:H});
-    if(!res.ok){ showToast("Failed to load logs"); return; }
-    allLogs = await res.json();
-    filterLogs();
-}
-
-function filterLogs(){
-    let q = document.getElementById("log-search").value.toLowerCase();
-    let filtered = q ? allLogs.filter(l=>
-        l.user_name.toLowerCase().includes(q)||
-        l.action.toLowerCase().includes(q)||
-        l.description.toLowerCase().includes(q)||
-        l.module.toLowerCase().includes(q)
-    ) : allLogs;
-    if(!filtered.length){
-        document.getElementById("logs-body").innerHTML =
-            `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No activity logs found</td></tr>`;
-        return;
-    }
-    document.getElementById("logs-body").innerHTML = filtered.map(l=>`
-        <tr>
-            <td style="font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap">${l.created_at}</td>
-            <td class="name" style="white-space:nowrap;font-size:13px">${escapeHtml(l.user_name)}</td>
-            <td><span class="role-badge role-${l.user_role}" style="font-size:10px">${escapeHtml(l.user_role)}</span></td>
-            <td><span class="log-module lm-${l.module}">${escapeHtml(l.module)}</span></td>
-            <td style="font-size:12px;color:var(--text);font-weight:600;white-space:nowrap">${escapeHtml(l.action).replace(/_/g," ")}</td>
-            <td style="font-size:12px;color:var(--sub)">${escapeHtml(l.description)}</td>
-            <td style="font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap">${l.ref_id?escapeHtml(l.ref_type)+" "+escapeHtml(l.ref_id):""}</td>
-        </tr>`).join("");
-}
+// ── ACTIVITY LOGS UI REMOVED ───────────────────────────
+// Activity logging still runs in the backend (see app/core/log.py record()),
+// but the viewer tab has been removed from this page.
 
 ["user-modal","reset-modal"].forEach(id=>{
     document.getElementById(id).addEventListener("click",function(e){if(e.target===this)this.classList.remove("open");});

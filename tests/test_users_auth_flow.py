@@ -49,8 +49,30 @@ class FakeUsersCrudSession:
         self.users = users
         self.added = []
         self.commits = 0
+        self.deleted_user_ids: list[int] = []
 
     async def execute(self, statement):
+        # Non-select statements (update, delete) — used by the hard-delete flow
+        # in delete_user. The fake doesn't need to maintain referential integrity
+        # for the dependent tables; it only tracks user deletes so tests can assert
+        # the row was removed.
+        stmt_type = type(statement).__name__
+        if stmt_type == "Update":
+            return FakeScalarResult(None)
+        if stmt_type == "Delete":
+            # Try to extract the id filter so we can drop the user from self.users
+            target_id = None
+            for expr in getattr(statement, "_where_criteria", []):
+                right = getattr(expr, "right", None)
+                value = getattr(right, "value", None)
+                if value is not None:
+                    target_id = value
+                    break
+            if target_id is not None:
+                self.deleted_user_ids.append(target_id)
+                self.users = [u for u in self.users if getattr(u, "id", None) != target_id]
+            return FakeScalarResult(None)
+
         compiled = statement.compile()
         criteria = {}
         for expr in statement._where_criteria:
@@ -314,7 +336,7 @@ def test_update_user_removes_role_default_permission_and_reopen_matches_saved_st
     assert reopened["permissions"] == serialize_permissions(final_permissions.split(","))
 
 
-def test_delete_user_deactivates_user() -> None:
+def test_delete_user_hard_deletes_user() -> None:
     admin = User(id=1, name="Admin", email="admin@example.com", password="x", role="admin", is_active=True)
     target = User(id=2, name="Cashier", email="cashier@example.com", password="x", role="cashier", is_active=True)
     fake_db = FakeUsersCrudSession([admin, target])
@@ -322,7 +344,9 @@ def test_delete_user_deactivates_user() -> None:
     result = __import__("asyncio").run(delete_user(2, db=fake_db, admin=admin))
 
     assert result == {"ok": True}
-    assert target.is_active is False
+    # Hard delete: the user row is removed, not just deactivated.
+    assert 2 in fake_db.deleted_user_ids
+    assert all(getattr(u, "id", None) != 2 for u in fake_db.users)
 
 
 def test_get_users_marks_only_admin_as_not_deletable() -> None:
