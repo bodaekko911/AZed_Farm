@@ -73,40 +73,111 @@
   } catch (_e) {}
   // ───────────────────────────────────────────────────────────────────────
 
-  // ── FLICKER SUPPRESSION ───────────────────────────────────────────────
-  // Many pages re-render tables/grids by doing `el.innerHTML = ""` then
-  // immediately re-assigning new HTML. The empty moment exposes the dark
-  // body background and reads as a black flash, especially when multiple
-  // API calls land in quick succession 1–3s after page load.
+  // ── FLICKER SUPPRESSION (page-level fade-in) ───────────────────────────
+  // Every page makes 3-5 parallel API calls (/me, /customers, /products-
+  // cache, /unpaid-invoices, etc.) and each response paints into a
+  // different section of the page. To the user this looks like multiple
+  // fast black flashes 1-3 seconds after load — sections snapping into
+  // existence one by one against the dark card background.
   //
-  // The rule below paints every common container with the same surface
-  // colour as the page card so the "empty" moment is invisible, and adds
-  // a 120ms cross-fade so newly inserted rows don't pop in harshly.
+  // Fix: keep the body invisible (opacity 0) for the first moment of the
+  // page, then fade in smoothly once the network goes quiet. This shows
+  // the user a single coordinated reveal instead of N staggered pops.
+  //
+  // Safety: a hard 1500ms cap guarantees the page is always visible,
+  // even if a request hangs.
   function installFlickerSuppressionStyle() {
     if (document.getElementById("app-flicker-suppression-style")) return;
     var style = document.createElement("style");
     style.id = "app-flicker-suppression-style";
     style.textContent = [
-      // Containers that get cleared+refilled keep showing the card color
-      // (not the body bg) during the rewrite gap.
-      "tbody, .cat-grid, .grid, #grid, #rows-body, #inv-items, #refund-items, #po-items, #delivery-items, #je-entries, #tb-foot, #cat-grid, #side-body {",
-      "  background-color: var(--card, var(--surface, transparent));",
-      "  transition: opacity 120ms ease;",
-      "}",
-      // Empty containers (innerHTML='') keep the card color and a soft
-      // opacity so the flash isn't visible against the page.
-      "tbody:empty, .cat-grid:empty, .grid:empty, #grid:empty, #rows-body:empty,",
-      "#inv-items:empty, #refund-items:empty, #po-items:empty, #delivery-items:empty,",
-      "#je-entries:empty, #tb-foot:empty, #cat-grid:empty, #side-body:empty {",
-      "  opacity: 0.92;",
-      "  background-color: var(--card, var(--surface, transparent));",
-      "}",
-      // Body itself never flashes — it has the theme bg from the inline",
-      // style we set on <html>, and a stable solid bg layered behind any",
-      // late CSS.",
-      "html, body { background-color: var(--bg, " + (appliedTheme === "light" ? "#f4f5ef" : "#060810") + "); }"
+      // Body starts invisible. The .app-ready class fades it in.
+      "html.app-fading body { opacity: 0; }",
+      "html.app-fading.app-ready body { opacity: 1; transition: opacity 220ms ease-out; }",
+      // Make sure the html itself stays the correct theme color during
+      // the invisible moment, so it's never a blank white screen.
+      "html { background-color: var(--bg, " + (appliedTheme === "light" ? "#f4f5ef" : "#060810") + "); }",
+      // Print: never fade, never hide.
+      "@media print { html.app-fading body { opacity: 1 !important; } }"
     ].join("\n");
     (document.head || document.documentElement).appendChild(style);
+  }
+
+  function installFadeInCoordinator() {
+    if (window.__appFadeInInstalled) return;
+    window.__appFadeInInstalled = true;
+
+    document.documentElement.classList.add("app-fading");
+
+    var revealed = false;
+    var inflight = 0;
+    var quietTimer = null;
+    var hardCap = null;
+
+    function reveal() {
+      if (revealed) return;
+      revealed = true;
+      if (quietTimer) { clearTimeout(quietTimer); quietTimer = null; }
+      if (hardCap) { clearTimeout(hardCap); hardCap = null; }
+      // Wait one animation frame so any pending DOM writes settle, then
+      // add the class that triggers the fade.
+      requestAnimationFrame(function () {
+        document.documentElement.classList.add("app-ready");
+      });
+    }
+
+    function scheduleQuietCheck() {
+      if (revealed) return;
+      if (quietTimer) clearTimeout(quietTimer);
+      // Network has been quiet for 300ms => assume initial paint is done.
+      quietTimer = setTimeout(function () {
+        if (inflight === 0) reveal();
+      }, 300);
+    }
+
+    // Wrap fetch to track in-flight requests. We intentionally install
+    // this BEFORE auth-guard.js wraps fetch, so auth-guard's wrapper
+    // sits on top of ours — both still work.
+    var _origFetch = window.fetch;
+    window.fetch = function () {
+      inflight += 1;
+      var p;
+      try {
+        p = _origFetch.apply(this, arguments);
+      } catch (err) {
+        inflight -= 1;
+        scheduleQuietCheck();
+        throw err;
+      }
+      return p.then(function (res) {
+        inflight -= 1;
+        scheduleQuietCheck();
+        return res;
+      }, function (err) {
+        inflight -= 1;
+        scheduleQuietCheck();
+        throw err;
+      });
+    };
+
+    // Hard cap: never leave the page invisible longer than 1.5s,
+    // regardless of network state.
+    hardCap = setTimeout(reveal, 1500);
+
+    // Also reveal once DOMContentLoaded fires AND a short quiet window
+    // has passed, in case no fetches are made at all (rare).
+    function onReady() {
+      // Give the page 250ms to kick off its initial fetches; if it
+      // doesn't, reveal anyway.
+      setTimeout(function () {
+        if (inflight === 0) reveal();
+      }, 250);
+    }
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", onReady, { once: true });
+    } else {
+      onReady();
+    }
   }
 
   function installDashboardPaletteStyle() {
@@ -404,6 +475,7 @@
     installControlThemeStyle();
     installHeaderThemeStyle();
     installFlickerSuppressionStyle();
+    installFadeInCoordinator();
     applyTheme(theme, { persist: false, dispatch: false });
     window.__appThemePalette = palettes[theme];
   } catch (_) {
@@ -413,6 +485,7 @@
     installControlThemeStyle();
     installHeaderThemeStyle();
     installFlickerSuppressionStyle();
+    installFadeInCoordinator();
     applyTheme("dark", { persist: false, dispatch: false });
     window.__appThemePalette = palettes.dark;
   }
