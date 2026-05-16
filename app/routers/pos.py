@@ -628,12 +628,12 @@ def pos_ui(current_user: User = Depends(require_permission("page_pos"))):
     # Belt-and-braces: send no-store on the HTML page so neither the
     # service worker (now skipped above) nor the browser's HTTP cache
     # can hold a stale copy across deploys.
-    response = _HTML(content=_pos_html_body())
+    response = _HTML(content=_pos_html_body(current_user))
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return response
 
 
-def _pos_html_body() -> str:
+def _pos_html_body(current_user: User) -> str:
     return """<!DOCTYPE html>
 <html>
 <head>
