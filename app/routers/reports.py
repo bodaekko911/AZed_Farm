@@ -1792,6 +1792,11 @@ async def utilities_report(
     from app.core.time_utils import app_tz
     from app.models.carbon import CarbonEmissionFactor, CarbonLog
 
+    # Utilities tracking went live on 15 May 2026 — earlier dates have no
+    # meaningful data, so we floor every query (range, trend, per-farm) at
+    # that date to avoid showing misleading zero-or-partial months.
+    UTILITIES_DATA_START = date(2026, 5, 15)
+
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
@@ -1799,6 +1804,21 @@ async def utilities_report(
     tz = app_tz()
     local_from = d_from.astimezone(tz).date()
     local_to   = d_to.astimezone(tz).date()
+    # Floor the requested window — never query data before tracking started
+    if local_from < UTILITIES_DATA_START:
+        local_from = UTILITIES_DATA_START
+    if local_to < UTILITIES_DATA_START:
+        # Entire range is before tracking started — return empty payload
+        return {
+            "date_from": UTILITIES_DATA_START.isoformat(),
+            "date_to":   UTILITIES_DATA_START.isoformat(),
+            "utilities": [],
+            "trend":     [],
+            "by_farm":   [],
+            "totals":    {"cost": 0.0, "categories": 0, "carbon_kg_co2e": 0.0},
+            "warning":   f"Utilities tracking started on {UTILITIES_DATA_START.isoformat()}. "
+                         f"Please pick a date in that range or later.",
+        }
 
     # 1) Pick up every active category that tracks consumption
     cat_rows = await db.execute(
@@ -1892,7 +1912,9 @@ async def utilities_report(
         total_cost   += t["cost"]
         total_carbon += kg
 
-    # 5) Last 12 months trend (rolling, anchored to today) for every active utility
+    # 5) Last 12 months trend (rolling, anchored to today) for every active utility.
+    # Months entirely before UTILITIES_DATA_START are skipped; the month
+    # containing it is clipped so it only covers the in-range portion.
     from calendar import monthrange
     today = date.today()
     anchor = today.replace(day=1)
@@ -1904,6 +1926,10 @@ async def utilities_report(
             y -= 1
         m_start = date(y, m, 1)
         m_end   = date(y, m, monthrange(y, m)[1])
+        if m_end < UTILITIES_DATA_START:
+            continue                                    # whole month pre-tracking
+        if m_start < UTILITIES_DATA_START:
+            m_start = UTILITIES_DATA_START              # clip the partial first month
         months.append((m_start, m_end, m_start.strftime("%b %y")))
 
     # one query covering all 12 months, group by (year, month, category)
@@ -3698,7 +3724,7 @@ function switchTab(tab){
     const section = document.getElementById("section-"+tab);
     if(!section) return;
     section.classList.add("active");
-    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, utilities:loadUtilities, pl:loadPL};
+    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, pl:loadPL};
     if(loaders[tab]){
         loaders[tab]();
     } else {
