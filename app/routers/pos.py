@@ -575,19 +575,22 @@ body {{ font-family: monospace; background:#060810; color:white; }}
 @router.get("/pos-sw.js")
 def pos_service_worker():
     from fastapi.responses import Response
+    # Bumping CACHE_VERSION on any deploy will purge old caches automatically.
+    # Importantly: /pos (the HTML) is NOT cached — always fetched fresh — so
+    # users always see the latest UI without needing to unregister anything.
     js = r"""
-const CACHE = 'pos-v1';
-const PRECACHE = ['/pos', '/products-cache', '/customers', '/static/Logo.png', '/static/ERP_logo.png'];
+const CACHE_VERSION = 'pos-v3';
+const PRECACHE = ['/products-cache', '/customers', '/static/Logo.png', '/static/ERP_logo.png'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(PRECACHE)));
+  e.waitUntil(caches.open(CACHE_VERSION).then(c => c.addAll(PRECACHE)));
   self.skipWaiting();
 });
 
 self.addEventListener('activate', e => {
   e.waitUntil(
     caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+      Promise.all(keys.filter(k => k !== CACHE_VERSION).map(k => caches.delete(k)))
     )
   );
   self.clients.claim();
@@ -596,13 +599,16 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
-  const cacheable = ['/pos', '/products-cache', '/customers', '/static/Logo.png', '/static/ERP_logo.png'];
+  // Never intercept the POS HTML page — always let the browser fetch it
+  // directly so deploys are picked up immediately.
+  if (url.pathname === '/pos' || url.pathname === '/pos/') return;
+  const cacheable = ['/products-cache', '/customers', '/static/Logo.png', '/static/ERP_logo.png'];
   if (!cacheable.some(p => url.pathname === p || url.pathname.startsWith(p))) return;
   e.respondWith(
     fetch(e.request).then(res => {
       if (res.ok) {
         const copy = res.clone();
-        caches.open(CACHE).then(c => c.put(e.request, copy));
+        caches.open(CACHE_VERSION).then(c => c.put(e.request, copy));
       }
       return res;
     }).catch(() => caches.match(e.request))
@@ -610,11 +616,24 @@ self.addEventListener('fetch', e => {
 });
 """
     return Response(content=js, media_type="application/javascript",
-                    headers={"Service-Worker-Allowed": "/"})
+                    headers={
+                        "Service-Worker-Allowed": "/",
+                        "Cache-Control": "no-store, no-cache, must-revalidate",
+                    })
 
 
 @router.get("/pos", response_class=HTMLResponse)
 def pos_ui(current_user: User = Depends(require_permission("page_pos"))):
+    from fastapi.responses import HTMLResponse as _HTML
+    # Belt-and-braces: send no-store on the HTML page so neither the
+    # service worker (now skipped above) nor the browser's HTTP cache
+    # can hold a stale copy across deploys.
+    response = _HTML(content=_pos_html_body())
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return response
+
+
+def _pos_html_body() -> str:
     return """<!DOCTYPE html>
 <html>
 <head>
@@ -757,6 +776,11 @@ body.light #right{background:rgba(244,245,239,.92);}
 .inputs-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
 .fld{display:flex;flex-direction:column;gap:4px;}
 .fld-label{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);}
+.fld-label-row{display:flex;align-items:center;justify-content:space-between;gap:6px;}
+.disc-toggle{display:inline-flex;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:1px;}
+.disc-mode-btn{background:transparent;color:var(--muted);border:0;font-family:var(--sans);font-size:10px;font-weight:700;letter-spacing:.5px;padding:2px 7px;border-radius:5px;cursor:pointer;transition:all .15s;}
+.disc-mode-btn:hover:not(.active){color:var(--text);}
+.disc-mode-btn.active{background:rgba(77,159,255,.18);color:var(--blue);}
 .fld-input{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;color:var(--text);font-family:var(--mono);font-size:14px;text-align:center;outline:none;width:100%;transition:all .18s;}
 .fld-input:focus{border-color:rgba(77,159,255,.5);}
 .total-row{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);}
@@ -969,8 +993,14 @@ body.light .toast{background:var(--card);}
     <div id="totals">
         <div class="inputs-row">
             <div class="fld">
-                <span class="fld-label">Discount %</span>
-                <input id="discount" class="fld-input" type="number" placeholder="0" min="0" max="100">
+                <div class="fld-label-row">
+                    <span class="fld-label" id="discount-label">Discount %</span>
+                    <div class="disc-toggle" role="group" aria-label="Discount mode">
+                        <button type="button" id="disc-mode-percent" class="disc-mode-btn active" onclick="setDiscountMode('percent')">%</button>
+                        <button type="button" id="disc-mode-amount"  class="disc-mode-btn"        onclick="setDiscountMode('amount')">EGP</button>
+                    </div>
+                </div>
+                <input id="discount" class="fld-input" type="number" placeholder="0" min="0" max="100" step="0.01">
             </div>
             <div class="fld">
                 <span class="fld-label">Cash Received</span>
@@ -1328,6 +1358,7 @@ document.getElementById("cust_search").addEventListener("input", function(){
 function applyCustomerDiscount(discountPct){
     const discountInput = document.getElementById("discount");
     if(!discountInput || discountInput.disabled) return;
+    setDiscountMode("percent");
     discountInput.value = Number(discountPct || 0).toFixed(1);
     drawCart();
 }
@@ -1614,13 +1645,71 @@ function drawCart(){
             </div>
         </div>`;}).join("");
 
-    let disc=parseFloat(document.getElementById("discount").value)||0;
-    let final=total-(total*disc/100);
-    let cash=parseFloat(document.getElementById("cash").value)||0;
+    // --- Discount handling -------------------------------------------------
+    // discountMode is "percent" (input is % of subtotal) or "amount" (raw EGP).
+    // The backend always receives a percentage, so amount mode is converted at
+    // checkout time. Values are clamped to valid ranges.
+    let discInput = parseFloat(document.getElementById("discount").value)||0;
+    if(discInput < 0) discInput = 0;
+    let disc;          // effective discount percent
+    let discAmt;       // EGP actually subtracted
+    if(discountMode === "amount"){
+        if(discInput > total) discInput = total;
+        discAmt = discInput;
+        disc    = total > 0 ? (discInput / total) * 100 : 0;
+    } else {
+        if(discInput > 100) discInput = 100;
+        disc    = discInput;
+        discAmt = total * disc / 100;
+    }
+    let final = total - discAmt;
+    let cash  = parseFloat(document.getElementById("cash").value)||0;
     document.getElementById("total").innerText=final.toFixed(2);
     let changeEl=document.getElementById("change");
     if(cash>0){ let ch=cash-final; changeEl.innerText=ch.toFixed(2); changeEl.style.color=ch>=0?"var(--green)":"var(--danger)"; }
     else { changeEl.innerText="—"; changeEl.style.color="var(--muted)"; }
+}
+
+/* ── DISCOUNT MODE TOGGLE ── */
+let discountMode = "percent";   // "percent" | "amount"
+
+function setDiscountMode(mode){
+    if(mode !== "percent" && mode !== "amount") return;
+    discountMode = mode;
+    const input = document.getElementById("discount");
+    const label = document.getElementById("discount-label");
+    const pctBtn = document.getElementById("disc-mode-percent");
+    const amtBtn = document.getElementById("disc-mode-amount");
+    if(mode === "amount"){
+        if(label)  label.innerText = "Discount EGP";
+        input.max = "";
+        input.placeholder = "0.00";
+        pctBtn?.classList.remove("active");
+        amtBtn?.classList.add("active");
+    } else {
+        if(label)  label.innerText = "Discount %";
+        input.max = "100";
+        input.placeholder = "0";
+        amtBtn?.classList.remove("active");
+        pctBtn?.classList.add("active");
+    }
+    input.value = "";
+    drawCart();
+}
+
+/* Returns the discount as a percentage (0–100) regardless of UI mode,
+   for sending to the backend. */
+function getEffectiveDiscountPercent(){
+    let raw = parseFloat(document.getElementById("discount").value)||0;
+    if(raw < 0) raw = 0;
+    if(discountMode === "amount"){
+        let subtotal = cart.reduce((s,c) => s + c.price * c.qty, 0);
+        if(subtotal <= 0) return 0;
+        if(raw > subtotal) raw = subtotal;
+        return (raw / subtotal) * 100;
+    }
+    if(raw > 100) raw = 100;
+    return raw;
 }
 
 document.getElementById("cash").addEventListener("input",drawCart);
@@ -1648,7 +1737,7 @@ async function checkout(settleLater=false){
     const payload = {
         customer_id:      selectedCustomer?parseInt(selectedCustomer):null,
         items:            cart.map(c=>({sku:c.sku,name:c.name,price:c.price,qty:c.qty,unit_price:c.price,catalog_price:c.original_price||c.price,price_edited:c.price!==(c.original_price||c.price)})),
-        discount_percent: parseFloat(document.getElementById("discount").value)||0,
+        discount_percent: getEffectiveDiscountPercent(),
         notes:            "",
         payment_method:   settleLater?"unpaid":selectedPayMethod,
         settle_later:     settleLater,
@@ -1791,6 +1880,7 @@ function editUnpaidInvoice(inv){
     document.getElementById("selected_badge").classList.add("show");
     document.getElementById("cust_wrap").style.display = "none";
     const discountPct = inv.subtotal ? (Number(inv.discount || 0) / Number(inv.subtotal)) * 100 : 0;
+    setDiscountMode("percent");
     document.getElementById("discount").value = discountPct.toFixed(1);
     updateEditingState();
     drawCart();
