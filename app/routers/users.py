@@ -743,7 +743,10 @@ td.name{color:var(--text);font-weight:600;}
         <div class="toolbar">
             <div class="search-box">
                 <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                <input id="user-search" type="search" name="user-list-filter" autocomplete="search-no-autofill" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Search name, email, role..." oninput="filterUsers()">
+                <!-- Honeypot fields: Chrome/Safari autofill these hidden fields instead of the real search box. Do NOT remove. -->
+                <input type="text" name="fakeusernameremembered" autocomplete="username" tabindex="-1" aria-hidden="true" style="position:absolute;left:-9999px;top:-9999px;opacity:0;height:0;width:0;pointer-events:none;">
+                <input type="password" name="fakepasswordremembered" autocomplete="current-password" tabindex="-1" aria-hidden="true" style="position:absolute;left:-9999px;top:-9999px;opacity:0;height:0;width:0;pointer-events:none;">
+                <input id="filter-list-q" type="search" name="filter-list-q" autocomplete="search-no-autofill-x9k2" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Search name, email, role..." readonly onfocus="this.removeAttribute('readonly');this.setAttribute('autocomplete','search-no-autofill-x9k2');" oninput="filterUsers()">
             </div>
         </div>
         <div class="table-wrap"><table>
@@ -976,7 +979,7 @@ async function loadUsers(){
 }
 
 function filterUsers(){
-    let q = document.getElementById("user-search").value.toLowerCase();
+    let q = document.getElementById("filter-list-q").value.toLowerCase();
     renderUsers(q ? allUsers.filter(u=>
         u.name.toLowerCase().includes(q)||
         u.email.toLowerCase().includes(q)||
