@@ -432,6 +432,12 @@ async def collect_payment(
     payment_method         = data.payment_method
     invoice.status         = "paid"
     invoice.payment_method = payment_method
+    # When an unpaid invoice is cashed, attribute the revenue to TODAY (the
+    # collection date) rather than the original sale-on-credit date. This is
+    # the cash-basis behaviour reports expect: an invoice only counts as
+    # revenue on the day it is actually paid.
+    from datetime import datetime, timezone
+    invoice.created_at = datetime.now(timezone.utc)
 
     total   = float(invoice.total)
     journal = Journal(ref_type="payment",
