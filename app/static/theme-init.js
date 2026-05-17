@@ -12,6 +12,106 @@
 (function () {
   var THEME_KEY = "colorMode";
   var LEGACY_KEYS = ["dashboard:theme", "expenses-theme", "refund-theme"];
+
+  // ──────────────────────────────────────────────────────────────────────
+  // EARLY THEME + SPLASH (runs synchronously in <head>, before <body>)
+  // ──────────────────────────────────────────────────────────────────────
+  // Decide theme immediately.
+  var _earlyTheme = "dark";
+  try {
+    var _stored = localStorage.getItem(THEME_KEY);
+    if (!_stored) {
+      for (var _i = 0; _i < LEGACY_KEYS.length; _i += 1) {
+        var _legacy = localStorage.getItem(LEGACY_KEYS[_i]);
+        if (_legacy) { _stored = _legacy; break; }
+      }
+    }
+    if (_stored === "light") _earlyTheme = "light";
+  } catch (_e) {}
+
+  // Paint <html> with the theme color so there's never a white flash.
+  var _earlyBg = _earlyTheme === "light" ? "#f4f5ef" : "#060810";
+  var _earlyFg = _earlyTheme === "light" ? "#1a1e14" : "#f0f4ff";
+  try {
+    document.documentElement.style.background = _earlyBg;
+    document.documentElement.style.color = _earlyFg;
+    document.documentElement.style.colorScheme = _earlyTheme;
+    document.documentElement.setAttribute("data-theme", _earlyTheme);
+    if (_earlyTheme === "light") document.documentElement.classList.add("light");
+  } catch (_e) {}
+
+  // Inject splash CSS into <head> immediately.
+  try {
+    var _splashStyle = document.createElement("style");
+    _splashStyle.id = "app-splash-style";
+    _splashStyle.textContent =
+      // Hide everything in <body> except the splash, until .app-ready.
+      "html:not(.app-ready) body > *:not(#app-splash){visibility:hidden!important;}" +
+      // Body opacity transition (in case page content uses fade later).
+      "html:not(.app-ready) body{opacity:1;}" +
+      // Splash overlay.
+      "#app-splash{position:fixed;inset:0;z-index:2147483600;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;" +
+      "background:" + _earlyBg + ";opacity:1;transition:opacity 380ms ease-out;}" +
+      "#app-splash.app-splash-hide{opacity:0;pointer-events:none;}" +
+      "#app-splash .splash-logo{min-width:220px;height:96px;padding:0 28px;border-radius:22px;" +
+      "background:" + (_earlyTheme === "light" ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.04)") + ";" +
+      "border:1px solid " + (_earlyTheme === "light" ? "rgba(0,0,0,0.06)" : "rgba(255,255,255,0.08)") + ";" +
+      "display:flex;align-items:center;justify-content:center;" +
+      "box-shadow:0 20px 50px rgba(0,0,0,0.35);" +
+      "animation:splashLogoIn 520ms cubic-bezier(.22,.9,.3,1.2) both;}" +
+      "#app-splash .splash-logo img{height:56px;width:auto;object-fit:contain;display:block;}" +
+      "#app-splash .splash-name{font-family:'Outfit',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;" +
+      "font-size:13px;letter-spacing:4px;font-weight:600;text-transform:uppercase;" +
+      "color:" + (_earlyTheme === "light" ? "rgba(26,30,20,0.55)" : "rgba(240,244,255,0.55)") + ";" +
+      "animation:splashFadeUp 600ms ease-out 120ms both;}" +
+      "#app-splash .splash-bar{width:140px;height:2px;border-radius:2px;" +
+      "background:linear-gradient(90deg,transparent,#00E5FF,#d97706,transparent);background-size:200% 100%;" +
+      "animation:splashBar 1400ms ease-in-out infinite,splashFadeUp 600ms ease-out 220ms both;opacity:.85;}" +
+      "@keyframes splashLogoIn{0%{opacity:0;transform:scale(0.86) translateY(6px);}100%{opacity:1;transform:scale(1) translateY(0);}}" +
+      "@keyframes splashFadeUp{0%{opacity:0;transform:translateY(6px);}100%{opacity:1;transform:translateY(0);}}" +
+      "@keyframes splashBar{0%{background-position:100% 50%;}100%{background-position:-100% 50%;}}" +
+      "@media print{#app-splash{display:none!important;}html:not(.app-ready) body > *:not(#app-splash){visibility:visible!important;}}";
+    (document.head || document.documentElement).appendChild(_splashStyle);
+  } catch (_e) {}
+
+  // Mount splash element. Body might not exist yet, so poll with rAF.
+  function _mountSplash() {
+    if (document.getElementById("app-splash")) return;
+    var s = document.createElement("div");
+    s.id = "app-splash";
+    s.setAttribute("aria-hidden", "true");
+    s.innerHTML =
+      '<div class="splash-logo"><img src="/static/ERP_logo.png" alt="AZed ERP" /></div>' +
+      '<div class="splash-name">Enterprise Resource Planning</div>' +
+      '<div class="splash-bar"></div>';
+    if (document.body) {
+      document.body.insertBefore(s, document.body.firstChild);
+    } else {
+      requestAnimationFrame(_mountSplash);
+    }
+  }
+  try { _mountSplash(); } catch (_e) {}
+
+  // GUARANTEED REVEAL: regardless of anything else, after MAX_SPLASH_MS,
+  // mark the page ready and fade the splash out. This is the safety net
+  // that makes sure the user always sees the page.
+  var MAX_SPLASH_MS = 1000;
+  function _revealPage() {
+    if (document.documentElement.classList.contains("app-ready")) return;
+    document.documentElement.classList.add("app-ready");
+    var s = document.getElementById("app-splash");
+    if (s) {
+      s.classList.add("app-splash-hide");
+      setTimeout(function () {
+        if (s && s.parentNode) s.parentNode.removeChild(s);
+      }, 450);
+    }
+  }
+  // Fire reveal after MAX_SPLASH_MS, no matter what.
+  setTimeout(_revealPage, MAX_SPLASH_MS);
+  // Also expose globally so other code can reveal early if it wants.
+  window.__appRevealPage = _revealPage;
+  // ──────────────────────────────────────────────────────────────────────
   var palettes = {
     dark: {
       bg: "#0B1120",
@@ -41,338 +141,6 @@
     }
   };
   var appliedTheme = "dark";
-
-  // ── INSTANT PAINT ──────────────────────────────────────────────────────
-  // Before any stylesheet parses, read the stored theme and paint the
-  // background + color-scheme directly on <html>. This eliminates the
-  // white flash that used to appear during page navigation, because
-  // browsers paint <html>'s inline style immediately, well before the
-  // page's <style> block (where body{background:var(--bg)} lives) is
-  // parsed. This runs synchronously in <head>, so there is no FOUC.
-  try {
-    var _earlyTheme = "dark";
-    try {
-      var _earlyStored = localStorage.getItem(THEME_KEY);
-      if (!_earlyStored) {
-        for (var _i = 0; _i < LEGACY_KEYS.length; _i += 1) {
-          var _legacy = localStorage.getItem(LEGACY_KEYS[_i]);
-          if (_legacy) { _earlyStored = _legacy; break; }
-        }
-      }
-      if (_earlyStored === "light") _earlyTheme = "light";
-    } catch (_e) {}
-    var _earlyBg = _earlyTheme === "light" ? "#f4f5ef" : "#060810";
-    var _earlyFg = _earlyTheme === "light" ? "#1a1e14" : "#f0f4ff";
-    document.documentElement.style.background = _earlyBg;
-    document.documentElement.style.color = _earlyFg;
-    document.documentElement.style.colorScheme = _earlyTheme;
-    document.documentElement.setAttribute("data-theme", _earlyTheme);
-    if (_earlyTheme === "light") {
-      document.documentElement.classList.add("light");
-    }
-  } catch (_e) {}
-
-  // ── EARLIEST POSSIBLE HIDE ────────────────────────────────────────────
-  // Inject a critical <style> right now (we're in <head>, before <body>
-  // opens), so the moment the browser parses <body> it already knows to
-  // keep it invisible. Without this, there's a microsecond window between
-  // <body> opening and the splash CSS being installed below, during which
-  // the page is briefly visible. The full splash style block below
-  // overrides this once installed; the splash itself is exempt by id.
-  try {
-    var _earlyHide = document.createElement("style");
-    _earlyHide.id = "app-early-hide";
-    _earlyHide.textContent = "html:not(.app-ready) > body > *:not(#app-splash) { visibility: hidden !important; }";
-    (document.head || document.documentElement).appendChild(_earlyHide);
-    document.documentElement.classList.add("app-fading");
-  } catch (_e) {}
-  // ───────────────────────────────────────────────────────────────────────
-
-  // ── EARLIEST POSSIBLE SPLASH MOUNT ────────────────────────────────────
-  // Inject the splash's critical CSS (positioning + base look) and mount
-  // the splash element NOW, before any other code runs. This way the
-  // splash is visible the instant <body> opens. The richer theme styles
-  // and fade-in coordinator installed below add behavior on top, but the
-  // splash itself paints immediately.
-  try {
-    var _earlyBgChoice = (typeof _earlyTheme !== "undefined" && _earlyTheme === "light") ? "#f4f5ef" : "#060810";
-    var _earlySplashStyle = document.createElement("style");
-    _earlySplashStyle.id = "app-splash-critical-style";
-    _earlySplashStyle.textContent =
-      "#app-splash{position:fixed;inset:0;z-index:2147483600;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;background:" + _earlyBgChoice + ";opacity:1;transition:opacity 380ms ease-out;}" +
-      "#app-splash.app-splash-hide{opacity:0;pointer-events:none;}" +
-      "#app-splash .splash-logo{min-width:220px;height:96px;padding:0 28px;border-radius:22px;background:" + (_earlyTheme === "light" ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.04)") + ";border:1px solid " + (_earlyTheme === "light" ? "rgba(0,0,0,0.06)" : "rgba(255,255,255,0.08)") + ";display:flex;align-items:center;justify-content:center;box-shadow:0 20px 50px rgba(0,0,0,0.35);}" +
-      "#app-splash .splash-logo img{height:56px;width:auto;object-fit:contain;display:block;}" +
-      "#app-splash .splash-name{font-family:'Outfit',-apple-system,BlinkMacSystemFont,sans-serif;font-size:13px;letter-spacing:4px;font-weight:600;text-transform:uppercase;color:" + (_earlyTheme === "light" ? "rgba(26,30,20,0.55)" : "rgba(240,244,255,0.55)") + ";}" +
-      "#app-splash .splash-bar{width:140px;height:2px;border-radius:2px;background:linear-gradient(90deg,transparent,#00E5FF,#d97706,transparent);background-size:200% 100%;animation:splashBar 1400ms ease-in-out infinite;opacity:.85;}" +
-      "@keyframes splashBar{0%{background-position:100% 50%;}100%{background-position:-100% 50%;}}" +
-      "@media print{#app-splash{display:none!important;}}";
-    (document.head || document.documentElement).appendChild(_earlySplashStyle);
-
-    // Mount the splash element. If <body> exists, attach directly.
-    // Otherwise watch with rAF until <body> opens.
-    var _earlySplash = document.createElement("div");
-    _earlySplash.id = "app-splash";
-    _earlySplash.setAttribute("aria-hidden", "true");
-    _earlySplash.innerHTML =
-      '<div class="splash-logo"><img src="/static/ERP_logo.png" alt="AZed ERP" /></div>' +
-      '<div class="splash-name">Enterprise Resource Planning</div>' +
-      '<div class="splash-bar"></div>';
-    if (document.body) {
-      document.body.insertBefore(_earlySplash, document.body.firstChild);
-    } else {
-      var _waitForBody = function () {
-        if (document.body) {
-          document.body.insertBefore(_earlySplash, document.body.firstChild);
-        } else {
-          requestAnimationFrame(_waitForBody);
-        }
-      };
-      requestAnimationFrame(_waitForBody);
-    }
-  } catch (_e) {}
-  // ───────────────────────────────────────────────────────────────────────
-  // ───────────────────────────────────────────────────────────────────────
-
-  // ── FLICKER SUPPRESSION + BRANDED SPLASH ──────────────────────────────
-  // Every page makes 3-5 parallel API calls (/me, /customers, /products-
-  // cache, /unpaid-invoices, etc.) and each response paints into a
-  // different section of the page. Without coordination this shows as
-  // multiple black flickers as sections snap into existence one by one.
-  //
-  // Fix: keep the body invisible during the initial load, but cover the
-  // page with a branded splash (logo + pulsing accent line) so the user
-  // sees an intentional, elegant loading moment instead of a blank
-  // screen. Once the network goes quiet, the splash and body cross-fade.
-  //
-  // Safety: a hard 1500ms cap guarantees the page is always visible,
-  // even if a request hangs.
-  function installFlickerSuppressionStyle() {
-    if (document.getElementById("app-flicker-suppression-style")) return;
-    var style = document.createElement("style");
-    style.id = "app-flicker-suppression-style";
-    var bgDark = "#060810";
-    var bgLight = "#f4f5ef";
-    var bg = appliedTheme === "light" ? bgLight : bgDark;
-    style.textContent = [
-      // Body starts invisible. The .app-ready class fades it in.
-      "html.app-fading body { opacity: 0; }",
-      "html.app-fading.app-ready body { opacity: 1; transition: opacity 320ms ease-out; }",
-      // Keep <html> the correct theme color the whole time.
-      "html { background-color: var(--bg, " + bg + "); }",
-
-      // ── Splash overlay ──",
-      "#app-splash {",
-      "  position: fixed; inset: 0; z-index: 2147483600;",
-      "  display: flex; flex-direction: column; align-items: center; justify-content: center;",
-      "  gap: 28px;",
-      "  background: " + bg + ";",
-      "  background-image: radial-gradient(ellipse at 50% 40%, rgba(0,229,255,0.06), transparent 55%), radial-gradient(ellipse at 50% 70%, rgba(217,119,6,0.05), transparent 60%);",
-      "  opacity: 1; transition: opacity 380ms ease-out;",
-      "  pointer-events: auto;",
-      "}",
-      'html[data-theme="light"] #app-splash {',
-      "  background: " + bgLight + ";",
-      "  background-image: radial-gradient(ellipse at 50% 40%, rgba(0,184,212,0.08), transparent 55%), radial-gradient(ellipse at 50% 70%, rgba(217,119,6,0.06), transparent 60%);",
-      "}",
-      "#app-splash.app-splash-hide { opacity: 0; pointer-events: none; }",
-
-      // Logo card — horizontal, sized for the AZed wordmark lockup.
-      "#app-splash .splash-logo {",
-      "  min-width: 220px; height: 96px;",
-      "  padding: 0 28px;",
-      "  border-radius: 22px;",
-      "  background: rgba(255,255,255,0.04);",
-      "  border: 1px solid rgba(255,255,255,0.08);",
-      "  display: flex; align-items: center; justify-content: center;",
-      "  box-shadow: 0 20px 50px rgba(0,0,0,0.35), 0 0 0 1px rgba(0,229,255,0.08);",
-      "  animation: splashLogoIn 520ms cubic-bezier(.22,.9,.3,1.2) both;",
-      "}",
-      'html[data-theme="light"] #app-splash .splash-logo {',
-      "  background: rgba(255,255,255,0.85);",
-      "  border-color: rgba(0,0,0,0.06);",
-      "  box-shadow: 0 18px 44px rgba(15,23,42,0.12);",
-      "}",
-      "#app-splash .splash-logo img { height: 56px; width: auto; object-fit: contain; display: block; }",
-
-      // Word-mark
-      "#app-splash .splash-name {",
-      "  font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;",
-      "  font-size: 13px; letter-spacing: 4px; font-weight: 600;",
-      "  text-transform: uppercase;",
-      "  color: rgba(240,244,255,0.55);",
-      "  animation: splashFadeUp 600ms ease-out 120ms both;",
-      "}",
-      'html[data-theme="light"] #app-splash .splash-name { color: rgba(26,30,20,0.55); }',
-
-      // Pulsing accent bar
-      "#app-splash .splash-bar {",
-      "  width: 140px; height: 2px; border-radius: 2px;",
-      "  background: linear-gradient(90deg, transparent, #00E5FF, #d97706, transparent);",
-      "  background-size: 200% 100%;",
-      "  animation: splashBar 1400ms ease-in-out infinite, splashFadeUp 600ms ease-out 220ms both;",
-      "  opacity: 0.85;",
-      "}",
-      'html[data-theme="light"] #app-splash .splash-bar { background: linear-gradient(90deg, transparent, #00B8D4, #b45309, transparent); background-size: 200% 100%; }',
-
-      "@keyframes splashLogoIn {",
-      "  0% { opacity: 0; transform: scale(0.86) translateY(6px); }",
-      "  100% { opacity: 1; transform: scale(1) translateY(0); }",
-      "}",
-      "@keyframes splashFadeUp {",
-      "  0% { opacity: 0; transform: translateY(6px); }",
-      "  100% { opacity: 1; transform: translateY(0); }",
-      "}",
-      "@keyframes splashBar {",
-      "  0% { background-position: 100% 50%; }",
-      "  100% { background-position: -100% 50%; }",
-      "}",
-
-      // Respect users who don't want motion.
-      "@media (prefers-reduced-motion: reduce) {",
-      "  #app-splash, #app-splash .splash-logo, #app-splash .splash-name, #app-splash .splash-bar { animation: none !important; transition: opacity 200ms linear !important; }",
-      "  html.app-fading.app-ready body { transition: opacity 200ms linear; }",
-      "}",
-
-      // Print: never show splash or hide body.
-      "@media print { html.app-fading body { opacity: 1 !important; } #app-splash { display: none !important; } }"
-    ].join("\n");
-    (document.head || document.documentElement).appendChild(style);
-  }
-
-  function mountSplash() {
-    if (document.getElementById("app-splash")) return;
-    var splash = document.createElement("div");
-    splash.id = "app-splash";
-    splash.setAttribute("aria-hidden", "true");
-    splash.innerHTML =
-      '<div class="splash-logo"><img src="/static/ERP_logo.png" alt="AZed ERP" /></div>' +
-      '<div class="splash-name">Enterprise Resource Planning</div>' +
-      '<div class="splash-bar"></div>';
-    // If <body> exists, mount there directly so the splash paints
-    // immediately. Otherwise, watch with rAF until <body> appears (which
-    // happens within microseconds of <head> closing) and mount the
-    // instant it does. DO NOT wait for DOMContentLoaded — that fires
-    // AFTER the whole page parses, by which point the user has already
-    // seen the half-loaded page.
-    if (document.body) {
-      document.body.insertBefore(splash, document.body.firstChild);
-      return;
-    }
-    var waitForBody = function () {
-      if (document.body) {
-        document.body.insertBefore(splash, document.body.firstChild);
-      } else {
-        requestAnimationFrame(waitForBody);
-      }
-    };
-    requestAnimationFrame(waitForBody);
-  }
-
-  function installFadeInCoordinator() {
-    if (window.__appFadeInInstalled) return;
-    window.__appFadeInInstalled = true;
-
-    document.documentElement.classList.add("app-fading");
-    mountSplash();
-
-    var revealed = false;
-    var inflight = 0;
-    var quietTimer = null;
-    var hardCap = null;
-
-    function hideSplash() {
-      var s = document.getElementById("app-splash");
-      if (!s) return;
-      s.classList.add("app-splash-hide");
-      // Remove from DOM after the fade completes so it never blocks input.
-      setTimeout(function () { if (s && s.parentNode) s.parentNode.removeChild(s); }, 450);
-    }
-
-    function reveal() {
-      if (revealed) return;
-      revealed = true;
-      if (quietTimer) { clearTimeout(quietTimer); quietTimer = null; }
-      if (hardCap) { clearTimeout(hardCap); hardCap = null; }
-      requestAnimationFrame(function () {
-        document.documentElement.classList.add("app-ready");
-        hideSplash();
-      });
-    }
-
-    function scheduleQuietCheck() {
-      if (revealed) return;
-      if (quietTimer) clearTimeout(quietTimer);
-      // Network has been quiet for 300ms => assume initial paint is done.
-      quietTimer = setTimeout(function () {
-        if (inflight === 0) reveal();
-      }, 300);
-    }
-
-    // Wrap fetch to track in-flight requests.
-    var _origFetch = window.fetch;
-    window.fetch = function () {
-      inflight += 1;
-      var p;
-      try {
-        p = _origFetch.apply(this, arguments);
-      } catch (err) {
-        inflight -= 1;
-        scheduleQuietCheck();
-        throw err;
-      }
-      return p.then(function (res) {
-        inflight -= 1;
-        scheduleQuietCheck();
-        return res;
-      }, function (err) {
-        inflight -= 1;
-        scheduleQuietCheck();
-        throw err;
-      });
-    };
-
-    // Minimum splash time so the brand moment feels intentional, not
-    // flashy. Without this, a fully-cached page reveals so fast the
-    // splash looks like a glitch. 380ms is the sweet spot — long enough
-    // to read as "loading," short enough to never feel slow.
-    var minSplashMs = 380;
-    var pageStart = Date.now();
-    function revealWithMinimum() {
-      var elapsed = Date.now() - pageStart;
-      if (elapsed >= minSplashMs) {
-        reveal();
-      } else {
-        setTimeout(reveal, minSplashMs - elapsed);
-      }
-    }
-
-    // Override reveal so it always respects the minimum.
-    var _originalReveal = reveal;
-    reveal = function () {
-      var elapsed = Date.now() - pageStart;
-      if (elapsed >= minSplashMs) {
-        _originalReveal();
-      } else {
-        setTimeout(_originalReveal, minSplashMs - elapsed);
-      }
-    };
-
-    // Hard cap: never leave the page invisible longer than 1.5s.
-    hardCap = setTimeout(function () { _originalReveal(); }, 1500);
-
-    // Reveal once DOM is ready AND quiet, in case no fetches happen.
-    function onReady() {
-      setTimeout(function () {
-        if (inflight === 0) reveal();
-      }, 250);
-    }
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", onReady, { once: true });
-    } else {
-      onReady();
-    }
-  }
 
   function installDashboardPaletteStyle() {
     if (document.getElementById("app-dashboard-palette-style")) return;
@@ -668,8 +436,6 @@
     installLogoThemeStyle();
     installControlThemeStyle();
     installHeaderThemeStyle();
-    installFlickerSuppressionStyle();
-    installFadeInCoordinator();
     applyTheme(theme, { persist: false, dispatch: false });
     window.__appThemePalette = palettes[theme];
   } catch (_) {
@@ -678,8 +444,6 @@
     installLogoThemeStyle();
     installControlThemeStyle();
     installHeaderThemeStyle();
-    installFlickerSuppressionStyle();
-    installFadeInCoordinator();
     applyTheme("dark", { persist: false, dispatch: false });
     window.__appThemePalette = palettes.dark;
   }
