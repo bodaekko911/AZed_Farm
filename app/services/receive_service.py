@@ -30,11 +30,16 @@ from sqlalchemy.orm import selectinload
 from app.core.log import record
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.expense import Expense, ExpenseCategory
-from app.models.inventory import StockMove
+from app.models.inventory import LocationStock, StockLocation, StockMove
 from app.models.product import Product
 from app.models.receipt import ProductReceipt
 from app.models.supplier import Supplier
 from app.models.user import User
+from app.services.location_inventory_service import (
+    ensure_default_stock_location,
+    get_or_create_location_stock,
+    quantize_qty,
+)
 
 _MONEY = Decimal("0.01")
 _QTY   = Decimal("0.001")
@@ -70,6 +75,7 @@ class ReceiptCreate(BaseModel):
     amount_paid:  Optional[float] = Field(None, ge=0)  # cash paid at receive time
     notes:        Optional[str]   = None
     affect_stock: bool            = True
+    location_id:  Optional[int]   = Field(None, ge=1)  # storage to receive into; default Main Warehouse
 
 
 class BatchReceiptItem(BaseModel):
@@ -85,6 +91,10 @@ class BatchReceiptCreate(BaseModel):
     Payment fields apply to the whole batch:
       • supplier_id  — optional supplier link
       • amount_paid  — total cash paid (split proportionally across line items)
+
+    Storage:
+      • location_id  — destination storage for all items in the batch.
+                       Defaults to Main Warehouse if not provided.
     """
     product_type: Literal["products", "packaging_materials"]
     receive_date: date_type
@@ -92,6 +102,7 @@ class BatchReceiptCreate(BaseModel):
     supplier_id:  Optional[int] = Field(None, ge=1)
     amount_paid:  Optional[float] = Field(None, ge=0)
     notes:        Optional[str] = None
+    location_id:  Optional[int] = Field(None, ge=1)
     items:        list[BatchReceiptItem] = Field(..., min_length=1)
 
 
@@ -567,6 +578,35 @@ async def _create_receipt_core(
     if unit_cost is not None:
         product.cost = unit_cost
 
+    # ── Resolve destination storage ───────────────────────────────────
+    # If caller didn't pick a location, fall back to the default
+    # (Main Warehouse). The location is recorded on the receipt
+    # regardless of `affect_stock` so we always know which storage was
+    # intended.
+    target_location: Optional[StockLocation] = None
+    if data.location_id:
+        loc_result = await db.execute(
+            select(StockLocation).where(
+                StockLocation.id == data.location_id,
+                StockLocation.is_active.is_(True),
+            )
+        )
+        target_location = loc_result.scalar_one_or_none()
+        if target_location is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Storage location {data.location_id} not found or inactive",
+            )
+    else:
+        target_location = await ensure_default_stock_location(db)
+
+    # Increment per-location stock for the chosen storage.
+    if data.affect_stock and target_location is not None:
+        loc_stock = await get_or_create_location_stock(
+            db, location_id=target_location.id, product_id=product.id
+        )
+        loc_stock.qty = quantize_qty((loc_stock.qty or 0)) + qty
+
     supplier_ref = (data.supplier_ref or "").strip() or None
     notes        = (data.notes or "").strip() or None
 
@@ -582,10 +622,14 @@ async def _create_receipt_core(
         supplier_id=supplier.id if supplier is not None else None,
         amount_paid=paid_cash,
         notes=notes,
+        location_id=target_location.id if target_location else None,
     )
     db.add(receipt)
 
     if data.affect_stock:
+        move_note = f"Receipt {ref_number}"
+        if target_location is not None:
+            move_note += f" → {target_location.name}"
         move = StockMove(
             product_id=product.id,
             type="in",
@@ -594,7 +638,7 @@ async def _create_receipt_core(
             qty_after=qty_after,
             ref_type="receipt",
             ref_id=0,
-            note=f"Receipt {ref_number}",
+            note=move_note,
             user_id=current_user.id,
         )
         db.add(move)
@@ -657,6 +701,8 @@ async def _create_receipt_core(
         "product_type":   data.product_type,
         "expense_id":     receipt.expense_id,
         "expense_ref":    expense_ref,
+        "location_id":    target_location.id   if target_location else None,
+        "location_name":  target_location.name if target_location else None,
     }
 
 
@@ -888,6 +934,7 @@ async def create_receipt_batch(
             amount_paid=paid_for_line,
             notes=data.notes,
             product_type=data.product_type,
+            location_id=data.location_id,
         )
         receipts.append(await _create_receipt_core(db, line, current_user))
 
@@ -927,6 +974,7 @@ async def list_receipts(
             selectinload(ProductReceipt.product),
             selectinload(ProductReceipt.user),
             selectinload(ProductReceipt.supplier),
+            selectinload(ProductReceipt.location),
             selectinload(ProductReceipt.expense).selectinload(Expense.category),
         )
         .order_by(ProductReceipt.receive_date.desc(), ProductReceipt.id.desc())
@@ -962,6 +1010,8 @@ async def list_receipts(
             "expense_ref":    r.expense.ref_number if r.expense else None,
             "received_by":    r.user.name if r.user else None,
             "created_at":     r.created_at.isoformat() if r.created_at else None,
+            "location_id":    r.location_id,
+            "location_name":  r.location.name if r.location else None,
         }
 
     return {

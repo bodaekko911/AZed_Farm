@@ -966,8 +966,10 @@ td.mono { font-family: var(--mono); }
     <!-- TABS -->
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
         <div class="tabs">
-            <button class="tab active" id="tab-stock" onclick="switchTab('stock')">Stock Levels</button>
-            <button class="tab"        id="tab-moves" onclick="switchTab('moves')">Movements</button>
+            <button class="tab active" id="tab-stock"     onclick="switchTab('stock')">Stock Levels</button>
+            <button class="tab"        id="tab-moves"     onclick="switchTab('moves')">Movements</button>
+            <button class="tab"        id="tab-storages"  onclick="switchTab('storages')">Storages</button>
+            <button class="tab"        id="tab-transfers" onclick="switchTab('transfers')">Transfers</button>
         </div>
     </div>
 
@@ -1048,6 +1050,129 @@ td.mono { font-family: var(--mono); }
                     <button class="page-btn" id="moves-next" onclick="movesNextPage()">Next →</button>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- STORAGES -->
+    <div id="storages-section" style="display:none">
+        <div class="toolbar">
+            <div class="search-box">
+                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <input id="storage-search" placeholder="Search storages…" oninput="renderStorages()">
+            </div>
+            <button class="btn btn-green" onclick="openStorageModal()">+ Add Storage</button>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Code</th>
+                        <th>Type</th>
+                        <th>Products</th>
+                        <th>Total Qty</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="storages-body">
+                    <tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- TRANSFERS -->
+    <div id="transfers-section" style="display:none">
+        <div class="toolbar">
+            <div class="search-box">
+                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <input id="transfer-search" placeholder="Search by product or note…" oninput="loadTransfers()">
+            </div>
+            <button class="btn btn-green" onclick="openTransferModal()">+ New Transfer</button>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Product</th>
+                        <th>From</th>
+                        <th>To</th>
+                        <th>Qty</th>
+                        <th>Note</th>
+                        <th>By</th>
+                    </tr>
+                </thead>
+                <tbody id="transfers-body">
+                    <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- STORAGE MODAL -->
+<div class="modal-bg" id="storage-modal">
+    <div class="modal">
+        <div class="modal-title">Add Storage</div>
+        <div class="modal-sub">Create a new storage location for organising stock.</div>
+        <div class="fld">
+            <label>Name</label>
+            <input type="text" id="st-name" placeholder="e.g. Main Warehouse" maxlength="100">
+        </div>
+        <div class="fld">
+            <label>Code (short identifier, optional)</label>
+            <input type="text" id="st-code" placeholder="e.g. MAIN" maxlength="20">
+        </div>
+        <div class="fld">
+            <label>Type</label>
+            <select id="st-type">
+                <option value="warehouse">Warehouse</option>
+                <option value="cold_storage">Cold Storage</option>
+                <option value="farm">Farm</option>
+                <option value="other">Other</option>
+            </select>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="closeStorageModal()">Cancel</button>
+            <button class="btn btn-green" id="st-save" onclick="saveStorage()">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- TRANSFER MODAL -->
+<div class="modal-bg" id="transfer-modal">
+    <div class="modal">
+        <div class="modal-title">New Stock Transfer</div>
+        <div class="modal-sub">Move stock from one storage to another.</div>
+        <div class="fld">
+            <label>Product</label>
+            <select id="tr-product"><option value="">— Choose product —</option></select>
+        </div>
+        <div class="fld">
+            <label>From Storage</label>
+            <select id="tr-source"><option value="">— Choose source —</option></select>
+            <div id="tr-source-stock" style="font-size:12px;color:var(--muted);margin-top:4px"></div>
+        </div>
+        <div class="fld">
+            <label>To Storage</label>
+            <select id="tr-dest"><option value="">— Choose destination —</option></select>
+        </div>
+        <div class="fld">
+            <label>Quantity</label>
+            <input type="number" id="tr-qty" min="0.001" step="0.001" placeholder="e.g. 50">
+        </div>
+        <div class="fld">
+            <label>Note (optional)</label>
+            <input type="text" id="tr-note" placeholder="e.g. Move feed to farm storage" maxlength="200">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="closeTransferModal()">Cancel</button>
+            <button class="btn btn-green" id="tr-save" onclick="saveTransfer()">Transfer</button>
         </div>
     </div>
 </div>
@@ -1185,11 +1310,17 @@ async function loadSummary(){
 /* ── TABS ── */
 function switchTab(tab){
     currentTab = tab;
-    document.getElementById("tab-stock").classList.toggle("active", tab==="stock");
-    document.getElementById("tab-moves").classList.toggle("active", tab==="moves");
-    document.getElementById("stock-section").style.display = tab==="stock" ? "" : "none";
-    document.getElementById("moves-section").style.display = tab==="moves" ? "" : "none";
-    if(tab==="moves") loadMoves();
+    document.getElementById("tab-stock").classList.toggle("active",     tab==="stock");
+    document.getElementById("tab-moves").classList.toggle("active",     tab==="moves");
+    document.getElementById("tab-storages").classList.toggle("active",  tab==="storages");
+    document.getElementById("tab-transfers").classList.toggle("active", tab==="transfers");
+    document.getElementById("stock-section").style.display     = tab==="stock"     ? "" : "none";
+    document.getElementById("moves-section").style.display     = tab==="moves"     ? "" : "none";
+    document.getElementById("storages-section").style.display  = tab==="storages"  ? "" : "none";
+    document.getElementById("transfers-section").style.display = tab==="transfers" ? "" : "none";
+    if(tab==="moves")     loadMoves();
+    if(tab==="storages")  loadStorages();
+    if(tab==="transfers") loadTransfers();
 }
 
 /* ── STOCK ── */
@@ -1392,6 +1523,229 @@ function showToast(msg){
     t.innerText=msg; t.classList.add("show");
     clearTimeout(toastTimer);
     toastTimer=setTimeout(()=>t.classList.remove("show"),3500);
+}
+
+/* ── STORAGES ── */
+let _storages = [];
+
+async function loadStorages(){
+    try {
+        const r = await fetch("/inventory/api/locations");
+        if (!r.ok) {
+            document.getElementById("storages-body").innerHTML =
+                `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">Could not load.</td></tr>`;
+            return;
+        }
+        const data = await r.json();
+        _storages = (data && data.items) ? data.items : (Array.isArray(data) ? data : []);
+        renderStorages();
+    } catch(e) {
+        document.getElementById("storages-body").innerHTML =
+            `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">Error loading storages.</td></tr>`;
+    }
+}
+
+function renderStorages(){
+    const q = (document.getElementById("storage-search")?.value || "").toLowerCase().trim();
+    const tbody = document.getElementById("storages-body");
+    const filtered = q
+        ? _storages.filter(s => (s.name||"").toLowerCase().includes(q) || (s.code||"").toLowerCase().includes(q))
+        : _storages;
+    if (!filtered.length) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">No storages.</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = filtered.map(s => {
+        const status = s.is_active === false
+            ? `<span style="color:var(--muted)">Inactive</span>`
+            : `<span style="color:#3dd06a">Active</span>`;
+        const qty = (s.total_qty != null) ? parseFloat(s.total_qty).toFixed(2) : "0.00";
+        return `<tr>
+            <td><b>${esc(s.name||"")}</b></td>
+            <td style="font-family:var(--mono);color:var(--sub)">${esc(s.code||"—")}</td>
+            <td style="color:var(--sub)">${esc(s.location_type||"warehouse")}</td>
+            <td style="font-family:var(--mono)">${s.product_count||0}</td>
+            <td style="font-family:var(--mono)">${qty}</td>
+            <td>${status}</td>
+        </tr>`;
+    }).join("");
+}
+
+function openStorageModal(){
+    document.getElementById("st-name").value = "";
+    document.getElementById("st-code").value = "";
+    document.getElementById("st-type").value = "warehouse";
+    document.getElementById("storage-modal").classList.add("open");
+}
+function closeStorageModal(){
+    document.getElementById("storage-modal").classList.remove("open");
+}
+
+async function saveStorage(){
+    const name = document.getElementById("st-name").value.trim();
+    const code = document.getElementById("st-code").value.trim() || null;
+    const type = document.getElementById("st-type").value;
+    if (!name) { showToast("Storage name is required"); return; }
+    const btn = document.getElementById("st-save");
+    btn.disabled = true;
+    try {
+        const r = await fetch("/inventory/api/locations", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name, code, location_type: type}),
+        });
+        if (!r.ok) {
+            const err = await r.json().catch(()=>({}));
+            showToast(err.detail || "Could not save storage");
+        } else {
+            showToast("Storage saved");
+            closeStorageModal();
+            loadStorages();
+        }
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+/* ── TRANSFERS ── */
+let _transferProducts = [];
+
+async function loadTransfers(){
+    const q = (document.getElementById("transfer-search")?.value || "").trim();
+    try {
+        const url = q
+            ? `/inventory/api/transfers?q=${encodeURIComponent(q)}`
+            : `/inventory/api/transfers`;
+        const r = await fetch(url);
+        const tbody = document.getElementById("transfers-body");
+        if (!r.ok) {
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Could not load.</td></tr>`;
+            return;
+        }
+        const data = await r.json();
+        const items = (data && data.items) ? data.items : (Array.isArray(data) ? data : []);
+        if (!items.length) {
+            tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">No transfers yet. Click "+ New Transfer" to move stock between storages.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = items.map(t => {
+            const date = t.created_at ? t.created_at : "—";
+            return `<tr>
+                <td style="color:var(--sub)">${esc(date)}</td>
+                <td>
+                    <div style="font-weight:600">${esc(t.product||"")}</div>
+                    <div style="font-family:var(--mono);font-size:11px;color:var(--muted)">${esc(t.sku||"")}</div>
+                </td>
+                <td>${esc(t.source_location||"—")}</td>
+                <td>${esc(t.destination_location||"—")}</td>
+                <td style="font-family:var(--mono)">${parseFloat(t.qty).toFixed(3)}</td>
+                <td style="color:var(--sub)">${esc(t.note||"—")}</td>
+                <td style="color:var(--muted)">${esc(t.actor||"—")}</td>
+            </tr>`;
+        }).join("");
+    } catch(e) {
+        document.getElementById("transfers-body").innerHTML =
+            `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Error loading transfers.</td></tr>`;
+    }
+}
+
+async function openTransferModal(){
+    // Populate dropdowns
+    if (!_storages.length) await loadStorages();
+    if (!_transferProducts.length) {
+        try {
+            // Re-use stock endpoint to get products with stock info
+            const r = await fetch("/inventory/api/stock?limit=2000");
+            if (r.ok) {
+                const data = await r.json();
+                _transferProducts = (data && data.items) ? data.items : [];
+            }
+        } catch(_) {}
+    }
+    const psel = document.getElementById("tr-product");
+    psel.innerHTML = `<option value="">— Choose product —</option>` +
+        _transferProducts.map(p => `<option value="${p.id}">${esc(p.name)} (${esc(p.sku)})</option>`).join("");
+    const ssel = document.getElementById("tr-source");
+    const dsel = document.getElementById("tr-dest");
+    const storageOpts = _storages.filter(s => s.is_active !== false)
+        .map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join("");
+    ssel.innerHTML = `<option value="">— Choose source —</option>` + storageOpts;
+    dsel.innerHTML = `<option value="">— Choose destination —</option>` + storageOpts;
+    document.getElementById("tr-qty").value = "";
+    document.getElementById("tr-note").value = "";
+    document.getElementById("tr-source-stock").textContent = "";
+    document.getElementById("transfer-modal").classList.add("open");
+
+    // Wire change handlers (idempotent — re-attach is fine)
+    psel.onchange = updateSourceStockHint;
+    ssel.onchange = updateSourceStockHint;
+}
+
+function closeTransferModal(){
+    document.getElementById("transfer-modal").classList.remove("open");
+}
+
+async function updateSourceStockHint(){
+    const pid = parseInt(document.getElementById("tr-product").value, 10) || 0;
+    const sid = parseInt(document.getElementById("tr-source").value, 10) || 0;
+    const hint = document.getElementById("tr-source-stock");
+    if (!pid || !sid) { hint.textContent = ""; return; }
+    try {
+        const r = await fetch(`/inventory/api/location-stock?product_id=${pid}&location_id=${sid}`);
+        if (r.ok) {
+            const data = await r.json();
+            const items = (data && data.items) ? data.items : [];
+            // items[0] is the product; find the matching location row inside its locations[]
+            let qty = 0;
+            if (items.length && Array.isArray(items[0].locations)) {
+                const loc = items[0].locations.find(l => l.location_id === sid);
+                if (loc) qty = parseFloat(loc.qty || 0);
+            }
+            hint.textContent = `Available in source: ${qty.toFixed(3)}`;
+        }
+    } catch(_) { hint.textContent = ""; }
+}
+
+async function saveTransfer(){
+    const product_id              = parseInt(document.getElementById("tr-product").value, 10) || 0;
+    const source_location_id      = parseInt(document.getElementById("tr-source").value, 10) || 0;
+    const destination_location_id = parseInt(document.getElementById("tr-dest").value, 10) || 0;
+    const qty  = parseFloat(document.getElementById("tr-qty").value) || 0;
+    const note = document.getElementById("tr-note").value.trim() || null;
+
+    if (!product_id) { showToast("Pick a product"); return; }
+    if (!source_location_id) { showToast("Pick a source storage"); return; }
+    if (!destination_location_id) { showToast("Pick a destination storage"); return; }
+    if (source_location_id === destination_location_id) { showToast("Source and destination must differ"); return; }
+    if (qty <= 0) { showToast("Quantity must be greater than 0"); return; }
+
+    const btn = document.getElementById("tr-save");
+    btn.disabled = true;
+    try {
+        const r = await fetch("/inventory/api/transfers", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                product_id, source_location_id, destination_location_id, qty, note,
+            }),
+        });
+        if (!r.ok) {
+            const err = await r.json().catch(()=>({}));
+            showToast(err.detail || "Transfer failed");
+        } else {
+            showToast("Transfer saved");
+            closeTransferModal();
+            loadTransfers();
+        }
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+/* ── Helper: esc — alias for existing escHtml if present, otherwise minimal */
+function esc(s){
+    if (typeof escHtml === "function") return escHtml(s);
+    return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 }
 
 init();

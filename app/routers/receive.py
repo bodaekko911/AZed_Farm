@@ -487,6 +487,12 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
           <label>Supplier Ref / Invoice <span style="color:var(--muted);font-weight:400">(optional)</span></label>
           <input type="text" id="supplier-ref" maxlength="150" placeholder="e.g. INV-2026-001">
         </div>
+        <div class="field">
+          <label>Storage <span style="color:var(--muted);font-weight:400">(where to put the received stock)</span></label>
+          <select id="location-select" required>
+            <option value="">— Loading storages… —</option>
+          </select>
+        </div>
         <div class="field full" id="payment-block" style="display:none">
           <label>Payment</label>
           <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:6px">
@@ -555,11 +561,12 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
           <tr>
             <th>Receipt #</th><th>Date</th><th>Product</th>
             <th>Qty</th><th>Unit Cost</th><th>Total</th>
+            <th>Storage</th>
             <th>Expense</th><th>Supplier</th><th>Payment</th><th>Supplier Ref</th><th>Notes</th><th>By</th><th>Actions</th>
           </tr>
         </thead>
         <tbody id="history-body">
-          <tr><td colspan="13" class="empty-row">Loading…</td></tr>
+          <tr><td colspan="14" class="empty-row">Loading…</td></tr>
         </tbody>
       </table>
     </div>
@@ -677,7 +684,7 @@ async function init() {
     document.body.classList.add('light');
     document.getElementById('mode-btn').innerHTML = '&#9728;&#65039;';
   }
-  await Promise.all([initUser(), loadProducts(), loadSuppliers()]);
+  await Promise.all([initUser(), loadProducts(), loadSuppliers(), loadLocations()]);
   document.getElementById('receive-date').value = todayIso();
   syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
   addRow();          // start with one empty row
@@ -685,6 +692,32 @@ async function init() {
 }
 
 let _suppliers = [];
+let _locations = [];
+
+async function loadLocations() {
+  try {
+    const r = await fetch('/inventory/api/locations');
+    if (!r.ok) return;
+    const data = await r.json();
+    _locations = (data && data.items) ? data.items : (Array.isArray(data) ? data : []);
+    const sel = document.getElementById('location-select');
+    if (!sel) return;
+    if (!_locations.length) {
+      sel.innerHTML = '<option value="">— No storages defined —</option>';
+      return;
+    }
+    // Default to Main Warehouse if present; otherwise first location.
+    let defaultId = '';
+    const main = _locations.find(l => (l.name || '').toLowerCase().includes('main'));
+    if (main) defaultId = String(main.id);
+    else if (_locations[0]) defaultId = String(_locations[0].id);
+
+    sel.innerHTML = _locations.map(l => {
+      const sel = String(l.id) === defaultId ? ' selected' : '';
+      return `<option value="${l.id}"${sel}>${escHtml(l.name)}</option>`;
+    }).join('');
+  } catch (_) { /* silent */ }
+}
 
 async function loadSuppliers() {
   try {
@@ -1104,6 +1137,7 @@ async function submitBatch(e) {
     supplier_id:  supplierId,
     amount_paid:  amountPaid,
     notes:        document.getElementById('notes').value.trim() || null,
+    location_id:  parseInt(document.getElementById('location-select').value, 10) || null,
     items,
   };
 
@@ -1159,14 +1193,14 @@ function resetForm() {
 async function loadHistory() {
   const r     = await fetch('/receive/api/history?limit=100');
   const tbody = document.getElementById('history-body');
-  if (!r.ok) { tbody.innerHTML = `<tr><td colspan="13" class="empty-row">Could not load.</td></tr>`; return; }
+  if (!r.ok) { tbody.innerHTML = `<tr><td colspan="14" class="empty-row">Could not load.</td></tr>`; return; }
   const data  = await r.json();
   _historyItems = data.items || [];
   const canUpdate = hasPermission('action_receive_products_update');
   const canDelete = hasPermission('action_receive_products_delete');
   const canManage = canUpdate || canDelete;
   if (!_historyItems.length) {
-    tbody.innerHTML = `<tr><td colspan="13" class="empty-row">No receipts yet.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="14" class="empty-row">No receipts yet.</td></tr>`;
     return;
   }
   tbody.innerHTML = _historyItems.map(row => {
@@ -1193,6 +1227,7 @@ async function loadHistory() {
     <td style="font-family:var(--mono)">${parseFloat(row.qty).toFixed(3)}</td>
     <td style="font-family:var(--mono)">${row.unit_cost!=null ? parseFloat(row.unit_cost).toFixed(2) : '<span style="color:var(--muted)">—</span>'}</td>
     <td style="font-family:var(--mono);color:var(--amber)">${row.total_cost!=null ? parseFloat(row.total_cost).toFixed(2) : '<span style="color:var(--muted)">—</span>'}</td>
+    <td style="color:var(--sub)">${row.location_name ? esc(row.location_name) : '<span style="color:var(--muted)">—</span>'}</td>
     <td>${row.expense_ref ? `<span class="badge badge-exp">${esc(row.expense_ref)}</span>` : '<span class="badge badge-none">—</span>'}</td>
     <td style="color:var(--sub)">${row.supplier_name ? esc(row.supplier_name) : '<span style="color:var(--muted)">—</span>'}</td>
     <td>${payCell}</td>

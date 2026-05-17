@@ -22,9 +22,11 @@ class ProductReceipt(Base):
     amount_paid  = Column(Numeric(12, 2), nullable=False, default=0, server_default="0")
     notes        = Column(Text, nullable=True)
     expense_id   = Column(Integer, ForeignKey("expenses.id"), nullable=True)
+    location_id  = Column(Integer, ForeignKey("stock_locations.id"), nullable=True, index=True)
     created_at   = Column(DateTime(timezone=True), server_default=func.now())
 
     product  = relationship("Product")
     user     = relationship("User")
     expense  = relationship("Expense")
     supplier = relationship("Supplier")
+    location = relationship("StockLocation")
