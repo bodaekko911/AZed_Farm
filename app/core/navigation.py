@@ -25,6 +25,7 @@ NAV_GROUPS = [
             {"label": "Receive", "href": "/receive/", "permission": "page_receive_products"},
             {"label": "Import", "href": "/import", "permission": "page_import"},
             {"label": "Farm", "href": "/farm/", "permission": "page_farm"},
+            {"label": "Animals", "href": "/animals/", "permission": "page_animals"},
             {"label": "Production", "href": "/production/", "permission": "page_production"},
             {"label": "Carbon", "href": "/carbon/", "permission": "page_carbon"},
         ],

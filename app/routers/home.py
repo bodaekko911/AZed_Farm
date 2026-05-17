@@ -480,6 +480,18 @@ body {
                 </div>
             </a>
 
+            <a href="/animals/" class="module-card c-green" data-permission="page_animals">
+                <div class="card-icon">🐄</div>
+                <div class="card-body">
+                    <div class="card-name">Animals</div>
+                    <div class="card-desc">Animal groups and feed consumption tracking</div>
+                </div>
+                <div class="card-footer">
+                    <span class="card-tag">Operations</span>
+                    <span class="card-arrow">↗</span>
+                </div>
+            </a>
+
             <a href="/carbon/" class="module-card c-teal" data-permission="page_carbon">
                 <div class="card-icon">🌿</div>
                 <div class="card-body">

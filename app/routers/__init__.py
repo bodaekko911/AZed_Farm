@@ -2,6 +2,7 @@ import logging
 
 from app.routers import (
     accounting,
+    animals,
     audit_log,
     auth,
     b2b,
@@ -56,6 +57,7 @@ _base_routers = (
     production.router,
     b2b.router,
     farm.router,
+    animals.router,
     carbon.router,
     reports.router,
     users.router,
