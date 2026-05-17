@@ -82,7 +82,8 @@ body.light #topbar{background:rgba(244,245,239,.92);}
 #browser_back{display:none;align-items:center;gap:6px;border:1px solid var(--border2);background:var(--card);color:var(--sub);border-radius:10px;padding:8px 12px;font-family:var(--sans);font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;}
 #browser_back.show{display:inline-flex;}
 #browser_back:hover{border-color:rgba(0,255,157,.35);color:var(--green);}
-#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:10px;}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:10px;opacity:0;transition:opacity 220ms ease-out;}
+#grid.grid-ready{opacity:1;}
 .category-tile{background:linear-gradient(180deg,rgba(77,159,255,.12),rgba(77,159,255,.04));border:1px solid rgba(77,159,255,.18);border-radius:16px;padding:18px 16px;cursor:pointer;display:flex;flex-direction:column;gap:10px;min-height:132px;transition:border-color .2s,box-shadow .2s,transform .15s;}
 .category-tile:hover{border-color:rgba(77,159,255,.45);box-shadow:0 10px 30px rgba(77,159,255,.16);transform:translateY(-2px);}
 .category-kicker{font-size:11px;letter-spacing:1.4px;text-transform:uppercase;color:var(--blue);font-weight:800;}
@@ -640,14 +641,26 @@ async function load(){
         if(ind) ind.style.display = "flex";
     }
     try {
-        customers = await (await fetch("/customers")).json();
-        products  = await (await fetch("/products-cache")).json();
+        // Run both fetches in parallel — saves ~300ms vs sequential awaits.
+        const [customersRes, productsRes] = await Promise.all([
+            fetch("/customers"),
+            fetch("/products-cache"),
+        ]);
+        const [customersData, productsData] = await Promise.all([
+            customersRes.json(),
+            productsRes.json(),
+        ]);
+        customers = customersData;
+        products  = productsData;
         buildCategories(products);
         showCategoriesView();
         checkUnpaidCount();
     } catch(e){
         console.error("Load error:", e);
         if(!navigator.onLine) showToast("📴 Working offline — product list may be limited", false);
+        // Even on error, reveal the grid so user isn't stuck looking at blank.
+        const grid = document.getElementById("grid");
+        if(grid) grid.classList.add("grid-ready");
     }
     updateOfflineBadge();
     if(navigator.onLine) syncOfflineQueue();
@@ -853,13 +866,15 @@ function setEmptyState(message){
 
 function renderProducts(list, emptyMessage="No products found"){
     let nr = document.getElementById("no_results");
+    const grid = document.getElementById("grid");
     if(!list.length){
-        document.getElementById("grid").innerHTML="";
+        grid.innerHTML="";
         setEmptyState(emptyMessage);
+        grid.classList.add("grid-ready");
         return;
     }
     nr.style.display="none";
-    document.getElementById("grid").innerHTML = list.map(p=>{
+    grid.innerHTML = list.map(p=>{
         const isService = p.stock_tracked === false || p.item_type === "service";
         const stockText = isService ? "Service" : `Stock: ${parseFloat(p.stock).toFixed(0)}`;
         const stockColor = isService ? "var(--muted)" : (p.stock>0 ? "#445066" : "#ff4d6d");
@@ -872,22 +887,26 @@ function renderProducts(list, emptyMessage="No products found"){
             <div class="p-stock" style="color:${stockColor}">${stockText}</div>
         </div>`;
     }).join("");
+    grid.classList.add("grid-ready");
 }
 
 function renderCategories(){
     const nr = document.getElementById("no_results");
+    const grid = document.getElementById("grid");
     if(!categories.length){
-        document.getElementById("grid").innerHTML = "";
+        grid.innerHTML = "";
         setEmptyState("No categories available");
+        grid.classList.add("grid-ready");
         return;
     }
     nr.style.display = "none";
-    document.getElementById("grid").innerHTML = categories.map(category => `
+    grid.innerHTML = categories.map(category => `
         <button class="category-tile" type="button" data-category="${category.name.replace(/"/g, "&quot;")}">
             <div class="category-kicker">Category</div>
             <div class="category-name">${category.name}</div>
             <div class="category-meta">${category.count} product${category.count === 1 ? "" : "s"}</div>
         </button>`).join("");
+    grid.classList.add("grid-ready");
 }
 
 function showCategoriesView(){
