@@ -73,26 +73,33 @@ def upgrade() -> None:
             unique=False,
         )
 
-    # 2. Seed default storage locations (only if missing)
+    # 2. Seed default storage locations (only if missing — checks both
+    #    name and code to avoid unique-constraint violations from any
+    #    partial state on prior failed migration attempts).
     if _table_exists("stock_locations"):
         existing = bind.execute(
-            sa.text("SELECT name FROM stock_locations")
+            sa.text("SELECT name, code FROM stock_locations")
         ).fetchall()
-        existing_names = {row[0] for row in existing}
+        existing_names = {row[0] for row in existing if row[0]}
+        existing_codes = {row[1] for row in existing if row[1]}
 
         for loc in DEFAULT_LOCATIONS:
-            if loc["name"] not in existing_names:
-                bind.execute(
-                    sa.text(
-                        "INSERT INTO stock_locations (name, code, location_type, is_active) "
-                        "VALUES (:name, :code, :type, TRUE)"
-                    ),
-                    {
-                        "name": loc["name"],
-                        "code": loc["code"],
-                        "type": loc["location_type"],
-                    },
-                )
+            if loc["name"] in existing_names:
+                continue
+            if loc["code"] in existing_codes:
+                continue
+            bind.execute(
+                sa.text(
+                    "INSERT INTO stock_locations (name, code, location_type, is_active) "
+                    "VALUES (:name, :code, :type, TRUE) "
+                    "ON CONFLICT DO NOTHING"
+                ),
+                {
+                    "name": loc["name"],
+                    "code": loc["code"],
+                    "type": loc["location_type"],
+                },
+            )
 
     # 3. Backfill: for every product with stock > 0, ensure a LocationStock
     #    row exists in Main Warehouse with that quantity. Only inserts where
