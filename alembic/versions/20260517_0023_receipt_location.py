@@ -85,7 +85,7 @@ def upgrade() -> None:
                 bind.execute(
                     sa.text(
                         "INSERT INTO stock_locations (name, code, location_type, is_active) "
-                        "VALUES (:name, :code, :type, 1)"
+                        "VALUES (:name, :code, :type, TRUE)"
                     ),
                     {
                         "name": loc["name"],
