@@ -917,6 +917,34 @@ td.mono { font-family: var(--mono); }
 }
 .btn-cancel:hover { border-color: var(--danger); color: var(--danger); }
 
+/* Searchable product picker (used in Transfer modal) */
+.product-picker { position: relative; }
+.product-picker-list {
+    position: absolute; left: 0; right: 0; top: calc(100% + 4px);
+    z-index: 600; max-height: 260px; overflow-y: auto;
+    background: var(--card); border: 1px solid var(--border2);
+    border-radius: 10px; padding: 4px;
+    box-shadow: 0 18px 40px rgba(0,0,0,.4);
+    display: none;
+}
+.product-picker-list.open { display: block; }
+.product-picker-item {
+    padding: 9px 12px; cursor: pointer; font-size: 13px;
+    border-radius: 7px; display: flex; align-items: center; gap: 10px;
+    color: var(--text);
+}
+.product-picker-item:hover,
+.product-picker-item.highlighted {
+    background: rgba(77,159,255,.14); color: var(--blue);
+}
+.product-picker-item .ppi-sku {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    margin-left: auto; white-space: nowrap;
+}
+.product-picker-empty {
+    padding: 14px; text-align: center; font-size: 12px; color: var(--muted);
+}
+
 .toast {
     position: fixed; bottom: 22px; left: 50%;
     transform: translateX(-50%) translateY(16px);
@@ -1149,9 +1177,16 @@ td.mono { font-family: var(--mono); }
     <div class="modal">
         <div class="modal-title">New Stock Transfer</div>
         <div class="modal-sub">Move stock from one storage to another.</div>
-        <div class="fld">
+        <div class="fld product-picker">
             <label>Product</label>
-            <select id="tr-product"><option value="">— Choose product —</option></select>
+            <input type="hidden" id="tr-product" value="">
+            <input type="text" id="tr-product-search"
+                   placeholder="Type product name or SKU…"
+                   autocomplete="off"
+                   oninput="onTransferProductInput()"
+                   onfocus="onTransferProductFocus()"
+                   onkeydown="onTransferProductKey(event)">
+            <div class="product-picker-list" id="tr-product-list"></div>
         </div>
         <div class="fld">
             <label>From Storage</label>
@@ -1662,9 +1697,12 @@ async function openTransferModal(){
             }
         } catch(_) {}
     }
-    const psel = document.getElementById("tr-product");
-    psel.innerHTML = `<option value="">— Choose product —</option>` +
-        _transferProducts.map(p => `<option value="${p.id}">${esc(p.name)} (${esc(p.sku)})</option>`).join("");
+    // Reset product picker
+    document.getElementById("tr-product").value = "";
+    document.getElementById("tr-product-search").value = "";
+    document.getElementById("tr-product-list").classList.remove("open");
+    document.getElementById("tr-product-list").innerHTML = "";
+
     const ssel = document.getElementById("tr-source");
     const dsel = document.getElementById("tr-dest");
     const storageOpts = _storages.filter(s => s.is_active !== false)
@@ -1676,10 +1714,97 @@ async function openTransferModal(){
     document.getElementById("tr-source-stock").textContent = "";
     document.getElementById("transfer-modal").classList.add("open");
 
-    // Wire change handlers (idempotent — re-attach is fine)
-    psel.onchange = updateSourceStockHint;
+    // Source change updates the stock hint
     ssel.onchange = updateSourceStockHint;
 }
+
+/* ── Searchable product picker (transfer modal) ── */
+let _trPickerHighlight = 0;
+let _trPickerFiltered = [];
+
+function renderTransferPicker(items){
+    const list = document.getElementById("tr-product-list");
+    _trPickerFiltered = items;
+    _trPickerHighlight = 0;
+    if (!items.length) {
+        list.innerHTML = `<div class="product-picker-empty">No products match.</div>`;
+        list.classList.add("open");
+        return;
+    }
+    list.innerHTML = items.slice(0, 50).map((p, i) => `
+        <div class="product-picker-item${i === 0 ? ' highlighted' : ''}"
+             data-id="${p.id}"
+             onclick="pickTransferProduct(${p.id})">
+            <span>${esc(p.name)}</span>
+            <span class="ppi-sku">${esc(p.sku || '')}</span>
+        </div>
+    `).join("");
+    list.classList.add("open");
+}
+
+function onTransferProductInput(){
+    const q = document.getElementById("tr-product-search").value.trim().toLowerCase();
+    // When user types, clear the hidden selection so they can't submit a stale id
+    document.getElementById("tr-product").value = "";
+    if (!q) {
+        renderTransferPicker(_transferProducts);
+        return;
+    }
+    const filtered = _transferProducts.filter(p => {
+        const name = (p.name || "").toLowerCase();
+        const sku  = (p.sku  || "").toLowerCase();
+        return name.includes(q) || sku.includes(q);
+    });
+    renderTransferPicker(filtered);
+}
+
+function onTransferProductFocus(){
+    // Show full list (or current filter) when the field is focused
+    onTransferProductInput();
+}
+
+function pickTransferProduct(id){
+    const p = _transferProducts.find(x => x.id === id);
+    if (!p) return;
+    document.getElementById("tr-product").value = String(p.id);
+    document.getElementById("tr-product-search").value = `${p.name} (${p.sku || ''})`;
+    document.getElementById("tr-product-list").classList.remove("open");
+    updateSourceStockHint();
+}
+
+function onTransferProductKey(ev){
+    const list = document.getElementById("tr-product-list");
+    const items = list.querySelectorAll(".product-picker-item");
+    if (ev.key === "ArrowDown") {
+        ev.preventDefault();
+        if (!items.length) return;
+        _trPickerHighlight = Math.min(_trPickerHighlight + 1, items.length - 1);
+        items.forEach((el, i) => el.classList.toggle("highlighted", i === _trPickerHighlight));
+        items[_trPickerHighlight].scrollIntoView({block: "nearest"});
+    } else if (ev.key === "ArrowUp") {
+        ev.preventDefault();
+        if (!items.length) return;
+        _trPickerHighlight = Math.max(_trPickerHighlight - 1, 0);
+        items.forEach((el, i) => el.classList.toggle("highlighted", i === _trPickerHighlight));
+        items[_trPickerHighlight].scrollIntoView({block: "nearest"});
+    } else if (ev.key === "Enter") {
+        ev.preventDefault();
+        if (items.length && _trPickerFiltered[_trPickerHighlight]) {
+            pickTransferProduct(_trPickerFiltered[_trPickerHighlight].id);
+        }
+    } else if (ev.key === "Escape") {
+        list.classList.remove("open");
+    }
+}
+
+// Close picker when clicking outside
+document.addEventListener("click", function(e){
+    const wrap = e.target.closest(".product-picker");
+    if (!wrap) {
+        const list = document.getElementById("tr-product-list");
+        if (list) list.classList.remove("open");
+    }
+});
 
 function closeTransferModal(){
     document.getElementById("transfer-modal").classList.remove("open");
