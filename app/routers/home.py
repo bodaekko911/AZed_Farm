@@ -14,7 +14,7 @@ def home_ui(_=Depends(get_current_user)):
 <meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Habiba Organic Farm — ERP</title>
+<title>AZed ERP</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -642,7 +642,7 @@ body {
     </main>
 
     <footer class="footer">
-        <span class="footer-brand">Habiba Organic Farm</span>
+        <span class="footer-brand">AZed ERP</span>
         <span id="footer-time"></span>
     </footer>
 

@@ -793,7 +793,7 @@ td.name{color:var(--text);font-weight:600;}
             <input id="u-name" placeholder="e.g. Ahmed Hassan">
         </div>
         <div class="fld"><label>Email *</label>
-            <input id="u-email" type="email" placeholder="ahmed@habiba.com">
+            <input id="u-email" type="email" placeholder="name@example.com">
         </div>
         <div class="fld"><label id="pass-label">Password *</label>
             <input id="u-pass" type="password" placeholder="Min __PASSWORD_MIN_LENGTH__ characters" oninput="pwdStrength('u-pass','u-bar')">

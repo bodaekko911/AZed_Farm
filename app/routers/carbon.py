@@ -530,7 +530,7 @@ async def carbon_dashboard(
   <div class="page-header">
     <div>
       <h1 class="page-title">Carbon Footprint</h1>
-      <p class="page-subtitle">Track CO₂-equivalent emissions from transport, energy, production, and waste across Habiba operations.</p>
+      <p class="page-subtitle">Track CO₂-equivalent emissions from transport, energy, production, and waste across your farm operations.</p>
     </div>
     <div class="page-actions">
       <a href="/carbon/log" class="btn btn-primary">+ Log Emission</a>
