@@ -19,7 +19,9 @@
     activeFarmTab: "value",
     activeSpoilageTab: "reasons",
     activeExpTab: "category",
+    activeUtilTab: "total",
     chart:  null,
+    utilityChart: null,
     currentUser: null,
     loaded: false,   // true after first successful load — suppresses spinner on refresh
   };
@@ -79,6 +81,9 @@
     const sp  = d.spoilage   || {};
     const ex  = d.expenses   || {};
     const cad = d.cadence    || {};
+    const ut  = d.utilities  || {};
+    const wt  = ut.water       || {};
+    const el  = ut.electricity || {};
 
     const specs = {
       deliveries: {
@@ -115,6 +120,20 @@
         meta:      `${ex.farm_share_pct || 0}% of company spend`,
         breakdown: fmtDelta(ex.farm_delta),
         deltaCls:  deltaClass(ex.farm_delta, true),
+      },
+      water: {
+        label:     "Water consumption",
+        value:     `${fmtQty(wt.consumption || 0)} ${wt.unit || "m³"}`,
+        meta:      `${fmtMoney(wt.cost || 0)} · ${fmtInt(wt.count || 0)} bill${(wt.count || 0) === 1 ? "" : "s"}`,
+        breakdown: fmtDelta(wt.delta),
+        deltaCls:  deltaClass(wt.delta, true),
+      },
+      electricity: {
+        label:     "Electricity consumption",
+        value:     `${fmtQty(el.consumption || 0)} ${el.unit || "kWh"}`,
+        meta:      `${fmtMoney(el.cost || 0)} · ${fmtInt(el.count || 0)} bill${(el.count || 0) === 1 ? "" : "s"}`,
+        breakdown: fmtDelta(el.delta),
+        deltaCls:  deltaClass(el.delta, true),
       },
     };
 
@@ -361,6 +380,122 @@
     })).join("");
   }
 
+  // ── utilities trend chart (water + electricity, last 12 months) ──
+  function renderUtilitiesChart(d) {
+    const months = (d.utilities && d.utilities.by_month) || [];
+    const canvas = $id("utilities-chart");
+    if (!canvas || !window.Chart) return;
+
+    if (state.utilityChart) {
+      state.utilityChart.destroy();
+      state.utilityChart = null;
+    }
+
+    const waterUnit = (d.utilities && d.utilities.water && d.utilities.water.unit) || "m³";
+    const elecUnit  = (d.utilities && d.utilities.electricity && d.utilities.electricity.unit) || "kWh";
+
+    state.utilityChart = new Chart(canvas, {
+      type: "line",
+      data: {
+        labels: months.map((m) => m.label),
+        datasets: [
+          {
+            label: `Water (${waterUnit})`,
+            data: months.map((m) => m.water),
+            borderColor: "#38bdf8",
+            backgroundColor: "rgba(56, 189, 248, .18)",
+            tension: .35,
+            yAxisID: "y",
+            fill: true,
+          },
+          {
+            label: `Electricity (${elecUnit})`,
+            data: months.map((m) => m.electricity),
+            borderColor: "#fbbf24",
+            backgroundColor: "rgba(251, 191, 36, .18)",
+            tension: .35,
+            yAxisID: "y1",
+            fill: true,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 11 } } },
+        },
+        scales: {
+          y:  { beginAtZero: true, position: "left",  title: { display: true, text: waterUnit } },
+          y1: { beginAtZero: true, position: "right", title: { display: true, text: elecUnit }, grid: { drawOnChartArea: false } },
+        },
+      },
+    });
+
+    const table = $id("utilities-chart-table");
+    if (table) {
+      table.innerHTML =
+        `<thead><tr><th>Month</th><th>Water (${escHtml(waterUnit)})</th><th>Electricity (${escHtml(elecUnit)})</th></tr></thead>` +
+        "<tbody>" + months.map((m) =>
+          `<tr><td>${escHtml(m.label)}</td><td>${fmtQty(m.water)}</td><td>${fmtQty(m.electricity)}</td></tr>`
+        ).join("") + "</tbody>";
+    }
+  }
+
+  // ── utilities-by-farm panel ──────────────────────────────────────
+  function renderUtilities() {
+    const d = state.data; if (!d) return;
+    const ut     = d.utilities || {};
+    const list   = ut.by_farm || [];
+    const target = $id("utilities-list"); if (!target) return;
+    if (!list.length) { target.innerHTML = emptyState("No water or electricity bills logged in this window."); return; }
+
+    const waterUnit = (ut.water && ut.water.unit) || "m³";
+    const elecUnit  = (ut.electricity && ut.electricity.unit) || "kWh";
+    const tab = state.activeUtilTab;
+
+    // Sort & choose what to show as the primary value depending on tab.
+    let sorted = list.slice();
+    if (tab === "water") {
+      sorted.sort((a, b) => Number(b.water_cost || 0) - Number(a.water_cost || 0));
+    } else if (tab === "electricity") {
+      sorted.sort((a, b) => Number(b.electricity_cost || 0) - Number(a.electricity_cost || 0));
+    } else {
+      sorted.sort((a, b) => Number(b.total_cost || 0) - Number(a.total_cost || 0));
+    }
+
+    const maxV = Math.max(1, ...sorted.map((r) => {
+      if (tab === "water")       return Number(r.water_cost || 0);
+      if (tab === "electricity") return Number(r.electricity_cost || 0);
+      return Number(r.total_cost || 0);
+    }));
+
+    target.innerHTML = sorted.map((row) => {
+      let primary, secondary, barVal;
+      if (tab === "water") {
+        primary   = fmtMoney(row.water_cost);
+        secondary = `${fmtQty(row.water_qty)} ${waterUnit}`;
+        barVal    = Number(row.water_cost || 0);
+      } else if (tab === "electricity") {
+        primary   = fmtMoney(row.electricity_cost);
+        secondary = `${fmtQty(row.electricity_qty)} ${elecUnit}`;
+        barVal    = Number(row.electricity_cost || 0);
+      } else {
+        primary   = fmtMoney(row.total_cost);
+        secondary = `${fmtQty(row.water_qty)} ${waterUnit} · ${fmtQty(row.electricity_qty)} ${elecUnit}`;
+        barVal    = Number(row.total_cost || 0);
+      }
+      return listRow({
+        title:    row.farm,
+        sub:      secondary,
+        value:    primary,
+        valueSub: null,
+        bar:      (barVal / maxV) * 100,
+      });
+    }).join("");
+  }
+
   // ── contribution panel ───────────────────────────────────────────
   function renderContribution() {
     const list   = (state.data && state.data.contribution) || [];
@@ -451,10 +586,12 @@
       renderNumberCards(data);
       renderBriefing(data);
       renderSeasonChart(data);
+      renderUtilitiesChart(data);
       renderTopFarms();
       renderTopProducts();
       renderSpoilage();
       renderExpenses();
+      renderUtilities();
       renderContribution();
       renderSignals();
       paintHeader();
@@ -593,6 +730,15 @@
         document.querySelectorAll("[data-exp-tab]").forEach((b) =>
           b.classList.toggle("active", b.dataset.expTab === state.activeExpTab));
         renderExpenses();
+      });
+    });
+
+    document.querySelectorAll("[data-util-tab]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.activeUtilTab = btn.dataset.utilTab;
+        document.querySelectorAll("[data-util-tab]").forEach((b) =>
+          b.classList.toggle("active", b.dataset.utilTab === state.activeUtilTab));
+        renderUtilities();
       });
     });
 

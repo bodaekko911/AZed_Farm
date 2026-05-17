@@ -451,6 +451,171 @@ async def farm_dashboard_summary(
         )[:10],
     }
 
+    # ── UTILITIES (water + electricity) ────────────────────────────────
+    # Reads from the existing Expense table, filtered by category name
+    # containing "water" or "electric" (case-insensitive). Uses each
+    # expense's `consumption` field (m³ for water, kWh for electricity)
+    # and the bill amount in EGP. No schema changes needed.
+    utilities: dict = {
+        "water":       {"consumption": 0.0, "cost": 0.0, "count": 0, "unit": "m³",  "prev": 0.0, "delta": None},
+        "electricity": {"consumption": 0.0, "cost": 0.0, "count": 0, "unit": "kWh", "prev": 0.0, "delta": None},
+        "by_farm":     [],
+        "by_month":    [],
+    }
+    util_by_farm: dict[int, dict] = {}
+    try:
+        # Current period: water + electricity rows, joined to category name.
+        rows = await db.execute(
+            select(
+                Expense.amount,
+                Expense.consumption,
+                Expense.farm_id,
+                ExpenseCategory.name,
+                ExpenseCategory.unit_name,
+            )
+            .join(ExpenseCategory, Expense.category_id == ExpenseCategory.id)
+            .where(
+                Expense.expense_date >= s_date,
+                Expense.expense_date <= e_date,
+                func.lower(ExpenseCategory.name).op("LIKE")("%water%") |
+                func.lower(ExpenseCategory.name).op("LIKE")("%electric%"),
+            )
+        )
+        for r in rows.all():
+            cat_name = (r.name or "").lower()
+            kind = "water" if "water" in cat_name else "electricity" if "electric" in cat_name else None
+            if not kind:
+                continue
+            amt  = float(r.amount or 0)
+            cons = float(r.consumption or 0)
+            utilities[kind]["cost"]        += amt
+            utilities[kind]["consumption"] += cons
+            utilities[kind]["count"]       += 1
+            # capture the actual unit from the category if defined
+            if r.unit_name:
+                utilities[kind]["unit"] = r.unit_name
+
+            fid = int(r.farm_id) if r.farm_id else 0
+            fname = farms_by_id.get(fid).name if farms_by_id.get(fid) else "Unassigned"
+            uf = util_by_farm.setdefault(fid, {
+                "farm_id":         fid,
+                "farm":            fname,
+                "water_qty":       0.0,
+                "water_cost":      0.0,
+                "electricity_qty": 0.0,
+                "electricity_cost":0.0,
+                "total_cost":      0.0,
+            })
+            if kind == "water":
+                uf["water_qty"]  += cons
+                uf["water_cost"] += amt
+            else:
+                uf["electricity_qty"]  += cons
+                uf["electricity_cost"] += amt
+            uf["total_cost"] += amt
+
+        # Previous-window comparison for deltas.
+        prev_rows = await db.execute(
+            select(
+                Expense.amount,
+                Expense.consumption,
+                ExpenseCategory.name,
+            )
+            .join(ExpenseCategory, Expense.category_id == ExpenseCategory.id)
+            .where(
+                Expense.expense_date >= p_start,
+                Expense.expense_date <= p_end,
+                func.lower(ExpenseCategory.name).op("LIKE")("%water%") |
+                func.lower(ExpenseCategory.name).op("LIKE")("%electric%"),
+            )
+        )
+        for r in prev_rows.all():
+            cat_name = (r.name or "").lower()
+            if "water" in cat_name:
+                utilities["water"]["prev"] += float(r.consumption or 0)
+            elif "electric" in cat_name:
+                utilities["electricity"]["prev"] += float(r.consumption or 0)
+
+        # Compute deltas vs previous period (on consumption, not cost).
+        utilities["water"]["delta"]       = _pct_delta(utilities["water"]["consumption"],       utilities["water"]["prev"])
+        utilities["electricity"]["delta"] = _pct_delta(utilities["electricity"]["consumption"], utilities["electricity"]["prev"])
+
+        # Round + finalise
+        for k in ("water", "electricity"):
+            utilities[k]["consumption"] = round(utilities[k]["consumption"], 2)
+            utilities[k]["cost"]        = round(utilities[k]["cost"], 2)
+            utilities[k]["prev"]        = round(utilities[k]["prev"], 2)
+
+        utilities["by_farm"] = sorted(
+            [
+                {
+                    **v,
+                    "water_qty":        round(v["water_qty"], 2),
+                    "water_cost":       round(v["water_cost"], 2),
+                    "electricity_qty":  round(v["electricity_qty"], 2),
+                    "electricity_cost": round(v["electricity_cost"], 2),
+                    "total_cost":       round(v["total_cost"], 2),
+                }
+                for v in util_by_farm.values()
+            ],
+            key=lambda d: d["total_cost"],
+            reverse=True,
+        )
+    except Exception:
+        logger.exception("farm_dashboard: utilities section failed")
+        _errors.append({"section": "utilities", "reason": "query failed"})
+
+    # Monthly trend (last 12 months) — water + electricity consumption.
+    try:
+        today2 = date.today()
+        anchor2 = today2.replace(day=1)
+        for i in range(11, -1, -1):
+            y = anchor2.year
+            m = anchor2.month - i
+            while m <= 0:
+                m += 12
+                y -= 1
+            m_start = date(y, m, 1)
+            if m == 12:
+                m_end = date(y, 12, 31)
+            else:
+                m_end = date(y, m + 1, 1) - timedelta(days=1)
+
+            mrows = await db.execute(
+                select(
+                    func.sum(Expense.consumption),
+                    ExpenseCategory.name,
+                )
+                .join(ExpenseCategory, Expense.category_id == ExpenseCategory.id)
+                .where(
+                    Expense.expense_date >= m_start,
+                    Expense.expense_date <= m_end,
+                    func.lower(ExpenseCategory.name).op("LIKE")("%water%") |
+                    func.lower(ExpenseCategory.name).op("LIKE")("%electric%"),
+                )
+                .group_by(ExpenseCategory.name)
+            )
+            mwater = 0.0
+            melec  = 0.0
+            for mr in mrows.all():
+                nm = (mr.name or "").lower()
+                v  = float(mr[0] or 0)
+                if "water" in nm:
+                    mwater += v
+                elif "electric" in nm:
+                    melec  += v
+            utilities["by_month"].append({
+                "month":       m_start.strftime("%Y-%m"),
+                "label":       m_start.strftime("%b %y"),
+                "water":       round(mwater, 2),
+                "electricity": round(melec, 2),
+            })
+    except Exception:
+        logger.exception("farm_dashboard: utilities monthly trend failed")
+        _errors.append({"section": "utilities_monthly", "reason": "query failed"})
+
+    out["utilities"] = utilities
+
     # ── NET CONTRIBUTION (per farm) ──────────────────────────────────
     contribution: list[dict] = []
     spoiled_by_farm: dict[int, float] = {}
@@ -755,6 +920,8 @@ def farm_dashboard_ui(current_user: User = Depends(get_current_user)):
     <article class="card number-card" data-card="intake_value" aria-live="polite"></article>
     <article class="card number-card" data-card="spoilage" aria-live="polite"></article>
     <article class="card number-card" data-card="farm_expenses" aria-live="polite"></article>
+    <article class="card number-card" data-card="water" aria-live="polite"></article>
+    <article class="card number-card" data-card="electricity" aria-live="polite"></article>
   </section>
 
   <section class="card chart-card" aria-label="Intake vs spoilage vs expenses by month">
@@ -762,6 +929,26 @@ def farm_dashboard_ui(current_user: User = Depends(get_current_user)):
     <div class="chart-wrap"><canvas id="season-chart" aria-label="Season analysis chart"></canvas></div>
     <table class="sr-only" id="chart-table" aria-label="Season analysis table"></table>
   </section>
+
+  <section class="card chart-card" aria-label="Water and electricity consumption by month">
+    <div class="panel-head"><h2 id="utilities-chart-title">Utilities — last 12 months</h2></div>
+    <div class="chart-wrap"><canvas id="utilities-chart" aria-label="Utilities trend chart"></canvas></div>
+    <table class="sr-only" id="utilities-chart-table" aria-label="Utilities trend table"></table>
+  </section>
+
+  <div class="panel-grid">
+    <section class="card panel-card" aria-label="Utilities by farm">
+      <div class="panel-head">
+        <h2>Utilities by farm</h2>
+        <div class="panel-tabs" role="tablist" aria-label="Utilities view">
+          <button type="button" class="tab-btn active" data-util-tab="total">By total cost</button>
+          <button type="button" class="tab-btn" data-util-tab="water">By water</button>
+          <button type="button" class="tab-btn" data-util-tab="electricity">By electricity</button>
+        </div>
+      </div>
+      <div id="utilities-list" class="panel-body"></div>
+    </section>
+  </div>
 
   <div class="panel-grid">
     <section class="card panel-card" aria-label="Top farms">
