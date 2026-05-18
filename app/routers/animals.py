@@ -30,6 +30,7 @@ from app.core.navigation import render_app_header
 from app.core.permissions import require_permission
 from app.database import get_async_session
 from app.models.animal import AnimalGroup, FeedingLog, MortalityLog
+from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm
 from app.models.inventory import StockLocation, StockMove
 from app.models.product import Product
@@ -50,20 +51,24 @@ router = APIRouter(
 # ── Schemas ──────────────────────────────────────────────────────────
 
 class AnimalGroupIn(BaseModel):
-    name:        str           = Field(..., min_length=1, max_length=150)
-    animal_type: str           = Field("other", max_length=30)
-    headcount:   int           = Field(0, ge=0)
-    farm_id:     Optional[int] = None
-    notes:       Optional[str] = None
+    name:           str           = Field(..., min_length=1, max_length=150)
+    animal_type:    str           = Field("other", max_length=30)
+    headcount:      int           = Field(0, ge=0)
+    farm_id:        Optional[int] = None
+    notes:          Optional[str] = None
+    purchase_cost:  Optional[float] = Field(None, ge=0)
+    cost_per_head:  Optional[float] = Field(None, ge=0)
 
 
 class AnimalGroupUpdate(BaseModel):
-    name:        Optional[str] = Field(None, min_length=1, max_length=150)
-    animal_type: Optional[str] = Field(None, max_length=30)
-    headcount:   Optional[int] = Field(None, ge=0)
-    farm_id:     Optional[int] = None
-    status:      Optional[str] = Field(None, max_length=20)
-    notes:       Optional[str] = None
+    name:           Optional[str] = Field(None, min_length=1, max_length=150)
+    animal_type:    Optional[str] = Field(None, max_length=30)
+    headcount:      Optional[int] = Field(None, ge=0)
+    farm_id:        Optional[int] = None
+    status:         Optional[str] = Field(None, max_length=20)
+    notes:          Optional[str] = None
+    purchase_cost:  Optional[float] = Field(None, ge=0)
+    cost_per_head:  Optional[float] = Field(None, ge=0)
 
 
 class FeedingCreate(BaseModel):
@@ -90,15 +95,29 @@ class MortalityCreate(BaseModel):
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _serialize_group(g: AnimalGroup) -> dict:
+    purchase_cost = float(g.purchase_cost) if g.purchase_cost is not None else None
+    cost_per_head = float(g.cost_per_head) if g.cost_per_head is not None else None
+    head = int(g.headcount or 0)
+    # Effective total purchase cost: prefer explicit total; otherwise derive
+    # from per-head price × headcount.
+    if purchase_cost is not None and purchase_cost > 0:
+        effective_total = purchase_cost
+    elif cost_per_head is not None and cost_per_head > 0:
+        effective_total = round(cost_per_head * head, 2)
+    else:
+        effective_total = 0.0
     return {
         "id":           g.id,
         "name":         g.name,
         "animal_type":  g.animal_type or "other",
-        "headcount":    int(g.headcount or 0),
+        "headcount":    head,
         "farm_id":      g.farm_id,
         "farm_name":    g.farm.name if g.farm else None,
         "status":       g.status or "active",
         "notes":        g.notes,
+        "purchase_cost":          purchase_cost,
+        "cost_per_head":          cost_per_head,
+        "effective_purchase_cost": effective_total,
         "created_at":   g.created_at.isoformat() if g.created_at else None,
         "archived_at":  g.archived_at.isoformat() if g.archived_at else None,
     }
@@ -174,6 +193,8 @@ async def create_group(
         headcount=data.headcount,
         farm_id=data.farm_id,
         notes=(data.notes or "").strip() or None,
+        purchase_cost=(Decimal(str(data.purchase_cost)) if data.purchase_cost is not None else None),
+        cost_per_head=(Decimal(str(data.cost_per_head)) if data.cost_per_head is not None else None),
         status="active",
     )
     db.add(group)
@@ -227,6 +248,15 @@ async def update_group(
             group.archived_at = datetime.now(timezone.utc)
     if data.notes is not None:
         group.notes = data.notes.strip() or None
+    if data.purchase_cost is not None:
+        # 0 / negative clears the field
+        group.purchase_cost = (
+            Decimal(str(data.purchase_cost)) if data.purchase_cost > 0 else None
+        )
+    if data.cost_per_head is not None:
+        group.cost_per_head = (
+            Decimal(str(data.cost_per_head)) if data.cost_per_head > 0 else None
+        )
 
     await db.flush()
     await db.refresh(group, attribute_names=["farm"])
@@ -562,6 +592,183 @@ async def list_farms_for_picker(db: AsyncSession = Depends(get_async_session)):
     return {"items": [{"id": f.id, "name": f.name} for f in rows]}
 
 
+# ── Cost Analyze API ────────────────────────────────────────────────
+
+@router.get(
+    "/api/groups/{group_id}/analyze",
+    dependencies=[Depends(require_permission("action_animals_analyze"))],
+)
+async def analyze_group(
+    group_id: int,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Roll-up cost analysis for a single animal group.
+
+    Components of the total cost:
+      1. Purchase cost  — from animal_groups.purchase_cost (or cost_per_head × headcount)
+      2. Feed cost      — Σ over feeding_logs of qty × product.cost
+      3. Other expenses — Σ over expenses where animal_group_id matches
+
+    The Analyze tab divides the total by current headcount to show
+    cost-per-head, and feeds back a category breakdown so the operator
+    can see where the money is going.
+    """
+    group = (
+        await db.execute(
+            select(AnimalGroup)
+            .options(selectinload(AnimalGroup.farm))
+            .where(AnimalGroup.id == group_id)
+        )
+    ).scalar_one_or_none()
+    if group is None:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    # ── 1. Purchase cost (effective) ──
+    purchase_cost = Decimal(str(group.purchase_cost or 0))
+    cost_per_head = Decimal(str(group.cost_per_head or 0))
+    head = int(group.headcount or 0)
+    if purchase_cost > 0:
+        effective_purchase = purchase_cost
+        purchase_source = "total"
+    elif cost_per_head > 0:
+        effective_purchase = (cost_per_head * Decimal(head)).quantize(Decimal("0.01"))
+        purchase_source = "per_head"
+    else:
+        effective_purchase = Decimal("0")
+        purchase_source = "none"
+
+    # ── 2. Feed cost (qty × product.cost) ──
+    feedings = (
+        await db.execute(
+            select(FeedingLog)
+            .options(selectinload(FeedingLog.product))
+            .where(FeedingLog.animal_group_id == group_id)
+            .order_by(FeedingLog.feed_date.asc())
+        )
+    ).scalars().all()
+
+    feed_cost = Decimal("0")
+    feed_qty_total = Decimal("0")
+    feed_breakdown: dict[int, dict] = {}
+    for f in feedings:
+        qty = Decimal(str(f.qty or 0))
+        unit_cost = Decimal(str(f.product.cost or 0)) if f.product else Decimal("0")
+        line_cost = (qty * unit_cost).quantize(Decimal("0.01"))
+        feed_cost += line_cost
+        feed_qty_total += qty
+        pid = f.product_id
+        if pid not in feed_breakdown:
+            feed_breakdown[pid] = {
+                "product_id":   pid,
+                "product_name": f.product.name if f.product else f"#{pid}",
+                "product_sku":  f.product.sku  if f.product else "",
+                "unit":         f.product.unit if f.product else "",
+                "total_qty":    Decimal("0"),
+                "unit_cost":    float(unit_cost),
+                "total_cost":   Decimal("0"),
+                "entries":      0,
+            }
+        feed_breakdown[pid]["total_qty"]  += qty
+        feed_breakdown[pid]["total_cost"] += line_cost
+        feed_breakdown[pid]["entries"]    += 1
+
+    feed_lines = sorted(
+        (
+            {
+                "product_id":   info["product_id"],
+                "product_name": info["product_name"],
+                "product_sku":  info["product_sku"],
+                "unit":         info["unit"],
+                "total_qty":    float(info["total_qty"]),
+                "unit_cost":    info["unit_cost"],
+                "total_cost":   float(info["total_cost"]),
+                "entries":      info["entries"],
+            }
+            for info in feed_breakdown.values()
+        ),
+        key=lambda r: r["total_cost"],
+        reverse=True,
+    )
+
+    # ── 3. Other expenses tagged against this group ──
+    expenses = (
+        await db.execute(
+            select(Expense)
+            .options(selectinload(Expense.category))
+            .where(Expense.animal_group_id == group_id)
+            .order_by(Expense.expense_date.asc())
+        )
+    ).scalars().all()
+
+    expense_cost = Decimal("0")
+    expense_by_cat: dict[str, dict] = {}
+    expense_lines: list[dict] = []
+    for e in expenses:
+        amt = Decimal(str(e.amount or 0))
+        expense_cost += amt
+        cat_name = e.category.name if e.category else "Other"
+        if cat_name not in expense_by_cat:
+            expense_by_cat[cat_name] = {"name": cat_name, "amount": Decimal("0"), "count": 0}
+        expense_by_cat[cat_name]["amount"] += amt
+        expense_by_cat[cat_name]["count"]  += 1
+        expense_lines.append({
+            "id":           e.id,
+            "ref_number":   e.ref_number,
+            "category":     cat_name,
+            "expense_date": e.expense_date.isoformat() if e.expense_date else None,
+            "amount":       float(amt),
+            "vendor":       e.vendor or "",
+            "description":  e.description or "",
+        })
+
+    expense_categories = sorted(
+        (
+            {"name": v["name"], "amount": float(v["amount"]), "count": v["count"]}
+            for v in expense_by_cat.values()
+        ),
+        key=lambda r: r["amount"],
+        reverse=True,
+    )
+
+    # ── Totals ──
+    total_cost = (effective_purchase + feed_cost + expense_cost).quantize(Decimal("0.01"))
+    per_head = (total_cost / Decimal(head)).quantize(Decimal("0.01")) if head > 0 else Decimal("0")
+
+    # Cost-share % by component (for a stacked bar / pie on the UI)
+    def _pct(part: Decimal) -> float:
+        if total_cost <= 0:
+            return 0.0
+        return round(float(part / total_cost * 100), 1)
+
+    return {
+        "group": _serialize_group(group),
+        "totals": {
+            "purchase_cost":  float(effective_purchase),
+            "purchase_source": purchase_source,   # "total" | "per_head" | "none"
+            "feed_cost":      float(feed_cost),
+            "expense_cost":   float(expense_cost),
+            "total_cost":     float(total_cost),
+            "cost_per_head":  float(per_head),
+            "headcount":      head,
+        },
+        "shares": {
+            "purchase_pct": _pct(effective_purchase),
+            "feed_pct":     _pct(feed_cost),
+            "expense_pct":  _pct(expense_cost),
+        },
+        "feedings": {
+            "total_qty":   float(feed_qty_total),
+            "entry_count": len(feedings),
+            "by_product":  feed_lines,
+        },
+        "expenses": {
+            "entry_count":  len(expenses),
+            "by_category":  expense_categories,
+            "items":        expense_lines,
+        },
+    }
+
+
 # ── HTML Page ───────────────────────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse)
@@ -647,6 +854,20 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
 .product-picker-item:hover,.product-picker-item.highlighted{{background:rgba(77,159,255,.14);color:var(--blue)}}
 .product-picker-item .ppi-sku{{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:auto;white-space:nowrap}}
 .product-picker-empty{{padding:14px;text-align:center;font-size:12px;color:var(--muted)}}
+/* ── Analyze tab ── */
+.an-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px}}
+.an-card{{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:16px}}
+.an-card .an-label{{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-weight:700;margin-bottom:6px}}
+.an-card .an-value{{font-size:22px;font-weight:800;font-family:var(--mono);color:var(--text)}}
+.an-card .an-hint{{font-size:11px;color:var(--muted);margin-top:6px}}
+.an-bar{{display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--card2);margin:14px 0 18px}}
+.an-bar span{{display:block;height:100%}}
+.an-bar .seg-purchase{{background:var(--blue)}}
+.an-bar .seg-feed{{background:var(--green)}}
+.an-bar .seg-expense{{background:var(--amber)}}
+.an-legend{{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--sub);margin-bottom:18px}}
+.an-legend span i{{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:middle}}
+.an-section-title{{font-size:13px;font-weight:700;letter-spacing:.5px;color:var(--sub);text-transform:uppercase;margin:18px 0 10px}}
 </style>
 </head>
 <body>
@@ -681,6 +902,7 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
         <button class="tab active" id="tab-groups"   onclick="switchTab('groups')">Animal Groups</button>
         <button class="tab"        id="tab-feedings" onclick="switchTab('feedings')">Feeding Log</button>
         <button class="tab"        id="tab-deaths"   onclick="switchTab('deaths')">Mortality Log</button>
+        <button class="tab"        id="tab-analyze"  onclick="switchTab('analyze')">Analyze</button>
     </div>
 
     <!-- GROUPS -->
@@ -754,6 +976,26 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
             </table>
         </div>
     </div>
+
+    <!-- ANALYZE -->
+    <div id="analyze-section" style="display:none">
+        <div class="toolbar">
+            <div class="search-box" style="flex:0 0 320px">
+                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <select id="an-group" onchange="loadAnalysis()" style="width:100%;padding:10px 12px 10px 36px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-family:var(--sans);font-size:13px;appearance:none">
+                    <option value="">— Pick a group to analyze —</option>
+                </select>
+            </div>
+            <div id="an-meta" style="color:var(--muted);font-size:12px;flex:1"></div>
+        </div>
+        <div id="analyze-body">
+            <div class="empty" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:50px">
+                Pick a group above to see its full cost breakdown.
+            </div>
+        </div>
+    </div>
 </div>
 
 <!-- GROUP MODAL -->
@@ -779,6 +1021,16 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
         <div class="fld">
             <label>Headcount</label>
             <input type="number" id="gm-head" min="0" step="1" placeholder="0">
+        </div>
+        <div class="fld">
+            <label>Purchase Cost — Total (EGP, optional)</label>
+            <input type="number" id="gm-purchase-cost" min="0" step="0.01" placeholder="e.g. 50000">
+            <div class="stock-hint">Total amount paid for the whole group. Leave blank if you use per-head pricing.</div>
+        </div>
+        <div class="fld">
+            <label>Cost per Head (EGP, optional)</label>
+            <input type="number" id="gm-cost-per-head" min="0" step="0.01" placeholder="e.g. 5000">
+            <div class="stock-hint">Per-animal price. Used only when total purchase cost is blank.</div>
         </div>
         <div class="fld">
             <label>Farm (optional)</label>
@@ -915,11 +1167,14 @@ function switchTab(tab){{
     document.getElementById("tab-groups").classList.toggle("active",   tab==="groups");
     document.getElementById("tab-feedings").classList.toggle("active", tab==="feedings");
     document.getElementById("tab-deaths").classList.toggle("active",   tab==="deaths");
+    document.getElementById("tab-analyze").classList.toggle("active",  tab==="analyze");
     document.getElementById("groups-section").style.display   = tab==="groups"   ? "" : "none";
     document.getElementById("feedings-section").style.display = tab==="feedings" ? "" : "none";
     document.getElementById("deaths-section").style.display   = tab==="deaths"   ? "" : "none";
+    document.getElementById("analyze-section").style.display  = tab==="analyze"  ? "" : "none";
     if (tab==="feedings") loadFeedings();
     if (tab==="deaths")   loadDeaths();
+    if (tab==="analyze")  initAnalyze();
 }}
 
 /* ── INIT ── */
@@ -1211,6 +1466,8 @@ function openGroupModal(id){{
             document.getElementById("gm-name").value = g.name || "";
             document.getElementById("gm-type").value = g.animal_type || "other";
             document.getElementById("gm-head").value = g.headcount || 0;
+            document.getElementById("gm-purchase-cost").value = g.purchase_cost != null ? g.purchase_cost : "";
+            document.getElementById("gm-cost-per-head").value = g.cost_per_head != null ? g.cost_per_head : "";
             document.getElementById("gm-farm").value = g.farm_id || "";
             document.getElementById("gm-status").value = g.status === "archived" ? "active" : (g.status || "active");
             document.getElementById("gm-notes").value = g.notes || "";
@@ -1220,6 +1477,8 @@ function openGroupModal(id){{
         document.getElementById("gm-name").value = "";
         document.getElementById("gm-type").value = "other";
         document.getElementById("gm-head").value = "";
+        document.getElementById("gm-purchase-cost").value = "";
+        document.getElementById("gm-cost-per-head").value = "";
         document.getElementById("gm-farm").value = "";
         document.getElementById("gm-notes").value = "";
         statusWrap.style.display = "none";
@@ -1235,12 +1494,18 @@ async function saveGroup(){{
     const id = document.getElementById("gm-id").value;
     const name = document.getElementById("gm-name").value.trim();
     if (!name) {{ showToast("Group name is required"); return; }}
+    const purchaseRaw = document.getElementById("gm-purchase-cost").value;
+    const perHeadRaw  = document.getElementById("gm-cost-per-head").value;
+    const purchaseCost = purchaseRaw === "" ? null : (parseFloat(purchaseRaw) || 0);
+    const perHeadCost  = perHeadRaw  === "" ? null : (parseFloat(perHeadRaw)  || 0);
     const payload = {{
         name: name,
         animal_type: document.getElementById("gm-type").value,
         headcount: parseInt(document.getElementById("gm-head").value, 10) || 0,
         farm_id: parseInt(document.getElementById("gm-farm").value, 10) || null,
         notes: document.getElementById("gm-notes").value.trim() || null,
+        purchase_cost: purchaseCost,
+        cost_per_head: perHeadCost,
     }};
     if (id) {{
         payload.status = document.getElementById("gm-status").value;
@@ -1437,6 +1702,177 @@ async function deleteFeeding(id){{
         loadFeedings();
         loadProducts();
     }}
+}}
+
+/* ── ANALYZE TAB ── */
+function initAnalyze(){{
+    const sel = document.getElementById("an-group");
+    const prev = sel.value;
+    // Show every non-archived group so historical analysis is still reachable.
+    const opts = _groups
+        .filter(g => g.status !== "archived")
+        .map(g => `<option value="${{g.id}}">${{esc(g.name)}} (${{g.headcount||0}} head)</option>`)
+        .join("");
+    sel.innerHTML = `<option value="">— Pick a group to analyze —</option>` + opts;
+    if (prev) sel.value = prev;
+}}
+
+function fmtMoney(n){{
+    const v = Number(n || 0);
+    return v.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
+}}
+
+function fmtQty(n){{
+    const v = Number(n || 0);
+    return v.toLocaleString(undefined, {{minimumFractionDigits: 0, maximumFractionDigits: 3}});
+}}
+
+async function loadAnalysis(){{
+    const gid = parseInt(document.getElementById("an-group").value, 10) || 0;
+    const body = document.getElementById("analyze-body");
+    const meta = document.getElementById("an-meta");
+    meta.textContent = "";
+    if (!gid){{
+        body.innerHTML = `<div class="empty" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:50px">Pick a group above to see its full cost breakdown.</div>`;
+        return;
+    }}
+    body.innerHTML = `<div class="empty" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:30px">Crunching numbers…</div>`;
+    try {{
+        const r = await fetch(`/animals/api/groups/${{gid}}/analyze`);
+        if (!r.ok){{
+            const err = await r.json().catch(()=>({{}}));
+            body.innerHTML = `<div class="empty" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:30px">${{esc(err.detail || "Could not load analysis.")}}</div>`;
+            return;
+        }}
+        const data = await r.json();
+        renderAnalysis(data);
+    }} catch(e){{
+        body.innerHTML = `<div class="empty" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:30px">Network error.</div>`;
+    }}
+}}
+
+function renderAnalysis(d){{
+    const body = document.getElementById("analyze-body");
+    const meta = document.getElementById("an-meta");
+    const g = d.group || {{}};
+    const t = d.totals || {{}};
+    const s = d.shares || {{}};
+    const f = d.feedings || {{by_product:[]}};
+    const ex = d.expenses || {{by_category:[], items:[]}};
+
+    meta.innerHTML = `<b style="color:var(--text)">${{esc(g.name||"")}}</b> · ${{esc(g.animal_type||"")}} · ${{t.headcount||0}} head` +
+        (g.farm_name ? ` · ${{esc(g.farm_name)}}` : "");
+
+    let purchaseHint = "";
+    if (t.purchase_source === "total")    purchaseHint = "From group total";
+    else if (t.purchase_source === "per_head") purchaseHint = `From per-head price × ${{t.headcount||0}}`;
+    else                                  purchaseHint = "No purchase cost set";
+
+    const cards = `
+        <div class="an-grid">
+            <div class="an-card">
+                <div class="an-label">Total Cost</div>
+                <div class="an-value" style="color:var(--green)">EGP ${{fmtMoney(t.total_cost)}}</div>
+                <div class="an-hint">Purchase + Feed + Expenses</div>
+            </div>
+            <div class="an-card">
+                <div class="an-label">Cost / Head</div>
+                <div class="an-value" style="color:var(--blue)">EGP ${{fmtMoney(t.cost_per_head)}}</div>
+                <div class="an-hint">Across ${{t.headcount||0}} current head</div>
+            </div>
+            <div class="an-card">
+                <div class="an-label">Purchase Cost</div>
+                <div class="an-value">EGP ${{fmtMoney(t.purchase_cost)}}</div>
+                <div class="an-hint">${{purchaseHint}}</div>
+            </div>
+            <div class="an-card">
+                <div class="an-label">Feed Cost</div>
+                <div class="an-value">EGP ${{fmtMoney(t.feed_cost)}}</div>
+                <div class="an-hint">${{f.entry_count||0}} feeding(s), ${{fmtQty(f.total_qty)}} units</div>
+            </div>
+            <div class="an-card">
+                <div class="an-label">Other Expenses</div>
+                <div class="an-value">EGP ${{fmtMoney(t.expense_cost)}}</div>
+                <div class="an-hint">${{ex.entry_count||0}} expense entry(s)</div>
+            </div>
+        </div>
+    `;
+
+    const bar = `
+        <div class="an-bar">
+            <span class="seg-purchase" style="width:${{s.purchase_pct||0}}%"></span>
+            <span class="seg-feed"     style="width:${{s.feed_pct||0}}%"></span>
+            <span class="seg-expense"  style="width:${{s.expense_pct||0}}%"></span>
+        </div>
+        <div class="an-legend">
+            <span><i style="background:var(--blue)"></i>Purchase ${{(s.purchase_pct||0)}}%</span>
+            <span><i style="background:var(--green)"></i>Feed ${{(s.feed_pct||0)}}%</span>
+            <span><i style="background:var(--amber)"></i>Expenses ${{(s.expense_pct||0)}}%</span>
+        </div>
+    `;
+
+    const feedRows = (f.by_product || []).map(r => `
+        <tr>
+            <td><b>${{esc(r.product_name||"")}}</b><div style="font-family:var(--mono);font-size:11px;color:var(--muted)">${{esc(r.product_sku||"")}}</div></td>
+            <td style="font-family:var(--mono)">${{fmtQty(r.total_qty)}} ${{esc(r.unit||"")}}</td>
+            <td style="font-family:var(--mono);color:var(--sub)">${{fmtMoney(r.unit_cost)}}</td>
+            <td style="font-family:var(--mono)">EGP ${{fmtMoney(r.total_cost)}}</td>
+            <td style="color:var(--muted);font-family:var(--mono)">${{r.entries||0}}</td>
+        </tr>
+    `).join("") || `<tr><td colspan="5" class="empty">No feedings logged for this group.</td></tr>`;
+
+    const expCatRows = (ex.by_category || []).map(c => `
+        <tr>
+            <td><b>${{esc(c.name||"")}}</b></td>
+            <td style="color:var(--muted);font-family:var(--mono)">${{c.count||0}}</td>
+            <td style="font-family:var(--mono)">EGP ${{fmtMoney(c.amount)}}</td>
+        </tr>
+    `).join("") || `<tr><td colspan="3" class="empty">No other expenses linked to this group.</td></tr>`;
+
+    const expItemRows = (ex.items || []).slice(0, 50).map(e => `
+        <tr>
+            <td style="color:var(--sub);font-family:var(--mono);font-size:11px">${{esc(e.ref_number||"")}}</td>
+            <td style="color:var(--sub)">${{esc(e.expense_date||"")}}</td>
+            <td>${{esc(e.category||"")}}</td>
+            <td style="color:var(--sub);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${{esc(e.description||"")}}">${{esc(e.vendor || e.description || "—")}}</td>
+            <td style="font-family:var(--mono)">EGP ${{fmtMoney(e.amount)}}</td>
+        </tr>
+    `).join("") || `<tr><td colspan="5" class="empty">No expense entries yet.</td></tr>`;
+
+    body.innerHTML = `
+        ${{cards}}
+        ${{bar}}
+
+        <div class="an-section-title">Feed Cost by Product</div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr>
+                    <th>Product</th><th>Total Qty</th><th>Unit Cost</th><th>Total Cost</th><th>Entries</th>
+                </tr></thead>
+                <tbody>${{feedRows}}</tbody>
+            </table>
+        </div>
+
+        <div class="an-section-title">Other Expenses by Category</div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr>
+                    <th>Category</th><th>Entries</th><th>Amount</th>
+                </tr></thead>
+                <tbody>${{expCatRows}}</tbody>
+            </table>
+        </div>
+
+        <div class="an-section-title">Expense Detail (most recent 50)</div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr>
+                    <th>Ref</th><th>Date</th><th>Category</th><th>Vendor / Note</th><th>Amount</th>
+                </tr></thead>
+                <tbody>${{expItemRows}}</tbody>
+            </table>
+        </div>
+    `;
 }}
 
 init();

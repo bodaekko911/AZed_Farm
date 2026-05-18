@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.log import record
 from app.models.accounting import Account, Journal, JournalEntry
+from app.models.animal import AnimalGroup
 from app.models.carbon import CarbonEmissionFactor, CarbonLog
 from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
@@ -149,6 +150,23 @@ async def _get_active_category(db: AsyncSession, category_id: int) -> ExpenseCat
     if not category:
         raise HTTPException(status_code=404, detail="Category not found")
     return category
+
+
+async def _validate_animal_group(
+    db: AsyncSession, animal_group_id: Optional[int]
+) -> Optional[int]:
+    """Ensures the referenced animal group exists (returns the id or None).
+    A 0 / falsy value clears the link."""
+    if not animal_group_id:
+        return None
+    group = (
+        await db.execute(
+            select(AnimalGroup).where(AnimalGroup.id == animal_group_id)
+        )
+    ).scalar_one_or_none()
+    if group is None:
+        raise HTTPException(status_code=400, detail="Animal group not found")
+    return group.id
 
 
 async def _get_or_create_salary_category(db: AsyncSession) -> ExpenseCategory:
@@ -395,6 +413,7 @@ async def list_expenses(
         selectinload(Expense.category),
         selectinload(Expense.user),
         selectinload(Expense.farm),
+        selectinload(Expense.animal_group),
     )
     if category_id:
         statement = statement.where(Expense.category_id == category_id)
@@ -432,6 +451,8 @@ async def list_expenses(
             "created_by": expense.user.name if expense.user else "—",
             "farm_id": expense.farm_id,
             "farm_name": expense.farm.name if expense.farm else None,
+            "animal_group_id":   expense.animal_group_id,
+            "animal_group_name": expense.animal_group.name if expense.animal_group else None,
         }
         for expense in expenses
     ]
@@ -495,6 +516,9 @@ async def create_expense_entry(db: AsyncSession, data: ExpenseCreate, current_us
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid date format - use YYYY-MM-DD") from exc
 
+    # Validate the animal group up-front (if provided)
+    animal_group_id = await _validate_animal_group(db, data.animal_group_id)
+
     reference_number = await _next_expense_reference(db)
     amount = round(float(data.amount), 2)
     vendor = _clean_text(data.vendor)
@@ -536,6 +560,7 @@ async def create_expense_entry(db: AsyncSession, data: ExpenseCreate, current_us
         description=description,
         journal_id=journal.id,
         farm_id=data.farm_id or None,
+        animal_group_id=animal_group_id,
         consumption=consumption,
         unit_price_used=unit_price_used,
     )
@@ -676,6 +701,8 @@ async def update_expense_entry(
         expense.description = _clean_text(data.description)
     if data.farm_id is not None:
         expense.farm_id = data.farm_id or None
+    if data.animal_group_id is not None:
+        expense.animal_group_id = await _validate_animal_group(db, data.animal_group_id)
 
     if expense.category is None:
         category_result = await db.execute(

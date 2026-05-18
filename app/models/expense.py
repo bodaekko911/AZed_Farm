@@ -27,6 +27,12 @@ class Expense(Base):
     """
     A single expense transaction — one bill, one payment, one entry.
     Automatically posts a journal entry (Debit expense account, Credit cash/bank).
+
+    Cost allocation:
+      • `animal_group_id` links the expense to an animal group so the
+        Animals → Analyze tab can roll it up into that group's total cost.
+      • `farm_id` is retained for legacy cost-allocation reports and bulk
+        Excel imports; the UI no longer sets it directly.
     """
     __tablename__ = "expenses"
 
@@ -42,13 +48,19 @@ class Expense(Base):
     journal_id      = Column(Integer, ForeignKey("journals.id"), nullable=True)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
 
-    farm_id     = Column(Integer, ForeignKey("farms.id"), nullable=True)
-    payroll_id  = Column(Integer, ForeignKey("payroll.id"), nullable=True, unique=True, index=True)
-    consumption = Column(Numeric(14, 4), nullable=True)        # quantity in the category's unit
-    unit_price_used = Column(Numeric(12, 4), nullable=True)    # snapshot of unit price at time of entry
+    farm_id         = Column(Integer, ForeignKey("farms.id"), nullable=True)
+    animal_group_id = Column(Integer, ForeignKey("animal_groups.id"), nullable=True, index=True)
+    payroll_id      = Column(Integer, ForeignKey("payroll.id"), nullable=True, unique=True, index=True)
+    consumption     = Column(Numeric(14, 4), nullable=True)        # quantity in the category's unit
+    unit_price_used = Column(Numeric(12, 4), nullable=True)        # snapshot of unit price at time of entry
 
-    category = relationship("ExpenseCategory", back_populates="expenses")
-    user     = relationship("User")
-    journal  = relationship("Journal")
-    farm     = relationship("Farm")
-    payroll  = relationship("Payroll")
+    category     = relationship("ExpenseCategory", back_populates="expenses")
+    user         = relationship("User")
+    journal      = relationship("Journal")
+    farm         = relationship("Farm")
+    payroll      = relationship("Payroll")
+    animal_group = relationship(
+        "AnimalGroup",
+        back_populates="expenses",
+        foreign_keys=[animal_group_id],
+    )

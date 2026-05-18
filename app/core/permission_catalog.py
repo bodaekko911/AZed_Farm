@@ -178,6 +178,7 @@ PERMISSION_MATRIX = [
             {"action": "delete_feed",   "key": "action_animal_feeding_delete",  "label": "Delete feeding entries"},
             {"action": "log_death",     "key": "action_animal_mortality_create","label": "Log animal deaths"},
             {"action": "delete_death",  "key": "action_animal_mortality_delete","label": "Reverse mortality entries"},
+            {"action": "analyze",       "key": "action_animals_analyze",        "label": "View cost analysis"},
         ],
     },
     {
@@ -377,6 +378,7 @@ ROLE_DEFINITIONS = {
             "action_animal_feeding_delete",
             "action_animal_mortality_create",
             "action_animal_mortality_delete",
+            "action_animals_analyze",
             "page_carbon",
             "action_carbon_log",
             "page_suppliers",

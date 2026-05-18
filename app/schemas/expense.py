@@ -28,6 +28,7 @@ class ExpenseCreate(BaseModel):
     vendor: Optional[str] = None
     description: Optional[str] = None
     farm_id: Optional[int] = None
+    animal_group_id: Optional[int] = None     # new — primary UI link
     consumption: Optional[float] = None        # quantity in the category's unit
     unit_price_used: Optional[float] = None    # snapshot at time of entry (optional override)
 
@@ -40,5 +41,6 @@ class ExpenseUpdate(BaseModel):
     vendor: Optional[str] = None
     description: Optional[str] = None
     farm_id: Optional[int] = None
+    animal_group_id: Optional[int] = None     # new — primary UI link
     consumption: Optional[float] = None
     unit_price_used: Optional[float] = None

@@ -4,9 +4,13 @@ Stage 1 of the Animal Management module. Defines:
   • AnimalGroup  — a herd / flock / pen of animals on a farm
   • FeedingLog   — a record of feed consumed by a group
 
+Stage 2 adds purchase-cost tracking on the group and a back-reference to
+expenses (so general operating expenses can be allocated against a group
+instead of, or in addition to, a farm).
+
 Future stages will add: production logs (milk/eggs/weight), health logs,
-mortality tracking, FCR metrics, and dashboard integration. Those features
-will reuse these tables; no breaking changes are anticipated.
+FCR metrics, and dashboard integration. Those features will reuse these
+tables; no breaking changes are anticipated.
 """
 from sqlalchemy import Column, Integer, String, Numeric, DateTime, Date, ForeignKey, Text
 from sqlalchemy.orm import relationship
@@ -19,22 +23,35 @@ class AnimalGroup(Base):
 
     Headcount can be edited directly; future stages may add structured
     intake/sale events that drive headcount automatically.
+
+    Purchase cost can be entered either as a total for the whole group
+    (purchase_cost) or as a per-head price (cost_per_head). The Analyze
+    endpoint uses whichever is present (preferring total if both are set).
     """
     __tablename__ = "animal_groups"
 
-    id           = Column(Integer, primary_key=True, index=True)
-    name         = Column(String(150), nullable=False, index=True)
-    animal_type  = Column(String(30), nullable=False, default="other")  # cattle|poultry|sheep|goats|other
-    headcount    = Column(Integer, nullable=False, default=0)
-    farm_id      = Column(Integer, ForeignKey("farms.id"), nullable=True, index=True)
-    status       = Column(String(20), nullable=False, default="active")  # active|sold|deceased|archived
-    notes        = Column(Text, nullable=True)
-    created_at   = Column(DateTime(timezone=True), server_default=func.now())
-    archived_at  = Column(DateTime(timezone=True), nullable=True)
+    id             = Column(Integer, primary_key=True, index=True)
+    name           = Column(String(150), nullable=False, index=True)
+    animal_type    = Column(String(30), nullable=False, default="other")  # cattle|poultry|sheep|goats|other
+    headcount      = Column(Integer, nullable=False, default=0)
+    farm_id        = Column(Integer, ForeignKey("farms.id"), nullable=True, index=True)
+    status         = Column(String(20), nullable=False, default="active")  # active|sold|deceased|archived
+    notes          = Column(Text, nullable=True)
+    purchase_cost  = Column(Numeric(14, 2), nullable=True)   # total paid for the whole group (EGP)
+    cost_per_head  = Column(Numeric(14, 2), nullable=True)   # optional per-animal price (EGP)
+    created_at     = Column(DateTime(timezone=True), server_default=func.now())
+    archived_at    = Column(DateTime(timezone=True), nullable=True)
 
     farm     = relationship("Farm")
     feedings = relationship("FeedingLog", back_populates="group", cascade="all, delete-orphan")
     deaths   = relationship("MortalityLog", back_populates="group", cascade="all, delete-orphan")
+    # Expenses tagged against this group (not a cascade delete — archiving a
+    # group keeps history intact). The Expense side defines the FK column.
+    expenses = relationship(
+        "Expense",
+        back_populates="animal_group",
+        foreign_keys="Expense.animal_group_id",
+    )
 
 
 class FeedingLog(Base):
