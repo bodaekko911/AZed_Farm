@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.log import record
+from app.core.navigation import render_app_header
 from app.core.permissions import get_current_user, require_action
 from app.core.product_types import is_stock_tracked_product
 from app.database import get_async_session
@@ -381,7 +382,7 @@ body {{ font-family: monospace; background:#060810; color:white; }}
 
 
 @router.get("/", response_class=HTMLResponse)
-def refunds_ui():
+def refunds_ui(current_user: User = Depends(get_current_user)):
     return """<!DOCTYPE html>
 <html>
 <head>
@@ -740,33 +741,7 @@ nav {
     <script src="/static/auth-guard.js"></script>
 </head>
 <body>
-
-<nav>
-    <a href="/home" class="logo navbar-brand">
-        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
-    </a>
-    <a href="/pos" class="nav-back">
-        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
-        Back to POS
-    </a>
-    <div class="nav-spacer"></div>
-    <button class="mode-btn" id="mode-btn" onclick="toggleMode()">🌙</button>
-    <div class="account-menu">
-        <button class="user-pill" id="account-trigger" onclick="toggleAccountMenu(event)" aria-haspopup="menu" aria-expanded="false">
-            <div class="user-avatar" id="user-avatar">A</div>
-            <span class="user-name" id="user-name">Admin</span>
-            <span class="menu-caret">&#9662;</span>
-        </button>
-        <div class="account-dropdown" id="account-dropdown" role="menu">
-            <div class="account-head">
-                <div class="account-label">Signed in as</div>
-                <div class="account-email" id="user-email">&mdash;</div>
-            </div>
-            <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
-            <button class="account-item danger" onclick="logout()" role="menuitem">Sign out</button>
-        </div>
-    </div>
-</nav>
+""" + render_app_header(current_user) + """
 
 <div class="page">
     <div class="page-header">

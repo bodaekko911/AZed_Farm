@@ -6,9 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import or_, select, func
 
 from app.core.log import ActivityLog
+from app.core.navigation import render_app_header
 from app.core.permissions import require_admin
 from app.core.time_utils import utc_bounds
 from app.database import get_async_session
+from app.models.user import User
 
 router = APIRouter(prefix="/audit-log", tags=["Audit Log"])
 
@@ -95,7 +97,9 @@ async def audit_log_meta(db: AsyncSession = Depends(get_async_session), _=Depend
 # ── HTML UI ───────────────────────────────────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse)
-def audit_log_ui(_=Depends(require_admin)):
+def audit_log_ui(
+    current_user: User = Depends(require_admin),
+):
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -253,16 +257,7 @@ tbody td{padding:12px 14px;font-size:13px;vertical-align:top}
     <script src="/static/auth-guard.js"></script>
 </head>
 <body>
-
-<header class="topbar">
-    <a href="/home" class="logo navbar-brand">
-        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
-    </a>
-    <div class="topbar-right">
-        <button class="mode-btn" id="mode-btn" onclick="toggleMode()">&#127769;</button>
-        <a href="/home" class="back-btn">&#8592; Home</a>
-    </div>
-</header>
+""" + render_app_header(current_user) + """
 
 <div class="page-header">
     <div>

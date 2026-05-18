@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.permissions import require_permission
+from app.core.navigation import render_app_header
 from app.core.product_types import is_stock_tracked_product
 from app.core.security import get_current_user
 from app.database import get_async_session
@@ -427,7 +428,7 @@ async def dashboard_insights(db: AsyncSession = Depends(get_async_session)):
 # ── UI ────────────────────────────────────────────────────────────────
 
 @router.get("/dashboard", response_class=HTMLResponse)
-def dashboard_ui():
+def dashboard_ui(current_user: User = Depends(get_current_user)):
     locale_dir = getattr(settings, "APP_LOCALE_DIR", "ltr")
     return f"""<!DOCTYPE html>
 <html lang="en" dir="{locale_dir}">
@@ -452,37 +453,7 @@ def dashboard_ui():
 </div>
 <div class="bg-grain"></div>
 <div id="loading"><div class="spinner"></div></div>
-<nav class="top-nav" aria-label="Primary">
-  <a href="/home" class="logo navbar-brand">
-    <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
-  </a>
-  <div class="nav-links">
-    <a href="/dashboard" class="nav-link active">Sales dashboard</a>
-    <a href="/farm-dashboard" class="nav-link">Farm dashboard</a>
-    <a href="/pos" class="nav-link">POS</a>
-    <a href="/b2b/" class="nav-link">B2B</a>
-    <a href="/reports/" class="nav-link">Reports</a>
-    <a href="/inventory/" class="nav-link">Inventory</a>
-  </div>
-  <div class="nav-actions">
-    <button class="mode-btn app-theme-toggle" id="mode-btn" type="button" data-theme-toggle aria-label="Switch color theme" title="Switch color theme" aria-pressed="false">&#127769;</button>
-    <div class="account-menu">
-      <button class="user-pill" id="account-trigger" type="button" aria-haspopup="menu" aria-expanded="false">
-        <div class="user-avatar" id="user-avatar">A</div>
-        <span class="user-name" id="user-name">Admin</span>
-        <span class="menu-caret">&#9662;</span>
-      </button>
-      <div class="account-dropdown" id="account-dropdown" role="menu">
-        <div class="account-head">
-          <div class="account-label">Signed in as</div>
-          <div class="account-email" id="user-email">&#8212;</div>
-        </div>
-        <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
-        <button class="account-item danger" id="signout-btn" type="button" role="menuitem">Sign out</button>
-      </div>
-    </div>
-  </div>
-</nav>
+{render_app_header(current_user, "page_dashboard")}
 <main class="page-shell">
   <header class="header-strip">
     <div>

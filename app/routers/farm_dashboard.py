@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.log import logger
+from app.core.navigation import render_app_header
 from app.core.permissions import require_permission
 from app.core.security import get_current_user
 from app.database import get_async_session
@@ -856,37 +857,7 @@ def farm_dashboard_ui(current_user: User = Depends(get_current_user)):
 </div>
 <div class="bg-grain"></div>
 <div id="loading"><div class="spinner"></div></div>
-<nav class="top-nav" aria-label="Primary">
-  <a href="/home" class="logo navbar-brand">
-    <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
-  </a>
-  <div class="nav-links">
-    <a href="/dashboard" class="nav-link">Sales dashboard</a>
-    <a href="/farm-dashboard" class="nav-link active">Farm dashboard</a>
-    <a href="/pos" class="nav-link">POS</a>
-    <a href="/b2b/" class="nav-link">B2B</a>
-    <a href="/reports/" class="nav-link">Reports</a>
-    <a href="/inventory/" class="nav-link">Inventory</a>
-  </div>
-  <div class="nav-actions">
-    <button class="mode-btn app-theme-toggle" id="mode-btn" type="button" data-theme-toggle aria-label="Switch color theme" title="Switch color theme" aria-pressed="false">&#127769;</button>
-    <div class="account-menu">
-      <button class="user-pill" id="account-trigger" type="button" aria-haspopup="menu" aria-expanded="false">
-        <div class="user-avatar" id="user-avatar">A</div>
-        <span class="user-name" id="user-name">Admin</span>
-        <span class="menu-caret">&#9662;</span>
-      </button>
-      <div class="account-dropdown" id="account-dropdown" role="menu">
-        <div class="account-head">
-          <div class="account-label">Signed in as</div>
-          <div class="account-email" id="user-email">&#8212;</div>
-        </div>
-        <a href="/users/password" class="account-item" role="menuitem">Change Password</a>
-        <button class="account-item danger" id="signout-btn" type="button" role="menuitem">Sign out</button>
-      </div>
-    </div>
-  </div>
-</nav>
+{render_app_header(current_user, "page_farm_dashboard")}
 <main class="page-shell">
   <header class="header-strip">
     <div>
