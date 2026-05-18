@@ -14,7 +14,7 @@ Reversing a feeding (delete) re-credits both stock totals.
 """
 from __future__ import annotations
 
-from datetime import date as date_type
+from datetime import date as date_type, datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -152,7 +152,8 @@ async def create_group(
     db.add(group)
     await db.flush()
     await db.refresh(group, attribute_names=["farm"])
-    await record(db, current_user, "animal_group.create", entity_type="animal_group", entity_id=group.id, meta={"name": group.name})
+    record(db, "Animals", "create_group", f"Created group: {group.name}",
+           user=current_user, ref_type="animal_group", ref_id=group.id)
     await db.commit()
     return _serialize_group(group)
 
@@ -196,13 +197,14 @@ async def update_group(
             raise HTTPException(status_code=400, detail="Invalid status")
         group.status = data.status
         if data.status == "archived":
-            group.archived_at = func.now()
+            group.archived_at = datetime.now(timezone.utc)
     if data.notes is not None:
         group.notes = data.notes.strip() or None
 
     await db.flush()
     await db.refresh(group, attribute_names=["farm"])
-    await record(db, current_user, "animal_group.update", entity_type="animal_group", entity_id=group.id, meta={"name": group.name})
+    record(db, "Animals", "update_group", f"Updated group: {group.name}",
+           user=current_user, ref_type="animal_group", ref_id=group.id)
     await db.commit()
     return _serialize_group(group)
 
@@ -221,8 +223,9 @@ async def archive_group(
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
     group.status = "archived"
-    group.archived_at = func.now()
-    await record(db, current_user, "animal_group.archive", entity_type="animal_group", entity_id=group.id, meta={"name": group.name})
+    group.archived_at = datetime.now(timezone.utc)
+    record(db, "Animals", "archive_group", f"Archived group: {group.name}",
+           user=current_user, ref_type="animal_group", ref_id=group.id)
     await db.commit()
     return {"ok": True}
 
@@ -335,11 +338,9 @@ async def create_feeding(
     )
     db.add(move)
 
-    await record(
-        db, current_user, "feeding.create",
-        entity_type="feeding_log", entity_id=feeding.id,
-        meta={"group": group.name, "product": product.name, "qty": float(qty), "location": location.name},
-    )
+    record(db, "Animals", "create_feeding",
+           f"Fed {group.name}: {float(qty)} of {product.name} from {location.name}",
+           user=current_user, ref_type="feeding_log", ref_id=feeding.id)
     await db.commit()
     await db.refresh(feeding, attribute_names=["group", "product", "location", "user"])
     return _serialize_feeding(feeding)
@@ -396,11 +397,9 @@ async def delete_feeding(
     )
     db.add(move)
 
-    await record(
-        db, current_user, "feeding.delete",
-        entity_type="feeding_log", entity_id=feeding.id,
-        meta={"qty": float(qty)},
-    )
+    record(db, "Animals", "delete_feeding",
+           f"Reversed feeding #{feeding.id} ({float(qty)} units restored)",
+           user=current_user, ref_type="feeding_log", ref_id=feeding.id)
     await db.delete(feeding)
     await db.commit()
     return {"ok": True}
