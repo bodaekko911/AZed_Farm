@@ -176,6 +176,8 @@ PERMISSION_MATRIX = [
             {"action": "delete",        "key": "action_animals_delete",         "label": "Archive animal groups"},
             {"action": "feed",          "key": "action_animal_feeding_create",  "label": "Log feedings"},
             {"action": "delete_feed",   "key": "action_animal_feeding_delete",  "label": "Delete feeding entries"},
+            {"action": "log_death",     "key": "action_animal_mortality_create","label": "Log animal deaths"},
+            {"action": "delete_death",  "key": "action_animal_mortality_delete","label": "Reverse mortality entries"},
         ],
     },
     {
@@ -373,6 +375,8 @@ ROLE_DEFINITIONS = {
             "action_animals_delete",
             "action_animal_feeding_create",
             "action_animal_feeding_delete",
+            "action_animal_mortality_create",
+            "action_animal_mortality_delete",
             "page_carbon",
             "action_carbon_log",
             "page_suppliers",

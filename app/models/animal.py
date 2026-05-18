@@ -34,6 +34,7 @@ class AnimalGroup(Base):
 
     farm     = relationship("Farm")
     feedings = relationship("FeedingLog", back_populates="group", cascade="all, delete-orphan")
+    deaths   = relationship("MortalityLog", back_populates="group", cascade="all, delete-orphan")
 
 
 class FeedingLog(Base):
@@ -59,3 +60,27 @@ class FeedingLog(Base):
     product  = relationship("Product")
     location = relationship("StockLocation")
     user     = relationship("User")
+
+
+class MortalityLog(Base):
+    """A recorded death (or batch death) within an animal group.
+
+    Submitting one of these decrements the parent group's headcount by
+    `count`. Deleting one restores the headcount.
+
+    Cause values:
+      illness | injury | age | predator | weather | birth | unknown | other
+    """
+    __tablename__ = "mortality_logs"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    animal_group_id = Column(Integer, ForeignKey("animal_groups.id"), nullable=False, index=True)
+    death_date      = Column(Date, nullable=False, index=True)
+    count           = Column(Integer, nullable=False, default=1)
+    cause           = Column(String(30), nullable=False, default="unknown")
+    note            = Column(Text, nullable=True)
+    user_id         = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at      = Column(DateTime(timezone=True), server_default=func.now())
+
+    group = relationship("AnimalGroup", back_populates="deaths")
+    user  = relationship("User")

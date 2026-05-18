@@ -1,6 +1,6 @@
 from app.core.log import ActivityLog
 from app.models.accounting import Account, Journal, JournalEntry
-from app.models.animal import AnimalGroup, FeedingLog
+from app.models.animal import AnimalGroup, FeedingLog, MortalityLog
 from app.models.receipt import ProductReceipt
 from app.models.b2b import (
     B2BClient,
@@ -77,6 +77,7 @@ __all__ = [
     "Journal",
     "JournalEntry",
     "LocationStock",
+    "MortalityLog",
     "Payroll",
     "Product",
     "ProductReceipt",

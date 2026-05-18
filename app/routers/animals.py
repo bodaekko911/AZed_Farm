@@ -29,7 +29,7 @@ from app.core.log import record
 from app.core.navigation import render_app_header
 from app.core.permissions import require_permission
 from app.database import get_async_session
-from app.models.animal import AnimalGroup, FeedingLog
+from app.models.animal import AnimalGroup, FeedingLog, MortalityLog
 from app.models.farm import Farm
 from app.models.inventory import StockLocation, StockMove
 from app.models.product import Product
@@ -75,6 +75,18 @@ class FeedingCreate(BaseModel):
     note:            Optional[str] = None
 
 
+# Valid mortality causes — frontend dropdown values must match these exactly.
+VALID_CAUSES = {"illness", "injury", "age", "predator", "weather", "birth", "unknown", "other"}
+
+
+class MortalityCreate(BaseModel):
+    animal_group_id: int       = Field(..., ge=1)
+    death_date:      date_type
+    count:           int       = Field(1, ge=1)
+    cause:           str       = Field("unknown", max_length=30)
+    note:            Optional[str] = None
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _serialize_group(g: AnimalGroup) -> dict:
@@ -108,6 +120,21 @@ def _serialize_feeding(f: FeedingLog) -> dict:
         "user_id":         f.user_id,
         "user_name":       f.user.name if f.user else None,
         "created_at":      f.created_at.isoformat() if f.created_at else None,
+    }
+
+
+def _serialize_death(d: MortalityLog) -> dict:
+    return {
+        "id":              d.id,
+        "animal_group_id": d.animal_group_id,
+        "group_name":      d.group.name if d.group else None,
+        "death_date":      d.death_date.isoformat() if d.death_date else None,
+        "count":           int(d.count or 0),
+        "cause":           d.cause or "unknown",
+        "note":            d.note,
+        "user_id":         d.user_id,
+        "user_name":       d.user.name if d.user else None,
+        "created_at":      d.created_at.isoformat() if d.created_at else None,
     }
 
 
@@ -405,6 +432,126 @@ async def delete_feeding(
     return {"ok": True}
 
 
+# ── Mortality Log API ───────────────────────────────────────────────
+
+@router.get("/api/deaths")
+async def list_deaths(
+    limit: int = Query(100, ge=1, le=500),
+    group_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_async_session),
+):
+    stmt = (
+        select(MortalityLog)
+        .options(
+            selectinload(MortalityLog.group),
+            selectinload(MortalityLog.user),
+        )
+        .order_by(MortalityLog.death_date.desc(), MortalityLog.id.desc())
+        .limit(limit)
+    )
+    if group_id:
+        stmt = stmt.where(MortalityLog.animal_group_id == group_id)
+    result = await db.execute(stmt)
+    return {"items": [_serialize_death(d) for d in result.scalars().all()]}
+
+
+@router.post(
+    "/api/deaths",
+    status_code=201,
+    dependencies=[Depends(require_permission("action_animal_mortality_create"))],
+)
+async def create_death(
+    data: MortalityCreate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(require_permission("action_animal_mortality_create")),
+):
+    # Validate group
+    group = (await db.execute(select(AnimalGroup).where(AnimalGroup.id == data.animal_group_id))).scalar_one_or_none()
+    if group is None:
+        raise HTTPException(status_code=400, detail="Animal group not found")
+    if group.status == "archived":
+        raise HTTPException(status_code=400, detail="Cannot log death for archived group")
+
+    # Validate cause
+    cause = (data.cause or "unknown").strip().lower()
+    if cause not in VALID_CAUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid cause '{cause}'. Must be one of: {', '.join(sorted(VALID_CAUSES))}",
+        )
+
+    # Validate count doesn't exceed current headcount
+    current_head = int(group.headcount or 0)
+    if data.count > current_head:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Count ({data.count}) exceeds current headcount ({current_head}) for {group.name}",
+        )
+
+    # If cause is "other", note must be provided so the death isn't a mystery
+    note = (data.note or "").strip() or None
+    if cause == "other" and not note:
+        raise HTTPException(
+            status_code=400,
+            detail="A note is required when cause is 'other' — describe what happened.",
+        )
+
+    # Create the record and adjust headcount
+    death = MortalityLog(
+        animal_group_id=group.id,
+        death_date=data.death_date,
+        count=data.count,
+        cause=cause,
+        note=note,
+        user_id=current_user.id,
+    )
+    db.add(death)
+    group.headcount = current_head - data.count
+    await db.flush()
+    await db.refresh(death, attribute_names=["group", "user"])
+
+    record(db, "Animals", "create_mortality",
+           f"Logged {data.count} death(s) in {group.name} (cause: {cause})",
+           user=current_user, ref_type="mortality_log", ref_id=death.id)
+    await db.commit()
+    return _serialize_death(death)
+
+
+@router.delete(
+    "/api/deaths/{death_id}",
+    dependencies=[Depends(require_permission("action_animal_mortality_delete"))],
+)
+async def delete_death(
+    death_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(require_permission("action_animal_mortality_delete")),
+):
+    """Reverses a mortality entry: restores the group's headcount."""
+    death = (
+        await db.execute(
+            select(MortalityLog)
+            .options(selectinload(MortalityLog.group))
+            .where(MortalityLog.id == death_id)
+        )
+    ).scalar_one_or_none()
+    if death is None:
+        raise HTTPException(status_code=404, detail="Mortality entry not found")
+
+    count = int(death.count or 0)
+    group_name = death.group.name if death.group else "(unknown group)"
+
+    # Restore headcount
+    if death.group is not None:
+        death.group.headcount = int(death.group.headcount or 0) + count
+
+    record(db, "Animals", "delete_mortality",
+           f"Reversed mortality entry #{death.id} for {group_name} (restored {count})",
+           user=current_user, ref_type="mortality_log", ref_id=death.id)
+    await db.delete(death)
+    await db.commit()
+    return {"ok": True}
+
+
 # ── Convenience: list farms + products for the UI dropdowns ─────────
 
 @router.get("/api/farms")
@@ -524,11 +671,16 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
             <div class="stat-label">Feedings Today</div>
             <div class="stat-value" id="stat-today">—</div>
         </div>
+        <div class="stat-card">
+            <div class="stat-label">Deaths This Month</div>
+            <div class="stat-value" id="stat-deaths">—</div>
+        </div>
     </div>
 
     <div class="tabs">
         <button class="tab active" id="tab-groups"   onclick="switchTab('groups')">Animal Groups</button>
         <button class="tab"        id="tab-feedings" onclick="switchTab('feedings')">Feeding Log</button>
+        <button class="tab"        id="tab-deaths"   onclick="switchTab('deaths')">Mortality Log</button>
     </div>
 
     <!-- GROUPS -->
@@ -574,6 +726,30 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
                 </tr></thead>
                 <tbody id="feedings-body">
                     <tr><td colspan="8" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- DEATHS -->
+    <div id="deaths-section" style="display:none">
+        <div class="toolbar">
+            <div class="search-box">
+                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <input id="d-search" placeholder="Search by group, cause, or note…" oninput="renderDeaths()">
+            </div>
+            <button class="btn btn-green" onclick="openDeathModal()">+ Log Death</button>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr>
+                    <th>Date</th><th>Group</th><th>Count</th><th>Cause</th>
+                    <th>Note</th><th>By</th><th></th>
+                </tr></thead>
+                <tbody id="deaths-body">
+                    <tr><td colspan="7" class="empty">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -671,6 +847,48 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
     </div>
 </div>
 
+<!-- DEATH MODAL -->
+<div class="modal-bg" id="death-modal">
+    <div class="modal">
+        <div class="modal-title">Log Death</div>
+        <div class="modal-sub">Records a death and reduces the group's headcount.</div>
+        <div class="fld">
+            <label>Date</label>
+            <input type="date" id="dm-date">
+        </div>
+        <div class="fld">
+            <label>Animal Group</label>
+            <select id="dm-group"><option value="">— Choose group —</option></select>
+            <div id="dm-head-hint" class="stock-hint"></div>
+        </div>
+        <div class="fld">
+            <label>Count (how many died)</label>
+            <input type="number" id="dm-count" min="1" step="1" value="1">
+        </div>
+        <div class="fld">
+            <label>Cause</label>
+            <select id="dm-cause">
+                <option value="unknown">Unknown</option>
+                <option value="illness">Illness / disease</option>
+                <option value="injury">Injury</option>
+                <option value="age">Old age</option>
+                <option value="predator">Predator</option>
+                <option value="weather">Weather / heat / cold</option>
+                <option value="birth">Birth complications</option>
+                <option value="other">Other (describe in note)</option>
+            </select>
+        </div>
+        <div class="fld">
+            <label>Note <span id="dm-note-req" style="color:var(--muted)">(optional)</span></label>
+            <textarea id="dm-note" maxlength="500" placeholder="e.g. Found in pen this morning, no obvious symptoms"></textarea>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="closeDeathModal()">Cancel</button>
+            <button class="btn btn-green" id="dm-save" onclick="saveDeath()">Log</button>
+        </div>
+    </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script src="/static/auth-guard.js"></script>
@@ -678,6 +896,7 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
 /* ── STATE ── */
 let _groups = [];
 let _feedings = [];
+let _deaths = [];
 let _farms = [];
 let _products = [];
 let _locations = [];
@@ -693,16 +912,19 @@ function showToast(msg){{
 
 /* ── TABS ── */
 function switchTab(tab){{
-    document.getElementById("tab-groups").classList.toggle("active", tab==="groups");
+    document.getElementById("tab-groups").classList.toggle("active",   tab==="groups");
     document.getElementById("tab-feedings").classList.toggle("active", tab==="feedings");
+    document.getElementById("tab-deaths").classList.toggle("active",   tab==="deaths");
     document.getElementById("groups-section").style.display   = tab==="groups"   ? "" : "none";
     document.getElementById("feedings-section").style.display = tab==="feedings" ? "" : "none";
+    document.getElementById("deaths-section").style.display   = tab==="deaths"   ? "" : "none";
     if (tab==="feedings") loadFeedings();
+    if (tab==="deaths")   loadDeaths();
 }}
 
 /* ── INIT ── */
 async function init(){{
-    await Promise.all([loadGroups(), loadFarmsAndLocations(), loadProducts()]);
+    await Promise.all([loadGroups(), loadFarmsAndLocations(), loadProducts(), loadDeaths({{silent:true}})]);
 }}
 
 async function loadFarmsAndLocations(){{
@@ -764,6 +986,145 @@ async function loadFeedings(){{
     }}
 }}
 
+async function loadDeaths(opts){{
+    const silent = opts && opts.silent;
+    try {{
+        const r = await fetch("/animals/api/deaths?limit=200");
+        if (!r.ok) {{
+            if (!silent) document.getElementById("deaths-body").innerHTML = `<tr><td colspan="7" class="empty">Could not load.</td></tr>`;
+            return;
+        }}
+        const d = await r.json();
+        _deaths = (d && d.items) ? d.items : [];
+        updateStats();
+        if (!silent) renderDeaths();
+    }} catch(_) {{
+        if (!silent) document.getElementById("deaths-body").innerHTML = `<tr><td colspan="7" class="empty">Error.</td></tr>`;
+    }}
+}}
+
+const CAUSE_LABELS = {{
+    illness:  "Illness / disease",
+    injury:   "Injury",
+    age:      "Old age",
+    predator: "Predator",
+    weather:  "Weather",
+    birth:    "Birth complications",
+    unknown:  "Unknown",
+    other:    "Other",
+}};
+
+function renderDeaths(){{
+    const q = (document.getElementById("d-search").value || "").toLowerCase().trim();
+    const tbody = document.getElementById("deaths-body");
+    const filtered = q
+        ? _deaths.filter(d => (d.group_name||"").toLowerCase().includes(q)
+                           || (d.cause||"").toLowerCase().includes(q)
+                           || (d.note||"").toLowerCase().includes(q))
+        : _deaths;
+    if (!filtered.length) {{
+        tbody.innerHTML = `<tr><td colspan="7" class="empty">No deaths recorded. Click "+ Log Death" to add one.</td></tr>`;
+        return;
+    }}
+    tbody.innerHTML = filtered.map(d => `
+        <tr>
+            <td style="color:var(--sub)">${{esc(d.death_date||"")}}</td>
+            <td><b>${{esc(d.group_name||"")}}</b></td>
+            <td style="font-family:var(--mono)">${{d.count||0}}</td>
+            <td style="color:var(--sub)">${{esc(CAUSE_LABELS[d.cause] || d.cause || "—")}}</td>
+            <td style="color:var(--sub);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${{esc(d.note||"")}}">${{esc(d.note||"—")}}</td>
+            <td style="color:var(--muted)">${{esc(d.user_name||"—")}}</td>
+            <td style="text-align:right">
+                <button class="btn btn-danger" onclick="deleteDeath(${{d.id}})">Delete</button>
+            </td>
+        </tr>
+    `).join("");
+}}
+
+/* ── DEATH MODAL ── */
+function openDeathModal(){{
+    document.getElementById("dm-date").value = new Date().toISOString().slice(0,10);
+    const sel = document.getElementById("dm-group");
+    sel.innerHTML = `<option value="">— Choose group —</option>` +
+        _groups.filter(g => g.status === "active")
+               .map(g => `<option value="${{g.id}}" data-head="${{g.headcount||0}}">${{esc(g.name)}} (${{g.headcount||0}} head)</option>`)
+               .join("");
+    document.getElementById("dm-count").value = "1";
+    document.getElementById("dm-cause").value = "unknown";
+    document.getElementById("dm-note").value = "";
+    document.getElementById("dm-head-hint").textContent = "";
+    updateDeathNoteRequirement();
+    sel.onchange = function(){{
+        const opt = sel.options[sel.selectedIndex];
+        const head = opt ? parseInt(opt.dataset.head, 10) || 0 : 0;
+        document.getElementById("dm-head-hint").textContent = head ? `Current headcount: ${{head}}` : "";
+    }};
+    document.getElementById("dm-cause").onchange = updateDeathNoteRequirement;
+    document.getElementById("death-modal").classList.add("open");
+}}
+
+function closeDeathModal(){{
+    document.getElementById("death-modal").classList.remove("open");
+}}
+
+function updateDeathNoteRequirement(){{
+    const cause = document.getElementById("dm-cause").value;
+    const req   = document.getElementById("dm-note-req");
+    if (cause === "other") {{
+        req.textContent = "(required for 'other')";
+        req.style.color = "var(--danger)";
+    }} else {{
+        req.textContent = "(optional)";
+        req.style.color = "var(--muted)";
+    }}
+}}
+
+async function saveDeath(){{
+    const animal_group_id = parseInt(document.getElementById("dm-group").value, 10) || 0;
+    const death_date      = document.getElementById("dm-date").value;
+    const count           = parseInt(document.getElementById("dm-count").value, 10) || 0;
+    const cause           = document.getElementById("dm-cause").value;
+    const note            = document.getElementById("dm-note").value.trim() || null;
+
+    if (!animal_group_id) {{ showToast("Pick a group"); return; }}
+    if (!death_date) {{ showToast("Pick a date"); return; }}
+    if (count < 1) {{ showToast("Count must be at least 1"); return; }}
+    if (cause === "other" && !note) {{ showToast("A note is required for 'other' cause"); return; }}
+
+    const btn = document.getElementById("dm-save");
+    btn.disabled = true;
+    try {{
+        const r = await fetch("/animals/api/deaths", {{
+            method: "POST", headers: {{"Content-Type": "application/json"}},
+            body: JSON.stringify({{animal_group_id, death_date, count, cause, note}}),
+        }});
+        if (!r.ok) {{
+            const err = await r.json().catch(()=>({{}}));
+            showToast(err.detail || "Could not log death");
+        }} else {{
+            showToast("Death logged");
+            closeDeathModal();
+            loadDeaths();
+            loadGroups();  // headcount changed
+        }}
+    }} finally {{
+        btn.disabled = false;
+    }}
+}}
+
+async function deleteDeath(id){{
+    if (!confirm("Reverse this mortality entry? Headcount will be restored.")) return;
+    const r = await fetch(`/animals/api/deaths/${{id}}`, {{method: "DELETE"}});
+    if (!r.ok) {{
+        const err = await r.json().catch(()=>({{}}));
+        showToast(err.detail || "Could not delete");
+    }} else {{
+        showToast("Entry reversed");
+        loadDeaths();
+        loadGroups();
+    }}
+}}
+
 function updateStats(){{
     const activeGroups = _groups.filter(g => g.status === "active");
     document.getElementById("stat-groups").textContent = activeGroups.length;
@@ -771,6 +1132,13 @@ function updateStats(){{
     const today = new Date().toISOString().slice(0,10);
     const todayCount = _feedings.filter(f => f.feed_date === today).length;
     document.getElementById("stat-today").textContent = todayCount;
+    // Deaths this month
+    const ym = today.slice(0,7);  // "2026-05"
+    const deathsThisMonth = _deaths
+        .filter(d => (d.death_date||"").startsWith(ym))
+        .reduce((s,d) => s + (d.count||0), 0);
+    const elDeaths = document.getElementById("stat-deaths");
+    if (elDeaths) elDeaths.textContent = deathsThisMonth;
 }}
 
 function renderGroups(){{
