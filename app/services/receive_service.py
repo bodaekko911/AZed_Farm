@@ -76,6 +76,8 @@ class ReceiptCreate(BaseModel):
     notes:        Optional[str]   = None
     affect_stock: bool            = True
     location_id:  Optional[int]   = Field(None, ge=1)  # storage to receive into; default Main Warehouse
+    farm_id:      Optional[int]   = Field(None, ge=1)  # cost allocation: farm
+    is_animal_expense: bool       = False              # cost allocation: 🐾 Animals bucket
 
 
 class BatchReceiptItem(BaseModel):
@@ -95,6 +97,10 @@ class BatchReceiptCreate(BaseModel):
     Storage:
       • location_id  — destination storage for all items in the batch.
                        Defaults to Main Warehouse if not provided.
+
+    Cost allocation (batch-wide — applies to every auto-created expense):
+      • farm_id            — allocate to a specific farm
+      • is_animal_expense  — allocate to the "🐾 Animals" bucket instead
     """
     product_type: Literal["products", "packaging_materials"]
     receive_date: date_type
@@ -103,6 +109,8 @@ class BatchReceiptCreate(BaseModel):
     amount_paid:  Optional[float] = Field(None, ge=0)
     notes:        Optional[str] = None
     location_id:  Optional[int] = Field(None, ge=1)
+    farm_id:      Optional[int] = Field(None, ge=1)
+    is_animal_expense: bool     = False
     items:        list[BatchReceiptItem] = Field(..., min_length=1)
 
 
@@ -216,6 +224,8 @@ async def _post_receipt_expense(
     supplier: Optional[Supplier],
     supplier_ref: Optional[str],
     user_id: Optional[int],
+    farm_id: Optional[int] = None,
+    is_animal_expense: bool = False,
 ) -> Expense:
     """Create Expense + double-entry Journal.
 
@@ -223,6 +233,14 @@ async def _post_receipt_expense(
       Debit  expense account        (total_cost)
       Credit cash                   (paid_cash)            ── if > 0
       Credit accounts_payable       (total_cost - paid_cash) ── if > 0
+
+    Cost allocation:
+      • farm_id           — tags the expense to a specific farm (shows in
+                            the expense table's Farm column, and in farm
+                            cost-allocation reports).
+      • is_animal_expense — tags the expense as "🐾 Animals". Shows in the
+                            expense table as Animals, and rolls into the
+                            combined Animals → Analyze view.
 
     No commit — caller owns transaction.
     """
@@ -283,6 +301,8 @@ async def _post_receipt_expense(
             f"{float(qty):.3f} \u00d7 {product_name}"
         ),
         journal_id=journal.id,
+        farm_id=(farm_id if (farm_id and not is_animal_expense) else None),
+        is_animal_expense=bool(is_animal_expense),
     )
     db.add(expense)
     return expense
@@ -664,6 +684,8 @@ async def _create_receipt_core(
             supplier=supplier,
             supplier_ref=supplier_ref,
             user_id=current_user.id,
+            farm_id=getattr(data, "farm_id", None),
+            is_animal_expense=bool(getattr(data, "is_animal_expense", False)),
         )
         await db.flush()
         receipt.expense_id = expense.id
@@ -935,6 +957,8 @@ async def create_receipt_batch(
             notes=data.notes,
             product_type=data.product_type,
             location_id=data.location_id,
+            farm_id=data.farm_id,
+            is_animal_expense=data.is_animal_expense,
         )
         receipts.append(await _create_receipt_core(db, line, current_user))
 

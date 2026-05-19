@@ -493,6 +493,12 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
             <option value="">— Loading storages… —</option>
           </select>
         </div>
+        <div class="field">
+          <label>Cost Allocation <span style="color:var(--muted);font-weight:400">(which farm or "🐾 Animals" this expense belongs to)</span></label>
+          <select id="farm-select">
+            <option value="">— General expense —</option>
+          </select>
+        </div>
         <div class="field full" id="payment-block" style="display:none">
           <label>Payment</label>
           <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:6px">
@@ -684,7 +690,7 @@ async function init() {
     document.body.classList.add('light');
     document.getElementById('mode-btn').innerHTML = '&#9728;&#65039;';
   }
-  await Promise.all([initUser(), loadProducts(), loadSuppliers(), loadLocations()]);
+  await Promise.all([initUser(), loadProducts(), loadSuppliers(), loadLocations(), loadFarms()]);
   document.getElementById('receive-date').value = todayIso();
   syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
   addRow();          // start with one empty row
@@ -693,6 +699,30 @@ async function init() {
 
 let _suppliers = [];
 let _locations = [];
+let _farms = [];
+
+async function loadFarms() {
+  try {
+    const r = await fetch('/farm/api/farms');
+    if (!r.ok) return;
+    const data = await r.json();
+    _farms = Array.isArray(data) ? data : (data && data.items) ? data.items : [];
+    const sel = document.getElementById('farm-select');
+    if (!sel) return;
+    const farmOpts = _farms.map(f =>
+      `<option value="${f.id}">${escHtml(f.name || ('Farm #' + f.id))}</option>`
+    ).join('');
+    sel.innerHTML = '<option value="">— General expense —</option>'
+      + farmOpts
+      + '<option value="__animals__">🐾 Animals</option>';
+  } catch (_) {
+    const sel = document.getElementById('farm-select');
+    if (sel) {
+      sel.innerHTML = '<option value="">— General expense —</option>'
+        + '<option value="__animals__">🐾 Animals</option>';
+    }
+  }
+}
 
 async function loadLocations() {
   try {
@@ -1130,6 +1160,11 @@ async function submitBatch(e) {
     }
   }
 
+  // Cost allocation: farm or "🐾 Animals" sentinel
+  const farmSelVal = document.getElementById('farm-select').value;
+  const isAnimalExp = farmSelVal === '__animals__';
+  const farmIdVal   = isAnimalExp ? null : (parseInt(farmSelVal, 10) || null);
+
   const payload = {
     product_type: productType,
     receive_date: document.getElementById('receive-date').value,
@@ -1138,6 +1173,8 @@ async function submitBatch(e) {
     amount_paid:  amountPaid,
     notes:        document.getElementById('notes').value.trim() || null,
     location_id:  parseInt(document.getElementById('location-select').value, 10) || null,
+    farm_id:           farmIdVal,
+    is_animal_expense: isAnimalExp,
     items,
   };
 
@@ -1176,6 +1213,7 @@ function resetForm() {
   syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
   document.getElementById('supplier-ref').value = '';
   document.getElementById('supplier-select').value = '';
+  document.getElementById('farm-select').value = '';
   document.getElementById('amount-paid').value = '';
   const cashRadio = document.querySelector('input[name="pay-mode"][value="cash"]');
   if (cashRadio) cashRadio.checked = true;
