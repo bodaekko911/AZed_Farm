@@ -295,23 +295,30 @@ async def _get_active_farm_or_404(db: AsyncSession, farm_id: int | None) -> Farm
 
 
 def _employee_payload(employee: Employee) -> dict:
-    farm = getattr(employee, "farm", None)
+    # Every getattr is defensive — if a column or relationship is missing
+    # (e.g. mid-migration database state), we degrade gracefully rather
+    # than 500-ing the whole list endpoint.
+    try:
+        farm = getattr(employee, "farm", None)
+        farm_name = farm.name if farm else None
+    except Exception:
+        farm_name = None
     return {
-        "id": employee.id,
-        "name": employee.name,
-        "phone": employee.phone or "—",
-        "position": employee.position or "—",
-        "department": employee.department or "—",
-        "hire_date": str(employee.hire_date) if employee.hire_date else "—",
-        "base_salary": float(employee.base_salary),
-        "is_active": employee.is_active,
-        "farm_id": employee.farm_id,
-        "farm_name": farm.name if farm else None,
-        "works_with_animals": bool(getattr(employee, "works_with_animals", False)),
-        "vacation_days_per_month":    getattr(employee, "vacation_days_per_month", 0) or 0,
+        "id":         getattr(employee, "id", None),
+        "name":       getattr(employee, "name", "") or "",
+        "phone":      getattr(employee, "phone", None) or "—",
+        "position":   getattr(employee, "position", None) or "—",
+        "department": getattr(employee, "department", None) or "—",
+        "hire_date":  str(employee.hire_date) if getattr(employee, "hire_date", None) else "—",
+        "base_salary": float(getattr(employee, "base_salary", 0) or 0),
+        "is_active":  bool(getattr(employee, "is_active", True)),
+        "farm_id":    getattr(employee, "farm_id", None),
+        "farm_name":  farm_name,
+        "works_with_animals":         bool(getattr(employee, "works_with_animals", False) or False),
+        "vacation_days_per_month":    int(getattr(employee, "vacation_days_per_month", 0) or 0),
         "food_allowance":             float(getattr(employee, "food_allowance", 0) or 0),
         "transportation_allowance":   float(getattr(employee, "transportation_allowance", 0) or 0),
-        "attendance_auto_status": _normalize_auto_attendance_status(
+        "attendance_auto_status":     _normalize_auto_attendance_status(
             getattr(employee, "attendance_auto_status", None)
         ),
     }
@@ -2339,7 +2346,43 @@ function onEmpSearch(){
 async function loadEmployees(){
     let q   = document.getElementById("emp-search").value.trim();
     let url = `/hr/api/employees${q?"?q="+encodeURIComponent(q):""}`;
-    employees = await (await fetch(url)).json();
+    let resp;
+    try{
+        resp = await fetch(url);
+    }catch(networkErr){
+        document.getElementById("emp-body").innerHTML =
+            `<tr><td colspan="8" style="text-align:center;color:#ef4444;padding:40px">Network error loading employees: ${escapeHtml(String(networkErr))}</td></tr>`;
+        employees = [];
+        updateAllowanceStat();
+        return;
+    }
+
+    if(!resp.ok){
+        let errMsg = `HTTP ${resp.status}`;
+        try{
+            const body = await resp.json();
+            if(body && body.detail) errMsg = body.detail;
+        }catch(_){ /* not JSON */ }
+        document.getElementById("emp-body").innerHTML =
+            `<tr><td colspan="8" style="text-align:center;color:#ef4444;padding:40px;line-height:1.5">
+                <b>Employees could not be loaded.</b><br>
+                <span style="font-size:12px;color:var(--muted)">${escapeHtml(String(errMsg))}</span>
+            </td></tr>`;
+        employees = [];
+        updateAllowanceStat();
+        return;
+    }
+
+    employees = await resp.json();
+    if(!Array.isArray(employees)){
+        // Defensive: if the API returns {detail: "..."} instead of [], surface it
+        const msg = (employees && employees.detail) ? employees.detail : "Unexpected response shape";
+        document.getElementById("emp-body").innerHTML =
+            `<tr><td colspan="8" style="text-align:center;color:#ef4444;padding:40px">${escapeHtml(String(msg))}</td></tr>`;
+        employees = [];
+        updateAllowanceStat();
+        return;
+    }
 
     if(!employees.length){
         document.getElementById("emp-body").innerHTML =
