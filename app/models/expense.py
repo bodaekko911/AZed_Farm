@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Numeric, Date, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, false as sql_false
 from app.database import Base
 
 
@@ -50,7 +50,7 @@ class Expense(Base):
 
     farm_id         = Column(Integer, ForeignKey("farms.id"), nullable=True)
     animal_group_id = Column(Integer, ForeignKey("animal_groups.id"), nullable=True, index=True)
-    is_animal_expense = Column(Boolean, nullable=False, default=False, server_default="0")
+    is_animal_expense = Column(Boolean, nullable=False, default=False, server_default=sql_false())
     payroll_id      = Column(Integer, ForeignKey("payroll.id"), nullable=True, unique=True, index=True)
     consumption     = Column(Numeric(14, 4), nullable=True)        # quantity in the category's unit
     unit_price_used = Column(Numeric(12, 4), nullable=True)        # snapshot of unit price at time of entry

@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Numeric, Date, DateTime, ForeignKey, Text, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, false as sql_false
 from app.database import Base
 
 
@@ -18,7 +18,7 @@ class Employee(Base):
     # When True, the employee is assigned to the "Animals" bucket (no specific
     # farm). Payroll auto-creates a salary expense with is_animal_expense=True,
     # which surfaces it in the Animals → Analyze tab.
-    works_with_animals = Column(Boolean, nullable=False, default=False, server_default="0")
+    works_with_animals = Column(Boolean, nullable=False, default=False, server_default=sql_false())
     is_active   = Column(Boolean, default=True)
     vacation_days_per_month    = Column(Integer, default=0, server_default="0", nullable=False)
     food_allowance              = Column(Numeric(12, 2), default=0, server_default="0", nullable=False)
