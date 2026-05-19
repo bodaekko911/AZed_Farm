@@ -453,6 +453,7 @@ async def list_expenses(
             "farm_name": expense.farm.name if expense.farm else None,
             "animal_group_id":   expense.animal_group_id,
             "animal_group_name": expense.animal_group.name if expense.animal_group else None,
+            "is_animal_expense": bool(getattr(expense, "is_animal_expense", False)),
         }
         for expense in expenses
     ]
@@ -561,6 +562,7 @@ async def create_expense_entry(db: AsyncSession, data: ExpenseCreate, current_us
         journal_id=journal.id,
         farm_id=data.farm_id or None,
         animal_group_id=animal_group_id,
+        is_animal_expense=bool(getattr(data, "is_animal_expense", False)),
         consumption=consumption,
         unit_price_used=unit_price_used,
     )
@@ -623,6 +625,7 @@ async def create_payroll_expense(
     employee = getattr(payroll, "employee", None)
     employee_name = getattr(employee, "name", None) or f"Employee #{payroll.employee_id}"
     farm_id = getattr(employee, "farm_id", None) or None
+    animal_group_id = getattr(employee, "animal_group_id", None) or None
     payment_date = paid_date or date_type.today()
     reference_number = await _next_expense_reference(db)
     description = f"Salary payment - {employee_name} - {payroll.period} - payroll #{payroll.id}"
@@ -649,6 +652,7 @@ async def create_payroll_expense(
         journal_id=journal.id,
         payroll_id=payroll.id,
         farm_id=farm_id,
+        animal_group_id=animal_group_id,
     )
     db.add(expense)
     await db.flush()
@@ -703,6 +707,8 @@ async def update_expense_entry(
         expense.farm_id = data.farm_id or None
     if data.animal_group_id is not None:
         expense.animal_group_id = await _validate_animal_group(db, data.animal_group_id)
+    if getattr(data, "is_animal_expense", None) is not None:
+        expense.is_animal_expense = bool(data.is_animal_expense)
 
     if expense.category is None:
         category_result = await db.execute(

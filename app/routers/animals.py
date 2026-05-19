@@ -21,7 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -595,67 +595,86 @@ async def list_farms_for_picker(db: AsyncSession = Depends(get_async_session)):
 # ── Cost Analyze API ────────────────────────────────────────────────
 
 @router.get(
-    "/api/groups/{group_id}/analyze",
+    "/api/analyze",
     dependencies=[Depends(require_permission("action_animals_analyze"))],
 )
-async def analyze_group(
-    group_id: int,
+async def analyze_animals(
     db: AsyncSession = Depends(get_async_session),
 ):
-    """Roll-up cost analysis for a single animal group.
+    """Combined cost analysis across ALL animal groups.
 
     Components of the total cost:
-      1. Purchase cost  — from animal_groups.purchase_cost (or cost_per_head × headcount)
-      2. Feed cost      — Σ over feeding_logs of qty × product.cost
-      3. Other expenses — Σ over expenses where animal_group_id matches
+      1. Purchase cost  — Σ over all groups (group.purchase_cost,
+                          or cost_per_head × headcount if total is blank)
+      2. Feed cost      — Σ over all feeding_logs of qty × product.cost
+      3. Other expenses — Σ over expenses where is_animal_expense=True
+                          OR animal_group_id IS NOT NULL  (covers both
+                          manual "Animals" tagging AND auto-payroll
+                          expenses linked to a specific group)
 
-    The Analyze tab divides the total by current headcount to show
-    cost-per-head, and feeds back a category breakdown so the operator
-    can see where the money is going.
+    Cost-per-head = Total ÷ sum of all groups' headcount.
     """
-    group = (
+    # ── Groups (for purchase cost + per-group summary) ──
+    groups = (
         await db.execute(
             select(AnimalGroup)
             .options(selectinload(AnimalGroup.farm))
-            .where(AnimalGroup.id == group_id)
+            .where(AnimalGroup.status != "archived")
+            .order_by(AnimalGroup.name.asc())
         )
-    ).scalar_one_or_none()
-    if group is None:
-        raise HTTPException(status_code=404, detail="Group not found")
+    ).scalars().all()
 
-    # ── 1. Purchase cost (effective) ──
-    purchase_cost = Decimal(str(group.purchase_cost or 0))
-    cost_per_head = Decimal(str(group.cost_per_head or 0))
-    head = int(group.headcount or 0)
-    if purchase_cost > 0:
-        effective_purchase = purchase_cost
-        purchase_source = "total"
-    elif cost_per_head > 0:
-        effective_purchase = (cost_per_head * Decimal(head)).quantize(Decimal("0.01"))
-        purchase_source = "per_head"
-    else:
-        effective_purchase = Decimal("0")
-        purchase_source = "none"
+    total_purchase = Decimal("0")
+    total_head = 0
+    groups_summary: list[dict] = []
+    for g in groups:
+        head = int(g.headcount or 0)
+        total_head += head
+        purchase_cost = Decimal(str(g.purchase_cost or 0))
+        cost_per_head = Decimal(str(g.cost_per_head or 0))
+        if purchase_cost > 0:
+            effective = purchase_cost
+            src = "total"
+        elif cost_per_head > 0:
+            effective = (cost_per_head * Decimal(head)).quantize(Decimal("0.01"))
+            src = "per_head"
+        else:
+            effective = Decimal("0")
+            src = "none"
+        total_purchase += effective
+        groups_summary.append({
+            "id": g.id,
+            "name": g.name,
+            "animal_type": g.animal_type or "other",
+            "headcount": head,
+            "farm_name": g.farm.name if g.farm else None,
+            "purchase_cost": float(effective),
+            "purchase_source": src,
+        })
 
-    # ── 2. Feed cost (qty × product.cost) ──
+    # ── Feed cost (qty × product.cost) across all groups ──
     feedings = (
         await db.execute(
             select(FeedingLog)
-            .options(selectinload(FeedingLog.product))
-            .where(FeedingLog.animal_group_id == group_id)
+            .options(
+                selectinload(FeedingLog.product),
+                selectinload(FeedingLog.group),
+            )
             .order_by(FeedingLog.feed_date.asc())
         )
     ).scalars().all()
 
-    feed_cost = Decimal("0")
+    total_feed = Decimal("0")
     feed_qty_total = Decimal("0")
     feed_breakdown: dict[int, dict] = {}
+    feed_by_group: dict[int, Decimal] = {}
     for f in feedings:
         qty = Decimal(str(f.qty or 0))
         unit_cost = Decimal(str(f.product.cost or 0)) if f.product else Decimal("0")
         line_cost = (qty * unit_cost).quantize(Decimal("0.01"))
-        feed_cost += line_cost
+        total_feed += line_cost
         feed_qty_total += qty
+        feed_by_group[f.animal_group_id] = feed_by_group.get(f.animal_group_id, Decimal("0")) + line_cost
         pid = f.product_id
         if pid not in feed_breakdown:
             feed_breakdown[pid] = {
@@ -690,22 +709,31 @@ async def analyze_group(
         reverse=True,
     )
 
-    # ── 3. Other expenses tagged against this group ──
+    # Merge feed cost into per-group summary
+    for row in groups_summary:
+        row["feed_cost"] = float(feed_by_group.get(row["id"], Decimal("0")))
+
+    # ── Other expenses tagged for Animals (manual or via payroll group) ──
     expenses = (
         await db.execute(
             select(Expense)
             .options(selectinload(Expense.category))
-            .where(Expense.animal_group_id == group_id)
-            .order_by(Expense.expense_date.asc())
+            .where(
+                or_(
+                    Expense.is_animal_expense == True,
+                    Expense.animal_group_id.isnot(None),
+                )
+            )
+            .order_by(Expense.expense_date.desc(), Expense.id.desc())
         )
     ).scalars().all()
 
-    expense_cost = Decimal("0")
+    total_expense = Decimal("0")
     expense_by_cat: dict[str, dict] = {}
     expense_lines: list[dict] = []
     for e in expenses:
         amt = Decimal(str(e.amount or 0))
-        expense_cost += amt
+        total_expense += amt
         cat_name = e.category.name if e.category else "Other"
         if cat_name not in expense_by_cat:
             expense_by_cat[cat_name] = {"name": cat_name, "amount": Decimal("0"), "count": 0}
@@ -719,6 +747,7 @@ async def analyze_group(
             "amount":       float(amt),
             "vendor":       e.vendor or "",
             "description":  e.description or "",
+            "source":       "payroll" if e.animal_group_id else "manual",
         })
 
     expense_categories = sorted(
@@ -731,30 +760,33 @@ async def analyze_group(
     )
 
     # ── Totals ──
-    total_cost = (effective_purchase + feed_cost + expense_cost).quantize(Decimal("0.01"))
-    per_head = (total_cost / Decimal(head)).quantize(Decimal("0.01")) if head > 0 else Decimal("0")
+    total_cost = (total_purchase + total_feed + total_expense).quantize(Decimal("0.01"))
+    per_head = (total_cost / Decimal(total_head)).quantize(Decimal("0.01")) if total_head > 0 else Decimal("0")
 
-    # Cost-share % by component (for a stacked bar / pie on the UI)
     def _pct(part: Decimal) -> float:
         if total_cost <= 0:
             return 0.0
         return round(float(part / total_cost * 100), 1)
 
+    # Sort groups summary by total cost contribution (purchase + feed) desc
+    for row in groups_summary:
+        row["subtotal"] = round(row["purchase_cost"] + row["feed_cost"], 2)
+    groups_summary.sort(key=lambda r: r["subtotal"], reverse=True)
+
     return {
-        "group": _serialize_group(group),
         "totals": {
-            "purchase_cost":  float(effective_purchase),
-            "purchase_source": purchase_source,   # "total" | "per_head" | "none"
-            "feed_cost":      float(feed_cost),
-            "expense_cost":   float(expense_cost),
+            "purchase_cost":  float(total_purchase),
+            "feed_cost":      float(total_feed),
+            "expense_cost":   float(total_expense),
             "total_cost":     float(total_cost),
             "cost_per_head":  float(per_head),
-            "headcount":      head,
+            "headcount":      total_head,
+            "group_count":    len(groups),
         },
         "shares": {
-            "purchase_pct": _pct(effective_purchase),
-            "feed_pct":     _pct(feed_cost),
-            "expense_pct":  _pct(expense_cost),
+            "purchase_pct": _pct(total_purchase),
+            "feed_pct":     _pct(total_feed),
+            "expense_pct":  _pct(total_expense),
         },
         "feedings": {
             "total_qty":   float(feed_qty_total),
@@ -764,8 +796,9 @@ async def analyze_group(
         "expenses": {
             "entry_count":  len(expenses),
             "by_category":  expense_categories,
-            "items":        expense_lines,
+            "items":        expense_lines[:50],   # cap detail list to most recent 50
         },
+        "groups": groups_summary,
     }
 
 
@@ -980,19 +1013,15 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
     <!-- ANALYZE -->
     <div id="analyze-section" style="display:none">
         <div class="toolbar">
-            <div class="search-box" style="flex:0 0 320px">
-                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-                </svg>
-                <select id="an-group" onchange="loadAnalysis()" style="width:100%;padding:10px 12px 10px 36px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-family:var(--sans);font-size:13px;appearance:none">
-                    <option value="">— Pick a group to analyze —</option>
-                </select>
+            <div style="flex:1;color:var(--sub);font-size:13px;line-height:1.5">
+                <b style="color:var(--text)">Combined Animal Cost Analysis</b><br>
+                <span style="color:var(--muted);font-size:12px">Across all active animal groups — purchase, feed, expenses tagged "Animals", and salaries of employees assigned to a group.</span>
             </div>
-            <div id="an-meta" style="color:var(--muted);font-size:12px;flex:1"></div>
+            <button class="btn btn-green" onclick="loadAnalysis()">↻ Refresh</button>
         </div>
         <div id="analyze-body">
             <div class="empty" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:50px">
-                Pick a group above to see its full cost breakdown.
+                Loading analysis…
             </div>
         </div>
     </div>
@@ -1704,17 +1733,10 @@ async function deleteFeeding(id){{
     }}
 }}
 
-/* ── ANALYZE TAB ── */
+/* ── ANALYZE TAB (Combined Animals) ── */
 function initAnalyze(){{
-    const sel = document.getElementById("an-group");
-    const prev = sel.value;
-    // Show every non-archived group so historical analysis is still reachable.
-    const opts = _groups
-        .filter(g => g.status !== "archived")
-        .map(g => `<option value="${{g.id}}">${{esc(g.name)}} (${{g.headcount||0}} head)</option>`)
-        .join("");
-    sel.innerHTML = `<option value="">— Pick a group to analyze —</option>` + opts;
-    if (prev) sel.value = prev;
+    // Single combined view — no picker. Load fresh data every time the tab is opened.
+    loadAnalysis();
 }}
 
 function fmtMoney(n){{
@@ -1728,17 +1750,10 @@ function fmtQty(n){{
 }}
 
 async function loadAnalysis(){{
-    const gid = parseInt(document.getElementById("an-group").value, 10) || 0;
     const body = document.getElementById("analyze-body");
-    const meta = document.getElementById("an-meta");
-    meta.textContent = "";
-    if (!gid){{
-        body.innerHTML = `<div class="empty" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:50px">Pick a group above to see its full cost breakdown.</div>`;
-        return;
-    }}
     body.innerHTML = `<div class="empty" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:30px">Crunching numbers…</div>`;
     try {{
-        const r = await fetch(`/animals/api/groups/${{gid}}/analyze`);
+        const r = await fetch(`/animals/api/analyze`);
         if (!r.ok){{
             const err = await r.json().catch(()=>({{}}));
             body.innerHTML = `<div class="empty" style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:30px">${{esc(err.detail || "Could not load analysis.")}}</div>`;
@@ -1753,37 +1768,28 @@ async function loadAnalysis(){{
 
 function renderAnalysis(d){{
     const body = document.getElementById("analyze-body");
-    const meta = document.getElementById("an-meta");
-    const g = d.group || {{}};
     const t = d.totals || {{}};
     const s = d.shares || {{}};
     const f = d.feedings || {{by_product:[]}};
     const ex = d.expenses || {{by_category:[], items:[]}};
-
-    meta.innerHTML = `<b style="color:var(--text)">${{esc(g.name||"")}}</b> · ${{esc(g.animal_type||"")}} · ${{t.headcount||0}} head` +
-        (g.farm_name ? ` · ${{esc(g.farm_name)}}` : "");
-
-    let purchaseHint = "";
-    if (t.purchase_source === "total")    purchaseHint = "From group total";
-    else if (t.purchase_source === "per_head") purchaseHint = `From per-head price × ${{t.headcount||0}}`;
-    else                                  purchaseHint = "No purchase cost set";
+    const gs = d.groups || [];
 
     const cards = `
         <div class="an-grid">
             <div class="an-card">
                 <div class="an-label">Total Cost</div>
                 <div class="an-value" style="color:var(--green)">EGP ${{fmtMoney(t.total_cost)}}</div>
-                <div class="an-hint">Purchase + Feed + Expenses</div>
+                <div class="an-hint">Across ${{t.group_count||0}} group(s)</div>
             </div>
             <div class="an-card">
                 <div class="an-label">Cost / Head</div>
                 <div class="an-value" style="color:var(--blue)">EGP ${{fmtMoney(t.cost_per_head)}}</div>
-                <div class="an-hint">Across ${{t.headcount||0}} current head</div>
+                <div class="an-hint">Across ${{t.headcount||0}} total head</div>
             </div>
             <div class="an-card">
                 <div class="an-label">Purchase Cost</div>
                 <div class="an-value">EGP ${{fmtMoney(t.purchase_cost)}}</div>
-                <div class="an-hint">${{purchaseHint}}</div>
+                <div class="an-hint">Sum of all groups' purchase prices</div>
             </div>
             <div class="an-card">
                 <div class="an-label">Feed Cost</div>
@@ -1793,7 +1799,7 @@ function renderAnalysis(d){{
             <div class="an-card">
                 <div class="an-label">Other Expenses</div>
                 <div class="an-value">EGP ${{fmtMoney(t.expense_cost)}}</div>
-                <div class="an-hint">${{ex.entry_count||0}} expense entry(s)</div>
+                <div class="an-hint">${{ex.entry_count||0}} expense entry(s) tagged "Animals"</div>
             </div>
         </div>
     `;
@@ -1811,6 +1817,16 @@ function renderAnalysis(d){{
         </div>
     `;
 
+    const groupRows = gs.map(r => `
+        <tr>
+            <td><b>${{esc(r.name||"")}}</b><div style="font-size:11px;color:var(--muted)">${{esc(r.animal_type||"")}}${{r.farm_name ? " · " + esc(r.farm_name) : ""}}</div></td>
+            <td style="font-family:var(--mono)">${{r.headcount||0}}</td>
+            <td style="font-family:var(--mono)">EGP ${{fmtMoney(r.purchase_cost)}}</td>
+            <td style="font-family:var(--mono)">EGP ${{fmtMoney(r.feed_cost)}}</td>
+            <td style="font-family:var(--mono);color:var(--text);font-weight:700">EGP ${{fmtMoney(r.subtotal)}}</td>
+        </tr>
+    `).join("") || `<tr><td colspan="5" class="empty">No active groups.</td></tr>`;
+
     const feedRows = (f.by_product || []).map(r => `
         <tr>
             <td><b>${{esc(r.product_name||"")}}</b><div style="font-family:var(--mono);font-size:11px;color:var(--muted)">${{esc(r.product_sku||"")}}</div></td>
@@ -1819,7 +1835,7 @@ function renderAnalysis(d){{
             <td style="font-family:var(--mono)">EGP ${{fmtMoney(r.total_cost)}}</td>
             <td style="color:var(--muted);font-family:var(--mono)">${{r.entries||0}}</td>
         </tr>
-    `).join("") || `<tr><td colspan="5" class="empty">No feedings logged for this group.</td></tr>`;
+    `).join("") || `<tr><td colspan="5" class="empty">No feedings logged yet.</td></tr>`;
 
     const expCatRows = (ex.by_category || []).map(c => `
         <tr>
@@ -1827,23 +1843,38 @@ function renderAnalysis(d){{
             <td style="color:var(--muted);font-family:var(--mono)">${{c.count||0}}</td>
             <td style="font-family:var(--mono)">EGP ${{fmtMoney(c.amount)}}</td>
         </tr>
-    `).join("") || `<tr><td colspan="3" class="empty">No other expenses linked to this group.</td></tr>`;
+    `).join("") || `<tr><td colspan="3" class="empty">No expenses tagged "Animals" yet.</td></tr>`;
 
-    const expItemRows = (ex.items || []).slice(0, 50).map(e => `
+    const expItemRows = (ex.items || []).slice(0, 50).map(e => {{
+        const srcBadge = e.source === "payroll"
+            ? `<span style="font-size:9px;padding:1px 6px;border-radius:8px;background:rgba(96,165,250,.12);color:var(--blue);font-weight:700;margin-left:4px">PAYROLL</span>`
+            : "";
+        return `
         <tr>
-            <td style="color:var(--sub);font-family:var(--mono);font-size:11px">${{esc(e.ref_number||"")}}</td>
+            <td style="color:var(--sub);font-family:var(--mono);font-size:11px">${{esc(e.ref_number||"")}}${{srcBadge}}</td>
             <td style="color:var(--sub)">${{esc(e.expense_date||"")}}</td>
             <td>${{esc(e.category||"")}}</td>
             <td style="color:var(--sub);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${{esc(e.description||"")}}">${{esc(e.vendor || e.description || "—")}}</td>
             <td style="font-family:var(--mono)">EGP ${{fmtMoney(e.amount)}}</td>
         </tr>
-    `).join("") || `<tr><td colspan="5" class="empty">No expense entries yet.</td></tr>`;
+        `;
+    }}).join("") || `<tr><td colspan="5" class="empty">No expense entries yet.</td></tr>`;
 
     body.innerHTML = `
         ${{cards}}
         ${{bar}}
 
-        <div class="an-section-title">Feed Cost by Product</div>
+        <div class="an-section-title">Per-Group Summary</div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr>
+                    <th>Group</th><th>Head</th><th>Purchase</th><th>Feed</th><th>Subtotal</th>
+                </tr></thead>
+                <tbody>${{groupRows}}</tbody>
+            </table>
+        </div>
+
+        <div class="an-section-title">Feed Cost by Product (All Groups)</div>
         <div class="table-wrap">
             <table>
                 <thead><tr>

@@ -54,7 +54,8 @@ class ExpenseCreate(BaseModel):
     vendor:         Optional[str] = None
     description:    Optional[str] = None
     farm_id:        Optional[int] = None
-    animal_group_id: Optional[int] = None     # primary UI link (replaces farm in the modal)
+    animal_group_id: Optional[int] = None     # set by payroll when employee has a specific group
+    is_animal_expense: Optional[bool] = None  # set by the "Animals" option in the Farm dropdown
     consumption:    Optional[float] = None    # quantity in category unit (auto-calculated if blank)
     unit_price_used: Optional[float] = None   # editable override for unit price
 
@@ -67,7 +68,8 @@ class ExpenseUpdate(BaseModel):
     vendor:         Optional[str]   = None
     description:    Optional[str]   = None
     farm_id:        Optional[int]   = None
-    animal_group_id: Optional[int]  = None    # primary UI link
+    animal_group_id: Optional[int]  = None
+    is_animal_expense: Optional[bool] = None
     consumption:    Optional[float] = None
     unit_price_used: Optional[float] = None
 
@@ -372,6 +374,7 @@ async def list_expenses(
             "farm_name":      e.farm.name if e.farm else None,
             "animal_group_id":   e.animal_group_id,
             "animal_group_name": e.animal_group.name if e.animal_group else None,
+            "is_animal_expense": bool(getattr(e, "is_animal_expense", False)),
             "consumption":    float(e.consumption) if e.consumption is not None else None,
             "unit_price_used": float(e.unit_price_used) if e.unit_price_used is not None else None,
             "unit_name":      e.category.unit_name if e.category else None,
@@ -500,6 +503,7 @@ async def add_expense(
         journal_id=journal.id,
         farm_id=data.farm_id or None,
         animal_group_id=data.animal_group_id or None,
+        is_animal_expense=bool(data.is_animal_expense),
         consumption=consumption,
         unit_price_used=unit_price_used,
     )
@@ -582,6 +586,8 @@ async def edit_expense(
             expense.animal_group_id = data.animal_group_id
         else:
             expense.animal_group_id = None
+    if data.is_animal_expense is not None:
+        expense.is_animal_expense = bool(data.is_animal_expense)
 
     # Post new journal
     _rcat = await db.execute(select(ExpenseCategory).where(ExpenseCategory.id == expense.category_id))
@@ -1106,7 +1112,7 @@ nav {
                         <tr>
                             <th>Ref</th>
                             <th>Category</th>
-                            <th>Animal Group</th>
+                            <th>Farm</th>
                             <th>Date</th>
                             <th>Vendor</th>
                             <th>Method</th>
@@ -1173,8 +1179,8 @@ nav {
                 <input id="m-vendor" placeholder="e.g. Cairo Electric Co.">
             </div>
             <div class="fld">
-                <label>Animal Group (for cost allocation)</label>
-                <select id="m-animal-group">
+                <label>Farm (for cost allocation)</label>
+                <select id="m-farm">
                     <option value="">— General expense —</option>
                 </select>
             </div>
@@ -1601,17 +1607,20 @@ async function loadExpenses() {
             const category = e.category || "—";
             const expenseDate = e.expense_date || "—";
             const vendor = e.vendor || "";
-            const groupName = e.animal_group_name || "—";
-            const groupBadge = e.animal_group_name ? ` <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(132,204,22,.1);color:#84cc16;font-weight:700">${escapeHtml(String(e.animal_group_name))}</span>` : "";
+            const isAnimal = !!e.is_animal_expense;
+            const displayName = isAnimal ? "🐾 Animals" : (e.farm_name || "—");
+            const badge = isAnimal
+                ? ` <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(132,204,22,.1);color:#84cc16;font-weight:700">🐾 Animals</span>`
+                : (e.farm_name ? ` <span style="font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(132,204,22,.1);color:#84cc16;font-weight:700">${escapeHtml(String(e.farm_name))}</span>` : "");
             const rowJson = JSON.stringify(e).replace(/"/g,'&quot;');
             return `
             <tr>
                 <td><div class="exp-ref">${escapeHtml(String(ref))}</div></td>
                 <td>
                     <div class="exp-cat">${escapeHtml(String(category))}</div>
-                    <div class="exp-vendor">${escapeHtml(String(vendor))}${groupBadge}</div>
+                    <div class="exp-vendor">${escapeHtml(String(vendor))}${badge}</div>
                 </td>
-                <td><div class="exp-vendor">${escapeHtml(String(groupName))}</div></td>
+                <td><div class="exp-vendor">${escapeHtml(String(displayName))}</div></td>
                 <td><div class="exp-date">${escapeHtml(String(expenseDate))}</div></td>
                 <td><div class="exp-vendor">${escapeHtml(String(vendor || "—"))}</div></td>
                 <td><span class="method-pill method-${methodClass}">${escapeHtml(paymentMethod.replace(/_/g, " "))}</span></td>
@@ -1649,7 +1658,7 @@ function viewReceipt(e, autoPrint = false) {
             <span style="color:var(--sub)">Category</span>    <span style="color:var(--text);font-weight:500">${escapeHtml(String(category))}</span>
             <span style="color:var(--sub)">Vendor</span>      <span style="color:var(--text)">${escapeHtml(String(e.vendor || "—"))}</span>
             <span style="color:var(--sub)">Method</span>      <span style="color:var(--text)">${methodLabel}</span>
-            ${e.animal_group_name ? `<span style="color:var(--sub)">Animal Group</span><span style="color:#84cc16;font-weight:500">${escapeHtml(String(e.animal_group_name))}</span>` : ""}
+            ${e.is_animal_expense ? `<span style="color:var(--sub)">Allocation</span><span style="color:#84cc16;font-weight:500">🐾 Animals</span>` : (e.farm_name ? `<span style="color:var(--sub)">Farm</span><span style="color:#84cc16;font-weight:500">${escapeHtml(String(e.farm_name))}</span>` : "")}
             ${e.description ? `<span style="color:var(--sub)">Notes</span><span style="color:var(--text)">${escapeHtml(String(e.description))}</span>` : ""}
             <span style="color:var(--sub)">Recorded by</span><span style="color:var(--text)">${escapeHtml(String(e.created_by || "—"))}</span>
         </div>
@@ -1702,7 +1711,7 @@ function openAddModal() {
     document.getElementById("m-method").value   = "cash";
     document.getElementById("m-vendor").value   = "";
     document.getElementById("m-notes").value    = "";
-    document.getElementById("m-animal-group").value = "";
+    document.getElementById("m-farm").value     = "";
     if (activeCatId) document.getElementById("m-category").value = activeCatId;
     document.getElementById("m-unit-price").value   = "";
     document.getElementById("m-consumption").value  = "";
@@ -1725,7 +1734,7 @@ function openEditModal(e) {
     document.getElementById("m-method").value   = String(e.payment_method || "cash");
     document.getElementById("m-vendor").value   = e.vendor || "";
     document.getElementById("m-notes").value    = e.description || "";
-    document.getElementById("m-animal-group").value = e.animal_group_id || "";
+    document.getElementById("m-farm").value     = e.is_animal_expense ? "__animals__" : (e.farm_id || "");
     document.getElementById("m-unit-price").value   = e.unit_price_used || "";
     document.getElementById("m-consumption").value  = e.consumption || "";
     onCategoryChange();
@@ -1829,7 +1838,9 @@ async function saveExpense() {
     const btn = document.getElementById("modal-save-btn");
     btn.disabled = true;
 
-    const animalGroupId = parseInt(document.getElementById("m-animal-group").value) || null;
+    const farmSelVal = document.getElementById("m-farm").value;
+    const isAnimal   = farmSelVal === "__animals__";
+    const farmId     = isAnimal ? null : (parseInt(farmSelVal) || null);
     const unitPrice   = parseFloat(document.getElementById("m-unit-price")?.value || 0);
     const consumption = parseFloat(document.getElementById("m-consumption")?.value || 0);
     const body = {
@@ -1837,7 +1848,8 @@ async function saveExpense() {
         payment_method: method,
         vendor:      vendor || null,
         description: notes  || null,
-        animal_group_id: animalGroupId,
+        farm_id:     farmId,
+        is_animal_expense: isAnimal,
         consumption: consumption > 0 ? consumption : null,
         unit_price_used: unitPrice > 0 ? unitPrice : null,
     };
@@ -1881,23 +1893,25 @@ async function deleteExpense(id, ref) {
     }
 }
 
-// ── Animal Group dropdown for cost allocation ─────────────────
-async function loadAnimalGroupsDropdown() {
-    console.log("Loading expenses page data: animal groups");
+// ── Farm dropdown for cost allocation (with "Animals" appended) ───────
+async function loadFarmsDropdown() {
+    console.log("Loading expenses page data: farms");
     try {
-        const response = await fetch("/animals/api/groups");
-        const data = await response.json();
-        const groups = (data && Array.isArray(data.items)) ? data.items : [];
-        const sel = document.getElementById("m-animal-group");
+        const response = await fetch("/farm/api/farms");
+        const farms = await readJsonResponse(response, "farms");
+        if (!Array.isArray(farms)) throw new Error(`farms returned ${describeDataShape(farms)}`);
+        const sel = document.getElementById("m-farm");
         if (!sel) return;
-        const active = groups.filter(g => (g.status || "active") !== "archived");
+        const farmOpts = farms.map(f => `<option value="${f.id}">${escapeHtml(String(f.name || "Farm #" + f.id))}</option>`).join("");
         sel.innerHTML = `<option value="">— General expense —</option>` +
-            active.map(g => `<option value="${g.id}">${escapeHtml(String(g.name || "Group #" + g.id))}</option>`).join("");
+            farmOpts +
+            `<option value="__animals__">🐾 Animals</option>`;
     } catch(e) {
-        console.error("Failed to load animal groups dropdown", e);
-        const sel = document.getElementById("m-animal-group");
-        if (sel) sel.innerHTML = `<option value="">Animal groups unavailable</option>`;
-        showToast("Failed to load animal groups", "err");
+        console.error("Failed to load farms dropdown", e);
+        const sel = document.getElementById("m-farm");
+        if (sel) sel.innerHTML = `<option value="">— General expense —</option>
+                                  <option value="__animals__">🐾 Animals</option>`;
+        showToast("Failed to load farms", "err");
     }
 }
 
@@ -1909,7 +1923,7 @@ async function bootstrapExpensesPage() {
         loadCarbonFactors(),
         loadSummary(),
         loadExpenses(),
-        loadAnimalGroupsDropdown()
+        loadFarmsDropdown()
     ]);
 }
 

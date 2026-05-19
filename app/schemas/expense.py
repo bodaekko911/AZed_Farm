@@ -28,7 +28,8 @@ class ExpenseCreate(BaseModel):
     vendor: Optional[str] = None
     description: Optional[str] = None
     farm_id: Optional[int] = None
-    animal_group_id: Optional[int] = None     # new — primary UI link
+    animal_group_id: Optional[int] = None     # set automatically by payroll for a specific group
+    is_animal_expense: Optional[bool] = None  # set by the "Animals" option in the Farm dropdown
     consumption: Optional[float] = None        # quantity in the category's unit
     unit_price_used: Optional[float] = None    # snapshot at time of entry (optional override)
 
@@ -41,6 +42,7 @@ class ExpenseUpdate(BaseModel):
     vendor: Optional[str] = None
     description: Optional[str] = None
     farm_id: Optional[int] = None
-    animal_group_id: Optional[int] = None     # new — primary UI link
+    animal_group_id: Optional[int] = None
+    is_animal_expense: Optional[bool] = None
     consumption: Optional[float] = None
     unit_price_used: Optional[float] = None

@@ -15,6 +15,7 @@ from app.core.permissions import get_current_user, has_permission, require_permi
 from app.core.log import record
 from app.core.navigation import render_app_header
 from app.models.accounting import Account, Journal, JournalEntry
+from app.models.animal import AnimalGroup
 from app.models.expense import Expense
 from app.models.hr import (
     Employee,
@@ -53,6 +54,7 @@ class EmployeeCreate(BaseModel):
     food_allowance:          float          = 0
     transportation_allowance: float         = 0
     farm_id:                 Optional[int]  = None
+    animal_group_id:         Optional[int]  = None
 
 class EmployeeUpdate(BaseModel):
     name:                    Optional[str]   = None
@@ -64,6 +66,7 @@ class EmployeeUpdate(BaseModel):
     food_allowance:          Optional[float] = None
     transportation_allowance: Optional[float] = None
     farm_id:                 Optional[int]   = None
+    animal_group_id:         Optional[int]   = None
     is_active:               Optional[bool]  = None
 
 class AttendanceCreate(BaseModel):
@@ -292,8 +295,27 @@ async def _get_active_farm_or_404(db: AsyncSession, farm_id: int | None) -> Farm
     return farm
 
 
+async def _get_animal_group_or_404(db: AsyncSession, group_id: int | None) -> AnimalGroup | None:
+    """Validate an optional animal_group_id. Pass None or 0 to clear."""
+    if group_id is None:
+        return None
+    if group_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid animal_group_id")
+    result = await db.execute(select(AnimalGroup).where(AnimalGroup.id == group_id))
+    group = result.scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Animal group not found")
+    if (group.status or "active") == "archived":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot assign an archived animal group",
+        )
+    return group
+
+
 def _employee_payload(employee: Employee) -> dict:
     farm = getattr(employee, "farm", None)
+    animal_group = getattr(employee, "animal_group", None)
     return {
         "id": employee.id,
         "name": employee.name,
@@ -305,6 +327,8 @@ def _employee_payload(employee: Employee) -> dict:
         "is_active": employee.is_active,
         "farm_id": employee.farm_id,
         "farm_name": farm.name if farm else None,
+        "animal_group_id":   getattr(employee, "animal_group_id", None),
+        "animal_group_name": animal_group.name if animal_group else None,
         "vacation_days_per_month":    getattr(employee, "vacation_days_per_month", 0) or 0,
         "food_allowance":             float(getattr(employee, "food_allowance", 0) or 0),
         "transportation_allowance":   float(getattr(employee, "transportation_allowance", 0) or 0),
@@ -572,7 +596,14 @@ async def _clear_hr_data(db: AsyncSession, current_user: User) -> dict:
 # ── EMPLOYEE API ───────────────────────────────────────
 @router.get("/api/employees")
 async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_session)):
-    stmt = select(Employee).options(selectinload(Employee.farm)).where(Employee.is_active == True)
+    stmt = (
+        select(Employee)
+        .options(
+            selectinload(Employee.farm),
+            selectinload(Employee.animal_group),
+        )
+        .where(Employee.is_active == True)
+    )
     if q:
         stmt = stmt.where(
             Employee.name.ilike(f"%{q}%") |
@@ -588,6 +619,7 @@ async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_sessio
 async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     hire = _parse_optional_iso_date(data.hire_date, "hire_date")
     farm = await _get_active_farm_or_404(db, data.farm_id)
+    animal_group = await _get_animal_group_or_404(db, data.animal_group_id)
     e = Employee(
         name=data.name, phone=data.phone,
         position=data.position, department=data.department,
@@ -596,6 +628,7 @@ async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_asyn
         food_allowance=max(0, float(data.food_allowance or 0)),
         transportation_allowance=max(0, float(data.transportation_allowance or 0)),
         farm_id=farm.id if farm else None,
+        animal_group_id=animal_group.id if animal_group else None,
     )
     db.add(e); await db.flush()
     record(db, "HR", "add_employee",
@@ -609,11 +642,17 @@ async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_asyn
 
     if farm:
         e.farm = farm
+    if animal_group:
+        e.animal_group = animal_group
     return _employee_payload(e)
 
 @router.put("/api/employees/{emp_id}", dependencies=[Depends(require_permission("action_hr_manage_employees"))])
 async def edit_employee(emp_id: int, data: EmployeeUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
-    _r = await db.execute(select(Employee).options(selectinload(Employee.farm)).where(Employee.id == emp_id))
+    _r = await db.execute(
+        select(Employee)
+        .options(selectinload(Employee.farm), selectinload(Employee.animal_group))
+        .where(Employee.id == emp_id)
+    )
     e = _r.scalar_one_or_none()
     if not e:
         raise HTTPException(status_code=404, detail="Employee not found")
@@ -622,6 +661,10 @@ async def edit_employee(emp_id: int, data: EmployeeUpdate, db: AsyncSession = De
         farm = await _get_active_farm_or_404(db, payload["farm_id"])
         payload["farm_id"] = farm.id if farm else None
         e.farm = farm
+    if "animal_group_id" in payload:
+        group = await _get_animal_group_or_404(db, payload["animal_group_id"])
+        payload["animal_group_id"] = group.id if group else None
+        e.animal_group = group
     for k, v in payload.items():
         setattr(e, k, v)
     record(db, "HR", "edit_employee",
@@ -1915,6 +1958,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="fld"><label>Position</label><input id="e-position" placeholder="e.g. Cashier"></div>
             <div class="fld"><label>Department</label><input id="e-department" placeholder="e.g. Sales"></div>
             <div class="fld"><label>Farm</label><select id="e-farm"><option value="">No farm selected</option></select></div>
+            <div class="fld"><label>Animal Group <span style="font-size:10px;color:var(--muted)">(optional — salary auto-allocates)</span></label><select id="e-animal-group"><option value="">— None —</option></select></div>
             <div class="fld"><label>Phone</label><input id="e-phone" placeholder="+20 100 000 0000"></div>
             <div class="fld"><label>Hire Date <span id="e-hire-lock" style="font-size:10px;color:var(--muted)">🔒 locked</span></label><input id="e-hire" type="date"></div>
             <div class="fld"><label>Base Salary (EGP)</label><input id="e-salary" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
@@ -2217,6 +2261,7 @@ async function init(){
     // Employees first — the Monthly Allowances stat is derived from this
     // array, so loadSummary() must run AFTER it's populated.
     await loadEmployeeFarms();
+    await loadEmployeeAnimalGroups();
     await loadEmployees();
     await loadSummary();
 }
@@ -2287,7 +2332,7 @@ async function loadEmployees(){
             <td style="font-size:12px;color:var(--muted)">${displayText(e.hire_date)}</td>
             <td class="mono">${money(salary)}</td>
             <td style="display:flex;gap:6px">
-                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}" data-vacation="${numberValue(e.vacation_days_per_month)||0}" data-food="${numberValue(e.food_allowance)||0}" data-transport="${numberValue(e.transportation_allowance)||0}" data-hire-date="${escapeHtml(e.hire_date||'')}">Edit</button>
+                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}" data-animal-group-id="${e.animal_group_id || ""}" data-vacation="${numberValue(e.vacation_days_per_month)||0}" data-food="${numberValue(e.food_allowance)||0}" data-transport="${numberValue(e.transportation_allowance)||0}" data-hire-date="${escapeHtml(e.hire_date||'')}">Edit</button>
                 ${(hasPermission("action_hr_view_loans") || hasPermission("action_hr_view_deductions"))?`<button class="action-btn purple" onclick="openLoanDeductionModalFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-salary="${salary}">Loans & Deductions</button>`:""}
                 ${hasPermission("action_hr_run_payroll")?`<button class="action-btn danger" onclick="deactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Remove</button>`:""}
             </td>
@@ -2311,7 +2356,8 @@ function openEditEmpFromButton(btn){
         numberValue(btn.dataset.vacation) || 0,
         numberValue(btn.dataset.food) || 0,
         numberValue(btn.dataset.transport) || 0,
-        btn.dataset.hireDate || ""
+        btn.dataset.hireDate || "",
+        btn.dataset.animalGroupId || ""
     );
 }
 
@@ -2327,10 +2373,11 @@ function openAddEmpModal(){
     updateEmpDailyRatePreview();
     document.getElementById("e-hire").value = "";
     fillEmployeeFarmSelect("");
+    fillEmployeeAnimalGroupSelect("");
     document.getElementById("emp-modal").classList.add("open");
 }
 
-function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacationDays,food,transport,hireDate){
+function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacationDays,food,transport,hireDate,animalGroupId){
     editingEmpId = id;
     document.getElementById("emp-modal-title").innerText = "Edit Employee";
     document.getElementById("e-name").value       = name;
@@ -2344,6 +2391,7 @@ function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacati
     document.getElementById("e-hire").value       = (hireDate && hireDate !== "—") ? hireDate : "";
     applyHireDateLock(true);
     fillEmployeeFarmSelect(farmId || "");
+    fillEmployeeAnimalGroupSelect(animalGroupId || "");
     updateEmpDailyRatePreview();
     document.getElementById("emp-modal").classList.add("open");
 }
@@ -2412,6 +2460,7 @@ async function saveEmployee(){
         food_allowance:          parseFloat(document.getElementById("e-food").value)||0,
         transportation_allowance: parseFloat(document.getElementById("e-transport").value)||0,
         farm_id:                 parseInt(document.getElementById("e-farm").value)||null,
+        animal_group_id:         parseInt(document.getElementById("e-animal-group").value)||null,
     };
     let url    = editingEmpId ? `/hr/api/employees/${editingEmpId}` : "/hr/api/employees";
     let method = editingEmpId ? "PUT" : "POST";
@@ -2452,6 +2501,30 @@ function fillEmployeeFarmSelect(selectedFarmId){
     const selected = String(selectedFarmId || "");
     sel.innerHTML = `<option value="">No farm selected</option>` +
         farms.map(f=>`<option value="${numberValue(f.id)}">${displayText(f.name || ("Farm #" + f.id))}</option>`).join("");
+    sel.value = selected;
+}
+
+let animalGroups = [];
+
+async function loadEmployeeAnimalGroups(){
+    try{
+        let res = await fetch("/animals/api/groups");
+        if(!res.ok) throw new Error(`Animals API returned ${res.status}`);
+        let data = await res.json();
+        const items = (data && Array.isArray(data.items)) ? data.items : [];
+        animalGroups = items.filter(g => (g.status || "active") !== "archived");
+    }catch(err){
+        animalGroups = [];
+    }
+    fillEmployeeAnimalGroupSelect("");
+}
+
+function fillEmployeeAnimalGroupSelect(selectedGroupId){
+    const sel = document.getElementById("e-animal-group");
+    if(!sel) return;
+    const selected = String(selectedGroupId || "");
+    sel.innerHTML = `<option value="">— None —</option>` +
+        animalGroups.map(g => `<option value="${numberValue(g.id)}">${displayText(g.name || ("Group #" + g.id))}</option>`).join("");
     sel.value = selected;
 }
 
@@ -3194,6 +3267,7 @@ async function refreshHRDataAfterClear(){
     employees = [];
     await loadSummary();
     await loadEmployeeFarms();
+    await loadEmployeeAnimalGroups();
     await loadEmployees();
     const active = activeHRTab();
     if(active === "attendance" && hasPermission("tab_hr_attendance")) initAttendanceTab();
