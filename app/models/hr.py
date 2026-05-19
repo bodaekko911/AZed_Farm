@@ -15,9 +15,10 @@ class Employee(Base):
     hire_date   = Column(Date)
     base_salary = Column(Numeric(12, 2), default=0)
     farm_id     = Column(Integer, ForeignKey("farms.id"), nullable=True, index=True)
-    # Optional link to an animal group. When set, payroll runs auto-tag the
-    # salary expense with this group so it shows up in Animals → Analyze.
-    animal_group_id = Column(Integer, ForeignKey("animal_groups.id"), nullable=True, index=True)
+    # When True, the employee is assigned to the "Animals" bucket (no specific
+    # farm). Payroll auto-creates a salary expense with is_animal_expense=True,
+    # which surfaces it in the Animals → Analyze tab.
+    works_with_animals = Column(Boolean, nullable=False, default=False, server_default="0")
     is_active   = Column(Boolean, default=True)
     vacation_days_per_month    = Column(Integer, default=0, server_default="0", nullable=False)
     food_allowance              = Column(Numeric(12, 2), default=0, server_default="0", nullable=False)
@@ -32,7 +33,6 @@ class Employee(Base):
     payroll_deductions = relationship("EmployeePayrollDeduction", back_populates="employee")
     allowance_advances = relationship("EmployeeAllowanceAdvance", back_populates="employee")
     farm       = relationship("Farm", back_populates="employees")
-    animal_group = relationship("AnimalGroup", foreign_keys=[animal_group_id])
 
 
 class Attendance(Base):

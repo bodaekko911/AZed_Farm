@@ -625,7 +625,7 @@ async def create_payroll_expense(
     employee = getattr(payroll, "employee", None)
     employee_name = getattr(employee, "name", None) or f"Employee #{payroll.employee_id}"
     farm_id = getattr(employee, "farm_id", None) or None
-    animal_group_id = getattr(employee, "animal_group_id", None) or None
+    is_animal = bool(getattr(employee, "works_with_animals", False))
     payment_date = paid_date or date_type.today()
     reference_number = await _next_expense_reference(db)
     description = f"Salary payment - {employee_name} - {payroll.period} - payroll #{payroll.id}"
@@ -652,7 +652,7 @@ async def create_payroll_expense(
         journal_id=journal.id,
         payroll_id=payroll.id,
         farm_id=farm_id,
-        animal_group_id=animal_group_id,
+        is_animal_expense=is_animal,
     )
     db.add(expense)
     await db.flush()

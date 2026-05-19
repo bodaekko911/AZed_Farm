@@ -1,14 +1,21 @@
-"""Link employees to an animal group (for payroll cost allocation)
+"""Add works_with_animals flag to employees
 
 Revision ID: 20260518_0027_emp_animal
 Revises: 20260518_0026_animal_costs
 Create Date: 2026-05-18
 
-Adds employees.animal_group_id (nullable FK to animal_groups.id). When a
-payroll is paid out, the auto-generated salary expense will inherit this
-value so the Animals → Analyze tab includes labor cost for that group.
+Adds employees.works_with_animals (boolean, default False). The HR
+Employee modal's Farm dropdown gets a "🐾 Animals" option appended; when
+picked, the employee is saved with farm_id=NULL and works_with_animals=True.
+On payroll payment, that flag causes the auto-generated salary expense
+to be tagged is_animal_expense=True, so it lands under "🐾 Animals" in
+the expense list and rolls into the combined Animals analysis.
 
-Idempotent: safe to re-run.
+Also cleans up `employees.animal_group_id` if an earlier draft of this
+migration ever applied it.
+
+Idempotent: safe to re-run on databases that may already have any of
+these columns / FKs / indexes.
 """
 from typing import Sequence, Union
 
@@ -47,36 +54,19 @@ def _has_fk(table: str, fk_name: str) -> bool:
 
 
 def upgrade() -> None:
-    if not _has_column("employees", "animal_group_id"):
+    # ── Add the toggle ──
+    if not _has_column("employees", "works_with_animals"):
         op.add_column(
             "employees",
-            sa.Column("animal_group_id", sa.Integer(), nullable=True),
+            sa.Column(
+                "works_with_animals",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.false(),
+            ),
         )
-    if not _has_fk("employees", "fk_employees_animal_group"):
-        try:
-            op.create_foreign_key(
-                "fk_employees_animal_group",
-                "employees",
-                "animal_groups",
-                ["animal_group_id"],
-                ["id"],
-            )
-        except Exception:
-            # SQLite / other backends: column exists, FK is best-effort.
-            pass
-    if not _has_index("employees", "ix_employees_animal_group_id"):
-        try:
-            op.create_index(
-                "ix_employees_animal_group_id",
-                "employees",
-                ["animal_group_id"],
-                unique=False,
-            )
-        except Exception:
-            pass
 
-
-def downgrade() -> None:
+    # ── Clean up any prior animal_group_id column on employees ──
     if _has_index("employees", "ix_employees_animal_group_id"):
         try:
             op.drop_index("ix_employees_animal_group_id", table_name="employees")
@@ -88,4 +78,12 @@ def downgrade() -> None:
         except Exception:
             pass
     if _has_column("employees", "animal_group_id"):
-        op.drop_column("employees", "animal_group_id")
+        try:
+            op.drop_column("employees", "animal_group_id")
+        except Exception:
+            pass
+
+
+def downgrade() -> None:
+    if _has_column("employees", "works_with_animals"):
+        op.drop_column("employees", "works_with_animals")
