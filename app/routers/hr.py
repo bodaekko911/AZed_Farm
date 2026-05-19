@@ -575,17 +575,81 @@ async def _clear_hr_data(db: AsyncSession, current_user: User) -> dict:
 # ── EMPLOYEE API ───────────────────────────────────────
 @router.get("/api/employees")
 async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_session)):
-    stmt = select(Employee).options(selectinload(Employee.farm)).where(Employee.is_active == True)
-    if q:
-        stmt = stmt.where(
-            Employee.name.ilike(f"%{q}%") |
-            Employee.position.ilike(f"%{q}%") |
-            Employee.department.ilike(f"%{q}%")
-        )
-    stmt = stmt.order_by(Employee.name)
-    _r = await db.execute(stmt)
-    emps = _r.scalars().all()
-    return [_employee_payload(e) for e in emps]
+    try:
+        stmt = select(Employee).options(selectinload(Employee.farm)).where(Employee.is_active == True)
+        if q:
+            stmt = stmt.where(
+                Employee.name.ilike(f"%{q}%") |
+                Employee.position.ilike(f"%{q}%") |
+                Employee.department.ilike(f"%{q}%")
+            )
+        stmt = stmt.order_by(Employee.name)
+        _r = await db.execute(stmt)
+        emps = _r.scalars().all()
+        return [_employee_payload(e) for e in emps]
+    except Exception as exc:
+        # Surface DB-schema problems clearly instead of a generic 500. The most
+        # common cause is a deploy where the new migration didn't run yet.
+        msg = str(exc).lower()
+        if "works_with_animals" in msg or "does not exist" in msg or "no such column" in msg:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Database is out of date: please run `alembic upgrade head` on Railway. "
+                    "(Missing column on the employees table.)"
+                ),
+            ) from exc
+        raise
+
+
+@router.get("/api/_diagnostics/employees")
+async def _diagnose_employees(db: AsyncSession = Depends(get_async_session)):
+    """Diagnostic endpoint. Returns raw counts so we can see why the
+    employees table appears empty in the UI.
+
+    Use:  GET /hr/api/_diagnostics/employees
+    """
+    total = (await db.execute(select(func.count()).select_from(Employee))).scalar() or 0
+    active = (await db.execute(
+        select(func.count()).select_from(Employee).where(Employee.is_active == True)
+    )).scalar() or 0
+    inactive = total - active
+
+    # Sample the most-recent 5 rows (regardless of active flag) so we can see
+    # what's actually in there.
+    sample_q = (
+        select(Employee.id, Employee.name, Employee.is_active, Employee.farm_id)
+        .order_by(Employee.id.desc())
+        .limit(5)
+    )
+    sample_rows = (await db.execute(sample_q)).all()
+    sample = [
+        {"id": r[0], "name": r[1], "is_active": bool(r[2]), "farm_id": r[3]}
+        for r in sample_rows
+    ]
+
+    # Verify the new column actually exists in the live database (this catches
+    # the "migration didn't run" case without throwing a 500).
+    has_works_with_animals = True
+    works_count = None
+    try:
+        works_count = (
+            await db.execute(
+                select(func.count()).select_from(Employee).where(Employee.works_with_animals == True)
+            )
+        ).scalar() or 0
+    except Exception as exc:
+        has_works_with_animals = False
+        works_count = f"ERROR: {exc}"
+
+    return {
+        "total_employees":        total,
+        "active_employees":       active,
+        "inactive_employees":     inactive,
+        "sample_recent":          sample,
+        "has_works_with_animals": has_works_with_animals,
+        "works_with_animals_yes": works_count,
+    }
 
 @router.post("/api/employees", dependencies=[Depends(require_permission("action_hr_manage_employees"))])
 async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
