@@ -609,12 +609,12 @@ async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_sessio
         raise
 
 
-@router.get("/api/_diagnostics/employees")
+@router.get("/api/diag")
 async def _diagnose_employees(db: AsyncSession = Depends(get_async_session)):
     """Diagnostic endpoint. Returns raw counts so we can see why the
     employees table appears empty in the UI.
 
-    Use:  GET /hr/api/_diagnostics/employees
+    Use:  GET /hr/api/diag
     """
     total = (await db.execute(select(func.count()).select_from(Employee))).scalar() or 0
     active = (await db.execute(
@@ -656,6 +656,7 @@ async def _diagnose_employees(db: AsyncSession = Depends(get_async_session)):
         "sample_recent":          sample,
         "has_works_with_animals": has_works_with_animals,
         "works_with_animals_yes": works_count,
+        "build_marker":           "diag-v2-2026-05-18",
     }
 
 @router.post("/api/employees", dependencies=[Depends(require_permission("action_hr_manage_employees"))])
