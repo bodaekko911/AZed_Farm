@@ -338,7 +338,7 @@ async def _load_b2b_client_payment_records(
     d_from: datetime,
     d_to: datetime,
 ):
-    payment_ref_types = ("consignment_client_payment", "consignment_payment", "b2b_payment", "b2b_collection")
+    payment_ref_types = ("consignment_client_payment", "consignment_payment", "b2b_payment", "b2b_collection", "b2b")
     payment_result = await db.execute(
         select(Journal)
         .where(
@@ -390,10 +390,14 @@ async def _load_b2b_client_payment_records(
     for journal in journals:
         invoice = None
         amount = 0.0
+        has_cash_debit = False
         for entry in journal.entries:
             if entry.account and entry.account.code == "1000" and _num(entry.debit) > 0:
                 amount = _num(entry.debit)
+                has_cash_debit = True
                 break
+        if journal.ref_type == "b2b" and not has_cash_debit:
+            continue
         if amount <= 0:
             amount = max((_num(entry.debit) for entry in journal.entries), default=0.0)
         client = client_map.get(journal.ref_id)

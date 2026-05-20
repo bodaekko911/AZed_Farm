@@ -913,6 +913,30 @@ td.name{color:var(--text);font-weight:600;}
     </div>
 </div>
 
+<!-- DELETE FARM CONFIRMATION MODAL (admin only) -->
+<div class="modal-bg" id="delete-farm-modal">
+    <div class="modal" style="width:500px;border-color:rgba(255,77,109,.35);">
+        <div class="modal-title" id="del-farm-title" style="color:var(--danger);">⚠️ Delete farm?</div>
+        <div class="modal-sub" id="del-farm-sub">This action cannot be undone.</div>
+
+        <div id="del-farm-warning" style="background:rgba(255,77,109,.08);border:1px solid rgba(255,77,109,.25);border-radius:10px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:var(--text);line-height:1.5;"></div>
+
+        <div class="fld">
+            <label>Type the farm name to confirm: <strong id="del-farm-expected" style="color:var(--danger);font-family:var(--mono);"></strong></label>
+            <input id="del-farm-input" autocomplete="off" spellcheck="false" placeholder="Type farm name exactly…">
+            <div id="del-farm-mismatch" style="display:none;font-size:11px;color:var(--danger);margin-top:4px;">Name doesn't match — type it exactly as shown.</div>
+        </div>
+
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeDeleteFarmModal()">Cancel</button>
+            <button id="del-farm-confirm-btn" onclick="confirmDeleteFarm()" disabled
+                style="background:var(--danger);color:#fff;border:1px solid var(--danger);border-radius:10px;padding:10px 18px;font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer;opacity:.4;transition:opacity .15s;">
+                Delete farm
+            </button>
+        </div>
+    </div>
+</div>
+
 <!-- WEATHER MODAL -->
 <div class="modal-bg" id="weather-modal">
     <div class="modal" style="width:500px">
@@ -1181,10 +1205,10 @@ function getFarmOptClass(i){ return FARM_OPT_CLS[i % FARM_OPT_CLS.length]; }
 
 function renderFarmCards(){
     document.getElementById("farms-row").innerHTML = allFarms.map((f,i)=>`
-        <div class="farm-card" onclick="filterByFarm(${f.id})">
-            ${isAdmin ? `<button class="farm-del-btn" title="Delete farm (admin)" onclick="event.stopPropagation();deleteFarm(${f.id}, ${JSON.stringify(f.name)}, ${f.delivery_count})">×</button>` : ``}
-            <div class="farm-name">${getFarmIcon(i)} ${f.name}</div>
-            <div class="farm-loc">${f.location || "—"}</div>
+        <div class="farm-card" data-farm-id="${f.id}">
+            ${isAdmin ? `<button type="button" class="farm-del-btn" data-farm-id="${f.id}" data-farm-deliveries="${f.delivery_count}" title="Delete farm (admin)">×</button>` : ``}
+            <div class="farm-name">${getFarmIcon(i)} ${escapeHtml(f.name)}</div>
+            <div class="farm-loc">${escapeHtml(f.location || "—")}</div>
             <div class="farm-stat">
                 <span class="farm-stat-label">Total Deliveries</span>
                 <span class="farm-stat-val">${f.delivery_count}</span>
@@ -1194,9 +1218,31 @@ function renderFarmCards(){
     document.getElementById("farm-selector").innerHTML = allFarms.map((f,i)=>`
         <div class="farm-opt ${getFarmOptClass(i)}" id="farm-opt-${f.id}" onclick="selectFarm(${f.id})">
             <div class="farm-opt-icon">${getFarmIcon(i)}</div>
-            <div class="farm-opt-name">${f.name}</div>
-            <div class="farm-opt-loc">${f.location || "—"}</div>
+            <div class="farm-opt-name">${escapeHtml(f.name)}</div>
+            <div class="farm-opt-loc">${escapeHtml(f.location || "—")}</div>
         </div>`).join("");
+
+    // Install the click delegation handler exactly once; it survives re-renders.
+    let row = document.getElementById("farms-row");
+    if(row && !row._delegationBound){
+        row._delegationBound = true;
+        row.addEventListener("click", function(e){
+            let delBtn = e.target.closest(".farm-del-btn");
+            if(delBtn){
+                e.stopPropagation();
+                let id = parseInt(delBtn.dataset.farmId, 10);
+                let dc = parseInt(delBtn.dataset.farmDeliveries, 10) || 0;
+                let farm = allFarms.find(x => x.id === id);
+                if(farm) openDeleteFarmModal(farm.id, farm.name, dc);
+                return;
+            }
+            let card = e.target.closest(".farm-card");
+            if(card){
+                let id = parseInt(card.dataset.farmId, 10);
+                if(!isNaN(id)) filterByFarm(id);
+            }
+        });
+    }
 }
 
 function fillFarmFilter(){
@@ -1578,6 +1624,19 @@ document.getElementById("add-farm-modal").addEventListener("click",function(e){
 document.getElementById("archived-farms-modal").addEventListener("click",function(e){
     if(e.target===this) closeArchivedModal();
 });
+document.getElementById("delete-farm-modal").addEventListener("click",function(e){
+    if(e.target===this) closeDeleteFarmModal();
+});
+document.getElementById("del-farm-input").addEventListener("input", onDeleteFarmInput);
+document.getElementById("del-farm-input").addEventListener("keydown", function(e){
+    if(e.key === "Enter"){
+        e.preventDefault();
+        let btn = document.getElementById("del-farm-confirm-btn");
+        if(!btn.disabled) confirmDeleteFarm();
+    } else if(e.key === "Escape"){
+        closeDeleteFarmModal();
+    }
+});
 
 /* ── ADD FARM ── */
 function openAddFarmModal(){
@@ -1626,29 +1685,83 @@ async function saveNewFarm(){
     }
 }
 
-/* ── DELETE FARM (admin only) ── */
-async function deleteFarm(id, name, deliveryCount){
+/* ── DELETE FARM (admin only, type-to-confirm) ── */
+let _pendingDelete = null;
+
+function openDeleteFarmModal(id, name, deliveryCount){
     if(!isAdmin){ showToast("Admin access required"); return; }
 
-    let msg;
-    if(deliveryCount > 0){
-        msg = `Archive "${name}"?\n\nThis farm has ${deliveryCount} delivery(ies). ` +
-              `It will be hidden from active lists but all history (deliveries, weather logs, stock) will be preserved.`;
-    } else {
-        msg = `Delete "${name}"?\n\nThis farm has no deliveries and will be permanently removed.`;
-    }
-    if(!confirm(msg)) return;
+    _pendingDelete = { id, name, deliveryCount };
+
+    // Decide mode: hard delete only if no history; otherwise soft archive.
+    let isHard = (deliveryCount === 0);
+
+    let title = isHard ? "⚠️ Delete farm permanently?" : "⚠️ Archive farm?";
+    let sub   = isHard
+        ? "No history exists for this farm, so it will be permanently removed."
+        : "This farm has delivery history. It will be archived (hidden) — history is preserved and an admin can restore it later.";
+    let warningHtml = isHard
+        ? `You are about to <strong style="color:var(--danger)">permanently delete</strong> "<strong>${escapeHtml(name)}</strong>". This cannot be undone.`
+        : `You are about to <strong>archive</strong> "<strong>${escapeHtml(name)}</strong>" (${deliveryCount} delivery${deliveryCount === 1 ? "" : "ies"}). It will disappear from active lists but all history stays intact. You can restore it from the 🗄️ Archived view.`;
+    let btnText = isHard ? "Delete forever" : "Archive farm";
+
+    document.getElementById("del-farm-title").innerText    = title;
+    document.getElementById("del-farm-sub").innerText      = sub;
+    document.getElementById("del-farm-warning").innerHTML  = warningHtml;
+    document.getElementById("del-farm-expected").innerText = name;
+    document.getElementById("del-farm-input").value        = "";
+    document.getElementById("del-farm-mismatch").style.display = "none";
+    let btn = document.getElementById("del-farm-confirm-btn");
+    btn.innerText = btnText;
+    btn.disabled  = true;
+    btn.style.opacity = ".4";
+    btn.style.cursor  = "not-allowed";
+
+    document.getElementById("delete-farm-modal").classList.add("open");
+    setTimeout(()=>document.getElementById("del-farm-input").focus(), 100);
+}
+
+function closeDeleteFarmModal(){
+    document.getElementById("delete-farm-modal").classList.remove("open");
+    _pendingDelete = null;
+}
+
+function onDeleteFarmInput(){
+    if(!_pendingDelete) return;
+    let typed = document.getElementById("del-farm-input").value;
+    let match = (typed === _pendingDelete.name);  // case-sensitive, exact
+    let btn = document.getElementById("del-farm-confirm-btn");
+    btn.disabled = !match;
+    btn.style.opacity = match ? "1" : ".4";
+    btn.style.cursor  = match ? "pointer" : "not-allowed";
+    // Only show the mismatch hint if the user has typed something
+    let mismatchEl = document.getElementById("del-farm-mismatch");
+    mismatchEl.style.display = (typed.length > 0 && !match) ? "block" : "none";
+}
+
+async function confirmDeleteFarm(){
+    if(!_pendingDelete) return;
+    let typed = document.getElementById("del-farm-input").value;
+    if(typed !== _pendingDelete.name){ onDeleteFarmInput(); return; }
+
+    let { id, name, deliveryCount } = _pendingDelete;
+    let btn = document.getElementById("del-farm-confirm-btn");
+    let originalText = btn.innerText;
+    btn.disabled = true;
+    btn.innerText = "Working…";
 
     try {
-        // If there's no history, do a hard delete; otherwise soft delete (archive).
         let url = `/farm/api/farms/${id}` + (deliveryCount > 0 ? "" : "?hard=true");
         let res  = await fetch(url, {method:"DELETE"});
         let data = await res.json();
         if(!res.ok || data.detail){
             showToast("Error: " + (data.detail || `Failed (${res.status})`));
+            btn.disabled = false;
+            btn.innerText = originalText;
             return;
         }
 
+        closeDeleteFarmModal();
         if(data.mode === "soft"){
             showToast(`${name} archived ✓ — history preserved`);
         } else {
@@ -1661,16 +1774,22 @@ async function deleteFarm(id, name, deliveryCount){
         fillFarmFilter();
         if(typeof fillWeatherFarmFilter === "function") fillWeatherFarmFilter();
         if(typeof fillSeasonFarmSelect === "function") fillSeasonFarmSelect();
-        // If the filter was set to the deleted farm, reset it
         let curFilter = document.getElementById("farm-filter");
         if(curFilter && String(curFilter.value) === String(id)){
             curFilter.value = "";
             deliveryPage = 0;
             loadDeliveries();
         }
+        // If the archived modal is open (the hard-delete flow), refresh its list too.
+        let archModal = document.getElementById("archived-farms-modal");
+        if(archModal && archModal.classList.contains("open")){
+            loadArchivedFarms();
+        }
         await loadStats();
     } catch(err) {
         showToast("Error: " + err.message);
+        btn.disabled = false;
+        btn.innerText = originalText;
     }
 }
 
@@ -1708,7 +1827,6 @@ async function loadArchivedFarms(){
         }
         list.innerHTML = farms.map(f => {
             let canHardDelete = (f.delivery_count === 0 && f.weather_count === 0);
-            let nameJs = JSON.stringify(f.name);
             return `
                 <div class="arch-row">
                     <div class="arch-info">
@@ -1716,14 +1834,28 @@ async function loadArchivedFarms(){
                         <div class="arch-meta">${escapeHtml(f.location || "—")} • ${f.delivery_count} deliveries • ${f.weather_count} weather logs</div>
                     </div>
                     <div class="arch-actions">
-                        <button class="action-btn" onclick="restoreFarm(${f.id}, ${nameJs})">↺ Restore</button>
+                        <button type="button" class="action-btn" data-arch-action="restore" data-farm-id="${f.id}" data-farm-name="${escapeHtml(f.name)}">↺ Restore</button>
                         ${canHardDelete
-                            ? `<button class="action-btn danger" onclick="hardDeleteFarm(${f.id}, ${nameJs})">Delete forever</button>`
-                            : `<button class="action-btn" disabled style="opacity:.4;cursor:not-allowed;" title="Has history — cannot be permanently deleted">Has history</button>`}
+                            ? `<button type="button" class="action-btn danger" data-arch-action="hard-delete" data-farm-id="${f.id}" data-farm-name="${escapeHtml(f.name)}">Delete forever</button>`
+                            : `<button type="button" class="action-btn" disabled style="opacity:.4;cursor:not-allowed;" title="Has history — cannot be permanently deleted">Has history</button>`}
                     </div>
                 </div>
             `;
         }).join("");
+
+        // Install click delegation once for the archived list.
+        if(!list._delegationBound){
+            list._delegationBound = true;
+            list.addEventListener("click", function(e){
+                let btn = e.target.closest("[data-arch-action]");
+                if(!btn) return;
+                let id     = parseInt(btn.dataset.farmId, 10);
+                let name   = btn.dataset.farmName;
+                let action = btn.dataset.archAction;
+                if(action === "restore")    restoreFarm(id, name);
+                if(action === "hard-delete") hardDeleteFarm(id, name);
+            });
+        }
     } catch(err){
         list.innerHTML = `<div style="color:var(--danger);padding:14px;text-align:center;">Error: ${escapeHtml(err.message)}</div>`;
     }
@@ -1756,20 +1888,9 @@ async function restoreFarm(id, name){
 
 async function hardDeleteFarm(id, name){
     if(!isAdmin){ showToast("Admin access required"); return; }
-    if(!confirm(`Permanently delete "${name}"?\n\nThis cannot be undone. (Allowed only because the farm has no deliveries or weather logs.)`)) return;
-    try {
-        let res  = await fetch(`/farm/api/farms/${id}?hard=true`, {method:"DELETE"});
-        let data = await res.json();
-        if(!res.ok || data.detail){
-            showToast("Error: " + (data.detail || `Failed (${res.status})`));
-            return;
-        }
-        showToast(`${name} permanently deleted ✓`);
-        loadArchivedFarms();
-        await loadStats();
-    } catch(err){
-        showToast("Error: " + err.message);
-    }
+    // Route through the same type-to-confirm modal as on-card deletes.
+    // We pass deliveryCount=0 because hard delete is only offered for farms with no history.
+    openDeleteFarmModal(id, name, 0);
 }
 
 /* ── WEATHER LOG ── */

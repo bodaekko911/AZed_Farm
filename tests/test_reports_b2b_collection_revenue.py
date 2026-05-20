@@ -261,3 +261,74 @@ def test_sales_report_splits_b2b_collection_amounts_by_invoice_type():
         "consignment": sum(row["consignment_amount"] for row in data["b2b_payment_records"]),
     }
     assert totals == {"cash": 100.0, "full_payment": 200.0, "consignment": 300.0}
+
+
+def test_sales_report_includes_cash_b2b_journals_but_not_invoice_issue_journals():
+    collected_at = datetime(2026, 5, 16, 10, 0, tzinfo=timezone.utc)
+
+    with make_session() as session:
+        cash_account = Account(id=1, code="1000", name="Cash", type="asset", balance=0)
+        ar_account = Account(id=2, code="1100", name="Accounts Receivable", type="asset", balance=0)
+        client = B2BClient(id=1, name="Cash Client", payment_terms="cash", outstanding=0)
+        cash_invoice = B2BInvoice(
+            id=1,
+            client_id=1,
+            invoice_number="HB2B-00001",
+            invoice_type="cash",
+            status="paid",
+            total=Decimal("150.00"),
+            amount_paid=Decimal("150.00"),
+            created_at=collected_at,
+        )
+        credit_invoice = B2BInvoice(
+            id=2,
+            client_id=1,
+            invoice_number="HB2B-00002",
+            invoice_type="full_payment",
+            status="unpaid",
+            total=Decimal("250.00"),
+            amount_paid=Decimal("0.00"),
+            created_at=collected_at,
+        )
+        cash_journal = Journal(
+            id=1,
+            ref_type="b2b",
+            ref_id=1,
+            description="B2B Historical Cash Sale - HB2B-00001",
+            created_at=collected_at,
+        )
+        issue_journal = Journal(
+            id=2,
+            ref_type="b2b",
+            ref_id=2,
+            description="B2B Historical Full Payment - HB2B-00002",
+            created_at=collected_at,
+        )
+        session.add_all(
+            [
+                cash_account,
+                ar_account,
+                client,
+                cash_invoice,
+                credit_invoice,
+                cash_journal,
+                issue_journal,
+                JournalEntry(journal_id=1, account_id=1, debit=Decimal("150.00"), credit=0),
+                JournalEntry(journal_id=2, account_id=2, debit=Decimal("250.00"), credit=0),
+            ]
+        )
+        session.commit()
+
+        data = run(
+            _build_sales_report(
+                AsyncSessionAdapter(session),
+                d_from=datetime(2026, 5, 16, 0, 0, tzinfo=timezone.utc),
+                d_to=datetime(2026, 5, 16, 23, 59, tzinfo=timezone.utc),
+                include_all=True,
+            )
+        )
+
+    assert data["channels"]["b2b"]["gross_sales"] == 150.0
+    assert len(data["b2b_payment_records"]) == 1
+    assert data["b2b_payment_records"][0]["reference"] == "HB2B-00001"
+    assert data["b2b_payment_records"][0]["cash_amount"] == 150.0

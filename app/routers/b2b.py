@@ -897,7 +897,7 @@ async def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: Asy
         ("1100", 0, amount),
         ("2200", amount, 0),
         ("4000", 0, amount),
-    ], user_id=current_user.id)
+    ], user_id=current_user.id, ref_id=invoice.id)
 
     await db.commit()
     return {"ok": True, "invoice_number": invoice.invoice_number, "amount": amount, "status": invoice.status}
