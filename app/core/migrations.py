@@ -63,6 +63,40 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
         "definition": "INTEGER",
         "backfill": "SELECT 1",
     },
+    # ── Animal cost-allocation feature (added 2026-05-18) ────────────
+    # Idempotently add columns so the app works even if alembic is
+    # blocked (e.g. by a multi-head conflict). Each patch is no-op when
+    # the column already exists.
+    {
+        "table": "animal_groups",
+        "column": "purchase_cost",
+        "definition": "NUMERIC(14, 2)",
+        "backfill": "SELECT 1",
+    },
+    {
+        "table": "animal_groups",
+        "column": "cost_per_head",
+        "definition": "NUMERIC(14, 2)",
+        "backfill": "SELECT 1",
+    },
+    {
+        "table": "expenses",
+        "column": "animal_group_id",
+        "definition": "INTEGER",
+        "backfill": "SELECT 1",
+    },
+    {
+        "table": "expenses",
+        "column": "is_animal_expense",
+        "definition": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "backfill": "UPDATE expenses SET is_animal_expense = FALSE WHERE is_animal_expense IS NULL",
+    },
+    {
+        "table": "employees",
+        "column": "works_with_animals",
+        "definition": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "backfill": "UPDATE employees SET works_with_animals = FALSE WHERE works_with_animals IS NULL",
+    },
 )
 _CRITICAL_AUTH_TABLES = {"users", "refresh_tokens", "activity_logs"}
 _REQUIRED_SCHEMA_COLUMNS = {
