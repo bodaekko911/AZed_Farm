@@ -78,6 +78,7 @@ class ReceiptCreate(BaseModel):
     location_id:  Optional[int]   = Field(None, ge=1)  # storage to receive into; default Main Warehouse
     farm_id:      Optional[int]   = Field(None, ge=1)  # cost allocation: farm
     is_animal_expense: bool       = False              # cost allocation: 🐾 Animals bucket
+    expense_category_id: Optional[int] = Field(None, ge=1)  # override auto category
 
 
 class BatchReceiptItem(BaseModel):
@@ -111,6 +112,7 @@ class BatchReceiptCreate(BaseModel):
     location_id:  Optional[int] = Field(None, ge=1)
     farm_id:      Optional[int] = Field(None, ge=1)
     is_animal_expense: bool     = False
+    expense_category_id: Optional[int] = Field(None, ge=1)
     items:        list[BatchReceiptItem] = Field(..., min_length=1)
 
 
@@ -156,6 +158,37 @@ async def _ensure_account(
         db.add(account)
         await db.flush()
     return account
+
+
+async def _resolve_chosen_category(
+    db: AsyncSession,
+    category_id: int,
+) -> ExpenseCategory:
+    """Resolve a user-selected expense category override.
+
+    Validates that the category exists and is active, and ensures the matching
+    expense ledger account is present (created on demand using the category's
+    account_code, mirroring the auto-derived path).
+    """
+    result = await db.execute(
+        select(ExpenseCategory).where(ExpenseCategory.id == category_id)
+    )
+    category = result.scalar_one_or_none()
+    if category is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Expense category {category_id} not found",
+        )
+    if category.is_active != "1":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Expense category '{category.name}' is archived — choose another one",
+        )
+    # Make sure the underlying expense account exists.
+    await _ensure_account(
+        db, category.account_code, category.name, "expense",
+    )
+    return category
 
 
 async def _get_or_create_receipt_category(
@@ -671,7 +704,11 @@ async def _create_receipt_core(
     payment_method = "cash"
     unpaid_amount = Decimal("0")
     if total_cost and total_cost > 0:
-        category = await _get_or_create_receipt_category(db, product_type=data.product_type)
+        chosen_id = getattr(data, "expense_category_id", None)
+        if chosen_id:
+            category = await _resolve_chosen_category(db, chosen_id)
+        else:
+            category = await _get_or_create_receipt_category(db, product_type=data.product_type)
         expense  = await _post_receipt_expense(
             db,
             category=category,
@@ -959,6 +996,7 @@ async def create_receipt_batch(
             location_id=data.location_id,
             farm_id=data.farm_id,
             is_animal_expense=data.is_animal_expense,
+            expense_category_id=data.expense_category_id,
         )
         receipts.append(await _create_receipt_core(db, line, current_user))
 

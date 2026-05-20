@@ -102,6 +102,27 @@ async def get_suppliers_list(db: AsyncSession = Depends(get_async_session)):
     ]
 
 
+@router.get("/api/expense-categories")
+async def get_expense_categories(db: AsyncSession = Depends(get_async_session)):
+    """Active expense categories — lets the receive form override the
+    auto-derived category (Products / Packaging Materials) and route the
+    posted expense to any chosen category instead."""
+    from app.models.expense import ExpenseCategory
+    result = await db.execute(
+        select(ExpenseCategory)
+        .where(ExpenseCategory.is_active == "1")
+        .order_by(ExpenseCategory.account_code, ExpenseCategory.name)
+    )
+    return [
+        {
+            "id":           c.id,
+            "name":         c.name,
+            "account_code": c.account_code,
+        }
+        for c in result.scalars().all()
+    ]
+
+
 @router.post("/api/receive-batch", status_code=201)
 async def receive_products_batch(
     data: BatchReceiptCreate,
@@ -499,6 +520,13 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
             <option value="">— General expense —</option>
           </select>
         </div>
+        <div class="field">
+          <label>Expense Category <span style="color:var(--muted);font-weight:400">(optional — override the auto category)</span></label>
+          <select id="expense-category-select" onchange="onExpenseCategoryChange()">
+            <option value="">— Auto (from Product Type) —</option>
+          </select>
+          <div class="field-help" id="expense-category-help" style="color:var(--muted);font-size:11px;margin-top:2px">Choose to route the posted expense to a different category in Expenses.</div>
+        </div>
         <div class="field full" id="payment-block" style="display:none">
           <label>Payment</label>
           <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:6px">
@@ -690,7 +718,7 @@ async function init() {
     document.body.classList.add('light');
     document.getElementById('mode-btn').innerHTML = '&#9728;&#65039;';
   }
-  await Promise.all([initUser(), loadProducts(), loadSuppliers(), loadLocations(), loadFarms()]);
+  await Promise.all([initUser(), loadProducts(), loadSuppliers(), loadLocations(), loadFarms(), loadExpenseCategories()]);
   document.getElementById('receive-date').value = todayIso();
   syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
   addRow();          // start with one empty row
@@ -765,6 +793,48 @@ async function loadSuppliers() {
           return `<option value="${s.id}">${lbl}</option>`;
         }).join('');
   } catch (_) { /* silent */ }
+}
+
+let _expenseCategories = [];
+
+async function loadExpenseCategories() {
+  try {
+    const r = await fetch('/receive/api/expense-categories');
+    if (!r.ok) return;
+    _expenseCategories = await r.json();
+    const sel = document.getElementById('expense-category-select');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">— Auto (from Product Type) —</option>'
+      + _expenseCategories.map(c =>
+          `<option value="${c.id}">${escHtml(c.name)}${c.account_code ? ' · ' + escHtml(c.account_code) : ''}</option>`
+        ).join('');
+  } catch (_) { /* silent */ }
+}
+
+function onExpenseCategoryChange() {
+  // When the user picks an override, reflect it in the "Selected expense category" chip
+  // attached to the Product Type block so it's clear where the expense will land.
+  const sel  = document.getElementById('expense-category-select');
+  const chip = document.getElementById('expense-category-display');
+  const help = document.getElementById('expense-category-help');
+  const productTypeEl = document.getElementById('product-type');
+  if (!sel || !chip) return;
+
+  if (sel.value) {
+    const cat = _expenseCategories.find(c => String(c.id) === String(sel.value));
+    if (cat) {
+      chip.textContent = cat.name + (cat.account_code ? ' (' + cat.account_code + ')' : '');
+      chip.style.color = 'var(--blue)';
+    }
+    if (help) help.textContent = 'Override active — the posted expense will use the selected category instead of the auto one.';
+  } else {
+    // Restore the auto-derived label
+    if (typeof syncProductTypeFields === 'function') {
+      syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
+    }
+    chip.style.color = '';
+    if (help) help.textContent = 'Choose to route the posted expense to a different category in Expenses.';
+  }
 }
 
 function escHtml(s){
@@ -1064,7 +1134,11 @@ function setProductType(selectId, value, displayId, helpId, errorId, blockId) {
   if (!select) return;
   select.value = value;
   syncProductTypeFields(selectId, displayId, helpId, errorId, blockId);
-  if (selectId === 'product-type') validateSubmit();
+  if (selectId === 'product-type') {
+    validateSubmit();
+    // If an override category is selected on the main form, keep its chip sticky.
+    if (typeof onExpenseCategoryChange === 'function') onExpenseCategoryChange();
+  }
 }
 
 function showProductTypeError(errorId, blockId) {
@@ -1165,6 +1239,12 @@ async function submitBatch(e) {
   const isAnimalExp = farmSelVal === '__animals__';
   const farmIdVal   = isAnimalExp ? null : (parseInt(farmSelVal, 10) || null);
 
+  // Expense category override (optional)
+  const expenseCatSel = document.getElementById('expense-category-select');
+  const expenseCategoryId = expenseCatSel && expenseCatSel.value
+    ? parseInt(expenseCatSel.value, 10)
+    : null;
+
   const payload = {
     product_type: productType,
     receive_date: document.getElementById('receive-date').value,
@@ -1175,6 +1255,7 @@ async function submitBatch(e) {
     location_id:  parseInt(document.getElementById('location-select').value, 10) || null,
     farm_id:           farmIdVal,
     is_animal_expense: isAnimalExp,
+    expense_category_id: expenseCategoryId,
     items,
   };
 
@@ -1214,6 +1295,9 @@ function resetForm() {
   document.getElementById('supplier-ref').value = '';
   document.getElementById('supplier-select').value = '';
   document.getElementById('farm-select').value = '';
+  const expCatSel = document.getElementById('expense-category-select');
+  if (expCatSel) expCatSel.value = '';
+  if (typeof onExpenseCategoryChange === 'function') onExpenseCategoryChange();
   document.getElementById('amount-paid').value = '';
   const cashRadio = document.querySelector('input[name="pay-mode"][value="cash"]');
   if (cashRadio) cashRadio.checked = true;
