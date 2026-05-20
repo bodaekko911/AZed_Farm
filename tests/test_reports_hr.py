@@ -249,6 +249,59 @@ def test_hr_report_data_totals_groups_and_employee_rows():
     assert data["total_rows"] == 3
 
 
+def test_hr_report_groups_animal_workers_as_animals_not_unassigned():
+    with make_session() as session:
+        animal_worker = Employee(
+            id=10,
+            name="Sam Animal Care",
+            department="Livestock",
+            base_salary=1800,
+            works_with_animals=True,
+            is_active=True,
+        )
+        office_worker = Employee(
+            id=11,
+            name="Nour Office",
+            department="Admin",
+            base_salary=1200,
+            is_active=True,
+        )
+        session.add_all([animal_worker, office_worker])
+        session.add_all(
+            [
+                Payroll(
+                    employee_id=10,
+                    period="2026-01",
+                    base_salary=1800,
+                    bonuses=0,
+                    deductions=0,
+                    net_salary=1800,
+                    paid=True,
+                ),
+                Payroll(
+                    employee_id=11,
+                    period="2026-01",
+                    base_salary=1200,
+                    bonuses=0,
+                    deductions=0,
+                    net_salary=1200,
+                    paid=True,
+                ),
+            ]
+        )
+        session.commit()
+
+        data = build_report(session)
+
+    by_farm = {row["farm_name"]: row for row in data["by_farm"]}
+    assert by_farm["Animals"]["employees"] == 1
+    assert by_farm["Animals"]["net_salary"] == 1800.0
+    assert by_farm["Unassigned"]["employees"] == 1
+    assert by_farm["Unassigned"]["net_salary"] == 1200.0
+    employees = {row["employee"]: row for row in data["employees"]}
+    assert employees["Sam Animal Care"]["farm_name"] == "Animals"
+
+
 def test_hr_report_filters_payroll_by_selected_range_months_when_period_omitted():
     with make_session() as session:
         seed_hr_data(session)

@@ -2685,6 +2685,21 @@ def _hr_group_bucket(**extra):
     return bucket
 
 
+def _hr_farm_bucket_key(employee: Employee) -> tuple[str, Optional[int]]:
+    if getattr(employee, "works_with_animals", False):
+        return ("animals", None)
+    if employee.farm_id is not None:
+        return ("farm", employee.farm_id)
+    return ("unassigned", None)
+
+
+def _hr_farm_bucket_label(employee: Employee) -> str:
+    if getattr(employee, "works_with_animals", False):
+        return "Animals"
+    farm = getattr(employee, "farm", None)
+    return farm.name if farm else "Unassigned"
+
+
 async def _build_hr_report(
     db: AsyncSession,
     *,
@@ -2899,8 +2914,7 @@ async def _build_hr_report(
         manual_deductions = round(sum(_num(getattr(payroll, "manual_deductions", 0)) for payroll in payrolls), 2)
         net_salary = round(sum(_num(payroll.net_salary) for payroll in payrolls), 2)
         paid = bool(payrolls) and all(bool(payroll.paid) for payroll in payrolls)
-        farm = getattr(employee, "farm", None)
-        farm_name = farm.name if farm else "Unassigned"
+        farm_name = _hr_farm_bucket_label(employee)
         department_name = employee.department or "Unassigned"
 
         row = {
@@ -2943,7 +2957,13 @@ async def _build_hr_report(
         dept_bucket["leave_days"] += att["leave"]
         dept_bucket["net_salary"] += net_salary
 
-        farm_bucket = farms.setdefault(employee.farm_id, _hr_group_bucket(farm_id=employee.farm_id, farm_name=farm_name))
+        farm_bucket = farms.setdefault(
+            _hr_farm_bucket_key(employee),
+            _hr_group_bucket(
+                farm_id=employee.farm_id,
+                farm_name=farm_name,
+            ),
+        )
         farm_bucket["employees"] += 1
         farm_bucket["base_salary"] += base_salary
         farm_bucket["present_days"] += att["present"]
