@@ -2395,12 +2395,17 @@ async function loadEmployees(){
     document.getElementById("emp-body").innerHTML = employees.map(e => {
         const id = numberValue(e.id);
         const salary = numberValue(e.base_salary);
+        // Farm cell: show "🐾 Animals" when the employee is allocated to Animals,
+        // otherwise show their farm name (or "-" if neither).
+        const farmCell = e.works_with_animals
+            ? `<span style="color:#84cc16;font-weight:600">🐾 Animals</span>`
+            : displayText(e.farm_name);
         return `
         <tr>
             <td class="name">${displayText(e.name)}</td>
             <td>${displayText(e.position)}</td>
             <td>${displayText(e.department)}</td>
-            <td>${displayText(e.farm_name)}</td>
+            <td>${farmCell}</td>
             <td style="font-family:var(--mono);font-size:12px">${displayText(e.phone)}</td>
             <td style="font-size:12px;color:var(--muted)">${displayText(e.hire_date)}</td>
             <td class="mono">${money(salary)}</td>
