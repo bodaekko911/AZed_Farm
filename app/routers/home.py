@@ -528,6 +528,18 @@ body {
                 </div>
             </a>
 
+            <a href="/suppliers/" class="module-card c-purple" data-permission="page_suppliers">
+                <div class="card-icon">🏢</div>
+                <div class="card-body">
+                    <div class="card-name">Suppliers</div>
+                    <div class="card-desc">Supplier directory, balances, payments, purchases</div>
+                </div>
+                <div class="card-footer">
+                    <span class="card-tag">Purchasing</span>
+                    <span class="card-arrow">↗</span>
+                </div>
+            </a>
+
             <a href="/receive/" class="module-card c-orange" data-permission="page_receive_products">
                 <div class="card-icon">📬</div>
                 <div class="card-body">

@@ -18,6 +18,7 @@ import app.routers.reports as reports
 from app.app_factory import create_app
 from app.core import security
 from app.database import Base, get_async_session
+from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm
 from app.models.hr import Attendance, Employee, Payroll
 
@@ -67,6 +68,8 @@ def make_session():
         engine,
         tables=[
             Farm.__table__,
+            ExpenseCategory.__table__,
+            Expense.__table__,
             Employee.__table__,
             Attendance.__table__,
             Payroll.__table__,
@@ -300,6 +303,48 @@ def test_hr_report_groups_animal_workers_as_animals_not_unassigned():
     assert by_farm["Unassigned"]["net_salary"] == 1200.0
     employees = {row["employee"]: row for row in data["employees"]}
     assert employees["Sam Animal Care"]["farm_name"] == "Animals"
+
+
+def test_hr_report_uses_animal_salary_expense_allocation_for_existing_payroll():
+    with make_session() as session:
+        employee = Employee(
+            id=20,
+            name="Old Animal Payroll",
+            department="Livestock",
+            base_salary=1600,
+            works_with_animals=False,
+            is_active=True,
+        )
+        payroll = Payroll(
+            id=20,
+            employee=employee,
+            period="2026-01",
+            base_salary=1600,
+            bonuses=0,
+            deductions=0,
+            net_salary=1600,
+            paid=True,
+        )
+        category = ExpenseCategory(id=20, name="Salaries & Wages", account_code="5006", is_active="1")
+        expense = Expense(
+            ref_number="EXP-HR-ANIMAL",
+            category=category,
+            expense_date=date(2026, 1, 31),
+            amount=1600,
+            payment_method="cash",
+            payroll_id=20,
+            is_animal_expense=True,
+        )
+        session.add_all([employee, payroll, category, expense])
+        session.commit()
+
+        data = build_report(session)
+
+    by_farm = {row["farm_name"]: row for row in data["by_farm"]}
+    assert by_farm["Animals"]["employees"] == 1
+    assert "Unassigned" not in by_farm
+    employees = {row["employee"]: row for row in data["employees"]}
+    assert employees["Old Animal Payroll"]["farm_name"] == "Animals"
 
 
 def test_hr_report_filters_payroll_by_selected_range_months_when_period_omitted():

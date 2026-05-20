@@ -2685,16 +2685,18 @@ def _hr_group_bucket(**extra):
     return bucket
 
 
-def _hr_farm_bucket_key(employee: Employee) -> tuple[str, Optional[int]]:
-    if getattr(employee, "works_with_animals", False):
+def _hr_farm_bucket_key(employee: Employee, animal_employee_ids: set[int] | None = None) -> tuple[str, Optional[int]]:
+    animal_employee_ids = animal_employee_ids or set()
+    if getattr(employee, "works_with_animals", False) or employee.id in animal_employee_ids:
         return ("animals", None)
     if employee.farm_id is not None:
         return ("farm", employee.farm_id)
     return ("unassigned", None)
 
 
-def _hr_farm_bucket_label(employee: Employee) -> str:
-    if getattr(employee, "works_with_animals", False):
+def _hr_farm_bucket_label(employee: Employee, animal_employee_ids: set[int] | None = None) -> str:
+    animal_employee_ids = animal_employee_ids or set()
+    if getattr(employee, "works_with_animals", False) or employee.id in animal_employee_ids:
         return "Animals"
     farm = getattr(employee, "farm", None)
     return farm.name if farm else "Unassigned"
@@ -2885,6 +2887,23 @@ async def _build_hr_report(
         if record.employee_id in included_ids:
             payroll_by_employee[record.employee_id].append(record)
 
+    animal_employee_ids: set[int] = set()
+    payroll_ids = [record.id for record in payroll_records if record.employee_id in included_ids]
+    if payroll_ids:
+        animal_expense_columns_available = await _schema_has_columns(db, {
+            "expenses": {"payroll_id", "is_animal_expense"},
+        })
+        if animal_expense_columns_available:
+            animal_expense_res = await db.execute(
+                select(Payroll.employee_id)
+                .join(Expense, Expense.payroll_id == Payroll.id)
+                .where(
+                    Payroll.id.in_(payroll_ids),
+                    Expense.is_animal_expense == True,
+                )
+            )
+            animal_employee_ids = {employee_id for (employee_id,) in animal_expense_res.all()}
+
     employee_rows = []
     departments = {}
     farms = {}
@@ -2914,7 +2933,7 @@ async def _build_hr_report(
         manual_deductions = round(sum(_num(getattr(payroll, "manual_deductions", 0)) for payroll in payrolls), 2)
         net_salary = round(sum(_num(payroll.net_salary) for payroll in payrolls), 2)
         paid = bool(payrolls) and all(bool(payroll.paid) for payroll in payrolls)
-        farm_name = _hr_farm_bucket_label(employee)
+        farm_name = _hr_farm_bucket_label(employee, animal_employee_ids)
         department_name = employee.department or "Unassigned"
 
         row = {
@@ -2958,7 +2977,7 @@ async def _build_hr_report(
         dept_bucket["net_salary"] += net_salary
 
         farm_bucket = farms.setdefault(
-            _hr_farm_bucket_key(employee),
+            _hr_farm_bucket_key(employee, animal_employee_ids),
             _hr_group_bucket(
                 farm_id=employee.farm_id,
                 farm_name=farm_name,
