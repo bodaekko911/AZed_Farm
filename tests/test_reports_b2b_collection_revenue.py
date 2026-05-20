@@ -129,6 +129,9 @@ def test_sales_report_counts_b2b_revenue_on_collection_date_not_invoice_date():
     assert data["b2b_records"][0]["datetime"] == "2026-05-01 09:00"
     assert data["b2b_records"][0]["collection_datetime"] == "2026-05-16 10:00"
     assert data["b2b_records"][0]["collected_in_period"] == 1000.0
+    assert data["b2b_payment_records"][0]["cash_amount"] == 0.0
+    assert data["b2b_payment_records"][0]["full_payment_amount"] == 1000.0
+    assert data["b2b_payment_records"][0]["consignment_amount"] == 0.0
 
 
 def test_sales_report_excludes_b2b_invoice_when_collection_is_outside_range():
@@ -172,3 +175,89 @@ def test_sales_report_excludes_b2b_invoice_when_collection_is_outside_range():
     assert data["gross_sales"] == 0.0
     assert data["net_sales"] == 0.0
     assert data["b2b_records"] == []
+    assert data["b2b_issued_invoice_count"] == 1
+    assert data["b2b_issued_invoice_records"][0]["invoice_number"] == "HB2B-00001"
+
+
+def test_sales_report_splits_b2b_collection_amounts_by_invoice_type():
+    collected_at = datetime(2026, 5, 16, 10, 0, tzinfo=timezone.utc)
+
+    with make_session() as session:
+        cash_account = Account(id=1, code="1000", name="Cash", type="asset", balance=0)
+        cash_client = B2BClient(id=1, name="Cash Client", payment_terms="cash", outstanding=0)
+        full_client = B2BClient(id=2, name="Full Client", payment_terms="full_payment", outstanding=0)
+        cons_client = B2BClient(id=3, name="Cons Client", payment_terms="consignment", outstanding=0)
+        cash_invoice = B2BInvoice(
+            id=1,
+            client_id=1,
+            invoice_number="HB2B-00001",
+            invoice_type="cash",
+            status="paid",
+            total=Decimal("100.00"),
+            amount_paid=Decimal("100.00"),
+            created_at=collected_at,
+        )
+        full_invoice = B2BInvoice(
+            id=2,
+            client_id=2,
+            invoice_number="HB2B-00002",
+            invoice_type="full_payment",
+            status="paid",
+            total=Decimal("200.00"),
+            amount_paid=Decimal("200.00"),
+            created_at=collected_at,
+        )
+        cash_journal = Journal(
+            id=1,
+            ref_type="b2b_collection",
+            ref_id=1,
+            description="B2B payment collected - HB2B-00001",
+            created_at=collected_at,
+        )
+        full_journal = Journal(
+            id=2,
+            ref_type="b2b_collection",
+            ref_id=2,
+            description="B2B payment collected - HB2B-00002",
+            created_at=collected_at,
+        )
+        consignment_journal = Journal(
+            id=3,
+            ref_type="consignment_client_payment",
+            ref_id=3,
+            description="Consignment client payment - Cons Client",
+            created_at=collected_at,
+        )
+        session.add_all(
+            [
+                cash_account,
+                cash_client,
+                full_client,
+                cons_client,
+                cash_invoice,
+                full_invoice,
+                cash_journal,
+                full_journal,
+                consignment_journal,
+                JournalEntry(journal_id=1, account_id=1, debit=Decimal("100.00"), credit=0),
+                JournalEntry(journal_id=2, account_id=1, debit=Decimal("200.00"), credit=0),
+                JournalEntry(journal_id=3, account_id=1, debit=Decimal("300.00"), credit=0),
+            ]
+        )
+        session.commit()
+
+        data = run(
+            _build_sales_report(
+                AsyncSessionAdapter(session),
+                d_from=datetime(2026, 5, 16, 0, 0, tzinfo=timezone.utc),
+                d_to=datetime(2026, 5, 16, 23, 59, tzinfo=timezone.utc),
+                include_all=True,
+            )
+        )
+
+    totals = {
+        "cash": sum(row["cash_amount"] for row in data["b2b_payment_records"]),
+        "full_payment": sum(row["full_payment_amount"] for row in data["b2b_payment_records"]),
+        "consignment": sum(row["consignment_amount"] for row in data["b2b_payment_records"]),
+    }
+    assert totals == {"cash": 100.0, "full_payment": 200.0, "consignment": 300.0}

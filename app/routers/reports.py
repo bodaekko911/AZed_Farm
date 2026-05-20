@@ -350,7 +350,7 @@ async def _load_b2b_client_payment_records(
         .order_by(Journal.created_at.desc(), Journal.id.desc())
     )
     journals = payment_result.scalars().all()
-    client_ids = {journal.ref_id for journal in journals if journal.ref_id}
+    client_ids = {journal.ref_id for journal in journals if journal.ref_type == "consignment_client_payment" and journal.ref_id}
     invoice_ids = set()
     invoice_numbers = set()
     invoice_pattern = re.compile(r"\b([A-Z]*B2B-\d{5,})\b", re.IGNORECASE)
@@ -388,6 +388,7 @@ async def _load_b2b_client_payment_records(
 
     payment_records = []
     for journal in journals:
+        invoice = None
         amount = 0.0
         for entry in journal.entries:
             if entry.account and entry.account.code == "1000" and _num(entry.debit) > 0:
@@ -407,6 +408,10 @@ async def _load_b2b_client_payment_records(
             if invoice:
                 reference = invoice.invoice_number or reference
                 client = invoice.client or client_map.get(invoice.client_id)
+        collection_type = "consignment" if journal.ref_type in {"consignment_client_payment", "consignment_payment"} else ((invoice.invoice_type or "b2b") if invoice else "b2b")
+        cash_amount = amount if collection_type == "cash" else 0.0
+        full_payment_amount = amount if collection_type == "full_payment" else 0.0
+        consignment_amount = amount if collection_type == "consignment" else 0.0
         payment_records.append({
             "journal_id": journal.id,
             "invoice_id": invoice.id if invoice else None,
@@ -417,12 +422,61 @@ async def _load_b2b_client_payment_records(
             "date": journal.created_at.strftime("%Y-%m-%d") if journal.created_at else "",
             "user_name": journal.user.name if journal.user else "—",
             "amount": round(amount, 2),
+            "cash_amount": round(cash_amount, 2),
+            "full_payment_amount": round(full_payment_amount, 2),
+            "consignment_amount": round(consignment_amount, 2),
+            "collection_type": collection_type,
             "notes": journal.description or "",
             "payment_method": "cash",
             "status": "posted",
             "journal_ref_type": journal.ref_type or "—",
         })
     return payment_records
+
+
+async def _load_b2b_issued_invoice_records(
+    db: AsyncSession,
+    *,
+    d_from: datetime,
+    d_to: datetime,
+):
+    result = await db.execute(
+        select(B2BInvoice)
+        .where(B2BInvoice.created_at >= d_from, B2BInvoice.created_at <= d_to)
+        .options(
+            selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product),
+            selectinload(B2BInvoice.client),
+            selectinload(B2BInvoice.user),
+        )
+        .order_by(B2BInvoice.created_at.desc(), B2BInvoice.id.desc())
+    )
+    records = []
+    for inv in result.scalars().all():
+        amount_paid = _num(inv.amount_paid)
+        total = _num(inv.total)
+        records.append(
+            {
+                "invoice_number": inv.invoice_number,
+                "client": inv.client.name if inv.client else "-",
+                "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "-",
+                "user_name": inv.user.name if inv.user else "-",
+                "invoice_type": inv.invoice_type,
+                "status": inv.status or "-",
+                "items": [
+                    {
+                        "name": item.product.name if item.product else "-",
+                        "qty": _num(item.qty),
+                        "unit_price": _num(item.unit_price),
+                        "total": _num(item.total),
+                    }
+                    for item in inv.items
+                ],
+                "total": total,
+                "amount_paid": amount_paid,
+                "balance_due": max(total - amount_paid, 0.0),
+            }
+        )
+    return records
 
 
 async def _build_sales_report(
@@ -449,6 +503,7 @@ async def _build_sales_report(
     - Top products are calculated from POS + B2B sold items minus refunded items.
     """
     b2b_payment_records = await _load_b2b_client_payment_records(db, d_from=d_from, d_to=d_to)
+    b2b_issued_invoice_records = await _load_b2b_issued_invoice_records(db, d_from=d_from, d_to=d_to)
 
     pos_result = await db.execute(
         select(Invoice)
@@ -768,10 +823,12 @@ async def _build_sales_report(
         ],
         "pos_records": _paginate_rows(pos_records, skip, limit, include_all=include_all),
         "b2b_records": _paginate_rows(b2b_records, skip, limit, include_all=include_all),
+        "b2b_issued_invoice_records": _paginate_rows(b2b_issued_invoice_records, skip, limit, include_all=include_all),
         "b2b_payment_records": _paginate_rows(b2b_payment_records, skip, limit, include_all=include_all),
         "refund_records": _paginate_rows(refund_records, skip, limit, include_all=include_all),
         "pos_count": len(pos_invoices),
         "b2b_count": len(b2b_invoices),
+        "b2b_issued_invoice_count": len(b2b_issued_invoice_records),
         "b2b_payment_count": len(b2b_payment_records),
         "refund_count": len(refund_records),
         "date_from": d_from.strftime("%Y-%m-%d"),
@@ -919,7 +976,8 @@ async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSess
             "metadata": [
                 ("Date Range", f"{data['date_from']} to {data['date_to']}"),
                 ("POS Invoices", data["pos_count"]),
-                ("B2B Invoices", data["b2b_count"]),
+                ("B2B Issued Invoices", data["b2b_issued_invoice_count"]),
+                ("B2B Collected Invoices", data["b2b_count"]),
                 ("B2B Payment Records", data["b2b_payment_count"]),
                 ("Refund Records", data["refund_count"]),
             ],
@@ -947,20 +1005,20 @@ async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSess
         },
         {
             "sheet_name": "B2B Invoices",
-            "report_title": "B2B Invoice Detail",
-            "headers": ["Invoice #", "Client", "Issued At", "Collected At", "User", "Type", "Status", "Total Invoiced", "Collected In Period", "Lifetime Paid", "Outstanding"],
-            "rows": [[row["invoice_number"], row["client"], row["datetime"], row["collection_datetime"], row["user_name"], row["invoice_type"], row["status"], row["total"], row["collected_in_period"], row["amount_paid"], row["balance_due"]] for row in data["b2b_records"]],
-            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Records", len(data["b2b_records"]))],
-            "column_formats": {"Issued At": "datetime", "Collected At": "datetime", "Total Invoiced": "money", "Collected In Period": "money", "Lifetime Paid": "money", "Outstanding": "money"},
+            "report_title": "B2B Issued Invoice Detail",
+            "headers": ["Invoice #", "Client", "Issued At", "User", "Type", "Status", "Total Invoiced", "Lifetime Paid", "Outstanding"],
+            "rows": [[row["invoice_number"], row["client"], row["datetime"], row["user_name"], row["invoice_type"], row["status"], row["total"], row["amount_paid"], row["balance_due"]] for row in data["b2b_issued_invoice_records"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Records", len(data["b2b_issued_invoice_records"]))],
+            "column_formats": {"Issued At": "datetime", "Total Invoiced": "money", "Lifetime Paid": "money", "Outstanding": "money"},
             "tab_color": "C55A11",
         },
         {
             "sheet_name": "B2B Collections",
             "report_title": "B2B Client Payment Detail",
-            "headers": ["Reference", "Client", "Date / Time", "User", "Amount", "Notes"],
-            "rows": [[row["reference"], row["client"], row["datetime"], row["user_name"], row["amount"], row["notes"]] for row in data["b2b_payment_records"]],
+            "headers": ["Reference", "Client", "Date / Time", "User", "Cash", "Full Payment", "Consignment", "Total Amount", "Notes"],
+            "rows": [[row["reference"], row["client"], row["datetime"], row["user_name"], row["cash_amount"], row["full_payment_amount"], row["consignment_amount"], row["amount"], row["notes"]] for row in data["b2b_payment_records"]],
             "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Records", len(data["b2b_payment_records"]))],
-            "column_formats": {"Date / Time": "datetime", "Amount": "money"},
+            "column_formats": {"Date / Time": "datetime", "Cash": "money", "Full Payment": "money", "Consignment": "money", "Total Amount": "money"},
             "wrap_columns": {"Notes"},
             "tab_color": "2F6F4F",
         },
