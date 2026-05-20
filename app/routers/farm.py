@@ -106,16 +106,23 @@ async def delete_farm(
     Delete a farm. Admin only.
 
     Default behavior is a SOFT delete (sets is_active=0) so historical
-    deliveries, weather logs and employee assignments remain intact and
-    auditable. Pass ?hard=true to permanently delete a farm, but only if
-    it has no related records.
+    deliveries, weather logs, employees, animals, expenses and other records
+    remain intact and auditable. The farm just disappears from active lists
+    and dropdowns.
+
+    Pass ?hard=true to permanently delete a farm. This only succeeds when no
+    other record references it (deliveries, weather logs, expenses, animals,
+    employees, spoilage, carbon, etc.). If anything references the farm we
+    return 400 with a clear message — the admin can archive it instead.
     """
     result = await db.execute(select(Farm).where(Farm.id == farm_id))
     farm = result.scalar_one_or_none()
     if not farm:
         raise HTTPException(status_code=404, detail="Farm not found")
 
-    # Count related records up front so we can decide / inform the user
+    farm_name = farm.name
+
+    # Always-safe counts: deliveries and weather logs (these are the headline ones)
     dlv_cnt = (await db.execute(
         select(func.count(FarmDelivery.id)).where(FarmDelivery.farm_id == farm_id)
     )).scalar() or 0
@@ -123,27 +130,33 @@ async def delete_farm(
         select(func.count(WeatherLog.id)).where(WeatherLog.farm_id == farm_id)
     )).scalar() or 0
 
-    farm_name = farm.name
-
     if hard:
-        # Hard delete only allowed when there's nothing referencing the farm.
-        if dlv_cnt > 0 or wx_cnt > 0:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Cannot hard-delete '{farm_name}' — it has "
-                    f"{dlv_cnt} delivery(ies) and {wx_cnt} weather log(s). "
-                    "Use soft delete (archive) instead."
-                ),
-            )
+        # Try the hard delete; if anything else (expenses, animals, employees,
+        # spoilage, carbon…) still references the farm we'll catch the FK error.
         try:
             record(db, "farm", "delete",
                    f"Hard-deleted farm: {farm_name}",
                    user=current_user, ref_type="farm", ref_id=farm_id)
         except Exception:
             pass
-        await db.delete(farm)
-        await db.commit()
+        try:
+            await db.delete(farm)
+            await db.commit()
+        except Exception as e:
+            await db.rollback()
+            msg = str(e).lower()
+            if "foreign key" in msg or "violates" in msg or "constraint" in msg:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Cannot permanently delete '{farm_name}' — other "
+                        f"records (deliveries, expenses, animals, employees, "
+                        f"weather logs, …) still reference it. Archive it "
+                        f"instead so history is preserved."
+                    ),
+                )
+            # Some other unexpected error — surface it.
+            raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
         return {"ok": True, "mode": "hard", "name": farm_name}
 
     # Soft delete (default): hide from active lists, keep history.
@@ -156,7 +169,11 @@ async def delete_farm(
                user=current_user, ref_type="farm", ref_id=farm_id)
     except Exception:
         pass
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Archive failed: {e}")
     return {
         "ok": True,
         "mode": "soft",
@@ -1691,19 +1708,16 @@ let _pendingDelete = null;
 function openDeleteFarmModal(id, name, deliveryCount){
     if(!isAdmin){ showToast("Admin access required"); return; }
 
-    _pendingDelete = { id, name, deliveryCount };
+    // The on-card × always ARCHIVES (soft delete). Permanent removal lives in
+    // the Archived modal — that flow calls openHardDeleteFarmModal(id, name).
+    _pendingDelete = { id, name, deliveryCount, hard: false };
 
-    // Decide mode: hard delete only if no history; otherwise soft archive.
-    let isHard = (deliveryCount === 0);
-
-    let title = isHard ? "⚠️ Delete farm permanently?" : "⚠️ Archive farm?";
-    let sub   = isHard
-        ? "No history exists for this farm, so it will be permanently removed."
-        : "This farm has delivery history. It will be archived (hidden) — history is preserved and an admin can restore it later.";
-    let warningHtml = isHard
-        ? `You are about to <strong style="color:var(--danger)">permanently delete</strong> "<strong>${escapeHtml(name)}</strong>". This cannot be undone.`
-        : `You are about to <strong>archive</strong> "<strong>${escapeHtml(name)}</strong>" (${deliveryCount} delivery${deliveryCount === 1 ? "" : "ies"}). It will disappear from active lists but all history stays intact. You can restore it from the 🗄️ Archived view.`;
-    let btnText = isHard ? "Delete forever" : "Archive farm";
+    let title = "⚠️ Archive farm?";
+    let sub   = "The farm will be hidden from active lists. All history (deliveries, weather logs, expenses, employees, animals) is preserved and an admin can restore it later from the 🗄️ Archived view.";
+    let warningHtml = deliveryCount > 0
+        ? `You are about to <strong>archive</strong> "<strong>${escapeHtml(name)}</strong>" — ${deliveryCount} delivery${deliveryCount === 1 ? "" : "ies"} on record. It will disappear from active lists but all history stays intact.`
+        : `You are about to <strong>archive</strong> "<strong>${escapeHtml(name)}</strong>". It will disappear from active lists; any linked records (expenses, animals, employees) stay intact.`;
+    let btnText = "Archive farm";
 
     document.getElementById("del-farm-title").innerText    = title;
     document.getElementById("del-farm-sub").innerText      = sub;
@@ -1713,6 +1727,26 @@ function openDeleteFarmModal(id, name, deliveryCount){
     document.getElementById("del-farm-mismatch").style.display = "none";
     let btn = document.getElementById("del-farm-confirm-btn");
     btn.innerText = btnText;
+    btn.disabled  = true;
+    btn.style.opacity = ".4";
+    btn.style.cursor  = "not-allowed";
+
+    document.getElementById("delete-farm-modal").classList.add("open");
+    setTimeout(()=>document.getElementById("del-farm-input").focus(), 100);
+}
+
+function openHardDeleteFarmModal(id, name){
+    if(!isAdmin){ showToast("Admin access required"); return; }
+    _pendingDelete = { id, name, deliveryCount: 0, hard: true };
+
+    document.getElementById("del-farm-title").innerText    = "⚠️ Delete farm permanently?";
+    document.getElementById("del-farm-sub").innerText      = "This cannot be undone. If any other record still references the farm the delete will be blocked.";
+    document.getElementById("del-farm-warning").innerHTML  = `You are about to <strong style="color:var(--danger)">permanently delete</strong> "<strong>${escapeHtml(name)}</strong>". This cannot be undone.`;
+    document.getElementById("del-farm-expected").innerText = name;
+    document.getElementById("del-farm-input").value        = "";
+    document.getElementById("del-farm-mismatch").style.display = "none";
+    let btn = document.getElementById("del-farm-confirm-btn");
+    btn.innerText = "Delete forever";
     btn.disabled  = true;
     btn.style.opacity = ".4";
     btn.style.cursor  = "not-allowed";
@@ -1744,16 +1778,16 @@ async function confirmDeleteFarm(){
     let typed = document.getElementById("del-farm-input").value;
     if(typed !== _pendingDelete.name){ onDeleteFarmInput(); return; }
 
-    let { id, name, deliveryCount } = _pendingDelete;
+    let { id, name, hard } = _pendingDelete;
     let btn = document.getElementById("del-farm-confirm-btn");
     let originalText = btn.innerText;
     btn.disabled = true;
     btn.innerText = "Working…";
 
     try {
-        let url = `/farm/api/farms/${id}` + (deliveryCount > 0 ? "" : "?hard=true");
+        let url = `/farm/api/farms/${id}` + (hard ? "?hard=true" : "");
         let res  = await fetch(url, {method:"DELETE"});
-        let data = await res.json();
+        let data = await res.json().catch(()=>({}));
         if(!res.ok || data.detail){
             showToast("Error: " + (data.detail || `Failed (${res.status})`));
             btn.disabled = false;
@@ -1826,7 +1860,6 @@ async function loadArchivedFarms(){
             return;
         }
         list.innerHTML = farms.map(f => {
-            let canHardDelete = (f.delivery_count === 0 && f.weather_count === 0);
             return `
                 <div class="arch-row">
                     <div class="arch-info">
@@ -1835,9 +1868,7 @@ async function loadArchivedFarms(){
                     </div>
                     <div class="arch-actions">
                         <button type="button" class="action-btn" data-arch-action="restore" data-farm-id="${f.id}" data-farm-name="${escapeHtml(f.name)}">↺ Restore</button>
-                        ${canHardDelete
-                            ? `<button type="button" class="action-btn danger" data-arch-action="hard-delete" data-farm-id="${f.id}" data-farm-name="${escapeHtml(f.name)}">Delete forever</button>`
-                            : `<button type="button" class="action-btn" disabled style="opacity:.4;cursor:not-allowed;" title="Has history — cannot be permanently deleted">Has history</button>`}
+                        <button type="button" class="action-btn danger" data-arch-action="hard-delete" data-farm-id="${f.id}" data-farm-name="${escapeHtml(f.name)}" title="Permanently delete — only works if no other record references this farm">Delete forever</button>
                     </div>
                 </div>
             `;
@@ -1888,9 +1919,8 @@ async function restoreFarm(id, name){
 
 async function hardDeleteFarm(id, name){
     if(!isAdmin){ showToast("Admin access required"); return; }
-    // Route through the same type-to-confirm modal as on-card deletes.
-    // We pass deliveryCount=0 because hard delete is only offered for farms with no history.
-    openDeleteFarmModal(id, name, 0);
+    // Route through the type-to-confirm modal in HARD-delete mode.
+    openHardDeleteFarmModal(id, name);
 }
 
 /* ── WEATHER LOG ── */
