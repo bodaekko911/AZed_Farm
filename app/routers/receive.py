@@ -325,25 +325,7 @@ textarea{resize:vertical;min-height:60px}
 .field-help{font-size:12px;color:var(--muted);line-height:1.45}
 .field-error{display:none;font-size:12px;color:var(--danger);font-weight:700}
 .field-error.show{display:block}
-.product-type-block{display:flex;flex-direction:column;gap:12px;padding:16px;border:1px solid var(--border2);border-radius:14px;background:linear-gradient(180deg,rgba(77,159,255,.05),rgba(255,255,255,0))}
-.product-type-block.invalid{border-color:rgba(255,77,109,.45);box-shadow:0 0 0 1px rgba(255,77,109,.14) inset}
-.product-type-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
 .required-pill{display:inline-flex;align-items:center;padding:4px 9px;border-radius:999px;background:rgba(255,181,71,.12);color:var(--amber);font-size:10px;font-weight:800;letter-spacing:.8px;text-transform:uppercase}
-.type-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
-.type-option{border:1px solid var(--border2);border-radius:14px;background:var(--card2);padding:16px;cursor:pointer;transition:all .2s;text-align:left}
-.type-option:hover{border-color:rgba(77,159,255,.35);transform:translateY(-1px)}
-.type-option:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
-.type-option.active{border-color:rgba(0,255,157,.35);background:linear-gradient(180deg,rgba(0,255,157,.10),rgba(77,159,255,.08));box-shadow:0 0 0 1px rgba(0,255,157,.15) inset}
-.type-option-badge{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:10px;margin-bottom:10px;font-size:16px;background:rgba(255,255,255,.06)}
-.type-option.active .type-option-badge{background:rgba(0,255,157,.14);color:var(--green)}
-.type-option-title{font-size:15px;font-weight:800;color:var(--text)}
-.type-option-sub{margin-top:5px;font-size:12px;color:var(--sub);line-height:1.45}
-.type-meta{margin-top:10px;font-size:11px;color:var(--muted)}
-.mapping-chip{display:inline-flex;align-items:center;gap:6px;padding:7px 10px;border-radius:999px;background:rgba(77,159,255,.08);border:1px solid rgba(77,159,255,.18);font-size:12px;color:var(--sub);font-weight:600}
-.mapping-chip strong{color:var(--blue)}
-body.light .type-option{background:#fff}
-body.light .product-type-block{background:linear-gradient(180deg,rgba(77,159,255,.06),rgba(0,0,0,0))}
-@media(max-width:700px){.type-grid{grid-template-columns:1fr}}
 
 /* ── product rows table ── */
 .rows-wrap{overflow:visible}
@@ -370,6 +352,74 @@ body.light .product-type-block{background:linear-gradient(180deg,rgba(77,159,255
 .picker-item .sku{font-family:var(--mono);font-size:11px;color:var(--muted)}
 .picker-item .stock{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap}
 .picker-empty{padding:12px 16px;color:var(--muted);font-size:13px}
+
+/* ── fancy combobox (fpicker) — used for supplier/storage/farm/category dropdowns ── */
+.fpicker{position:relative;width:100%}
+.fpicker-trigger{
+  display:flex;align-items:center;gap:10px;width:100%;
+  background:var(--surface);border:1px solid var(--border);border-radius:10px;
+  color:var(--text);font-family:var(--sans);font-size:14px;
+  padding:9px 13px;cursor:pointer;transition:all .15s;text-align:left;
+  min-height:40px;
+}
+.fpicker-trigger:hover{border-color:var(--border2)}
+.fpicker-trigger:focus,.fpicker-trigger.open{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px rgba(77,159,255,.10)}
+.fpicker-trigger.invalid{border-color:rgba(255,77,109,.55);box-shadow:0 0 0 3px rgba(255,77,109,.10)}
+.fpicker-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fpicker-label.placeholder{color:var(--muted)}
+.fpicker-meta{font-family:var(--mono);font-size:11px;color:var(--muted);flex-shrink:0}
+.fpicker-icon{flex-shrink:0;width:16px;height:16px;color:var(--muted);transition:transform .2s}
+.fpicker-trigger.open .fpicker-icon{transform:rotate(180deg);color:var(--blue)}
+.fpicker-clear{
+  flex-shrink:0;width:18px;height:18px;border:none;background:transparent;
+  color:var(--muted);font-size:14px;font-weight:700;cursor:pointer;
+  border-radius:50%;display:none;align-items:center;justify-content:center;
+  padding:0;line-height:1;transition:all .15s;
+}
+.fpicker-clear:hover{background:rgba(255,77,109,.15);color:var(--danger)}
+.fpicker:hover .fpicker-clear.has-value{display:flex}
+.fpicker-trigger.open .fpicker-clear.has-value{display:flex}
+
+.fpicker-panel{
+  position:absolute;top:calc(100% + 6px);left:0;right:0;z-index:600;
+  background:var(--card2);border:1px solid var(--border2);border-radius:12px;
+  box-shadow:0 12px 40px rgba(0,0,0,.5);
+  max-height:340px;display:none;flex-direction:column;overflow:hidden;
+  animation:fpickerOpen .15s ease-out;
+}
+.fpicker-panel.open{display:flex}
+@keyframes fpickerOpen{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.fpicker-search{
+  flex-shrink:0;padding:10px 12px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:8px;background:var(--card);
+}
+.fpicker-search-icon{width:14px;height:14px;color:var(--muted);flex-shrink:0}
+.fpicker-search input{
+  flex:1;background:transparent;border:none;outline:none;
+  color:var(--text);font-family:var(--sans);font-size:13px;padding:2px 0;
+}
+.fpicker-search input::placeholder{color:var(--muted)}
+.fpicker-list{flex:1;overflow-y:auto;padding:6px 0;min-height:0}
+.fpicker-item{
+  display:flex;align-items:center;gap:10px;padding:9px 14px;
+  cursor:pointer;font-size:13px;color:var(--text);
+  transition:background .12s;border-left:2px solid transparent;
+}
+.fpicker-item:hover,.fpicker-item.highlighted{background:rgba(77,159,255,.10)}
+.fpicker-item.selected{border-left-color:var(--blue);background:rgba(77,159,255,.06)}
+.fpicker-item.selected::after{content:"✓";margin-left:auto;color:var(--blue);font-weight:700}
+.fpicker-item-emoji{font-size:16px;line-height:1;flex-shrink:0}
+.fpicker-item-main{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fpicker-item-sub{font-family:var(--mono);font-size:11px;color:var(--muted);flex-shrink:0}
+.fpicker-empty{padding:18px 14px;text-align:center;color:var(--muted);font-size:13px;font-style:italic}
+.fpicker-section-label{
+  padding:8px 14px 4px;font-size:10px;font-weight:700;
+  color:var(--muted);letter-spacing:1px;text-transform:uppercase;
+}
+
+body.light .fpicker-trigger{background:#fff}
+body.light .fpicker-panel{background:#fff;border-color:rgba(0,0,0,.12)}
+body.light .fpicker-search{background:#fafafa}
 
 /* ── row inputs ── */
 .qty-input,.cost-input{width:100px;text-align:right;font-family:var(--mono)}
@@ -469,40 +519,11 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
           <label>Receive Date *</label>
           <input type="date" id="receive-date" required>
         </div>
-        <div class="field full">
-          <div class="product-type-block" id="product-type-block">
-            <div class="product-type-head">
-              <div>
-                <label style="display:block;margin-bottom:6px">Product Type</label>
-                <div class="field-help">Required. Choose how this receipt should be classified before you submit it.</div>
-              </div>
-              <span class="required-pill">Required</span>
-            </div>
-            <input type="hidden" id="product-type" value="">
-            <div class="type-grid">
-              <button type="button" class="type-option" id="product-type-option-products" onclick="setProductType('product-type','products','expense-category-display','product-type-help','product-type-error','product-type-block')" aria-pressed="false">
-                <span class="type-option-badge">&#128230;</span>
-                <div class="type-option-title">Products</div>
-                <div class="type-option-sub">Use this for normal stock items received into inventory.</div>
-                <div class="type-meta">Auto expense category: <strong>Products</strong></div>
-              </button>
-              <button type="button" class="type-option" id="product-type-option-packaging_materials" onclick="setProductType('product-type','packaging_materials','expense-category-display','product-type-help','product-type-error','product-type-block')" aria-pressed="false">
-                <span class="type-option-badge">&#128230;</span>
-                <div class="type-option-title">Packaging Materials</div>
-                <div class="type-option-sub">Use this for lids, jars, labels, boxes, and packaging supplies.</div>
-                <div class="type-meta">Auto expense category: <strong>Packaging Materials</strong></div>
-              </button>
-            </div>
-            <div class="mapping-chip">Selected expense category: <strong id="expense-category-display">Choose Product Type</strong></div>
-            <div class="field-help" id="product-type-help">Select one option to show how unit cost will be categorized.</div>
-            <div class="field-error" id="product-type-error">Choose Product Type before receiving stock.</div>
-          </div>
-        </div>
         <div class="field">
           <label>Supplier <span style="color:var(--muted);font-weight:400">(optional — for credit tracking)</span></label>
-          <select id="supplier-select" onchange="onSupplierChange()">
-            <option value="">— No supplier (cash purchase) —</option>
-          </select>
+          <div class="fpicker" id="fp-supplier">
+            <input type="hidden" id="supplier-select" value="">
+          </div>
         </div>
         <div class="field">
           <label>Supplier Ref / Invoice <span style="color:var(--muted);font-weight:400">(optional)</span></label>
@@ -510,22 +531,23 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
         </div>
         <div class="field">
           <label>Storage <span style="color:var(--muted);font-weight:400">(where to put the received stock)</span></label>
-          <select id="location-select" required>
-            <option value="">— Loading storages… —</option>
-          </select>
+          <div class="fpicker" id="fp-location">
+            <input type="hidden" id="location-select" value="">
+          </div>
         </div>
         <div class="field">
           <label>Cost Allocation <span style="color:var(--muted);font-weight:400">(which farm or "🐾 Animals" this expense belongs to)</span></label>
-          <select id="farm-select">
-            <option value="">— General expense —</option>
-          </select>
+          <div class="fpicker" id="fp-farm">
+            <input type="hidden" id="farm-select" value="">
+          </div>
         </div>
         <div class="field">
-          <label>Expense Category <span style="color:var(--muted);font-weight:400">(optional — override the auto category)</span></label>
-          <select id="expense-category-select" onchange="onExpenseCategoryChange()">
-            <option value="">— Auto (from Product Type) —</option>
-          </select>
-          <div class="field-help" id="expense-category-help" style="color:var(--muted);font-size:11px;margin-top:2px">Choose to route the posted expense to a different category in Expenses.</div>
+          <label>Expense Category <span class="required-pill" style="margin-left:6px">Required</span></label>
+          <div class="fpicker" id="fp-expense-category">
+            <input type="hidden" id="expense-category-select" value="">
+          </div>
+          <div class="field-help" id="expense-category-help">Pick which category in Expenses this purchase posts to.</div>
+          <div class="field-error" id="expense-category-error">Pick an expense category before receiving stock.</div>
         </div>
         <div class="field full" id="payment-block" style="display:none">
           <label>Payment</label>
@@ -630,35 +652,6 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
         <input type="number" id="edit-cost" min="0" step="0.01">
       </div>
       <div class="field full">
-        <div class="product-type-block" id="edit-product-type-block">
-          <div class="product-type-head">
-            <div>
-              <label style="display:block;margin-bottom:6px">Product Type</label>
-              <div class="field-help">Required. Changing this also changes the automatic expense category mapping.</div>
-            </div>
-            <span class="required-pill">Required</span>
-          </div>
-          <input type="hidden" id="edit-product-type" value="">
-          <div class="type-grid">
-            <button type="button" class="type-option" id="edit-product-type-option-products" onclick="setProductType('edit-product-type','products','edit-expense-category-display','edit-product-type-help','edit-product-type-error','edit-product-type-block')" aria-pressed="false">
-              <span class="type-option-badge">&#128230;</span>
-              <div class="type-option-title">Products</div>
-              <div class="type-option-sub">Normal inventory items received into stock.</div>
-              <div class="type-meta">Auto expense category: <strong>Products</strong></div>
-            </button>
-            <button type="button" class="type-option" id="edit-product-type-option-packaging_materials" onclick="setProductType('edit-product-type','packaging_materials','edit-expense-category-display','edit-product-type-help','edit-product-type-error','edit-product-type-block')" aria-pressed="false">
-              <span class="type-option-badge">&#128230;</span>
-              <div class="type-option-title">Packaging Materials</div>
-              <div class="type-option-sub">Jars, lids, labels, boxes, and related packaging supplies.</div>
-              <div class="type-meta">Auto expense category: <strong>Packaging Materials</strong></div>
-            </button>
-          </div>
-          <div class="mapping-chip">Selected expense category: <strong id="edit-expense-category-display">Choose Product Type</strong></div>
-          <div class="field-help" id="edit-product-type-help">Select one option to keep the receipt classification clear.</div>
-          <div class="field-error" id="edit-product-type-error">Choose Product Type before saving.</div>
-        </div>
-      </div>
-      <div class="field full">
         <label>Supplier / Reference</label>
         <input type="text" id="edit-supplier" maxlength="150">
       </div>
@@ -685,15 +678,6 @@ let _currentUserRole = '';
 let _currentUserPermissions = new Set();
 let _historyItems = [];
 let _editingReceipt = null;
-const PRODUCT_TYPE_LABELS = {
-  products: 'Products',
-  packaging_materials: 'Packaging Materials',
-};
-const PRODUCT_TYPE_HELP_TEXT = {
-  products: 'Unit costs will post to the Products expense category when applicable.',
-  packaging_materials: 'Unit costs will post to the Packaging Materials expense category when applicable.',
-  default: 'Select one option to show how unit cost will be categorized.',
-};
 
 function hasPermission(permission) {
   return _currentUserRole === 'admin' || _currentUserPermissions.has(permission);
@@ -718,9 +702,34 @@ async function init() {
     document.body.classList.add('light');
     document.getElementById('mode-btn').innerHTML = '&#9728;&#65039;';
   }
+  // Build the four main-form pickers before loaders populate them
+  _fpickers.supplier = new FPicker('fp-supplier', 'supplier-select', {
+    placeholder: '— No supplier (cash purchase) —',
+    searchPlaceholder: 'Search suppliers…',
+    emptyText: 'No suppliers found',
+    onChange: () => onSupplierChange(),
+  });
+  _fpickers.location = new FPicker('fp-location', 'location-select', {
+    placeholder: 'Loading storages…',
+    searchPlaceholder: 'Search storages…',
+    emptyText: 'No storages',
+    clearable: false,
+  });
+  _fpickers.farm = new FPicker('fp-farm', 'farm-select', {
+    placeholder: '— General expense —',
+    searchPlaceholder: 'Search farms…',
+    emptyText: 'No matches',
+  });
+  _fpickers.category = new FPicker('fp-expense-category', 'expense-category-select', {
+    placeholder: '— Select expense category —',
+    searchPlaceholder: 'Search categories…',
+    emptyText: 'No categories',
+    clearable: false,
+    onChange: () => onExpenseCategoryChange(),
+  });
+
   await Promise.all([initUser(), loadProducts(), loadSuppliers(), loadLocations(), loadFarms(), loadExpenseCategories()]);
   document.getElementById('receive-date').value = todayIso();
-  syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
   addRow();          // start with one empty row
   await loadHistory();
 }
@@ -732,67 +741,79 @@ let _farms = [];
 async function loadFarms() {
   try {
     const r = await fetch('/farm/api/farms');
-    if (!r.ok) return;
-    const data = await r.json();
-    _farms = Array.isArray(data) ? data : (data && data.items) ? data.items : [];
-    const sel = document.getElementById('farm-select');
-    if (!sel) return;
-    const farmOpts = _farms.map(f =>
-      `<option value="${f.id}">${escHtml(f.name || ('Farm #' + f.id))}</option>`
-    ).join('');
-    sel.innerHTML = '<option value="">— General expense —</option>'
-      + farmOpts
-      + '<option value="__animals__">🐾 Animals</option>';
-  } catch (_) {
-    const sel = document.getElementById('farm-select');
-    if (sel) {
-      sel.innerHTML = '<option value="">— General expense —</option>'
-        + '<option value="__animals__">🐾 Animals</option>';
+    if (r.ok) {
+      const data = await r.json();
+      _farms = Array.isArray(data) ? data : (data && data.items) ? data.items : [];
+    } else {
+      _farms = [];
     }
+  } catch (_) { _farms = []; }
+  if (_fpickers.farm) {
+    _fpickers.farm.setOptions([
+      { value: '',           label: 'General expense', emoji: '🏷️', meta: 'no allocation' },
+      ..._farms.map(f => ({
+        value: String(f.id),
+        label: f.name || ('Farm #' + f.id),
+        emoji: '🌾',
+        meta: f.location || '',
+      })),
+      { value: '__animals__', label: 'Animals',        emoji: '🐾', meta: 'animal bucket' },
+    ]);
   }
 }
 
 async function loadLocations() {
   try {
     const r = await fetch('/inventory/api/locations');
-    if (!r.ok) return;
-    const data = await r.json();
-    _locations = (data && data.items) ? data.items : (Array.isArray(data) ? data : []);
-    const sel = document.getElementById('location-select');
-    if (!sel) return;
-    if (!_locations.length) {
-      sel.innerHTML = '<option value="">— No storages defined —</option>';
-      return;
+    if (r.ok) {
+      const data = await r.json();
+      _locations = (data && data.items) ? data.items : (Array.isArray(data) ? data : []);
+    } else {
+      _locations = [];
     }
-    // Default to Main Warehouse if present; otherwise first location.
-    let defaultId = '';
-    const main = _locations.find(l => (l.name || '').toLowerCase().includes('main'));
-    if (main) defaultId = String(main.id);
-    else if (_locations[0]) defaultId = String(_locations[0].id);
-
-    sel.innerHTML = _locations.map(l => {
-      const sel = String(l.id) === defaultId ? ' selected' : '';
-      return `<option value="${l.id}"${sel}>${escHtml(l.name)}</option>`;
-    }).join('');
-  } catch (_) { /* silent */ }
+  } catch (_) { _locations = []; }
+  if (_fpickers.location) {
+    if (!_locations.length) {
+      _fpickers.location.setOptions([]);
+    } else {
+      _fpickers.location.setOptions(_locations.map(l => ({
+        value: String(l.id),
+        label: l.name,
+        emoji: '📦',
+      })));
+      // Default to Main Warehouse if present; otherwise first location.
+      let defaultId = '';
+      const main = _locations.find(l => (l.name || '').toLowerCase().includes('main'));
+      if (main) defaultId = String(main.id);
+      else if (_locations[0]) defaultId = String(_locations[0].id);
+      if (defaultId) _fpickers.location.setValue(defaultId);
+    }
+  }
 }
 
 async function loadSuppliers() {
   try {
     const r = await fetch('/receive/api/suppliers');
-    if (!r.ok) return;
-    _suppliers = await r.json();
-    const sel = document.getElementById('supplier-select');
-    if (!sel) return;
-    sel.innerHTML = '<option value="">— No supplier (cash purchase) —</option>'
-      + _suppliers.map(s => {
-          const bal = Number(s.balance || 0);
-          const lbl = bal > 0
-            ? `${escHtml(s.name)} (owed ${bal.toFixed(2)})`
-            : escHtml(s.name);
-          return `<option value="${s.id}">${lbl}</option>`;
-        }).join('');
-  } catch (_) { /* silent */ }
+    if (r.ok) {
+      _suppliers = await r.json();
+    } else {
+      _suppliers = [];
+    }
+  } catch (_) { _suppliers = []; }
+  if (_fpickers.supplier) {
+    _fpickers.supplier.setOptions([
+      { value: '', label: 'No supplier (cash purchase)', emoji: '💵' },
+      ..._suppliers.map(s => {
+        const bal = Number(s.balance || 0);
+        return {
+          value: String(s.id),
+          label: s.name,
+          emoji: '🏢',
+          meta:  bal > 0 ? ('owed ' + bal.toFixed(2)) : '',
+        };
+      }),
+    ]);
+  }
 }
 
 let _expenseCategories = [];
@@ -800,41 +821,31 @@ let _expenseCategories = [];
 async function loadExpenseCategories() {
   try {
     const r = await fetch('/receive/api/expense-categories');
-    if (!r.ok) return;
-    _expenseCategories = await r.json();
-    const sel = document.getElementById('expense-category-select');
-    if (!sel) return;
-    sel.innerHTML = '<option value="">— Auto (from Product Type) —</option>'
-      + _expenseCategories.map(c =>
-          `<option value="${c.id}">${escHtml(c.name)}${c.account_code ? ' · ' + escHtml(c.account_code) : ''}</option>`
-        ).join('');
-  } catch (_) { /* silent */ }
+    if (r.ok) {
+      _expenseCategories = await r.json();
+    } else {
+      _expenseCategories = [];
+    }
+  } catch (_) { _expenseCategories = []; }
+  if (_fpickers.category) {
+    _fpickers.category.setOptions(_expenseCategories.map(c => ({
+      value: String(c.id),
+      label: c.name,
+      emoji: '💸',
+      meta:  c.account_code || '',
+    })));
+  }
 }
 
 function onExpenseCategoryChange() {
-  // When the user picks an override, reflect it in the "Selected expense category" chip
-  // attached to the Product Type block so it's clear where the expense will land.
-  const sel  = document.getElementById('expense-category-select');
-  const chip = document.getElementById('expense-category-display');
-  const help = document.getElementById('expense-category-help');
-  const productTypeEl = document.getElementById('product-type');
-  if (!sel || !chip) return;
-
-  if (sel.value) {
-    const cat = _expenseCategories.find(c => String(c.id) === String(sel.value));
-    if (cat) {
-      chip.textContent = cat.name + (cat.account_code ? ' (' + cat.account_code + ')' : '');
-      chip.style.color = 'var(--blue)';
-    }
-    if (help) help.textContent = 'Override active — the posted expense will use the selected category instead of the auto one.';
-  } else {
-    // Restore the auto-derived label
-    if (typeof syncProductTypeFields === 'function') {
-      syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
-    }
-    chip.style.color = '';
-    if (help) help.textContent = 'Choose to route the posted expense to a different category in Expenses.';
+  // Clear validation styling once a category is picked.
+  const val = document.getElementById('expense-category-select').value;
+  const errEl = document.getElementById('expense-category-error');
+  if (val) {
+    if (_fpickers.category) _fpickers.category.setInvalid(false);
+    if (errEl) errEl.classList.remove('show');
   }
+  validateSubmit();
 }
 
 function escHtml(s){
@@ -842,6 +853,236 @@ function escHtml(s){
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FPicker — reusable searchable combobox.
+//   Drives a hidden <input> with the selected value (so existing
+//   document.getElementById('xxx').value lookups still work).
+//   Options: { id, value, label, emoji?, meta?, group?, searchText? }
+// ─────────────────────────────────────────────────────────────────────────────
+class FPicker {
+  constructor(hostId, hiddenInputId, opts = {}) {
+    this.host = document.getElementById(hostId);
+    this.hidden = document.getElementById(hiddenInputId);
+    if (!this.host || !this.hidden) throw new Error('FPicker host/hidden missing: ' + hostId);
+    this.placeholder = opts.placeholder || 'Select…';
+    this.searchPlaceholder = opts.searchPlaceholder || 'Type to search…';
+    this.emptyText = opts.emptyText || 'No results';
+    this.clearable = opts.clearable !== false;   // default true
+    this.options = [];                            // [{value,label,emoji,meta,group,searchText}]
+    this.onChange = opts.onChange || (()=>{});
+    this._q = '';
+    this._highlight = 0;
+    this._build();
+  }
+
+  _build() {
+    this.host.innerHTML = `
+      <button type="button" class="fpicker-trigger" id="${this.host.id}-trig">
+        <span class="fpicker-label placeholder" id="${this.host.id}-lbl">${escHtml(this.placeholder)}</span>
+        <span class="fpicker-meta" id="${this.host.id}-meta" style="display:none"></span>
+        <button type="button" class="fpicker-clear" id="${this.host.id}-clr" tabindex="-1" aria-label="Clear">×</button>
+        <svg class="fpicker-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3,6 8,11 13,6"/></svg>
+      </button>
+      <div class="fpicker-panel" id="${this.host.id}-panel">
+        <div class="fpicker-search">
+          <svg class="fpicker-search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="7" cy="7" r="5"/><line x1="11" y1="11" x2="14" y2="14"/></svg>
+          <input type="text" id="${this.host.id}-search" placeholder="${escHtml(this.searchPlaceholder)}" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="fpicker-list" id="${this.host.id}-list"></div>
+      </div>
+    `;
+    // Re-append hidden so the inner HTML didn't drop it
+    if (!this.host.contains(this.hidden)) this.host.appendChild(this.hidden);
+
+    this.trig  = document.getElementById(this.host.id + '-trig');
+    this.lbl   = document.getElementById(this.host.id + '-lbl');
+    this.metaEl= document.getElementById(this.host.id + '-meta');
+    this.clrBtn= document.getElementById(this.host.id + '-clr');
+    this.panel = document.getElementById(this.host.id + '-panel');
+    this.sBox  = document.getElementById(this.host.id + '-search');
+    this.list  = document.getElementById(this.host.id + '-list');
+
+    this.trig.addEventListener('click', e => { e.stopPropagation(); this.toggle(); });
+    this.trig.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        this.open();
+      }
+    });
+    this.clrBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      this.setValue('', { fireChange: true });
+    });
+    this.sBox.addEventListener('input', () => { this._q = this.sBox.value.trim().toLowerCase(); this._highlight = 0; this._render(); });
+    this.sBox.addEventListener('keydown', e => this._onKey(e));
+    this.list.addEventListener('mousemove', e => {
+      const item = e.target.closest('.fpicker-item');
+      if (!item) return;
+      const idx = parseInt(item.dataset.idx, 10);
+      if (!isNaN(idx) && idx !== this._highlight) {
+        this._highlight = idx;
+        this._updateHighlight();
+      }
+    });
+    this.list.addEventListener('click', e => {
+      const item = e.target.closest('.fpicker-item');
+      if (!item) return;
+      const idx = parseInt(item.dataset.idx, 10);
+      this._pick(idx);
+    });
+    document.addEventListener('click', e => {
+      if (!this.host.contains(e.target)) this.close();
+    });
+  }
+
+  setOptions(opts) {
+    this.options = (opts || []).map(o => ({
+      value: String(o.value ?? ''),
+      label: o.label ?? '',
+      emoji: o.emoji || '',
+      meta:  o.meta  || '',
+      group: o.group || '',
+      searchText: (o.searchText || (o.label + ' ' + (o.meta || ''))).toLowerCase(),
+    }));
+    // Re-sync current display in case the selected value's metadata changed
+    this.setValue(this.hidden.value, { fireChange: false });
+  }
+
+  _filtered() {
+    if (!this._q) return this.options.map((o, i) => ({ o, i }));
+    return this.options
+      .map((o, i) => ({ o, i }))
+      .filter(({ o }) => o.searchText.includes(this._q));
+  }
+
+  open() {
+    this.panel.classList.add('open');
+    this.trig.classList.add('open');
+    this._q = '';
+    this.sBox.value = '';
+    // Highlight the currently selected item if any
+    const cur = this.options.findIndex(o => o.value === this.hidden.value);
+    this._highlight = cur >= 0 ? cur : 0;
+    this._render();
+    setTimeout(() => this.sBox.focus(), 50);
+  }
+
+  close() {
+    this.panel.classList.remove('open');
+    this.trig.classList.remove('open');
+  }
+
+  toggle() {
+    if (this.panel.classList.contains('open')) this.close();
+    else this.open();
+  }
+
+  _onKey(e) {
+    const filtered = this._filtered();
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      this._highlight = Math.min(this._highlight + 1, filtered.length - 1);
+      this._updateHighlight(true);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      this._highlight = Math.max(this._highlight - 1, 0);
+      this._updateHighlight(true);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const visible = filtered[this._highlight];
+      if (visible) this._pick(visible.i);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      this.close();
+      this.trig.focus();
+    }
+  }
+
+  _pick(idx) {
+    const o = this.options[idx];
+    if (!o) return;
+    this.setValue(o.value, { fireChange: true });
+    this.close();
+    this.trig.focus();
+  }
+
+  _render() {
+    const filtered = this._filtered();
+    if (!filtered.length) {
+      this.list.innerHTML = `<div class="fpicker-empty">${escHtml(this.emptyText)}</div>`;
+      return;
+    }
+    let html = '';
+    let lastGroup = null;
+    filtered.forEach(({ o, i }, vIdx) => {
+      if (o.group && o.group !== lastGroup) {
+        html += `<div class="fpicker-section-label">${escHtml(o.group)}</div>`;
+        lastGroup = o.group;
+      } else if (!o.group) {
+        lastGroup = null;
+      }
+      const selected = o.value === this.hidden.value;
+      const highlight = vIdx === this._highlight;
+      html += `
+        <div class="fpicker-item${selected ? ' selected' : ''}${highlight ? ' highlighted' : ''}" data-idx="${i}">
+          ${o.emoji ? `<span class="fpicker-item-emoji">${escHtml(o.emoji)}</span>` : ''}
+          <span class="fpicker-item-main">${escHtml(o.label)}</span>
+          ${o.meta ? `<span class="fpicker-item-sub">${escHtml(o.meta)}</span>` : ''}
+        </div>
+      `;
+    });
+    this.list.innerHTML = html;
+    // Scroll the highlighted item into view
+    const hEl = this.list.querySelector('.highlighted');
+    if (hEl && hEl.scrollIntoView) hEl.scrollIntoView({ block: 'nearest' });
+  }
+
+  _updateHighlight(scroll) {
+    const items = this.list.querySelectorAll('.fpicker-item');
+    items.forEach((el, idx) => el.classList.toggle('highlighted', idx === this._highlight));
+    if (scroll) {
+      const hEl = items[this._highlight];
+      if (hEl && hEl.scrollIntoView) hEl.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  setValue(value, { fireChange = false } = {}) {
+    const v = String(value ?? '');
+    this.hidden.value = v;
+    const o = this.options.find(x => x.value === v);
+    if (o) {
+      this.lbl.textContent = o.label;
+      this.lbl.classList.remove('placeholder');
+      if (o.emoji) this.lbl.textContent = o.emoji + ' ' + o.label;
+      if (o.meta) {
+        this.metaEl.textContent = o.meta;
+        this.metaEl.style.display = '';
+      } else {
+        this.metaEl.style.display = 'none';
+      }
+      this.clrBtn.classList.add('has-value');
+    } else {
+      this.lbl.textContent = this.placeholder;
+      this.lbl.classList.add('placeholder');
+      this.metaEl.style.display = 'none';
+      this.clrBtn.classList.remove('has-value');
+    }
+    // Make the clear button visible only when clearable AND there's a value
+    if (!this.clearable) this.clrBtn.style.display = 'none';
+
+    if (fireChange) this.onChange(v, o);
+  }
+
+  getValue() { return this.hidden.value; }
+
+  setInvalid(on) {
+    this.trig.classList.toggle('invalid', !!on);
+  }
+}
+
+// Holder for the four main-form pickers
+const _fpickers = {};
 
 function onSupplierChange(){
   const v = document.getElementById('supplier-select').value;
@@ -1108,68 +1349,16 @@ function updateGrandTotal() {
   updateRemainingHint();
 }
 
-function syncProductTypeFields(selectId, displayId, helpId, errorId, blockId) {
-  const select = document.getElementById(selectId);
-  const display = document.getElementById(displayId);
-  const help = helpId ? document.getElementById(helpId) : null;
-  const error = errorId ? document.getElementById(errorId) : null;
-  const block = blockId ? document.getElementById(blockId) : null;
-  if (!select || !display) return;
-  const value = select.value || '';
-  display.textContent = PRODUCT_TYPE_LABELS[value] || 'Choose Product Type';
-  if (help) help.textContent = PRODUCT_TYPE_HELP_TEXT[value] || PRODUCT_TYPE_HELP_TEXT.default;
-  if (error) error.classList.remove('show');
-  if (block) block.classList.remove('invalid');
-  ['products', 'packaging_materials'].forEach(optionValue => {
-    const option = document.getElementById(`${selectId}-option-${optionValue}`);
-    if (!option) return;
-    const active = value === optionValue;
-    option.classList.toggle('active', active);
-    option.setAttribute('aria-pressed', active ? 'true' : 'false');
-  });
-}
-
-function setProductType(selectId, value, displayId, helpId, errorId, blockId) {
-  const select = document.getElementById(selectId);
-  if (!select) return;
-  select.value = value;
-  syncProductTypeFields(selectId, displayId, helpId, errorId, blockId);
-  if (selectId === 'product-type') {
-    validateSubmit();
-    // If an override category is selected on the main form, keep its chip sticky.
-    if (typeof onExpenseCategoryChange === 'function') onExpenseCategoryChange();
-  }
-}
-
-function showProductTypeError(errorId, blockId) {
-  const error = document.getElementById(errorId);
-  const block = document.getElementById(blockId);
-  if (error) error.classList.add('show');
-  if (block) block.classList.add('invalid');
-}
-
-function onProductTypeChange() {
-  syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
-  validateSubmit();
-}
-
-function inferProductTypeFromReceipt(receipt) {
-  const categoryName = String(receipt?.expense_category_name || '').trim().toLowerCase();
-  if (categoryName === 'products') return 'products';
-  if (categoryName === 'packaging materials') return 'packaging_materials';
-  return '';
-}
-
 function validateSubmit() {
   const rows = document.querySelectorAll('#rows-body tr.data-row');
-  const productType = document.getElementById('product-type')?.value;
+  const categoryId = document.getElementById('expense-category-select')?.value;
   const valid = Array.from(rows).some(tr => {
     const id  = tr.dataset.row;
     const pid = document.getElementById(`pid-${id}`)?.value;
     const qty = parseFloat(document.getElementById(`qty-${id}`)?.value) || 0;
     return pid && qty > 0;
   });
-  document.getElementById('submit-btn').disabled = !(productType && valid);
+  document.getElementById('submit-btn').disabled = !(categoryId && valid);
 }
 
 // ── Submit ──────────────────────────────────────────────────────────────────
@@ -1185,7 +1374,6 @@ async function submitBatch(e) {
 
   const rows    = document.querySelectorAll('#rows-body tr.data-row');
   const items   = [];
-  const productType = document.getElementById('product-type').value;
 
   rows.forEach(tr => {
     const id   = tr.dataset.row;
@@ -1198,10 +1386,14 @@ async function submitBatch(e) {
     items.push(item);
   });
 
-  if (!productType) {
-    showProductTypeError('product-type-error', 'product-type-block');
-    showToast('Choose Product Type before receiving stock.', 'err');
-    btn.disabled = false; btn.textContent = 'âœ“ Receive Stock';
+  // Validate expense category (required)
+  const expenseCatVal = document.getElementById('expense-category-select').value;
+  if (!expenseCatVal) {
+    const errEl = document.getElementById('expense-category-error');
+    if (errEl) errEl.classList.add('show');
+    if (_fpickers.category) _fpickers.category.setInvalid(true);
+    showToast('Pick an expense category before receiving stock.', 'err');
+    btn.disabled = false; btn.textContent = '✓ Receive Stock';
     return;
   }
   if (items.length === 0) {
@@ -1239,14 +1431,10 @@ async function submitBatch(e) {
   const isAnimalExp = farmSelVal === '__animals__';
   const farmIdVal   = isAnimalExp ? null : (parseInt(farmSelVal, 10) || null);
 
-  // Expense category override (optional)
-  const expenseCatSel = document.getElementById('expense-category-select');
-  const expenseCategoryId = expenseCatSel && expenseCatSel.value
-    ? parseInt(expenseCatSel.value, 10)
-    : null;
+  // Expense category (required — validated above)
+  const expenseCategoryId = parseInt(expenseCatVal, 10);
 
   const payload = {
-    product_type: productType,
     receive_date: document.getElementById('receive-date').value,
     supplier_ref: document.getElementById('supplier-ref').value.trim() || null,
     supplier_id:  supplierId,
@@ -1290,14 +1478,16 @@ async function submitBatch(e) {
 }
 
 function resetForm() {
-  document.getElementById('product-type').value = '';
-  syncProductTypeFields('product-type', 'expense-category-display', 'product-type-help', 'product-type-error', 'product-type-block');
   document.getElementById('supplier-ref').value = '';
-  document.getElementById('supplier-select').value = '';
-  document.getElementById('farm-select').value = '';
-  const expCatSel = document.getElementById('expense-category-select');
-  if (expCatSel) expCatSel.value = '';
-  if (typeof onExpenseCategoryChange === 'function') onExpenseCategoryChange();
+  if (_fpickers.supplier) _fpickers.supplier.setValue('');
+  if (_fpickers.farm)     _fpickers.farm.setValue('');
+  if (_fpickers.category) {
+    _fpickers.category.setValue('');
+    _fpickers.category.setInvalid(false);
+  }
+  const errEl = document.getElementById('expense-category-error');
+  if (errEl) errEl.classList.remove('show');
+  // Storage stays defaulted to Main Warehouse — don't clear it.
   document.getElementById('amount-paid').value = '';
   const cashRadio = document.querySelector('input[name="pay-mode"][value="cash"]');
   if (cashRadio) cashRadio.checked = true;
@@ -1379,8 +1569,6 @@ function openEditModal(receiptId) {
   document.getElementById('edit-date').value = receipt.receive_date || todayIso();
   document.getElementById('edit-qty').value = parseFloat(receipt.qty || 0).toFixed(3);
   document.getElementById('edit-cost').value = receipt.unit_cost != null ? parseFloat(receipt.unit_cost).toFixed(2) : '';
-  document.getElementById('edit-product-type').value = inferProductTypeFromReceipt(receipt);
-  syncProductTypeFields('edit-product-type', 'edit-expense-category-display', 'edit-product-type-help', 'edit-product-type-error', 'edit-product-type-block');
   document.getElementById('edit-supplier').value = receipt.supplier_ref || '';
   document.getElementById('edit-notes').value = receipt.notes || '';
   document.getElementById('edit-modal').classList.add('open');
@@ -1396,16 +1584,7 @@ async function saveEditReceipt() {
   const btn = document.getElementById('edit-save-btn');
   btn.disabled = true;
   btn.textContent = 'Saving...';
-  const productType = document.getElementById('edit-product-type').value;
-  if (!productType) {
-    showProductTypeError('edit-product-type-error', 'edit-product-type-block');
-    showToast('Choose Product Type before saving.', 'err');
-    btn.disabled = false;
-    btn.textContent = 'Save Changes';
-    return;
-  }
   const payload = {
-    product_type: productType,
     receive_date: document.getElementById('edit-date').value,
     qty: parseFloat(document.getElementById('edit-qty').value),
     supplier_ref: document.getElementById('edit-supplier').value.trim() || null,

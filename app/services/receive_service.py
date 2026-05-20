@@ -68,7 +68,10 @@ class ReceiptCreate(BaseModel):
     product_id:   int             = Field(..., ge=1)
     qty:          float           = Field(..., gt=0)
     unit_cost:    Optional[float] = Field(None, ge=0)
-    product_type: Literal["products", "packaging_materials"]
+    # product_type is now legacy — kept for the importer and old API clients.
+    # The intake UI sends expense_category_id directly. Defaults to "products"
+    # so the auto-derivation path still works when no category override is given.
+    product_type: Literal["products", "packaging_materials"] = "products"
     receive_date: date_type
     supplier_ref: Optional[str]   = Field(None, max_length=150)
     supplier_id:  Optional[int]   = Field(None, ge=1)
@@ -103,7 +106,7 @@ class BatchReceiptCreate(BaseModel):
       • farm_id            — allocate to a specific farm
       • is_animal_expense  — allocate to the "🐾 Animals" bucket instead
     """
-    product_type: Literal["products", "packaging_materials"]
+    product_type: Literal["products", "packaging_materials"] = "products"
     receive_date: date_type
     supplier_ref: Optional[str] = Field(None, max_length=150)
     supplier_id:  Optional[int] = Field(None, ge=1)
