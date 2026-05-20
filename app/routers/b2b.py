@@ -151,7 +151,7 @@ async def _load_client_payment_activity(
     invoices = invoice_result.scalars().all()
     invoice_by_id = {invoice.id: invoice for invoice in invoices}
     invoice_by_number = {str(invoice.invoice_number or "").upper(): invoice for invoice in invoices}
-    invoice_pattern = re.compile(r"(B2B-\d{5,})", re.IGNORECASE)
+    invoice_pattern = re.compile(r"\b([A-Z]*B2B-\d{5,})\b", re.IGNORECASE)
 
     records = []
     for journal in journals:
@@ -723,7 +723,7 @@ async def record_payment(invoice_id: int, data: PaymentRecord, db: AsyncSession 
         await _post_journal(db, f"Cash collected - {invoice.invoice_number}", "b2b_collection", [
             ("1000", amount, 0),
             ("1100", 0, amount),
-        ], user_id=current_user.id)
+        ], user_id=current_user.id, ref_id=invoice.id)
     else:
         # full_payment / consignment: Dr Cash / Cr AR, Dr Deferred Revenue / Cr Revenue
         await _post_journal(db, f"Payment received - {invoice.invoice_number}", "b2b_payment", [
@@ -731,7 +731,7 @@ async def record_payment(invoice_id: int, data: PaymentRecord, db: AsyncSession 
             ("1100", 0, amount),
             ("2200", amount, 0),
             ("4000", 0, amount),
-        ], user_id=current_user.id)
+        ], user_id=current_user.id, ref_id=invoice.id)
 
     await db.commit()
     return {"ok": True, "status": invoice.status}

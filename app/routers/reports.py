@@ -353,7 +353,7 @@ async def _load_b2b_client_payment_records(
     client_ids = {journal.ref_id for journal in journals if journal.ref_id}
     invoice_ids = set()
     invoice_numbers = set()
-    invoice_pattern = re.compile(r"(B2B-\d{5,})", re.IGNORECASE)
+    invoice_pattern = re.compile(r"\b([A-Z]*B2B-\d{5,})\b", re.IGNORECASE)
     for journal in journals:
         if journal.ref_type == "consignment_client_payment":
             continue
@@ -409,6 +409,7 @@ async def _load_b2b_client_payment_records(
                 client = invoice.client or client_map.get(invoice.client_id)
         payment_records.append({
             "journal_id": journal.id,
+            "invoice_id": invoice.id if invoice else None,
             "reference": reference,
             "client_id": client.id if client else journal.ref_id,
             "client": client.name if client else "—",
@@ -437,13 +438,14 @@ async def _build_sales_report(
     Operational Sales Report using the same revenue definition as Dashboard and P&L.
 
     Revenue / Net Sales = paid POS invoices
-                        + paid B2B invoices
+                        + B2B collections posted in the period
                         - retail refunds
                         - B2B refunds
 
     Notes:
-    - Unpaid and partial B2B invoices are not counted as revenue.
-    - B2B client payment records are counted as cash collection only, not revenue.
+    - B2B invoices are issued on one date and collected on another. Revenue for
+      B2B reporting follows the collection journal date, not invoice.created_at.
+    - Uncollected B2B invoices are outstanding, not current-period revenue.
     - Top products are calculated from POS + B2B sold items minus refunded items.
     """
     b2b_payment_records = await _load_b2b_client_payment_records(db, d_from=d_from, d_to=d_to)
@@ -459,20 +461,23 @@ async def _build_sales_report(
     )
     pos_invoices = pos_result.scalars().all()
 
-    b2b_result = await db.execute(
-        select(B2BInvoice)
-        .where(
-            B2BInvoice.created_at >= d_from,
-            B2BInvoice.created_at <= d_to,
-            B2BInvoice.status == "paid",
+    b2b_invoice_ids = {
+        int(record["invoice_id"])
+        for record in b2b_payment_records
+        if record.get("invoice_id") is not None
+    }
+    b2b_invoices = []
+    if b2b_invoice_ids:
+        b2b_result = await db.execute(
+            select(B2BInvoice)
+            .where(B2BInvoice.id.in_(b2b_invoice_ids))
+            .options(
+                selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product),
+                selectinload(B2BInvoice.client),
+                selectinload(B2BInvoice.user),
+            )
         )
-        .options(
-            selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product),
-            selectinload(B2BInvoice.client),
-            selectinload(B2BInvoice.user),
-        )
-    )
-    b2b_invoices = b2b_result.scalars().all()
+        b2b_invoices = b2b_result.scalars().all()
 
     retail_refund_result = await db.execute(
         select(RetailRefund)
@@ -563,24 +568,46 @@ async def _build_sales_report(
             }
         )
 
+    b2b_invoices_by_id = {inv.id: inv for inv in b2b_invoices}
+    collection_totals_by_invoice = defaultdict(float)
+    collection_dates_by_invoice = defaultdict(list)
+    for payment in b2b_payment_records:
+        amount = _num(payment["amount"])
+        channels["b2b"]["gross_sales"] += amount
+        channels["b2b"]["cash_collected"] += amount
+        if payment["date"]:
+            daily[payment["date"]]["gross_sales"] += amount
+            daily[payment["date"]]["cash_collected"] += amount
+
+        invoice = b2b_invoices_by_id.get(payment.get("invoice_id"))
+        if not invoice:
+            continue
+        collection_totals_by_invoice[invoice.id] += amount
+        collection_dates_by_invoice[invoice.id].append(payment["datetime"])
+        invoice_total = _num(invoice.total)
+        allocation_ratio = (amount / invoice_total) if invoice_total > 0 else 0.0
+        for item in invoice.items:
+            product_name = item.product.name if item.product else "-"
+            add_product(
+                item.product_id,
+                product_name,
+                _num(item.qty) * allocation_ratio,
+                _num(item.total) * allocation_ratio,
+                1,
+            )
+
     b2b_records = []
     for inv in sorted(
         b2b_invoices,
-        key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc),
+        key=lambda x: max(collection_dates_by_invoice.get(x.id, [""])) or "",
         reverse=True,
     ):
         total = _num(inv.total)
         amount_paid = _num(inv.amount_paid)
-        collected = 0.0 if (inv.invoice_type or "").lower() == "consignment" else amount_paid
+        collected_in_period = collection_totals_by_invoice[inv.id]
         outstanding = max(total - amount_paid, 0.0)
-        day_key = inv.created_at.strftime("%Y-%m-%d") if inv.created_at else ""
-
-        channels["b2b"]["gross_sales"] += total
-        channels["b2b"]["cash_collected"] += collected
         channels["b2b"]["outstanding"] += outstanding
         channels["b2b"]["count"] += 1
-        daily[day_key]["gross_sales"] += total
-        daily[day_key]["cash_collected"] += collected
 
         items_data = []
         for item in inv.items:
@@ -595,27 +622,23 @@ async def _build_sales_report(
                     "total": item_total,
                 }
             )
-            add_product(item.product_id, product_name, item_qty, item_total, 1)
 
         b2b_records.append(
             {
                 "invoice_number": inv.invoice_number,
                 "client": inv.client.name if inv.client else "-",
                 "datetime": inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "-",
+                "collection_datetime": max(collection_dates_by_invoice.get(inv.id, [""])) or "-",
                 "user_name": inv.user.name if inv.user else "-",
                 "invoice_type": inv.invoice_type,
                 "status": inv.status or "-",
                 "items": items_data,
                 "total": total,
                 "amount_paid": amount_paid,
+                "collected_in_period": round(collected_in_period, 2),
                 "balance_due": outstanding,
             }
         )
-
-    for payment in b2b_payment_records:
-        channels["b2b"]["cash_collected"] += payment["amount"]
-        if payment["date"]:
-            daily[payment["date"]]["cash_collected"] += payment["amount"]
 
     refund_records = []
     retail_cash_refunds = 0.0
@@ -925,10 +948,10 @@ async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSess
         {
             "sheet_name": "B2B Invoices",
             "report_title": "B2B Invoice Detail",
-            "headers": ["Invoice #", "Client", "Date / Time", "User", "Type", "Status", "Total Invoiced", "Amount Paid", "Outstanding"],
-            "rows": [[row["invoice_number"], row["client"], row["datetime"], row["user_name"], row["invoice_type"], row["status"], row["total"], row["amount_paid"], row["balance_due"]] for row in data["b2b_records"]],
+            "headers": ["Invoice #", "Client", "Issued At", "Collected At", "User", "Type", "Status", "Total Invoiced", "Collected In Period", "Lifetime Paid", "Outstanding"],
+            "rows": [[row["invoice_number"], row["client"], row["datetime"], row["collection_datetime"], row["user_name"], row["invoice_type"], row["status"], row["total"], row["collected_in_period"], row["amount_paid"], row["balance_due"]] for row in data["b2b_records"]],
             "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Records", len(data["b2b_records"]))],
-            "column_formats": {"Date / Time": "datetime", "Total Invoiced": "money", "Amount Paid": "money", "Outstanding": "money"},
+            "column_formats": {"Issued At": "datetime", "Collected At": "datetime", "Total Invoiced": "money", "Collected In Period": "money", "Lifetime Paid": "money", "Outstanding": "money"},
             "tab_color": "C55A11",
         },
         {
@@ -4090,24 +4113,25 @@ async function loadSales(){
 
     const typeLabel = {cash:"Cash", full_payment:"Full Payment", consignment:"Consignment"};
     let b2bHtml = `
-        <div class="table-title" style="margin-top:22px">B2B Invoices — ${data.b2b_records.length} invoices</div>
+        <div class="table-title" style="margin-top:22px">B2B Invoices Collected — ${data.b2b_records.length} invoices</div>
         <div class="table-wrap">
-        <table><thead><tr><th>Invoice #</th><th>Client</th><th>Date / Time</th><th>By</th><th>Type</th><th>Items</th><th style="text-align:right">Invoiced</th><th style="text-align:right">Paid</th><th style="text-align:right">Outstanding</th></tr></thead><tbody>`;
+        <table><thead><tr><th>Invoice #</th><th>Client</th><th>Issued</th><th>Collected</th><th>By</th><th>Type</th><th>Items</th><th style="text-align:right">Invoiced</th><th style="text-align:right">Collected</th><th style="text-align:right">Outstanding</th></tr></thead><tbody>`;
     if(data.b2b_records.length){
         b2bHtml += data.b2b_records.map(inv=>`
             <tr>
                 <td class="mono" style="font-size:11px;color:var(--blue)">${inv.invoice_number}</td>
                 <td class="name" style="font-size:13px">${inv.client}</td>
                 <td class="mono" style="font-size:12px;color:var(--muted)">${inv.datetime}</td>
+                <td class="mono" style="font-size:12px;color:var(--green)">${inv.collection_datetime}</td>
                 <td style="font-size:12px;color:var(--muted);white-space:nowrap">${inv.user_name}</td>
                 <td style="font-size:12px">${typeLabel[inv.invoice_type]||inv.invoice_type}</td>
                 <td style="font-size:12px;color:var(--sub)">${inv.items.map(it=>`<span style="display:inline-block;background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:1px 7px;margin:2px;white-space:nowrap">${it.qty%1===0?it.qty.toFixed(0):it.qty.toFixed(2)} × ${it.name} <span style="color:var(--muted)">${it.total.toFixed(2)}</span></span>`).join("")}</td>
                 <td class="mono" style="text-align:right">${inv.total.toFixed(2)}</td>
-                <td class="mono" style="text-align:right;color:var(--green)">${inv.amount_paid.toFixed(2)}</td>
+                <td class="mono" style="text-align:right;color:var(--green)">${inv.collected_in_period.toFixed(2)}</td>
                 <td class="mono" style="text-align:right;color:${inv.balance_due>0?"var(--warn)":"var(--muted)"};font-weight:${inv.balance_due>0?700:400}">${inv.balance_due>0?inv.balance_due.toFixed(2):"—"}</td>
             </tr>`).join("");
     } else {
-        b2bHtml += `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px">No B2B invoices</td></tr>`;
+        b2bHtml += `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:24px">No B2B invoices collected in this period</td></tr>`;
     }
     b2bHtml += `</tbody></table></div>`;
 

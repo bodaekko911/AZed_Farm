@@ -718,7 +718,12 @@ async def collect_b2b_payment(
     if client:
         client.outstanding = Decimal(str(max(0, float(client.outstanding) - amount)))
     # Journal: Cash in, AR out, Deferred → Revenue
-    journal = Journal(ref_type="b2b_collection", description=f"B2B payment collected - {invoice.invoice_number}")
+    journal = Journal(
+        ref_type="b2b_collection",
+        ref_id=invoice.id,
+        description=f"B2B payment collected - {invoice.invoice_number}",
+        user_id=current_user.id,
+    )
     db.add(journal); await db.flush()
     for code, debit, credit in [
         ("1000", amount, 0),
