@@ -31,7 +31,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libpq5 \
+    && apt-get install -y --no-install-recommends libpq5 dos2unix \
     && rm -rf /var/lib/apt/lists/* \
     && addgroup --system appgroup \
     && adduser --system --ingroup appgroup --home /app appuser
@@ -39,11 +39,16 @@ RUN apt-get update \
 COPY --from=builder /opt/venv /opt/venv
 COPY . .
 
-RUN mkdir -p /app/logs /app/app/static/uploads \
+# Defensive: strip any CRLF line endings (Windows-style) from the entrypoint
+# script. This is the single most common cause of "exec: no such file or
+# directory" errors in containerised Python apps.
+RUN dos2unix /app/entrypoint.sh \
+    && chmod +x /app/entrypoint.sh \
+    && mkdir -p /app/logs /app/app/static/uploads \
     && chown -R appuser:appgroup /app
 
 USER appuser
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "python -m alembic upgrade head && gunicorn -c gunicorn.conf.py app.main:app"]
+ENTRYPOINT ["/app/entrypoint.sh"]
