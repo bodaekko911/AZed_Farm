@@ -76,7 +76,13 @@ async def create_farm(name: str, location: str = "", notes: str = "", db: AsyncS
     if not name:
         raise HTTPException(status_code=400, detail="Farm name is required")
     result = await db.execute(select(Farm).where(Farm.name == name))
-    if result.scalar_one_or_none():
+    existing = result.scalar_one_or_none()
+    if existing:
+        if existing.is_active == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"An archived farm named '{name}' already exists. An admin can restore it from the archive instead.",
+            )
         raise HTTPException(status_code=400, detail="A farm with that name already exists")
     f = Farm(name=name, location=location.strip() or None, notes=notes.strip() or None)
     db.add(f)
@@ -87,6 +93,141 @@ async def create_farm(name: str, location: str = "", notes: str = "", db: AsyncS
     except Exception:
         pass
     return {"id": f.id, "name": f.name, "location": f.location or ""}
+
+
+@router.delete("/api/farms/{farm_id}")
+async def delete_farm(
+    farm_id: int,
+    hard: bool = False,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Delete a farm. Admin only.
+
+    Default behavior is a SOFT delete (sets is_active=0) so historical
+    deliveries, weather logs and employee assignments remain intact and
+    auditable. Pass ?hard=true to permanently delete a farm, but only if
+    it has no related records.
+    """
+    result = await db.execute(select(Farm).where(Farm.id == farm_id))
+    farm = result.scalar_one_or_none()
+    if not farm:
+        raise HTTPException(status_code=404, detail="Farm not found")
+
+    # Count related records up front so we can decide / inform the user
+    dlv_cnt = (await db.execute(
+        select(func.count(FarmDelivery.id)).where(FarmDelivery.farm_id == farm_id)
+    )).scalar() or 0
+    wx_cnt = (await db.execute(
+        select(func.count(WeatherLog.id)).where(WeatherLog.farm_id == farm_id)
+    )).scalar() or 0
+
+    farm_name = farm.name
+
+    if hard:
+        # Hard delete only allowed when there's nothing referencing the farm.
+        if dlv_cnt > 0 or wx_cnt > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot hard-delete '{farm_name}' — it has "
+                    f"{dlv_cnt} delivery(ies) and {wx_cnt} weather log(s). "
+                    "Use soft delete (archive) instead."
+                ),
+            )
+        try:
+            record(db, "farm", "delete",
+                   f"Hard-deleted farm: {farm_name}",
+                   user=current_user, ref_type="farm", ref_id=farm_id)
+        except Exception:
+            pass
+        await db.delete(farm)
+        await db.commit()
+        return {"ok": True, "mode": "hard", "name": farm_name}
+
+    # Soft delete (default): hide from active lists, keep history.
+    if farm.is_active == 0:
+        raise HTTPException(status_code=400, detail="Farm is already archived")
+    farm.is_active = 0
+    try:
+        record(db, "farm", "archive",
+               f"Archived farm: {farm_name} ({dlv_cnt} deliveries, {wx_cnt} weather logs preserved)",
+               user=current_user, ref_type="farm", ref_id=farm_id)
+    except Exception:
+        pass
+    await db.commit()
+    return {
+        "ok": True,
+        "mode": "soft",
+        "name": farm_name,
+        "preserved": {"deliveries": dlv_cnt, "weather_logs": wx_cnt},
+    }
+
+
+@router.get("/api/farms/archived")
+async def get_archived_farms(
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(require_admin),
+):
+    """List soft-deleted (archived) farms. Admin only."""
+    result = await db.execute(
+        select(Farm).where(Farm.is_active == 0).order_by(Farm.name)
+    )
+    farms = result.scalars().all()
+    out = []
+    for f in farms:
+        dlv_cnt = (await db.execute(
+            select(func.count(FarmDelivery.id)).where(FarmDelivery.farm_id == f.id)
+        )).scalar() or 0
+        wx_cnt = (await db.execute(
+            select(func.count(WeatherLog.id)).where(WeatherLog.farm_id == f.id)
+        )).scalar() or 0
+        out.append({
+            "id":             f.id,
+            "name":           f.name,
+            "location":       f.location or "—",
+            "notes":          f.notes or "",
+            "delivery_count": dlv_cnt,
+            "weather_count":  wx_cnt,
+            "created_at":     f.created_at.isoformat() if f.created_at else None,
+        })
+    return out
+
+
+@router.post("/api/farms/{farm_id}/restore")
+async def restore_farm(
+    farm_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(require_admin),
+):
+    """Restore an archived farm (sets is_active=1). Admin only."""
+    result = await db.execute(select(Farm).where(Farm.id == farm_id))
+    farm = result.scalar_one_or_none()
+    if not farm:
+        raise HTTPException(status_code=404, detail="Farm not found")
+    if farm.is_active == 1:
+        raise HTTPException(status_code=400, detail="Farm is already active")
+
+    # If another ACTIVE farm now uses this name, block the restore.
+    name_clash = await db.execute(
+        select(Farm).where(Farm.name == farm.name, Farm.is_active == 1, Farm.id != farm.id)
+    )
+    if name_clash.scalar_one_or_none():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot restore — an active farm already uses the name '{farm.name}'. Rename the active farm first.",
+        )
+
+    farm.is_active = 1
+    try:
+        record(db, "farm", "restore",
+               f"Restored farm: {farm.name}",
+               user=current_user, ref_type="farm", ref_id=farm_id)
+    except Exception:
+        pass
+    await db.commit()
+    return {"ok": True, "id": farm.id, "name": farm.name}
 
 
 # ── DELIVERY API ───────────────────────────────────────
@@ -456,6 +597,13 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;pa
 .farm-stat{display:flex;justify-content:space-between;font-size:12px;padding:6px 0;border-top:1px solid var(--border);}
 .farm-stat-label{color:var(--muted);}
 .farm-stat-val{font-family:var(--mono);color:var(--green);font-weight:700;}
+.farm-del-btn{position:absolute;top:10px;right:10px;width:26px;height:26px;border-radius:50%;border:1px solid var(--border);background:var(--card2);color:var(--muted);font-size:16px;font-weight:700;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;font-family:var(--sans);padding:0;z-index:2;}
+.farm-del-btn:hover{border-color:var(--danger);color:var(--danger);background:rgba(255,77,109,.08);transform:scale(1.08);}
+.arch-row{display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--card2);border:1px solid var(--border);border-radius:10px;flex-wrap:wrap;}
+.arch-row .arch-info{flex:1;min-width:200px;}
+.arch-row .arch-name{font-size:14px;font-weight:700;color:var(--text);}
+.arch-row .arch-meta{font-size:11px;color:var(--muted);margin-top:3px;font-family:var(--mono);}
+.arch-row .arch-actions{display:flex;gap:6px;}
 .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;}
 .stat-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:16px 18px;display:flex;flex-direction:column;gap:6px;position:relative;overflow:hidden;}
 .stat-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;}
@@ -570,7 +718,10 @@ td.name{color:var(--text);font-weight:600;}
 
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:8px;">
         <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);">Your Farms</div>
-        <button class="btn btn-lime" id="btn-add-farm" onclick="openAddFarmModal()" style="font-size:12px;padding:7px 14px;">+ Add Farm</button>
+        <div style="display:flex;align-items:center;gap:10px;">
+            <button id="btn-view-archived" onclick="openArchivedModal()" style="display:none;background:transparent;border:1px solid var(--border2);color:var(--sub);font-family:var(--sans);font-size:12px;font-weight:600;padding:6px 12px;border-radius:7px;cursor:pointer;transition:all .15s;">🗄️ Archived</button>
+            <button class="btn btn-lime" id="btn-add-farm" onclick="openAddFarmModal()" style="font-size:12px;padding:7px 14px;">+ Add Farm</button>
+        </div>
     </div>
     <div class="farms-row" id="farms-row">
         <div style="color:var(--muted);padding:20px">Loading farms...</div>
@@ -744,6 +895,20 @@ td.name{color:var(--text);font-weight:600;}
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeAddFarmModal()">Cancel</button>
             <button class="btn btn-lime" id="af-save-btn" onclick="saveNewFarm()">✓ Create Farm</button>
+        </div>
+    </div>
+</div>
+
+<!-- ARCHIVED FARMS MODAL (admin only) -->
+<div class="modal-bg" id="archived-farms-modal">
+    <div class="modal" style="width:680px">
+        <div class="modal-title">🗄️ Archived Farms</div>
+        <div class="modal-sub">Soft-deleted farms. Restore brings them back to active lists. Permanent delete is only available for farms with no history.</div>
+        <div id="archived-farms-list" style="display:flex;flex-direction:column;gap:10px;max-height:50vh;overflow-y:auto;">
+            <div style="color:var(--muted);padding:14px;text-align:center;">Loading archived farms…</div>
+        </div>
+        <div class="modal-actions" style="margin-top:20px;">
+            <button class="btn-cancel" onclick="closeArchivedModal()">Close</button>
         </div>
     </div>
 </div>
@@ -949,6 +1114,9 @@ function configureFarmPermissions(u){
     if(!hasPermission("action_farm_delivery_create", u)) document.getElementById("btn-add-delivery").style.display = "none";
     if(!hasPermission("action_farm_weather_log", u)) document.getElementById("btn-add-weather").style.display = "none";
     if(!hasPermission("action_farm_create", u)) { let b = document.getElementById("btn-add-farm"); if(b) b.style.display = "none"; }
+    // Archived farms view is admin-only
+    let archBtn = document.getElementById("btn-view-archived");
+    if(archBtn) archBtn.style.display = isAdmin ? "inline-block" : "none";
     if(firstAvailable) switchTab(firstAvailable);
 }
 
@@ -1014,6 +1182,7 @@ function getFarmOptClass(i){ return FARM_OPT_CLS[i % FARM_OPT_CLS.length]; }
 function renderFarmCards(){
     document.getElementById("farms-row").innerHTML = allFarms.map((f,i)=>`
         <div class="farm-card" onclick="filterByFarm(${f.id})">
+            ${isAdmin ? `<button class="farm-del-btn" title="Delete farm (admin)" onclick="event.stopPropagation();deleteFarm(${f.id}, ${JSON.stringify(f.name)}, ${f.delivery_count})">×</button>` : ``}
             <div class="farm-name">${getFarmIcon(i)} ${f.name}</div>
             <div class="farm-loc">${f.location || "—"}</div>
             <div class="farm-stat">
@@ -1406,6 +1575,9 @@ document.getElementById("weather-modal").addEventListener("click",function(e){
 document.getElementById("add-farm-modal").addEventListener("click",function(e){
     if(e.target===this) closeAddFarmModal();
 });
+document.getElementById("archived-farms-modal").addEventListener("click",function(e){
+    if(e.target===this) closeArchivedModal();
+});
 
 /* ── ADD FARM ── */
 function openAddFarmModal(){
@@ -1451,6 +1623,152 @@ async function saveNewFarm(){
     } finally {
         btn.disabled  = false;
         btn.innerText = "✓ Create Farm";
+    }
+}
+
+/* ── DELETE FARM (admin only) ── */
+async function deleteFarm(id, name, deliveryCount){
+    if(!isAdmin){ showToast("Admin access required"); return; }
+
+    let msg;
+    if(deliveryCount > 0){
+        msg = `Archive "${name}"?\n\nThis farm has ${deliveryCount} delivery(ies). ` +
+              `It will be hidden from active lists but all history (deliveries, weather logs, stock) will be preserved.`;
+    } else {
+        msg = `Delete "${name}"?\n\nThis farm has no deliveries and will be permanently removed.`;
+    }
+    if(!confirm(msg)) return;
+
+    try {
+        // If there's no history, do a hard delete; otherwise soft delete (archive).
+        let url = `/farm/api/farms/${id}` + (deliveryCount > 0 ? "" : "?hard=true");
+        let res  = await fetch(url, {method:"DELETE"});
+        let data = await res.json();
+        if(!res.ok || data.detail){
+            showToast("Error: " + (data.detail || `Failed (${res.status})`));
+            return;
+        }
+
+        if(data.mode === "soft"){
+            showToast(`${name} archived ✓ — history preserved`);
+        } else {
+            showToast(`${name} deleted ✓`);
+        }
+
+        // Refresh everything that lists farms
+        allFarms = await (await fetch("/farm/api/farms")).json();
+        renderFarmCards();
+        fillFarmFilter();
+        if(typeof fillWeatherFarmFilter === "function") fillWeatherFarmFilter();
+        if(typeof fillSeasonFarmSelect === "function") fillSeasonFarmSelect();
+        // If the filter was set to the deleted farm, reset it
+        let curFilter = document.getElementById("farm-filter");
+        if(curFilter && String(curFilter.value) === String(id)){
+            curFilter.value = "";
+            deliveryPage = 0;
+            loadDeliveries();
+        }
+        await loadStats();
+    } catch(err) {
+        showToast("Error: " + err.message);
+    }
+}
+
+/* ── ARCHIVED FARMS (admin only) ── */
+function escapeHtml(s){
+    return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function openArchivedModal(){
+    if(!isAdmin){ showToast("Admin access required"); return; }
+    document.getElementById("archived-farms-modal").classList.add("open");
+    loadArchivedFarms();
+}
+
+function closeArchivedModal(){
+    document.getElementById("archived-farms-modal").classList.remove("open");
+}
+
+async function loadArchivedFarms(){
+    let list = document.getElementById("archived-farms-list");
+    list.innerHTML = `<div style="color:var(--muted);padding:14px;text-align:center;">Loading archived farms…</div>`;
+    try {
+        let res  = await fetch("/farm/api/farms/archived");
+        if(!res.ok){
+            let data = await res.json().catch(()=>({}));
+            list.innerHTML = `<div style="color:var(--danger);padding:14px;text-align:center;">Error: ${escapeHtml(data.detail || ("Failed ("+res.status+")"))}</div>`;
+            return;
+        }
+        let farms = await res.json();
+        if(!farms.length){
+            list.innerHTML = `<div style="color:var(--muted);padding:20px;text-align:center;">No archived farms.</div>`;
+            return;
+        }
+        list.innerHTML = farms.map(f => {
+            let canHardDelete = (f.delivery_count === 0 && f.weather_count === 0);
+            let nameJs = JSON.stringify(f.name);
+            return `
+                <div class="arch-row">
+                    <div class="arch-info">
+                        <div class="arch-name">🌾 ${escapeHtml(f.name)}</div>
+                        <div class="arch-meta">${escapeHtml(f.location || "—")} • ${f.delivery_count} deliveries • ${f.weather_count} weather logs</div>
+                    </div>
+                    <div class="arch-actions">
+                        <button class="action-btn" onclick="restoreFarm(${f.id}, ${nameJs})">↺ Restore</button>
+                        ${canHardDelete
+                            ? `<button class="action-btn danger" onclick="hardDeleteFarm(${f.id}, ${nameJs})">Delete forever</button>`
+                            : `<button class="action-btn" disabled style="opacity:.4;cursor:not-allowed;" title="Has history — cannot be permanently deleted">Has history</button>`}
+                    </div>
+                </div>
+            `;
+        }).join("");
+    } catch(err){
+        list.innerHTML = `<div style="color:var(--danger);padding:14px;text-align:center;">Error: ${escapeHtml(err.message)}</div>`;
+    }
+}
+
+async function restoreFarm(id, name){
+    if(!isAdmin){ showToast("Admin access required"); return; }
+    if(!confirm(`Restore "${name}"?\n\nIt will reappear in all active farm lists and dropdowns.`)) return;
+    try {
+        let res  = await fetch(`/farm/api/farms/${id}/restore`, {method:"POST"});
+        let data = await res.json();
+        if(!res.ok || data.detail){
+            showToast("Error: " + (data.detail || `Failed (${res.status})`));
+            return;
+        }
+        showToast(`${name} restored ✓`);
+
+        // Refresh the active farms list + dropdowns + stats, and the archived list inside the modal
+        allFarms = await (await fetch("/farm/api/farms")).json();
+        renderFarmCards();
+        fillFarmFilter();
+        if(typeof fillWeatherFarmFilter === "function") fillWeatherFarmFilter();
+        if(typeof fillSeasonFarmSelect === "function") fillSeasonFarmSelect();
+        await loadStats();
+        loadArchivedFarms();
+    } catch(err){
+        showToast("Error: " + err.message);
+    }
+}
+
+async function hardDeleteFarm(id, name){
+    if(!isAdmin){ showToast("Admin access required"); return; }
+    if(!confirm(`Permanently delete "${name}"?\n\nThis cannot be undone. (Allowed only because the farm has no deliveries or weather logs.)`)) return;
+    try {
+        let res  = await fetch(`/farm/api/farms/${id}?hard=true`, {method:"DELETE"});
+        let data = await res.json();
+        if(!res.ok || data.detail){
+            showToast("Error: " + (data.detail || `Failed (${res.status})`));
+            return;
+        }
+        showToast(`${name} permanently deleted ✓`);
+        loadArchivedFarms();
+        await loadStats();
+    } catch(err){
+        showToast("Error: " + err.message);
     }
 }
 
