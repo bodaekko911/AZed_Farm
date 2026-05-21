@@ -134,6 +134,29 @@ async def get_expense_cost_allocation(
     return await get_cost_allocation(db, farm_id=farm_id, date_from=date_from, date_to=date_to)
 
 
+@router.get("/api/farms")
+async def list_farms_for_expense_allocation(db: AsyncSession = Depends(get_async_session)):
+    """Active farms for the expense form's cost-allocation dropdown.
+
+    Proxied here (gated by page_expenses at the router level) so users
+    who can manage expenses don't also need page_farm just to load the
+    picker — avoids spurious PERMISSION_DENIED audit entries.
+    """
+    from sqlalchemy import select
+    from app.models.farm import Farm
+    result = await db.execute(
+        select(Farm).where(Farm.is_active == 1).order_by(Farm.name)
+    )
+    return [
+        {
+            "id":       f.id,
+            "name":     f.name,
+            "location": f.location or "",
+        }
+        for f in result.scalars().all()
+    ]
+
+
 @router.get("/", response_class=HTMLResponse)
 def expenses_ui(current_user: User = Depends(require_permission("page_expenses"))):
     return legacy_expenses_ui(current_user)

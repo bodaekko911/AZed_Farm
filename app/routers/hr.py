@@ -659,6 +659,27 @@ async def _diagnose_employees(db: AsyncSession = Depends(get_async_session)):
         "build_marker":           "diag-v2-2026-05-18",
     }
 
+
+@router.get("/api/farms")
+async def list_farms_for_employee_assignment(db: AsyncSession = Depends(get_async_session)):
+    """Active farms for the HR employee form's "assigned farm" dropdown.
+
+    Proxied here (gated only by page_hr at the router level) so HR users
+    don't also need page_farm just to load the picker.
+    """
+    result = await db.execute(
+        select(Farm).where(Farm.is_active == 1).order_by(Farm.name)
+    )
+    return [
+        {
+            "id":       f.id,
+            "name":     f.name,
+            "location": f.location or "",
+        }
+        for f in result.scalars().all()
+    ]
+
+
 @router.post("/api/employees", dependencies=[Depends(require_permission("action_hr_manage_employees"))])
 async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     hire = _parse_optional_iso_date(data.hire_date, "hire_date")
@@ -2559,7 +2580,7 @@ async function saveEmployee(){
 async function loadEmployeeFarms(){
     const errorBox = document.getElementById("farm-load-error");
     try{
-        let res = await fetch("/farm/api/farms");
+        let res = await fetch("/hr/api/farms");
         if(!res.ok) throw new Error(`Farm API returned ${res.status}`);
         let data = await res.json();
         if(!Array.isArray(data)) throw new Error("Farm API returned an unexpected response");

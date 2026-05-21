@@ -592,6 +592,85 @@ async def list_farms_for_picker(db: AsyncSession = Depends(get_async_session)):
     return {"items": [{"id": f.id, "name": f.name} for f in rows]}
 
 
+@router.get("/api/locations")
+async def list_locations_for_picker(db: AsyncSession = Depends(get_async_session)):
+    """Active storage locations for the animals feeding form.
+
+    Proxied here so users with page_animals don't also need page_inventory
+    just to load the location picker when recording a feeding event.
+    """
+    rows = (await db.execute(
+        select(StockLocation)
+        .where(StockLocation.is_active == True)
+        .order_by(StockLocation.name)
+    )).scalars().all()
+    return {"items": [{"id": loc.id, "name": loc.name, "code": loc.code or ""} for loc in rows]}
+
+
+@router.get("/api/products")
+async def list_products_for_picker(
+    q: str = "",
+    limit: int = 2000,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Stock-tracked products (feed) for the animals feeding form picker.
+
+    Proxied here so users with page_animals don't also need page_inventory.
+    Returns only the fields the picker actually needs.
+    """
+    from app.models.product import Product
+    from app.core.product_types import stock_tracked_product_condition
+    from sqlalchemy import or_ as _or
+    stmt = select(Product).where(
+        _or(Product.is_active.is_(True), Product.is_active.is_(None)),
+        stock_tracked_product_condition(Product),
+    )
+    if q:
+        stmt = stmt.where(Product.name.ilike(f"%{q}%") | Product.sku.ilike(f"%{q}%"))
+    rows = (await db.execute(stmt.order_by(Product.name).limit(limit))).scalars().all()
+    return {
+        "items": [
+            {
+                "id":    p.id,
+                "sku":   p.sku,
+                "name":  p.name,
+                "unit":  p.unit,
+                "stock": float(p.stock or 0),
+            }
+            for p in rows
+        ],
+    }
+
+
+@router.get("/api/location-stock")
+async def location_stock_for_picker(
+    product_id: int,
+    location_id: int,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Per-location stock lookup for the animals feeding form hint.
+
+    Proxied here so users with page_animals don't also need page_inventory
+    when checking available feed quantity at the selected storage.
+    """
+    from app.models.inventory import LocationStock
+    row = (await db.execute(
+        select(LocationStock).where(
+            LocationStock.product_id == product_id,
+            LocationStock.location_id == location_id,
+        )
+    )).scalar_one_or_none()
+    qty = float(row.qty or 0) if row else 0.0
+    return {
+        "items": [
+            {
+                "product_id": product_id,
+                "locations": [{"location_id": location_id, "qty": qty}],
+            }
+        ],
+    }
+
+
 # ── Cost Analyze API ────────────────────────────────────────────────
 
 @router.get(
@@ -1215,7 +1294,7 @@ async function loadFarmsAndLocations(){{
     try {{
         const [fr, lr] = await Promise.all([
             fetch("/animals/api/farms"),
-            fetch("/inventory/api/locations"),
+            fetch("/animals/api/locations"),
         ]);
         if (fr.ok) {{
             const d = await fr.json();
@@ -1230,7 +1309,7 @@ async function loadFarmsAndLocations(){{
 
 async function loadProducts(){{
     try {{
-        const r = await fetch("/inventory/api/stock?limit=2000");
+        const r = await fetch("/animals/api/products?limit=2000");
         if (r.ok) {{
             const d = await r.json();
             _products = (d && d.items) ? d.items : [];
@@ -1670,7 +1749,7 @@ async function updateStockHint(){{
     const hint = document.getElementById("fm-stock-hint");
     if (!pid || !lid) {{ hint.textContent = ""; return; }}
     try {{
-        const r = await fetch(`/inventory/api/location-stock?product_id=${{pid}}&location_id=${{lid}}`);
+        const r = await fetch(`/animals/api/location-stock?product_id=${{pid}}&location_id=${{lid}}`);
         if (r.ok) {{
             const d = await r.json();
             const items = (d && d.items) ? d.items : [];
