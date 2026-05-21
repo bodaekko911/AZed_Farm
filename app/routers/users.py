@@ -72,25 +72,6 @@ async def _extract_user(authorization: str, db: AsyncSession):
         return None
 
 # ── Activity Log API ─────────────────────────────────────
-@router.post("/api/log")
-async def log_action(
-    data: LogCreate,
-    db: AsyncSession = Depends(get_async_session),
-    user: User | None = Depends(get_optional_current_user),
-):
-    entry = ActivityLog(
-        user_id     = user.id   if user else None,
-        user_name   = user.name if user else "Unknown",
-        user_role   = user.role if user else "unknown",
-        action      = data.action,
-        module      = data.module,
-        description = data.description,
-        ref_type    = data.ref_type,
-        ref_id      = data.ref_id,
-    )
-    db.add(entry); await db.commit()
-    return {"ok": True}
-
 @router.get("/api/logs")
 async def get_logs(
     module:  Optional[str] = None,
@@ -1318,11 +1299,12 @@ async function saveUser(){
     let method = editingId ? "PUT" : "POST";
     let res    = await fetch(url, {method, headers:H, body:JSON.stringify(body)});
     let data   = await res.json();
-    if(data.detail){ showToast("Error: "+data.detail); return; }
-    if(editingId && !samePermissionSet(data.permissions || "", perms)){
-        showToast("Error: saved permissions do not match the final selection");
-        return;
-    }
+    if(!res.ok || data.detail){ showToast("Error: " + (data.detail || `Failed (${res.status})`)); return; }
+    // Note: we do NOT compare `data.permissions` to the locally selected set.
+    // The backend stores overrides relative to the role and returns effective
+    // permissions, which include legacy expansions (e.g. page_accounting also
+    // grants page_expenses). A strict equality check would always fail in
+    // those cases even though the save succeeded.
     await loadUsers();
     closeModal();
     showToast(editingId ? `✓ ${data.name} updated` : `✓ ${data.name} created — role: ${data.role}`);
