@@ -2248,30 +2248,7 @@
   }
 
   function firstAllowedPage(data) {
-    const permissions = new Set(
-      String(data.permissions || '').split(',').map(v => v.trim()).filter(Boolean)
-    );
-    const pages = [
-      ['/dashboard',       'page_dashboard'],
-      ['/pos',             'page_pos'],
-      ['/farm/',           'page_farm'],
-      ['/production/',     'page_production'],
-      ['/inventory/',      'page_inventory'],
-      ['/products/',       'page_products'],
-      ['/customers-mgmt/', 'page_customers'],
-      ['/suppliers/',      'page_suppliers'],
-      ['/receive/',        'page_receive_products'],
-      ['/import',          'page_import'],
-      ['/reports/',        'page_reports'],
-      ['/b2b/',            'page_b2b'],
-      ['/hr/',             'page_hr'],
-      ['/accounting/',     'page_accounting'],
-      ['/expenses/',       'page_expenses'],
-      ['/carbon/',         'page_carbon']
-    ];
-    if (data.role === 'admin') return '/dashboard';
-    const match = pages.find(p => permissions.has(p[1]));
-    return match ? match[0] : '/home';
+    return '/home';
   }
 
   function showSigninError(msg) {
@@ -2335,9 +2312,7 @@
 
       btn.innerHTML = '\u2713 Redirecting\u2026';
       btn.style.opacity = '1';
-      const next = new URLSearchParams(window.location.search).get('next');
-      const dest = (next && next.startsWith('/') && !next.startsWith('//')) ? next : firstAllowedPage(data);
-      window.location.href = dest;
+      window.location.href = firstAllowedPage(data);
 
     } catch (_) {
       showSigninError('Connection error. Please try again.');

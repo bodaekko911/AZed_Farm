@@ -76,41 +76,7 @@
   }
 
   function firstAllowedPage(data) {
-    var permissions = new Set(
-      String(data.permissions || "")
-        .split(",")
-        .map(function (value) {
-          return value.trim();
-        })
-        .filter(Boolean)
-    );
-
-    var pages = [
-      ["/dashboard", "page_dashboard"],
-      ["/pos", "page_pos"],
-      ["/farm/", "page_farm"],
-      ["/production/", "page_production"],
-      ["/inventory/", "page_inventory"],
-      ["/products/", "page_products"],
-      ["/customers-mgmt/", "page_customers"],
-      ["/suppliers/", "page_suppliers"],
-      ["/receive/", "page_receive_products"],
-      ["/import", "page_import"],
-      ["/reports/", "page_reports"],
-      ["/b2b/", "page_b2b"],
-      ["/hr/", "page_hr"],
-      ["/accounting/", "page_accounting"],
-      ["/expenses/", "page_expenses"],
-      ["/carbon/", "page_carbon"]
-    ];
-
-    if (data.role === "admin") return "/dashboard";
-
-    var match = pages.find(function (page) {
-      return permissions.has(page[1]);
-    });
-
-    return match ? match[0] : "/home";
+    return "/home";
   }
 
   function enhanceAnchorScrolling() {
@@ -295,8 +261,7 @@
             return;
           }
 
-          var next = new URLSearchParams(window.location.search).get("next");
-          window.location.href = safeUrl(next) ? next : firstAllowedPage(data);
+          window.location.href = firstAllowedPage(data);
         } catch (_) {
           setNotice(errorEl, "Connection error. Please try again.");
 
