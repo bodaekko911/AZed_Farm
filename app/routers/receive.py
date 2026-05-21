@@ -123,6 +123,52 @@ async def get_expense_categories(db: AsyncSession = Depends(get_async_session)):
     ]
 
 
+@router.get("/api/locations")
+async def get_locations_list(db: AsyncSession = Depends(get_async_session)):
+    """Active storage locations for the receive form's destination dropdown.
+
+    Proxied here (gated only by page_receive_products) so users who can
+    receive stock don't also need page_inventory just to load the picker.
+    """
+    from app.models.inventory import StockLocation
+    result = await db.execute(
+        select(StockLocation)
+        .where(StockLocation.is_active == True)
+        .order_by(StockLocation.name)
+    )
+    return {
+        "items": [
+            {
+                "id":   loc.id,
+                "name": loc.name,
+                "code": loc.code or "",
+            }
+            for loc in result.scalars().all()
+        ],
+    }
+
+
+@router.get("/api/farms")
+async def get_farms_list(db: AsyncSession = Depends(get_async_session)):
+    """Active farms for the receive form's cost-allocation dropdown.
+
+    Proxied here (gated only by page_receive_products) so users who can
+    receive stock don't also need page_farm just to load the picker.
+    """
+    from app.models.farm import Farm
+    result = await db.execute(
+        select(Farm).where(Farm.is_active == 1).order_by(Farm.name)
+    )
+    return [
+        {
+            "id":       f.id,
+            "name":     f.name,
+            "location": f.location or "",
+        }
+        for f in result.scalars().all()
+    ]
+
+
 @router.post("/api/receive-batch", status_code=201)
 async def receive_products_batch(
     data: BatchReceiptCreate,
@@ -739,42 +785,63 @@ let _locations = [];
 let _farms = [];
 
 async function loadFarms() {
+  let failed = false;
   try {
-    const r = await fetch('/farm/api/farms');
+    const r = await fetch('/receive/api/farms');
     if (r.ok) {
       const data = await r.json();
       _farms = Array.isArray(data) ? data : (data && data.items) ? data.items : [];
     } else {
       _farms = [];
+      failed = true;
     }
-  } catch (_) { _farms = []; }
+  } catch (_) { _farms = []; failed = true; }
   if (_fpickers.farm) {
-    _fpickers.farm.setOptions([
-      { value: '',           label: 'General expense', emoji: '🏷️', meta: 'no allocation' },
-      ..._farms.map(f => ({
-        value: String(f.id),
-        label: f.name || ('Farm #' + f.id),
-        emoji: '🌾',
-        meta: f.location || '',
-      })),
-      { value: '__animals__', label: 'Animals',        emoji: '🐾', meta: 'animal bucket' },
-    ]);
+    if (failed) {
+      // Surface failure instead of letting the picker stay at its initial label.
+      _fpickers.farm.setOptions([
+        { value: '',           label: 'General expense', emoji: '🏷️', meta: 'no allocation' },
+        { value: '__animals__', label: 'Animals',        emoji: '🐾', meta: 'animal bucket' },
+      ]);
+    } else {
+      _fpickers.farm.setOptions([
+        { value: '',           label: 'General expense', emoji: '🏷️', meta: 'no allocation' },
+        ..._farms.map(f => ({
+          value: String(f.id),
+          label: f.name || ('Farm #' + f.id),
+          emoji: '🌾',
+          meta: f.location || '',
+        })),
+        { value: '__animals__', label: 'Animals',        emoji: '🐾', meta: 'animal bucket' },
+      ]);
+    }
   }
 }
 
 async function loadLocations() {
+  let failed = false;
   try {
-    const r = await fetch('/inventory/api/locations');
+    const r = await fetch('/receive/api/locations');
     if (r.ok) {
       const data = await r.json();
       _locations = (data && data.items) ? data.items : (Array.isArray(data) ? data : []);
     } else {
       _locations = [];
+      failed = true;
     }
-  } catch (_) { _locations = []; }
+  } catch (_) { _locations = []; failed = true; }
   if (_fpickers.location) {
-    if (!_locations.length) {
+    if (failed) {
+      // Don't leave the picker stuck on "Loading storages…" — give the user
+      // a clear failure state with no options.
       _fpickers.location.setOptions([]);
+      _fpickers.location.placeholder = 'Could not load storages — refresh to retry';
+      _fpickers.location.setValue('');
+      showToast('Could not load storages. Refresh the page to retry.', 'err');
+    } else if (!_locations.length) {
+      _fpickers.location.setOptions([]);
+      _fpickers.location.placeholder = 'No storages defined — ask an admin to create one';
+      _fpickers.location.setValue('');
     } else {
       _fpickers.location.setOptions(_locations.map(l => ({
         value: String(l.id),
