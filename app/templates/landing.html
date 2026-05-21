@@ -473,6 +473,9 @@
   .ops-module.soil::before { background: var(--soil-mid); }
   .ops-module.leaf-light::before { background: var(--leaf-light); }
   .ops-module.harvest-light::before { background: var(--harvest-light); }
+  .ops-module.terracotta::before { background: #B85C3F; }
+  .ops-module.plum::before { background: #7A4A6E; }
+  .ops-module.slate::before { background: #4A5A6A; }
 
   .ops-module-icon {
     width: 44px; height: 44px; border-radius: 10px;
@@ -486,6 +489,9 @@
   .bg-soil { background: var(--cream-dark); }
   .bg-pink { background: #FDE8F0; }
   .bg-teal { background: #DCF5EE; }
+  .bg-terracotta { background: #FBE4DA; }
+  .bg-plum { background: #F2E0EC; }
+  .bg-slate { background: #E2E8EE; }
 
   .ops-module h3 {
     font-size: 16px; font-weight: 500; color: var(--soil);
@@ -606,57 +612,6 @@
   .bar.highlight { background: var(--leaf); }
 
   .bar-lbl { font-size: 10px; color: var(--text-light); }
-
-  /* ── TESTIMONIALS / PROOF ───────────────────────────── */
-  .proof-section { background: var(--soil); padding: 80px 48px; }
-
-  .proof-header { text-align: center; margin-bottom: 56px; }
-
-  .proof-eyebrow {
-    display: inline-flex; align-items: center; gap: 8px;
-    font-size: 11px; font-weight: 500; letter-spacing: 0.1em;
-    text-transform: uppercase; color: var(--leaf-light);
-    margin-bottom: 14px;
-  }
-
-  .proof-eyebrow::before {
-    content: '';
-    display: block; width: 24px; height: 2px; background: var(--leaf-light);
-  }
-
-  .proof-title {
-    font-family: 'Playfair Display', serif;
-    font-size: 36px; font-weight: 700; color: var(--cream);
-  }
-
-  .proof-cards {
-    display: grid; grid-template-columns: repeat(3, 1fr);
-    gap: 24px;
-  }
-
-  .proof-card {
-    background: rgba(245,240,232,0.06);
-    border: 1px solid rgba(245,240,232,0.12);
-    border-radius: 14px; padding: 28px;
-  }
-
-  .proof-quote {
-    font-size: 15px; line-height: 1.7; color: rgba(245,240,232,0.85);
-    font-weight: 300; font-style: italic;
-    margin-bottom: 20px;
-  }
-
-  .proof-author { display: flex; align-items: center; gap: 12px; }
-
-  .proof-avatar {
-    width: 40px; height: 40px; border-radius: 50%;
-    background: var(--leaf); display: flex; align-items: center; justify-content: center;
-    font-family: 'Playfair Display', serif;
-    font-size: 14px; font-weight: 700; color: var(--cream);
-  }
-
-  .proof-name { font-size: 14px; font-weight: 500; color: var(--cream); }
-  .proof-role { font-size: 12px; color: var(--soil-light); font-weight: 300; }
 
   /* ── CTA BANNER ─────────────────────────────────────── */
   .cta-section {
@@ -875,101 +830,6 @@
     font-size: 14px; line-height: 1.6; color: var(--leaf);
   }
 
-  /* ── AI ASSISTANT ────────────────────────────────────── */
-  .ai-section { background: var(--soil); padding: 96px 48px; }
-
-  .ai-inner {
-    display: grid; grid-template-columns: 1fr 1fr;
-    gap: 80px; align-items: center;
-  }
-
-  .ai-chips { display: flex; flex-direction: column; gap: 10px; }
-
-  .ai-chip {
-    background: rgba(245,240,232,0.07);
-    border: 1px solid rgba(245,240,232,0.15);
-    border-radius: 8px; padding: 12px 16px;
-    font-size: 14px; color: rgba(245,240,232,0.7);
-    font-style: italic; font-weight: 300;
-    cursor: default;
-    transition: background 0.2s, border-color 0.2s;
-  }
-
-  .ai-chip:hover {
-    background: rgba(245,240,232,0.12);
-    border-color: rgba(124,191,114,0.4);
-    color: rgba(245,240,232,0.9);
-  }
-
-  .chat-mock {
-    background: var(--cream); border-radius: 16px;
-    overflow: hidden;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.25);
-  }
-
-  .chat-header {
-    background: var(--text-dark); padding: 12px 16px;
-    display: flex; align-items: center; gap: 6px;
-  }
-
-  .chat-dot { width: 10px; height: 10px; border-radius: 50%; }
-
-  .chat-title {
-    font-size: 12px; color: rgba(245,240,232,0.5);
-    margin-left: 8px; font-weight: 300;
-  }
-
-  .chat-body { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
-
-  .chat-msg { font-size: 13px; line-height: 1.6; }
-
-  .user-msg {
-    align-self: flex-end;
-    background: var(--leaf);
-    color: var(--cream);
-    padding: 10px 14px; border-radius: 14px 14px 4px 14px;
-    max-width: 85%; font-weight: 400;
-  }
-
-  .bot-msg {
-    display: flex; gap: 10px; align-items: flex-start;
-  }
-
-  .bot-icon {
-    width: 28px; height: 28px; border-radius: 50%;
-    background: var(--harvest); color: var(--cream);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 12px; font-weight: 700; flex-shrink: 0;
-  }
-
-  .bot-bubble {
-    background: var(--white); color: var(--text-mid);
-    padding: 12px 16px; border-radius: 4px 14px 14px 14px;
-    font-size: 13px; line-height: 1.65; font-weight: 300;
-    border: 1px solid var(--cream-dark);
-  }
-
-  .bot-bubble strong { font-weight: 500; color: var(--soil); }
-
-  .chat-input-row {
-    display: flex; align-items: center; gap: 8px;
-    background: var(--white); border-radius: 8px;
-    border: 1px solid var(--cream-dark);
-    padding: 10px 14px; margin-top: 4px;
-  }
-
-  .chat-input-mock {
-    flex: 1; font-size: 13px; color: var(--text-light);
-    font-weight: 300; font-style: italic;
-  }
-
-  .chat-send {
-    width: 28px; height: 28px; border-radius: 6px;
-    background: var(--leaf); color: var(--cream);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 14px; cursor: pointer;
-  }
-
   /* ── SCROLL PROGRESS BAR ─────────────────────────────── */
   .scroll-progress {
     position: fixed; top: 0; left: 0; z-index: 200;
@@ -1059,10 +919,7 @@
   body.dark .faq-item,
   body.dark .ba-table,
   body.dark .dash-body,
-  body.dark .chat-mock,
-  body.dark .proof-card,
-  body.dark .fake-spreadsheet,
-  body.dark .bot-bubble { background: #2a2a2a; border-color: #333; }
+  body.dark .fake-spreadsheet { background: #2a2a2a; border-color: #333; }
 
   body.dark .challenge-illustration,
   body.dark .dashboard-mock { background: #1e1e1e; }
@@ -1084,10 +941,6 @@
   body.dark .dash-top { background: #111; }
   body.dark .dash-metric { background: #1e1e1e; }
   body.dark .dash-chart-row { background: #1e1e1e; }
-
-  body.dark .chat-header { background: #111; }
-  body.dark .chat-input-row { background: #2a2a2a; border-color: #444; }
-  body.dark .user-msg { background: var(--leaf); }
 
   body.dark .faq-item.active,
   body.dark .challenge-card.active { background: #1a2e1a; }
@@ -1461,12 +1314,6 @@
       gap: 24px;
     }
     .wf-arrow { transform: rotate(90deg); justify-content: center; padding: 0; }
-
-    .ai-inner { grid-template-columns: 1fr; gap: 48px; }
-    .ai-section { padding: 64px 20px; }
-
-    .proof-cards { grid-template-columns: 1fr; }
-    .proof-section { padding: 64px 20px; }
 
     .faq-grid { grid-template-columns: 1fr; }
 
@@ -1845,7 +1692,7 @@
 <section class="farm-ops-section" id="operations">
   <div class="section-eyebrow">What the system covers</div>
   <h2 class="section-title fade-in">Every part of your farm operation, unified</h2>
-  <p class="section-sub fade-in">AZed ERP covers the full agricultural value chain — from managing your fields and workers to billing customers and tracking your carbon footprint.</p>
+  <p class="section-sub fade-in">From fields, animals, and workers to checkout, suppliers, and carbon — nine connected modules covering the full agricultural value chain in one system.</p>
 
   <div class="ops-modules">
     <div class="ops-module green fade-in">
@@ -1952,6 +1799,63 @@
         <li>Carbon footprint logging per farm</li>
       </ul>
     </div>
+
+    <div class="ops-module terracotta fade-in">
+      <div class="ops-module-icon bg-terracotta">
+        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+          <path d="M6 13c0-3 2-5 5-5s5 2 5 5v3H6v-3z" stroke="#B85C3F" stroke-width="1.6" stroke-linejoin="round"/>
+          <circle cx="9" cy="6" r="1.4" fill="#B85C3F"/>
+          <circle cx="13" cy="6" r="1.4" fill="#B85C3F"/>
+          <path d="M8 8.5l-1.5-2M14 8.5l1.5-2" stroke="#B85C3F" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <h3>Animals & Livestock</h3>
+      <p>Track every animal across your farms with full lifecycle records and dedicated cost allocation that keeps livestock expenses cleanly separated from crop operations.</p>
+      <ul class="ops-features">
+        <li>Per-animal profiles and farm assignment</li>
+        <li>Dedicated "Animals" expense bucket for clean P&amp;L</li>
+        <li>Vet, feed, and care cost tracking</li>
+        <li>Linked to payroll and inventory consumption</li>
+      </ul>
+    </div>
+
+    <div class="ops-module plum fade-in fade-in-delay-1">
+      <div class="ops-module-icon bg-plum">
+        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+          <rect x="3" y="5" width="16" height="11" rx="2" stroke="#7A4A6E" stroke-width="1.6"/>
+          <path d="M3 9h16" stroke="#7A4A6E" stroke-width="1.6"/>
+          <path d="M7 13h3M13 13h2" stroke="#7A4A6E" stroke-width="1.6" stroke-linecap="round"/>
+          <circle cx="6.5" cy="7" r=".8" fill="#7A4A6E"/>
+        </svg>
+      </div>
+      <h3>POS Terminal & Receive Intake</h3>
+      <p>A real point-of-sale checkout for retail counters plus a structured intake flow for incoming stock — both posting straight into accounting with the right expense categories.</p>
+      <ul class="ops-features">
+        <li>Fast checkout with discounts and settle-later</li>
+        <li>Batch receive multiple products per delivery</li>
+        <li>Suppliers, cash, or partial payment in one screen</li>
+        <li>Auto-posted journal entries on every transaction</li>
+      </ul>
+    </div>
+
+    <div class="ops-module slate fade-in fade-in-delay-2">
+      <div class="ops-module-icon bg-slate">
+        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+          <path d="M4 18V6M4 18h14" stroke="#4A5A6A" stroke-width="1.6" stroke-linecap="round"/>
+          <rect x="7" y="10" width="2.5" height="6" fill="#4A5A6A"/>
+          <rect x="11" y="7" width="2.5" height="9" fill="#4A5A6A"/>
+          <rect x="15" y="12" width="2.5" height="4" fill="#4A5A6A"/>
+        </svg>
+      </div>
+      <h3>Reports, Audit & Access Control</h3>
+      <p>Granular per-role and per-user permissions, a full audit trail of every change in the system, and reports that read the same numbers your accountant trusts.</p>
+      <ul class="ops-features">
+        <li>Role-based permissions with per-user overrides</li>
+        <li>Audit log of every create, edit, and delete</li>
+        <li>Sales, expense, payroll, and inventory reports</li>
+        <li>CSV/Excel import to bring legacy data in</li>
+      </ul>
+    </div>
   </div>
 </section>
 
@@ -2033,46 +1937,6 @@
             <div class="bar-wrap"><div class="bar" style="height:70px"></div><span class="bar-lbl">W6</span></div>
             <div class="bar-wrap"><div class="bar highlight" style="height:76px"></div><span class="bar-lbl">W7</span></div>
           </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- PROOF / TESTIMONIALS -->
-<section class="proof-section">
-  <div class="proof-header">
-    <div class="proof-eyebrow">What farmers say</div>
-    <h2 class="proof-title">Built for the way farms actually work</h2>
-  </div>
-  <div class="proof-cards">
-    <div class="proof-card fade-in">
-      <p class="proof-quote">"Before, month-end was three days of pain. Now the accounting closes itself and I can actually focus on the crop."</p>
-      <div class="proof-author">
-        <div class="proof-avatar">AH</div>
-        <div>
-          <div class="proof-name">Ahmed Hassan</div>
-          <div class="proof-role">Farm Owner, Dakahlia</div>
-        </div>
-      </div>
-    </div>
-    <div class="proof-card fade-in fade-in-delay-1">
-      <p class="proof-quote">"We used to lose 6-8% to spoilage because we didn't see the stock pile up. The alerts cut that to under 2%."</p>
-      <div class="proof-author">
-        <div class="proof-avatar" style="background:var(--harvest)">MK</div>
-        <div>
-          <div class="proof-name">Mona Khalil</div>
-          <div class="proof-role">Operations Manager</div>
-        </div>
-      </div>
-    </div>
-    <div class="proof-card fade-in fade-in-delay-2">
-      <p class="proof-quote">"Managing payroll for 30 workers across 4 farms used to take 2 days. Now it's done in under an hour with full accuracy."</p>
-      <div class="proof-author">
-        <div class="proof-avatar" style="background:var(--sky)">YA</div>
-        <div>
-          <div class="proof-name">Youssef Amin</div>
-          <div class="proof-role">HR Manager</div>
         </div>
       </div>
     </div>
@@ -2218,68 +2082,6 @@
   <div class="workflow-note fade-in">
     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="color:var(--leaf);flex-shrink:0;margin-top:2px"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm-.75 3.5h1.5v5h-1.5v-5zm.75 7.5a1 1 0 110-2 1 1 0 010 2z"/></svg>
     <span>Every step updates stock levels, customer balances, and the accounting ledger in real time — no manual syncing between systems.</span>
-  </div>
-</section>
-
-<!-- AI ASSISTANT HIGHLIGHT -->
-<section class="ai-section">
-  <div class="ai-inner">
-    <div class="ai-left fade-in">
-      <div class="section-eyebrow" style="color:var(--cream);margin-bottom:14px">
-        <span style="background:var(--leaf-light);height:2px;width:24px;display:inline-block;margin-right:8px;vertical-align:4px"></span>
-        Built-in intelligence
-      </div>
-      <h2 class="section-title" style="color:var(--cream);max-width:440px">Ask your farm anything — in plain language</h2>
-      <p style="font-size:16px;line-height:1.7;color:rgba(245,240,232,0.75);font-weight:300;max-width:440px;margin-bottom:36px">
-        AZed ERP includes a conversational AI assistant with memory of your business context. Ask about stock levels, get payroll summaries, or request a farm performance report — just by typing.
-      </p>
-      <div class="ai-chips">
-        <div class="ai-chip">"What's the spoilage rate on Farm 2 this month?"</div>
-        <div class="ai-chip">"Which B2B client has the highest outstanding balance?"</div>
-        <div class="ai-chip">"Generate payroll summary for May"</div>
-        <div class="ai-chip">"What stock items are below reorder threshold?"</div>
-      </div>
-    </div>
-
-    <div class="ai-right fade-in">
-      <div class="chat-mock">
-        <div class="chat-header">
-          <div class="chat-dot" style="background:#FF5F57"></div>
-          <div class="chat-dot" style="background:#FFBD2E"></div>
-          <div class="chat-dot" style="background:#28CA41"></div>
-          <span class="chat-title">Farm Assistant</span>
-        </div>
-        <div class="chat-body">
-          <div class="chat-msg user-msg">What's our total revenue vs expenses this week?</div>
-          <div class="chat-msg bot-msg">
-            <div class="bot-icon">A</div>
-            <div class="bot-bubble">
-              Here's this week's summary:<br><br>
-              <strong>Revenue:</strong> EGP 38,420<br>
-              <strong>Cost of goods:</strong> EGP 22,180<br>
-              <strong>Operating expenses:</strong> EGP 7,640<br>
-              <strong>Net:</strong> EGP 8,600 (22.4% margin)<br><br>
-              Farm Al-Nour contributed 61% of revenue. Three invoices totalling EGP 6,800 are still outstanding.
-            </div>
-          </div>
-          <div class="chat-msg user-msg">Which products had the most spoilage?</div>
-          <div class="chat-msg bot-msg">
-            <div class="bot-icon">A</div>
-            <div class="bot-bubble">
-              Top spoilage this week:<br>
-              1. Cucumber — 34 kg (4.1%)<br>
-              2. Tomato — 18 kg (1.8%)<br>
-              3. Pepper — 9 kg (2.3%)<br><br>
-              Cucumber spoilage is above your 3% alert threshold. Consider adjusting delivery scheduling or cold storage allocation.
-            </div>
-          </div>
-          <div class="chat-input-row">
-            <div class="chat-input-mock">Ask about your farm...</div>
-            <div class="chat-send">→</div>
-          </div>
-        </div>
-      </div>
-    </div>
   </div>
 </section>
 
