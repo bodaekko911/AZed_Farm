@@ -835,10 +835,10 @@ function onSearch(){
 
 function escapeJsString(value){
     return String(value ?? "")
-        .replace(/\\/g, "\\\\")
+        .replace(/\\\\/g, "\\\\\\\\")
         .replace(/'/g, "\\'")
-        .replace(/\r/g, "\\r")
-        .replace(/\n/g, "\\n");
+        .replace(/\\r/g, "\\\\r")
+        .replace(/\\n/g, "\\\\n");
 }
 
 /* ── SUPPLIERS ── */
