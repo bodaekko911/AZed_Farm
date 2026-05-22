@@ -44,3 +44,5 @@ app/static/uploads/*
 Thumbs.db
 
 Thunder/
+
+pytest-cache-files-*/
