@@ -651,10 +651,10 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
     </form>
   </div>
 
-  <!-- ── History ── -->
+  <!-- ── Recent received products ── -->
   <div class="card">
     <div class="section-head">
-      <div class="section-title">Receipt History</div>
+      <div class="section-title">Recent Received Products</div>
       <button type="button" class="action-btn export" id="export-btn" onclick="exportReceipts()" style="display:none">Export Excel</button>
     </div>
     <div class="table-wrap">
@@ -679,7 +679,7 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
 <div class="modal-wrap" id="edit-modal">
   <div class="modal-card">
     <div class="modal-title">Edit Receipt</div>
-    <div class="modal-sub" id="edit-modal-sub">Update this received stock entry.</div>
+    <div class="modal-sub" id="edit-modal-sub">Update this recent received product entry.</div>
     <div class="meta-grid">
       <div class="field">
         <label>Product</label>
@@ -1617,7 +1617,7 @@ async function loadHistory() {
     <td>${canManage ? `<div class="history-actions">
       ${canUpdate ? `<button type="button" class="action-btn" onclick="openEditModal(${row.id})">Edit</button>` : ''}
       ${canDelete ? `<button type="button" class="action-btn danger" onclick="deleteReceipt(${row.id})">Delete</button>` : ''}
-    </div>` : '<span style="color:var(--muted)">-</span>'}</td>
+    </div>` : '<span style="color:var(--muted)">No action permission</span>'}</td>
   </tr>`;
   }).join('');
 }
