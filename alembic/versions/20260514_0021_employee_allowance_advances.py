@@ -6,7 +6,7 @@ Create Date: 2026-05-14
 """
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -23,6 +23,9 @@ def _has_table(table: str) -> bool:
 
 
 def upgrade() -> None:
+    if context.is_offline_mode():
+        return
+
     if not _has_table("employee_allowance_advances"):
         op.create_table(
             "employee_allowance_advances",
@@ -65,5 +68,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if context.is_offline_mode():
+        return
+
     if _has_table("employee_allowance_advances"):
         op.drop_table("employee_allowance_advances")
