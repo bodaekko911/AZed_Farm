@@ -11,7 +11,7 @@ Create Date: 2026-05-13
 """
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -52,6 +52,9 @@ def _has_fk(table: str, name: str) -> bool:
 
 
 def upgrade() -> None:
+    if context.is_offline_mode():
+        return
+
     # 1. product_receipts.supplier_id
     if _has_table("product_receipts") and not _has_column("product_receipts", "supplier_id"):
         op.add_column(
@@ -130,6 +133,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if context.is_offline_mode():
+        return
+
     if _has_table("supplier_payments"):
         op.drop_table("supplier_payments")
     if _has_table("product_receipts"):
