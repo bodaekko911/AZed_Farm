@@ -9,7 +9,7 @@ Idempotent: safe to run on databases that may already have the table.
 """
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -26,6 +26,9 @@ def _table_exists(table: str) -> bool:
 
 
 def upgrade() -> None:
+    if context.is_offline_mode():
+        return
+
     if not _table_exists("mortality_logs"):
         op.create_table(
             "mortality_logs",
@@ -45,6 +48,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if context.is_offline_mode():
+        return
+
     if _table_exists("mortality_logs"):
         op.drop_index("ix_mortality_logs_date",  table_name="mortality_logs")
         op.drop_index("ix_mortality_logs_group", table_name="mortality_logs")

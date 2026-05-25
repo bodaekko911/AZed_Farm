@@ -19,7 +19,7 @@ these columns / FKs / indexes.
 """
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -54,6 +54,9 @@ def _has_fk(table: str, fk_name: str) -> bool:
 
 
 def upgrade() -> None:
+    if context.is_offline_mode():
+        return
+
     # ── Add the toggle ──
     if not _has_column("employees", "works_with_animals"):
         op.add_column(
@@ -85,5 +88,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if context.is_offline_mode():
+        return
+
     if _has_column("employees", "works_with_animals"):
         op.drop_column("employees", "works_with_animals")

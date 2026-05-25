@@ -14,7 +14,7 @@ on databases that may already have partial state.
 """
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -31,6 +31,9 @@ def _table_exists(table: str) -> bool:
 
 
 def upgrade() -> None:
+    if context.is_offline_mode():
+        return
+
     if not _table_exists("animal_groups"):
         op.create_table(
             "animal_groups",
@@ -72,6 +75,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if context.is_offline_mode():
+        return
+
     if _table_exists("feeding_logs"):
         op.drop_index("ix_feeding_logs_date",     table_name="feeding_logs")
         op.drop_index("ix_feeding_logs_location", table_name="feeding_logs")

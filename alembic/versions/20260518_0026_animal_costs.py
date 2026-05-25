@@ -13,7 +13,7 @@ Idempotent: safe to re-run on databases that may already have any of these.
 """
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -48,6 +48,9 @@ def _has_fk(table: str, fk_name: str) -> bool:
 
 
 def upgrade() -> None:
+    if context.is_offline_mode():
+        return
+
     # ── animal_groups: purchase cost columns ──
     if not _has_column("animal_groups", "purchase_cost"):
         op.add_column(
@@ -93,6 +96,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if context.is_offline_mode():
+        return
+
     if _has_index("expenses", "ix_expenses_animal_group_id"):
         try:
             op.drop_index("ix_expenses_animal_group_id", table_name="expenses")
