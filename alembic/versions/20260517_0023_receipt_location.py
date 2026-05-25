@@ -18,7 +18,7 @@ is safe to run on a database that may already have partial state.
 """
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -50,6 +50,9 @@ DEFAULT_LOCATIONS = [
 
 
 def upgrade() -> None:
+    if context.is_offline_mode():
+        return
+    
     bind = op.get_bind()
 
     # 1. Add location_id to product_receipts (nullable FK to stock_locations)
@@ -132,6 +135,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if context.is_offline_mode():
+        return
+    
     # Drop FK + index + column. We do NOT remove seeded locations or
     # backfilled stock — those are user data once created.
     if _has_column("product_receipts", "location_id"):
