@@ -11,7 +11,7 @@ have been partially upgraded.
 """
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -30,6 +30,9 @@ def _has_column(table: str, column: str) -> bool:
 
 
 def upgrade() -> None:
+    if context.is_offline_mode():
+        return
+    
     if not _has_column("expense_categories", "unit_price"):
         op.add_column(
             "expense_categories",
@@ -58,6 +61,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if context.is_offline_mode():
+        return
+    
     if _has_column("expenses", "unit_price_used"):
         op.drop_column("expenses", "unit_price_used")
     if _has_column("expenses", "consumption"):
