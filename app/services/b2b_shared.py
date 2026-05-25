@@ -48,7 +48,7 @@ async def seed_deferred_revenue(db: AsyncSession) -> None:
     if _r.scalar_one_or_none() is None:
         db.add(Account(
             code="2200", name="Deferred Revenue",
-            account_type="liability", balance=Decimal("0"),
+            type="liability", balance=Decimal("0"),
         ))
         await db.commit()
 
