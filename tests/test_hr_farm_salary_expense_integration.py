@@ -13,7 +13,7 @@ from app.database import Base
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm, FarmDelivery
-from app.models.hr import Employee, Payroll
+from app.models.hr import Attendance, Employee, Payroll
 from app.models.user import User
 from app.services.expense_service import SALARY_CATEGORY_NAME, get_cost_allocation
 
@@ -52,6 +52,7 @@ def make_session():
         tables=[
             User.__table__,
             Farm.__table__,
+            Attendance.__table__,
             Employee.__table__,
             Payroll.__table__,
             ExpenseCategory.__table__,
