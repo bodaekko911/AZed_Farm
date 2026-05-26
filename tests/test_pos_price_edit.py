@@ -240,7 +240,7 @@ def test_audit_log_contains_all_edited_lines() -> None:
     )
     _, fake_db = _invoke(
         data, _make_user("manager"),
-        extra_results=[[prod_a], [prod_b], [prod_c]],
+        extra_results=[[prod_a, prod_b, prod_c]],
     )
 
     audit = [obj for obj in fake_db.added if getattr(obj, "action", None) == "pos_sale_with_price_edits"]
