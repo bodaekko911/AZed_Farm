@@ -654,13 +654,13 @@ td.name{color:var(--text);font-weight:600;}
                 <thead><tr>
                     <th>Batch #</th>
                     <th>Status</th>
+                    <th>Stages</th>
                     <th>Started</th>
-                    <th>Completed</th>
-                    <th>Inputs</th>
-                    <th>Outputs</th>
-                    <th>Yield %</th>
+                    <th>Latest stage</th>
+                    <th>Original input</th>
+                    <th>Latest output</th>
+                    <th>Final yield %</th>
                     <th>Spoilage</th>
-                    <th>Notes</th>
                     <th></th>
                 </tr></thead>
                 <tbody id="drying-body"><tr><td colspan="10" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr></tbody>
@@ -808,9 +808,8 @@ td.name{color:var(--text);font-weight:600;}
 <div class="modal-bg" id="drying-start-modal">
     <div class="modal">
         <div class="modal-title">Start Drying Batch</div>
-        <div class="modal-sub">Inputs deducted from stock immediately. Outputs added when batch is completed.</div>
+        <div class="modal-sub">Inputs deducted from stock immediately. Add more stages as the batch progresses.</div>
         <div class="fld"><label>Notes</label><input id="dry-notes" placeholder="e.g. Started sun-drying tomatoes"></div>
-        <div class="fld"><label>Expected Yield % (optional)</label><input id="dry-expected-yield" type="number" min="0" max="100" step="0.1" placeholder="e.g. 20"></div>
         <div class="section-label" style="color:var(--orange)">Raw Materials Going In</div>
         <div id="drying-inputs"></div>
         <button class="add-row-btn orange-btn" onclick="addItemRow('drying-inputs',null)">+ Add Raw Material</button>
@@ -821,18 +820,46 @@ td.name{color:var(--text);font-weight:600;}
     </div>
 </div>
 
-<!-- DRYING COMPLETE MODAL -->
-<div class="modal-bg" id="drying-complete-modal">
+<!-- DRYING NEXT STAGE MODAL -->
+<div class="modal-bg" id="drying-next-stage-modal">
     <div class="modal">
-        <div class="modal-title">Complete Drying Batch</div>
-        <div class="modal-sub" id="drying-complete-sub">Output stock will be added when you confirm. Cannot be undone.</div>
-        <div class="fld"><label>Completion Notes</label><input id="dry-complete-notes" placeholder="e.g. Sun-drying finished after 8 days"></div>
-        <div class="section-label" style="color:var(--green)">Finished Products Coming Out</div>
-        <div id="drying-outputs"></div>
-        <button class="add-row-btn green-btn" onclick="addItemRow('drying-outputs',null)">+ Add Finished Product</button>
+        <div class="modal-title">Add Next Stage</div>
+        <div class="modal-sub" id="drying-next-sub">Close the current stage (record its outputs) and open a new one with fresh inputs.</div>
+
+        <div class="section-label" style="color:var(--green)">Outputs of the CURRENT stage</div>
+        <div class="modal-sub" style="margin-top:0">What did the current stage produce? Stock will be credited.</div>
+        <div id="drying-next-prev-outputs"></div>
+        <button class="add-row-btn green-btn" onclick="addItemRow('drying-next-prev-outputs',null)">+ Add Output</button>
+
+        <div class="fld" style="margin-top:14px"><label>Notes on the current stage (optional)</label><input id="dry-next-prev-notes" placeholder="e.g. Sun-drying completed after 8 days"></div>
+
+        <div class="section-label" style="color:var(--orange);margin-top:18px">Inputs for the NEW stage</div>
+        <div class="modal-sub" style="margin-top:0">What goes into the next transformation? Stock will be deducted. You can include the outputs above or add new material.</div>
+        <div id="drying-next-new-inputs"></div>
+        <button class="add-row-btn orange-btn" onclick="addItemRow('drying-next-new-inputs',null)">+ Add Input</button>
+
+        <div class="fld" style="margin-top:14px"><label>Label for the new stage (optional)</label><input id="dry-next-new-label" placeholder="e.g. Grinding"></div>
+        <div class="fld"><label>Notes for the new stage (optional)</label><input id="dry-next-new-notes" placeholder=""></div>
+
         <div class="modal-actions">
-            <button class="btn-cancel" onclick="closeDryingCompleteModal()">Cancel</button>
-            <button class="btn btn-green" onclick="submitDryingComplete()">Complete Batch</button>
+            <button class="btn-cancel" onclick="closeDryingNextStageModal()">Cancel</button>
+            <button class="btn btn-orange" onclick="submitDryingNextStage()">Save &amp; Open Next Stage</button>
+        </div>
+    </div>
+</div>
+
+<!-- DRYING FINALIZE MODAL -->
+<div class="modal-bg" id="drying-finalize-modal">
+    <div class="modal">
+        <div class="modal-title">Finalize Drying Batch</div>
+        <div class="modal-sub" id="drying-finalize-sub">Record the final outputs of the current stage. The batch will be marked completed and cannot be reopened.</div>
+        <div class="section-label" style="color:var(--green)">Final outputs</div>
+        <div id="drying-finalize-outputs"></div>
+        <button class="add-row-btn green-btn" onclick="addItemRow('drying-finalize-outputs',null)">+ Add Output</button>
+        <div class="fld"><label>Completion notes</label><input id="dry-finalize-notes" placeholder="e.g. Production complete; 2.1kg powder yielded"></div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeDryingFinalizeModal()">Cancel</button>
+            <button class="btn btn-green" onclick="submitDryingFinalize()">Finalize Batch</button>
         </div>
     </div>
 </div>
@@ -1803,19 +1830,18 @@ async function loadDrying(){
     try {
         const resp = await fetch("/production/drying/api/batches?limit=100");
         if(!resp.ok){
-            document.getElementById("drying-body").innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--danger);padding:60px">Failed to load drying batches.</td></tr>`;
+            document.getElementById("drying-body").innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--danger);padding:60px">Failed to load.</td></tr>`;
             return;
         }
         const data = await resp.json();
         dryingBatches = Array.isArray(data) ? data : (data.batches || []);
         renderDryingTable();
-    } catch (e) {
+    } catch(e){
         console.error("loadDrying failed", e);
-        document.getElementById("drying-body").innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--danger);padding:60px">Network error.</td></tr>`;
     }
 }
 
-function statusBadge(status){
+function dryingStatusBadge(status){
     const styles = {
         in_progress: "background:rgba(251,146,60,.12);color:var(--orange)",
         completed:   "background:rgba(74,222,128,.12);color:var(--green)",
@@ -1825,19 +1851,9 @@ function statusBadge(status){
     return `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;${styles[status]||""}">${label}</span>`;
 }
 
-function fmtDateShort(s){
+function dryingShortDate(s){
     if(!s) return "-";
     try { return new Date(s).toLocaleDateString(); } catch(e){ return s; }
-}
-
-function summarizeItems(items){
-    if(!items || !items.length) return "-";
-    const visible = items.slice(0, 2).map(it => {
-        const qty = (it.qty || 0).toFixed(2);
-        const product = (it.product_name || "").split(" ")[0];
-        return `${qty} ${product}`;
-    }).join(", ");
-    return items.length > 2 ? `${visible}...` : visible;
 }
 
 function renderDryingTable(){
@@ -1847,12 +1863,24 @@ function renderDryingTable(){
     }
     let html = "";
     dryingBatches.forEach(b => {
-        const yieldDisplay = (b.actual_yield_pct !== null && b.actual_yield_pct !== undefined) ? `${Number(b.actual_yield_pct).toFixed(1)}%` : "-";
-        const spoilageCount = (b.spoilage || []).length;
+        const stages = b.stages || [];
+        const stage1 = stages[0];
+        const latestStage = stages[stages.length - 1];
         const isInProgress = b.status === "in_progress";
+        const finalYield = b.final_yield_pct;
+        const yieldDisplay = (finalYield !== null && finalYield !== undefined) ? `${Number(finalYield).toFixed(1)}%` : "-";
+        const yieldColor = (finalYield && finalYield < 15) ? "var(--danger)" : (finalYield && finalYield < 30) ? "var(--warn)" : (finalYield ? "var(--green)" : "var(--muted)");
+
+        const origInputSummary = stage1 ? (stage1.inputs || []).slice(0,2).map(i => `${(i.qty||0).toFixed(2)}${i.unit||""} ${(i.product_name||"").split(" ")[0]}`).join(", ") : "-";
+        const latestOutputSummary = latestStage && latestStage.outputs && latestStage.outputs.length ?
+            latestStage.outputs.slice(0,2).map(o => `${(o.qty||0).toFixed(2)}${o.unit||""} ${(o.product_name||"").split(" ")[0]}`).join(", ") : "-";
+
         const actions = [];
+        if(isInProgress && hasPermission("action_drying_start_batch")){
+            actions.push(`<button class="action-btn blue" onclick="openDryingNextStageModal(${b.id})">+ Stage</button>`);
+        }
         if(isInProgress && hasPermission("action_drying_complete_batch")){
-            actions.push(`<button class="action-btn green" onclick="openDryingCompleteModal(${b.id})">Complete</button>`);
+            actions.push(`<button class="action-btn green" onclick="openDryingFinalizeModal(${b.id})">Finalize</button>`);
         }
         if(isInProgress && hasPermission("action_drying_log_spoilage")){
             actions.push(`<button class="action-btn warn" onclick="openDryingSpoilageModal(${b.id})">Spoilage</button>`);
@@ -1860,17 +1888,18 @@ function renderDryingTable(){
         if(isInProgress && hasPermission("action_drying_cancel_batch")){
             actions.push(`<button class="action-btn danger" onclick="cancelDrying(${b.id}, '${escapeHtml(b.batch_number)}')">Cancel</button>`);
         }
+
         html += `<tr>
             <td style="font-family:var(--mono);font-size:12px;color:var(--orange)">${escapeHtml(b.batch_number)}</td>
-            <td>${statusBadge(b.status)}</td>
-            <td style="font-size:12px;color:var(--muted)">${fmtDateShort(b.started_at)}</td>
-            <td style="font-size:12px;color:var(--muted)">${fmtDateShort(b.completed_at)}</td>
-            <td style="font-size:12px;color:var(--sub)">${summarizeItems(b.inputs)}</td>
-            <td style="font-size:12px;color:var(--green)">${summarizeItems(b.outputs)}</td>
-            <td style="font-family:var(--mono);color:${b.actual_yield_pct ? (b.actual_yield_pct<15?'var(--danger)':b.actual_yield_pct<30?'var(--warn)':'var(--green)') : 'var(--muted)'}">${yieldDisplay}</td>
-            <td style="font-size:12px;color:${spoilageCount?'var(--danger)':'var(--muted)'}">${spoilageCount || '-'}</td>
-            <td style="font-size:12px;color:var(--muted);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(b.notes || '-')}</td>
-            <td><div style="display:flex;gap:6px">${actions.join("")}</div></td>
+            <td>${dryingStatusBadge(b.status)}</td>
+            <td style="text-align:center;font-family:var(--mono)">${b.stage_count || stages.length || 0}</td>
+            <td style="font-size:12px;color:var(--muted)">${dryingShortDate(b.started_at)}</td>
+            <td style="font-size:12px;color:var(--sub)">${escapeHtml(b.current_stage_label || (latestStage && latestStage.label ? latestStage.label : "—"))}</td>
+            <td style="font-size:12px;color:var(--sub);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(origInputSummary)}</td>
+            <td style="font-size:12px;color:var(--green);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(latestOutputSummary)}</td>
+            <td style="font-family:var(--mono);color:${yieldColor}">${yieldDisplay}</td>
+            <td style="font-size:12px;color:${b.spoilage_count?'var(--danger)':'var(--muted)'}">${b.spoilage_count || '-'}</td>
+            <td><div style="display:flex;gap:6px;flex-wrap:wrap">${actions.join("")}</div></td>
         </tr>`;
     });
     document.getElementById("drying-body").innerHTML = html;
@@ -1879,7 +1908,6 @@ function renderDryingTable(){
 /* ── DRYING START ── */
 function openDryingStartModal(){
     document.getElementById("dry-notes").value = "";
-    document.getElementById("dry-expected-yield").value = "";
     document.getElementById("drying-inputs").innerHTML = "";
     addItemRow("drying-inputs", null);
     document.getElementById("drying-start-modal").classList.add("open");
@@ -1890,95 +1918,116 @@ function closeDryingStartModal(){
 async function submitDryingStart(){
     const inputs = getRows("drying-inputs");
     if(!inputs.length){
-        alert("Add at least one raw material input. Pick a product from the search dropdown and enter a quantity.");
+        alert("Add at least one raw material input.");
         return;
     }
-    const expectedYield = parseFloat(document.getElementById("dry-expected-yield").value);
     const body = {
         inputs: inputs,
         notes: document.getElementById("dry-notes").value || null,
-        expected_yield_pct: isNaN(expectedYield) ? null : expectedYield,
     };
     try {
-        const resp = await fetch("/production/drying/api/batches", {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify(body),
-        });
+        const resp = await fetch("/production/drying/api/batches", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
         if(!resp.ok){
-            const err = await resp.json().catch(() => ({}));
+            const err = await resp.json().catch(()=>({}));
             alert("Failed to start batch: " + (err.detail || resp.status));
             return;
         }
         closeDryingStartModal();
         await loadDrying();
-    } catch(e){
-        alert("Network error: " + e.message);
-    }
+    } catch(e){ alert("Network error: " + e.message); }
 }
 
-/* ── DRYING COMPLETE ── */
-function openDryingCompleteModal(batchId){
+/* ── DRYING NEXT STAGE ── */
+function openDryingNextStageModal(batchId){
     activeDryingBatchId = batchId;
     const batch = dryingBatches.find(b => b.id === batchId);
     if(!batch) return;
-    document.getElementById("drying-complete-sub").innerText = `Completing ${batch.batch_number}. Output stock will be created when you confirm.`;
-    document.getElementById("dry-complete-notes").value = "";
-    document.getElementById("drying-outputs").innerHTML = "";
-    addItemRow("drying-outputs", null);
-    document.getElementById("drying-complete-modal").classList.add("open");
+    document.getElementById("drying-next-sub").innerText = `Closing current stage of ${batch.batch_number}, opening the next one.`;
+    document.getElementById("drying-next-prev-outputs").innerHTML = "";
+    document.getElementById("drying-next-new-inputs").innerHTML = "";
+    addItemRow("drying-next-prev-outputs", null);
+    addItemRow("drying-next-new-inputs", null);
+    document.getElementById("dry-next-prev-notes").value = "";
+    document.getElementById("dry-next-new-label").value = "";
+    document.getElementById("dry-next-new-notes").value = "";
+    document.getElementById("drying-next-stage-modal").classList.add("open");
 }
-function closeDryingCompleteModal(){
-    document.getElementById("drying-complete-modal").classList.remove("open");
+function closeDryingNextStageModal(){
+    document.getElementById("drying-next-stage-modal").classList.remove("open");
     activeDryingBatchId = null;
 }
-async function submitDryingComplete(){
+async function submitDryingNextStage(){
     if(!activeDryingBatchId) return;
-    const outputs = getRows("drying-outputs");
-    if(!outputs.length){
-        alert("Add at least one finished output product. Pick a product from the search dropdown and enter a quantity.");
-        return;
-    }
+    const prevOutputs = getRows("drying-next-prev-outputs");
+    const newInputs   = getRows("drying-next-new-inputs");
+    if(!prevOutputs.length){ alert("Add at least one output of the current stage."); return; }
+    if(!newInputs.length){ alert("Add at least one input for the new stage."); return; }
     const body = {
-        outputs: outputs,
-        notes: document.getElementById("dry-complete-notes").value || null,
+        prev_stage_outputs: prevOutputs,
+        new_stage_inputs: newInputs,
+        new_stage_label: document.getElementById("dry-next-new-label").value || null,
+        new_stage_notes: document.getElementById("dry-next-new-notes").value || null,
+        prev_stage_notes: document.getElementById("dry-next-prev-notes").value || null,
     };
     try {
-        const resp = await fetch(`/production/drying/api/batches/${activeDryingBatchId}/complete`, {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify(body),
-        });
+        const resp = await fetch(`/production/drying/api/batches/${activeDryingBatchId}/next-stage`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
         if(!resp.ok){
-            const err = await resp.json().catch(() => ({}));
-            alert("Failed to complete batch: " + (err.detail || resp.status));
+            const err = await resp.json().catch(()=>({}));
+            alert("Failed to add stage: " + (err.detail || resp.status));
             return;
         }
-        closeDryingCompleteModal();
+        closeDryingNextStageModal();
         await loadDrying();
-    } catch(e){
-        alert("Network error: " + e.message);
-    }
+    } catch(e){ alert("Network error: " + e.message); }
+}
+
+/* ── DRYING FINALIZE ── */
+function openDryingFinalizeModal(batchId){
+    activeDryingBatchId = batchId;
+    const batch = dryingBatches.find(b => b.id === batchId);
+    if(!batch) return;
+    document.getElementById("drying-finalize-sub").innerText = `Finalize ${batch.batch_number}. The current stage will be closed with these outputs and the batch marked completed.`;
+    document.getElementById("drying-finalize-outputs").innerHTML = "";
+    addItemRow("drying-finalize-outputs", null);
+    document.getElementById("dry-finalize-notes").value = "";
+    document.getElementById("drying-finalize-modal").classList.add("open");
+}
+function closeDryingFinalizeModal(){
+    document.getElementById("drying-finalize-modal").classList.remove("open");
+    activeDryingBatchId = null;
+}
+async function submitDryingFinalize(){
+    if(!activeDryingBatchId) return;
+    const outputs = getRows("drying-finalize-outputs");
+    if(!outputs.length){ alert("Add at least one final output."); return; }
+    const body = {
+        final_outputs: outputs,
+        notes: document.getElementById("dry-finalize-notes").value || null,
+    };
+    try {
+        const resp = await fetch(`/production/drying/api/batches/${activeDryingBatchId}/finalize`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+        if(!resp.ok){
+            const err = await resp.json().catch(()=>({}));
+            alert("Failed to finalize: " + (err.detail || resp.status));
+            return;
+        }
+        closeDryingFinalizeModal();
+        await loadDrying();
+    } catch(e){ alert("Network error: " + e.message); }
 }
 
 /* ── DRYING CANCEL ── */
 async function cancelDrying(batchId, batchNumber){
-    if(!confirm(`Cancel ${batchNumber}? Inputs will be returned to stock. This cannot be undone.`)) return;
+    if(!confirm(`Cancel ${batchNumber}? This will REFUND every input and CLAW BACK every output across all stages. Cannot be undone.`)) return;
     try {
-        const resp = await fetch(`/production/drying/api/batches/${batchId}/cancel`, {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({reason: null}),
-        });
+        const resp = await fetch(`/production/drying/api/batches/${batchId}/cancel`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({reason: null})});
         if(!resp.ok){
-            const err = await resp.json().catch(() => ({}));
+            const err = await resp.json().catch(()=>({}));
             alert("Failed to cancel: " + (err.detail || resp.status));
             return;
         }
         await loadDrying();
-    } catch(e){
-        alert("Network error: " + e.message);
-    }
+    } catch(e){ alert("Network error: " + e.message); }
 }
 
 /* ── DRYING SPOILAGE ── */
@@ -1987,17 +2036,14 @@ function openDryingSpoilageModal(batchId){
     const batch = dryingBatches.find(b => b.id === batchId);
     if(!batch) return;
     const sel = document.getElementById("dry-spl-product");
-    // Populate with the batch's input products (most likely candidates) first, then others
-    const inputProductIds = (batch.inputs || []).map(i => i.product_id);
-    const inputOptions = allProducts
-        .filter(p => inputProductIds.includes(p.id))
-        .map(p => `<option value="${p.id}">${escapeHtml(formatProductLabel(p))}</option>`)
-        .join("");
-    const otherOptions = allProducts
-        .filter(p => !inputProductIds.includes(p.id))
-        .map(p => `<option value="${p.id}">${escapeHtml(formatProductLabel(p))}</option>`)
-        .join("");
-    sel.innerHTML = `<option value="">Select product</option>` + inputOptions + otherOptions;
+    const inputIds = new Set();
+    (batch.stages || []).forEach(s => {
+        (s.inputs || []).forEach(i => inputIds.add(i.product_id));
+        (s.outputs || []).forEach(o => inputIds.add(o.product_id));
+    });
+    const candidateOptions = allProducts.filter(p => inputIds.has(p.id)).map(p => `<option value="${p.id}">${escapeHtml(formatProductLabel(p))}</option>`).join("");
+    const otherOptions = allProducts.filter(p => !inputIds.has(p.id)).map(p => `<option value="${p.id}">${escapeHtml(formatProductLabel(p))}</option>`).join("");
+    sel.innerHTML = `<option value="">Select product</option>` + candidateOptions + otherOptions;
     document.getElementById("dry-spl-qty").value = "";
     document.getElementById("dry-spl-reason").value = "mold";
     document.getElementById("dry-spl-detail").value = "";
@@ -2013,35 +2059,21 @@ async function submitDryingSpoilage(){
     const qty = parseFloat(document.getElementById("dry-spl-qty").value);
     const reason = document.getElementById("dry-spl-reason").value;
     const detail = document.getElementById("dry-spl-detail").value;
-    if(!pid || !qty || qty <= 0 || !reason){
-        alert("Fill in product, quantity, and reason.");
-        return;
-    }
-    const body = {
-        product_id: pid,
-        qty: qty,
-        reason: reason,
-        detail: detail || null,
-    };
+    if(!pid || !qty || qty <= 0 || !reason){ alert("Fill in product, quantity, reason."); return; }
+    const body = {product_id: pid, qty: qty, reason: reason, detail: detail || null};
     try {
-        const resp = await fetch(`/production/drying/api/batches/${activeDryingBatchId}/spoilage`, {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify(body),
-        });
+        const resp = await fetch(`/production/drying/api/batches/${activeDryingBatchId}/spoilage`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
         if(!resp.ok){
-            const err = await resp.json().catch(() => ({}));
+            const err = await resp.json().catch(()=>({}));
             alert("Failed to log spoilage: " + (err.detail || resp.status));
             return;
         }
         closeDryingSpoilageModal();
         await loadDrying();
-    } catch(e){
-        alert("Network error: " + e.message);
-    }
+    } catch(e){ alert("Network error: " + e.message); }
 }
 
-["batch-modal","pkg-modal","recipe-modal","spoilage-modal","drying-start-modal","drying-complete-modal","drying-spoilage-modal"].forEach(id => {
+["batch-modal","pkg-modal","recipe-modal","spoilage-modal","drying-start-modal","drying-next-stage-modal","drying-finalize-modal","drying-spoilage-modal"].forEach(id => {
     document.getElementById(id).addEventListener("click", function(e){ if(e.target===this) this.classList.remove("open"); });
 });
 
