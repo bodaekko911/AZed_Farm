@@ -6,11 +6,11 @@ from app.database import Base
 
 
 class DryingBatch(Base):
-    """A multi-day processing batch (drying, fermenting, curing, etc).
+    """Multi-stage processing batch (drying, fermenting, curing, etc).
 
-    Distinct from ProductionBatch — drying batches are stateful and span
-    real wall-clock time. Stock moves only at terminal transitions:
-    inputs deduct on start; outputs credit on complete; cancel refunds inputs.
+    Each batch progresses through N transformation stages. Stock moves
+    happen at each stage transition: inputs deducted when stage is opened,
+    outputs credited when stage is closed.
     """
     __tablename__ = "drying_batches"
 
@@ -24,17 +24,13 @@ class DryingBatch(Base):
                              server_default=func.now())
     completed_at    = Column(DateTime(timezone=True), nullable=True)
     cancelled_at    = Column(DateTime(timezone=True), nullable=True)
-
-    expected_yield_pct = Column(Numeric(5, 2), nullable=True)
-    actual_yield_pct   = Column(Numeric(5, 2), nullable=True)
-    notes              = Column(Text)
+    notes           = Column(Text)
 
     started_by_id   = Column(Integer, ForeignKey("users.id"), nullable=False)
     completed_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
-    inputs   = relationship("DryingBatchInput",    back_populates="batch",
-                            cascade="all, delete-orphan")
-    outputs  = relationship("DryingBatchOutput",   back_populates="batch",
+    stages   = relationship("DryingBatchStage",    back_populates="batch",
+                            order_by="DryingBatchStage.stage_number",
                             cascade="all, delete-orphan")
     spoilage = relationship("DryingBatchSpoilage", back_populates="batch",
                             cascade="all, delete-orphan")
@@ -42,43 +38,64 @@ class DryingBatch(Base):
     completed_by = relationship("User", foreign_keys=[completed_by_id])
 
 
-class DryingBatchInput(Base):
-    __tablename__ = "drying_batch_inputs"
+class DryingBatchStage(Base):
+    """One transformation step within a drying batch."""
+    __tablename__ = "drying_batch_stages"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    batch_id     = Column(Integer, ForeignKey("drying_batches.id", ondelete="CASCADE"), nullable=False)
+    stage_number = Column(Integer, nullable=False)
+    label        = Column(String(80))
+    notes        = Column(Text)
+    logged_at    = Column(DateTime(timezone=True), nullable=False,
+                          server_default=func.now())
+    logged_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    total_input_qty      = Column(Numeric(12, 3))
+    total_output_qty     = Column(Numeric(12, 3))
+    stage_loss_pct       = Column(Numeric(5, 2))
+    cumulative_yield_pct = Column(Numeric(5, 2))
+
+    batch     = relationship("DryingBatch", back_populates="stages")
+    logged_by = relationship("User")
+    inputs    = relationship("DryingBatchStageInput",  back_populates="stage",
+                             cascade="all, delete-orphan")
+    outputs   = relationship("DryingBatchStageOutput", back_populates="stage",
+                             cascade="all, delete-orphan")
+
+
+class DryingBatchStageInput(Base):
+    __tablename__ = "drying_batch_stage_inputs"
 
     id         = Column(Integer, primary_key=True, index=True)
-    batch_id   = Column(Integer, ForeignKey("drying_batches.id"), nullable=False)
+    stage_id   = Column(Integer, ForeignKey("drying_batch_stages.id", ondelete="CASCADE"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     qty        = Column(Numeric(12, 3), nullable=False)
 
-    batch   = relationship("DryingBatch", back_populates="inputs")
+    stage   = relationship("DryingBatchStage", back_populates="inputs")
     product = relationship("Product")
 
 
-class DryingBatchOutput(Base):
-    __tablename__ = "drying_batch_outputs"
+class DryingBatchStageOutput(Base):
+    __tablename__ = "drying_batch_stage_outputs"
 
     id         = Column(Integer, primary_key=True, index=True)
-    batch_id   = Column(Integer, ForeignKey("drying_batches.id"), nullable=False)
+    stage_id   = Column(Integer, ForeignKey("drying_batch_stages.id", ondelete="CASCADE"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     qty        = Column(Numeric(12, 3), nullable=False)
 
-    batch   = relationship("DryingBatch", back_populates="outputs")
+    stage   = relationship("DryingBatchStage", back_populates="outputs")
     product = relationship("Product")
 
 
 class DryingBatchSpoilage(Base):
-    """Spoilage logged during a drying batch.
-
-    Distinct from normal process loss (water evaporation). Captures specifically
-    what went wrong: mold, pest, weather, other.
-    """
+    """Spoilage logged during a drying batch — distinct from process loss."""
     __tablename__ = "drying_batch_spoilage"
 
     id           = Column(Integer, primary_key=True, index=True)
-    batch_id     = Column(Integer, ForeignKey("drying_batches.id"), nullable=False)
+    batch_id     = Column(Integer, ForeignKey("drying_batches.id", ondelete="CASCADE"), nullable=False)
     product_id   = Column(Integer, ForeignKey("products.id"), nullable=False)
     qty          = Column(Numeric(12, 3), nullable=False)
-    # mold | pest | weather | other
     reason       = Column(String(50), nullable=False)
     detail       = Column(Text)
     logged_at    = Column(DateTime(timezone=True), nullable=False,
