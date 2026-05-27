@@ -59,4 +59,4 @@ def test_expenses_loaders_check_status_and_log_debug_shapes() -> None:
     assert "if (!response.ok)" in source
     assert 'showInlineError("cat-list-body"' in source
     assert "Summary error" in source
-    assert "Farm list unavailable" in source
+    assert "Failed to load farms" in source

@@ -239,6 +239,9 @@ def test_clear_hr_data_deletes_only_hr_scope(monkeypatch):
                 "attendance": 2,
                 "payroll": 1,
                 "employees": 1,
+                "loans": 0,
+                "loan_repayments": 0,
+                "payroll_deductions": 0,
                 "hr_expenses": 1,
             },
         }

@@ -157,7 +157,7 @@ def test_recent_activity_sorted_desc(monkeypatch: pytest.MonkeyPatch):
     async def fake_briefing(*_args, **_kwargs):
         return {"lead": "Lead", "actions": []}
 
-    async def fake_panels(_db, _rng):
+    async def fake_panels(_db, _rng, _user):
         return {
             "top_products_by_revenue": [],
             "top_products_by_qty": [],

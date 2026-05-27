@@ -95,6 +95,9 @@ def test_list_expenses_returns_expenses_with_no_filters() -> None:
                     payment_method="cash",
                     vendor="Power Co",
                     description="Monthly bill",
+                    animal_group_id=None,
+                    animal_group=None,
+                    is_animal_expense=False,
                 )
             ]
         ]
@@ -117,6 +120,9 @@ def test_list_expenses_returns_expenses_with_no_filters() -> None:
             "created_by": "Admin",
             "farm_id": 2,
             "farm_name": "North Farm",
+            "animal_group_id": None,
+            "animal_group_name": None,
+            "is_animal_expense": False,
         }
     ]
 
