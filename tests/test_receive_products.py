@@ -471,6 +471,7 @@ def test_update_receipt_updates_stock_move_and_receipt_fields():
                 receive_date=date(2026, 4, 14),
                 supplier_ref="INV-NEW",
                 notes="updated",
+                product_type="products",
             ),
             user,
         )

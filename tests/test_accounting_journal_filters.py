@@ -1,11 +1,24 @@
-from datetime import date
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.models.accounting import Journal
 from app.routers import accounting as accounting_router
+
+
+def _expected_utc_bound(d: date, *, end: bool = False) -> str:
+    """Return the SQLAlchemy literal-bind string for the UTC boundary of a local date."""
+    tz = ZoneInfo(settings.APP_TIMEZONE)
+    utc = ZoneInfo("UTC")
+    if end:
+        d = d + timedelta(days=1)
+    dt_utc = datetime.combine(d, time.min, tzinfo=tz).astimezone(utc)
+    # SQLAlchemy compiles aware datetimes as 'YYYY-MM-DD HH:MM:SS+00:00' (no microseconds)
+    return f"'{dt_utc.strftime('%Y-%m-%d %H:%M:%S+00:00')}'"
 
 
 def test_apply_date_range_uses_inclusive_start_and_exclusive_next_day_end() -> None:
@@ -18,8 +31,11 @@ def test_apply_date_range_uses_inclusive_start_and_exclusive_next_day_end() -> N
 
     compiled = str(statement.compile(compile_kwargs={"literal_binds": True}))
 
-    assert "journals.created_at >= '2026-04-02 00:00:00+00:00'" in compiled
-    assert "journals.created_at < '2026-04-04 00:00:00+00:00'" in compiled
+    start_literal = _expected_utc_bound(date(2026, 4, 2))
+    end_literal = _expected_utc_bound(date(2026, 4, 3), end=True)
+
+    assert f"journals.created_at >= {start_literal}" in compiled
+    assert f"journals.created_at < {end_literal}" in compiled
     assert "date(journals.created_at)" not in compiled
 
 
@@ -40,9 +56,12 @@ def test_apply_date_range_allows_open_ended_ranges() -> None:
     from_sql = str(from_only.compile(compile_kwargs={"literal_binds": True}))
     to_sql = str(to_only.compile(compile_kwargs={"literal_binds": True}))
 
-    assert "journals.created_at >= '2026-04-02 00:00:00+00:00'" in from_sql
-    assert "journals.created_at < '2026-04-04 00:00:00+00:00'" not in from_sql
-    assert "journals.created_at < '2026-04-04 00:00:00+00:00'" in to_sql
+    start_literal = _expected_utc_bound(date(2026, 4, 2))
+    end_literal = _expected_utc_bound(date(2026, 4, 3), end=True)
+
+    assert f"journals.created_at >= {start_literal}" in from_sql
+    assert f"journals.created_at <" not in from_sql
+    assert f"journals.created_at < {end_literal}" in to_sql
     assert "journals.created_at >=" not in to_sql
 
 

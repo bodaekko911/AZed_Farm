@@ -1,12 +1,15 @@
 from fastapi.testclient import TestClient
 
 
-def test_login_page_renders_valid_escaped_newline_checks(client: TestClient) -> None:
-    response = client.get("/")
-
+def test_landing_js_has_crlf_open_redirect_guard(client: TestClient) -> None:
+    response = client.get("/static/landing.js")
     assert response.status_code == 200
-    assert 'url.indexOf("\\r") === -1' in response.text
-    assert 'url.indexOf("\\n") === -1' in response.text
+    # CR/LF guard uses fromCharCode to dodge template-engine escaping concerns.
+    assert 'String.fromCharCode(13)' in response.text
+    assert 'String.fromCharCode(10)' in response.text
+    # And the redirect must be same-origin (starts with single slash, not //).
+    assert 'text.indexOf("/") === 0' in response.text
+    assert 'text.indexOf("//") !== 0' in response.text
 
 
 def test_auth_me_requires_authentication(client: TestClient) -> None:

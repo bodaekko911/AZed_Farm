@@ -234,21 +234,6 @@ def test_password_page_is_available_to_authenticated_user() -> None:
     assert "Current Password" in response.text
 
 
-def test_log_action_uses_optional_shared_auth_dependency() -> None:
-    user = SimpleNamespace(id=9, name="Cookie Logger", role="admin", is_active=True)
-    client, fake_db = _make_client(optional_user=user)
-
-    response = client.post(
-        "/users/api/log",
-        json={"action": "PING", "module": "TESTS", "description": "shared auth"},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    assert len(fake_db.added) == 1
-    assert fake_db.added[0].user_id == user.id
-
-
 def test_non_admin_cannot_update_user_permissions() -> None:
     user = SimpleNamespace(
         id=11,

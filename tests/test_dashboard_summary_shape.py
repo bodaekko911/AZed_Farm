@@ -42,7 +42,7 @@ class FakeResult:
 
 
 class FakeDB:
-    async def execute(self, _stmt):
+    async def execute(self, *args, **kwargs):
         return FakeResult(0)
 
     async def rollback(self):
@@ -112,9 +112,19 @@ def test_summary_endpoint_has_required_top_level_keys(monkeypatch: pytest.Monkey
 def test_numbers_contains_expected_additive_entries(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("app.services.dashboard_briefing_service.build_briefing", lambda *args, **kwargs: asyncio.sleep(0, result={"lead": "Lead", "actions": []}))
     result = run(summary_service.get_summary(FakeDB(), "today", None, None, fake_user()))
-    assert set(result["numbers"].keys()) == {"sales", "clients_owe", "spent", "stock_alerts", "margin"}
+    assert set(result["numbers"].keys()) == {
+        "sales", "clients_owe", "spent", "stock_alerts", "margin",
+        "profit", "b2b_cash",
+    }
     assert isinstance(result["numbers"]["sales"]["prev_value"], float)
     assert set(result["numbers"]["margin"].keys()) == {"value_pct", "delta_pts", "gross_profit"}
+    expected_profit_keys = {
+        "gross_profit", "gross_margin_pct",
+        "revenue", "operational_cost",
+        "operating_expenses", "operating_profit", "operating_margin_pct",
+        "net_profit", "net_margin_pct",
+    }
+    assert expected_profit_keys <= set(result["numbers"]["profit"].keys())
     assert isinstance(result["insights"], list)
 
 
