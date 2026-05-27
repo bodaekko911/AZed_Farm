@@ -14,9 +14,9 @@ from app.schemas.drying import (
 from app.services import drying_service
 
 router = APIRouter(
-    prefix="/drying",
+    prefix="/production/drying",
     tags=["drying"],
-    dependencies=[Depends(require_permission("page_drying"))],
+    dependencies=[Depends(require_permission("page_production"))],
 )
 
 
