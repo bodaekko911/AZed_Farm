@@ -138,16 +138,22 @@ async def _close_open_stage(
     """Find the open stage, write its outputs, credit stock, compute metrics."""
     open_stage = _find_open_stage(batch)
 
+    # Track newly-created output objects with product attached so metrics can
+    # read .product.unit without needing the ORM relationship to be refreshed.
+    new_output_objs = []
     for item in outputs_payload:
         product = await _load_product_or_404(db, item.product_id)
         before = float(product.stock)
         product.stock = before + float(item.qty)
         after = float(product.stock)
-        db.add(DryingBatchStageOutput(
+        out = DryingBatchStageOutput(
             stage_id=open_stage.id,
             product_id=product.id,
             qty=item.qty,
-        ))
+        )
+        out.product = product  # attach for in-memory metrics computation
+        db.add(out)
+        new_output_objs.append(out)
         db.add(StockMove(
             product_id=product.id,
             type="in",
@@ -160,18 +166,21 @@ async def _close_open_stage(
             note=f"Output from {batch_number} stage {open_stage.stage_number}",
         ))
 
-    # Flush so the output rows have IDs, then reload stage with products attached
     await db.flush()
 
-    # Re-read stage inputs/outputs with products for metrics (already in memory from eager load)
+    # Compute metrics from in-memory objects (product is attached on new outputs).
     metrics = _compute_stage_metrics(
         open_stage.inputs,
-        open_stage.outputs,
+        new_output_objs,
         stage_1_inputs,
     )
 
     open_stage.total_input_qty      = metrics["total_input_qty"]
-    open_stage.total_output_qty     = metrics["total_output_qty"] if metrics["total_output_qty"] is not None else sum(float(i.qty) for i in outputs_payload)
+    open_stage.total_output_qty     = (
+        metrics["total_output_qty"]
+        if metrics["total_output_qty"] is not None
+        else sum(float(i.qty) for i in outputs_payload)
+    )
     open_stage.stage_loss_pct       = metrics["stage_loss_pct"]
     open_stage.cumulative_yield_pct = metrics["cumulative_yield_pct"]
 
