@@ -303,7 +303,6 @@ async def start_batch(
     )
 
     await db.commit()
-    await db.refresh(batch)
     return batch
 
 
@@ -392,7 +391,6 @@ async def add_next_stage(
     )
 
     await db.commit()
-    await db.refresh(batch)
     return batch
 
 
@@ -440,7 +438,6 @@ async def finalize_batch(
     )
 
     await db.commit()
-    await db.refresh(batch)
     return batch
 
 
@@ -516,7 +513,6 @@ async def cancel_batch(
     )
 
     await db.commit()
-    await db.refresh(batch)
     return batch
 
 
@@ -602,6 +598,8 @@ async def list_batches(
             selectinload(DryingBatch.stages)
             .selectinload(DryingBatchStage.outputs)
             .selectinload(DryingBatchStageOutput.product),
+            selectinload(DryingBatch.stages)
+            .selectinload(DryingBatchStage.logged_by),
             selectinload(DryingBatch.spoilage),
             selectinload(DryingBatch.started_by),
             selectinload(DryingBatch.completed_by),
@@ -629,6 +627,8 @@ async def get_batch(db: AsyncSession, batch_id: int) -> DryingBatch:
             selectinload(DryingBatch.stages)
             .selectinload(DryingBatchStage.outputs)
             .selectinload(DryingBatchStageOutput.product),
+            selectinload(DryingBatch.stages)
+            .selectinload(DryingBatchStage.logged_by),
             selectinload(DryingBatch.spoilage),
             selectinload(DryingBatch.started_by),
             selectinload(DryingBatch.completed_by),
