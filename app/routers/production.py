@@ -591,6 +591,7 @@ td.name{color:var(--text);font-weight:600;}
             <button class="tab"        id="tab-packaging" onclick="switchTab('packaging')">Packaging</button>
             <button class="tab"        id="tab-recipes"   onclick="switchTab('recipes')">Recipes</button>
             <button class="tab"        id="tab-spoilage"  onclick="switchTab('spoilage')">Spoilage</button>
+            <button class="tab"        id="tab-drying"    onclick="switchTab('drying')">Drying</button>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
             <button class="btn btn-orange" id="btn-batch"      onclick="openBatchModal()">New Processing Batch</button>
@@ -598,6 +599,7 @@ td.name{color:var(--text);font-weight:600;}
             <button class="btn btn-blue"   id="btn-recipe"     onclick="openRecipeModal(false)"    style="display:none">+ Processing Recipe</button>
             <button class="btn btn-blue"   id="btn-pkg-recipe" onclick="openRecipeModal(true)"     style="display:none">+ Packaging Recipe</button>
             <button class="btn btn-danger" id="btn-spoilage"   onclick="openSpoilageModal()"       style="display:none">Log Spoilage</button>
+            <button class="btn btn-orange" id="btn-drying"     onclick="openDryingStartModal()"    style="display:none">New Drying Batch</button>
         </div>
     </div>
 
@@ -641,6 +643,27 @@ td.name{color:var(--text);font-weight:600;}
             <table>
                 <thead><tr><th>Ref #</th><th>Product</th><th>Qty Lost</th><th>Reason</th><th>Farm Source</th><th>Date</th><th>Notes</th><th></th></tr></thead>
                 <tbody id="spoilage-body"><tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- DRYING -->
+    <div id="section-drying" style="display:none">
+        <div class="table-wrap">
+            <table>
+                <thead><tr>
+                    <th>Batch #</th>
+                    <th>Status</th>
+                    <th>Started</th>
+                    <th>Completed</th>
+                    <th>Inputs</th>
+                    <th>Outputs</th>
+                    <th>Yield %</th>
+                    <th>Spoilage</th>
+                    <th>Notes</th>
+                    <th></th>
+                </tr></thead>
+                <tbody id="drying-body"><tr><td colspan="10" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr></tbody>
             </table>
         </div>
     </div>
@@ -781,6 +804,64 @@ td.name{color:var(--text);font-weight:600;}
     </div>
 </div>
 
+<!-- DRYING START MODAL -->
+<div class="modal-bg" id="drying-start-modal">
+    <div class="modal">
+        <div class="modal-title">Start Drying Batch</div>
+        <div class="modal-sub">Inputs deducted from stock immediately. Outputs added when batch is completed.</div>
+        <div class="fld"><label>Notes</label><input id="dry-notes" placeholder="e.g. Started sun-drying tomatoes"></div>
+        <div class="fld"><label>Expected Yield % (optional)</label><input id="dry-expected-yield" type="number" min="0" max="100" step="0.1" placeholder="e.g. 20"></div>
+        <div class="section-label" style="color:var(--orange)">Raw Materials Going In</div>
+        <div id="drying-inputs"></div>
+        <button class="add-row-btn orange-btn" onclick="addItemRow('drying-inputs',null)">+ Add Raw Material</button>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeDryingStartModal()">Cancel</button>
+            <button class="btn btn-orange" onclick="submitDryingStart()">Start Batch</button>
+        </div>
+    </div>
+</div>
+
+<!-- DRYING COMPLETE MODAL -->
+<div class="modal-bg" id="drying-complete-modal">
+    <div class="modal">
+        <div class="modal-title">Complete Drying Batch</div>
+        <div class="modal-sub" id="drying-complete-sub">Output stock will be added when you confirm. Cannot be undone.</div>
+        <div class="fld"><label>Completion Notes</label><input id="dry-complete-notes" placeholder="e.g. Sun-drying finished after 8 days"></div>
+        <div class="section-label" style="color:var(--green)">Finished Products Coming Out</div>
+        <div id="drying-outputs"></div>
+        <button class="add-row-btn green-btn" onclick="addItemRow('drying-outputs',null)">+ Add Finished Product</button>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeDryingCompleteModal()">Cancel</button>
+            <button class="btn btn-green" onclick="submitDryingComplete()">Complete Batch</button>
+        </div>
+    </div>
+</div>
+
+<!-- DRYING SPOILAGE MODAL -->
+<div class="modal-bg" id="drying-spoilage-modal">
+    <div class="modal" style="width:500px">
+        <div class="modal-title">Log Drying Spoilage</div>
+        <div class="modal-sub">Mark material lost to mold, pest, weather, etc. Stock deducted immediately.</div>
+        <div class="fld"><label>Product *</label>
+            <select id="dry-spl-product"><option value="">Select product</option></select>
+        </div>
+        <div class="fld"><label>Quantity *</label><input id="dry-spl-qty" type="number" min="0.001" step="0.001"></div>
+        <div class="fld"><label>Reason *</label>
+            <select id="dry-spl-reason">
+                <option value="mold">Mold</option>
+                <option value="pest">Pest</option>
+                <option value="weather">Weather</option>
+                <option value="other">Other</option>
+            </select>
+        </div>
+        <div class="fld"><label>Detail (optional)</label><input id="dry-spl-detail" placeholder="e.g. Rain damaged third tray"></div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeDryingSpoilageModal()">Cancel</button>
+            <button class="btn btn-danger" onclick="submitDryingSpoilage()">Log Spoilage</button>
+        </div>
+    </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -846,6 +927,7 @@ async function logout(){
           {id:"tab-packaging", permission:"tab_production_packaging", tab:"packaging"},
           {id:"tab-recipes", permission:"tab_production_recipes", tab:"recipes"},
           {id:"tab-spoilage", permission:"tab_production_spoilage", tab:"spoilage"},
+          {id:"tab-drying", permission:"action_drying_start_batch", tab:"drying"},
       ];
       let firstAllowed = null;
       tabMap.forEach(conf => {
@@ -910,9 +992,10 @@ function switchTab(tab){
         packaging: "tab_production_packaging",
         recipes: "tab_production_recipes",
         spoilage: "tab_production_spoilage",
+        drying: "action_drying_start_batch",
     };
     if(required[tab] && !hasPermission(required[tab])) return;
-    ["batches","packaging","recipes","spoilage"].forEach(t => {
+    ["batches","packaging","recipes","spoilage","drying"].forEach(t => {
         document.getElementById("section-"+t).style.display = t===tab ? "" : "none";
         document.getElementById("tab-"+t).classList.toggle("active", t===tab);
     });
@@ -921,9 +1004,11 @@ function switchTab(tab){
     document.getElementById("btn-recipe").style.display     = tab==="recipes"  ? "" : "none";
     document.getElementById("btn-pkg-recipe").style.display = tab==="recipes"  ? "" : "none";
     document.getElementById("btn-spoilage").style.display   = tab==="spoilage" ? "" : "none";
+    document.getElementById("btn-drying").style.display     = tab==="drying" && hasPermission("action_drying_start_batch") ? "" : "none";
     if(tab==="packaging") loadPkgBatches();
     if(tab==="recipes")   loadRecipes();
     if(tab==="spoilage")  loadSpoilage();
+    if(tab==="drying")    loadDrying();
 }
 
 /* ── ITEM ROWS ── */
@@ -1710,7 +1795,271 @@ async function deleteSpoilage(id, ref){
     loadSpoilage();
 }
 
-["batch-modal","pkg-modal","recipe-modal","spoilage-modal"].forEach(id => {
+/* ── DRYING TAB ── */
+let dryingBatches = [];
+let activeDryingBatchId = null;
+
+async function loadDrying(){
+    try {
+        const resp = await fetch("/production/drying/api/batches?limit=100");
+        if(!resp.ok){
+            document.getElementById("drying-body").innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--danger);padding:60px">Failed to load drying batches.</td></tr>`;
+            return;
+        }
+        const data = await resp.json();
+        dryingBatches = Array.isArray(data) ? data : (data.batches || []);
+        renderDryingTable();
+    } catch (e) {
+        console.error("loadDrying failed", e);
+        document.getElementById("drying-body").innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--danger);padding:60px">Network error.</td></tr>`;
+    }
+}
+
+function statusBadge(status){
+    const styles = {
+        in_progress: "background:rgba(251,146,60,.12);color:var(--orange)",
+        completed:   "background:rgba(74,222,128,.12);color:var(--green)",
+        cancelled:   "background:rgba(248,113,113,.12);color:var(--danger)",
+    };
+    const label = status==="in_progress" ? "In progress" : (status==="completed" ? "Completed" : (status==="cancelled" ? "Cancelled" : status));
+    return `<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;${styles[status]||""}">${label}</span>`;
+}
+
+function fmtDateShort(s){
+    if(!s) return "-";
+    try { return new Date(s).toLocaleDateString(); } catch(e){ return s; }
+}
+
+function summarizeItems(items){
+    if(!items || !items.length) return "-";
+    const visible = items.slice(0, 2).map(it => {
+        const qty = (it.qty || 0).toFixed(2);
+        const product = (it.product_name || "").split(" ")[0];
+        return `${qty} ${product}`;
+    }).join(", ");
+    return items.length > 2 ? `${visible}...` : visible;
+}
+
+function renderDryingTable(){
+    if(!dryingBatches.length){
+        document.getElementById("drying-body").innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:60px">No drying batches yet.</td></tr>`;
+        return;
+    }
+    let html = "";
+    dryingBatches.forEach(b => {
+        const yieldDisplay = (b.actual_yield_pct !== null && b.actual_yield_pct !== undefined) ? `${Number(b.actual_yield_pct).toFixed(1)}%` : "-";
+        const spoilageCount = (b.spoilage || []).length;
+        const isInProgress = b.status === "in_progress";
+        const actions = [];
+        if(isInProgress && hasPermission("action_drying_complete_batch")){
+            actions.push(`<button class="action-btn green" onclick="openDryingCompleteModal(${b.id})">Complete</button>`);
+        }
+        if(isInProgress && hasPermission("action_drying_log_spoilage")){
+            actions.push(`<button class="action-btn warn" onclick="openDryingSpoilageModal(${b.id})">Spoilage</button>`);
+        }
+        if(isInProgress && hasPermission("action_drying_cancel_batch")){
+            actions.push(`<button class="action-btn danger" onclick="cancelDrying(${b.id}, '${escapeHtml(b.batch_number)}')">Cancel</button>`);
+        }
+        html += `<tr>
+            <td style="font-family:var(--mono);font-size:12px;color:var(--orange)">${escapeHtml(b.batch_number)}</td>
+            <td>${statusBadge(b.status)}</td>
+            <td style="font-size:12px;color:var(--muted)">${fmtDateShort(b.started_at)}</td>
+            <td style="font-size:12px;color:var(--muted)">${fmtDateShort(b.completed_at)}</td>
+            <td style="font-size:12px;color:var(--sub)">${summarizeItems(b.inputs)}</td>
+            <td style="font-size:12px;color:var(--green)">${summarizeItems(b.outputs)}</td>
+            <td style="font-family:var(--mono);color:${b.actual_yield_pct ? (b.actual_yield_pct<15?'var(--danger)':b.actual_yield_pct<30?'var(--warn)':'var(--green)') : 'var(--muted)'}">${yieldDisplay}</td>
+            <td style="font-size:12px;color:${spoilageCount?'var(--danger)':'var(--muted)'}">${spoilageCount || '-'}</td>
+            <td style="font-size:12px;color:var(--muted);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(b.notes || '-')}</td>
+            <td><div style="display:flex;gap:6px">${actions.join("")}</div></td>
+        </tr>`;
+    });
+    document.getElementById("drying-body").innerHTML = html;
+}
+
+/* ── DRYING START ── */
+function openDryingStartModal(){
+    document.getElementById("dry-notes").value = "";
+    document.getElementById("dry-expected-yield").value = "";
+    document.getElementById("drying-inputs").innerHTML = "";
+    addItemRow("drying-inputs", null);
+    document.getElementById("drying-start-modal").classList.add("open");
+}
+function closeDryingStartModal(){
+    document.getElementById("drying-start-modal").classList.remove("open");
+}
+async function submitDryingStart(){
+    const inputs = [];
+    document.querySelectorAll("#drying-inputs .item-row").forEach(row => {
+        const sel = row.querySelector("select");
+        const qtyInput = row.querySelector("input[type=number]");
+        const pid = parseInt(sel?.value);
+        const qty = parseFloat(qtyInput?.value);
+        if(pid && qty > 0){
+            inputs.push({product_id: pid, qty: qty});
+        }
+    });
+    if(!inputs.length){
+        alert("Add at least one raw material input.");
+        return;
+    }
+    const expectedYield = parseFloat(document.getElementById("dry-expected-yield").value);
+    const body = {
+        inputs: inputs,
+        notes: document.getElementById("dry-notes").value || null,
+        expected_yield_pct: isNaN(expectedYield) ? null : expectedYield,
+    };
+    try {
+        const resp = await fetch("/production/drying/api/batches", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(body),
+        });
+        if(!resp.ok){
+            const err = await resp.json().catch(() => ({}));
+            alert("Failed to start batch: " + (err.detail || resp.status));
+            return;
+        }
+        closeDryingStartModal();
+        await loadDrying();
+    } catch(e){
+        alert("Network error: " + e.message);
+    }
+}
+
+/* ── DRYING COMPLETE ── */
+function openDryingCompleteModal(batchId){
+    activeDryingBatchId = batchId;
+    const batch = dryingBatches.find(b => b.id === batchId);
+    if(!batch) return;
+    document.getElementById("drying-complete-sub").innerText = `Completing ${batch.batch_number}. Output stock will be created when you confirm.`;
+    document.getElementById("dry-complete-notes").value = "";
+    document.getElementById("drying-outputs").innerHTML = "";
+    addItemRow("drying-outputs", null);
+    document.getElementById("drying-complete-modal").classList.add("open");
+}
+function closeDryingCompleteModal(){
+    document.getElementById("drying-complete-modal").classList.remove("open");
+    activeDryingBatchId = null;
+}
+async function submitDryingComplete(){
+    if(!activeDryingBatchId) return;
+    const outputs = [];
+    document.querySelectorAll("#drying-outputs .item-row").forEach(row => {
+        const sel = row.querySelector("select");
+        const qtyInput = row.querySelector("input[type=number]");
+        const pid = parseInt(sel?.value);
+        const qty = parseFloat(qtyInput?.value);
+        if(pid && qty > 0){
+            outputs.push({product_id: pid, qty: qty});
+        }
+    });
+    if(!outputs.length){
+        alert("Add at least one finished output product.");
+        return;
+    }
+    const body = {
+        outputs: outputs,
+        notes: document.getElementById("dry-complete-notes").value || null,
+    };
+    try {
+        const resp = await fetch(`/production/drying/api/batches/${activeDryingBatchId}/complete`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(body),
+        });
+        if(!resp.ok){
+            const err = await resp.json().catch(() => ({}));
+            alert("Failed to complete batch: " + (err.detail || resp.status));
+            return;
+        }
+        closeDryingCompleteModal();
+        await loadDrying();
+    } catch(e){
+        alert("Network error: " + e.message);
+    }
+}
+
+/* ── DRYING CANCEL ── */
+async function cancelDrying(batchId, batchNumber){
+    if(!confirm(`Cancel ${batchNumber}? Inputs will be returned to stock. This cannot be undone.`)) return;
+    try {
+        const resp = await fetch(`/production/drying/api/batches/${batchId}/cancel`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({reason: null}),
+        });
+        if(!resp.ok){
+            const err = await resp.json().catch(() => ({}));
+            alert("Failed to cancel: " + (err.detail || resp.status));
+            return;
+        }
+        await loadDrying();
+    } catch(e){
+        alert("Network error: " + e.message);
+    }
+}
+
+/* ── DRYING SPOILAGE ── */
+function openDryingSpoilageModal(batchId){
+    activeDryingBatchId = batchId;
+    const batch = dryingBatches.find(b => b.id === batchId);
+    if(!batch) return;
+    const sel = document.getElementById("dry-spl-product");
+    // Populate with the batch's input products (most likely candidates) first, then others
+    const inputProductIds = (batch.inputs || []).map(i => i.product_id);
+    const inputOptions = allProducts
+        .filter(p => inputProductIds.includes(p.id))
+        .map(p => `<option value="${p.id}">${escapeHtml(formatProductLabel(p))}</option>`)
+        .join("");
+    const otherOptions = allProducts
+        .filter(p => !inputProductIds.includes(p.id))
+        .map(p => `<option value="${p.id}">${escapeHtml(formatProductLabel(p))}</option>`)
+        .join("");
+    sel.innerHTML = `<option value="">Select product</option>` + inputOptions + otherOptions;
+    document.getElementById("dry-spl-qty").value = "";
+    document.getElementById("dry-spl-reason").value = "mold";
+    document.getElementById("dry-spl-detail").value = "";
+    document.getElementById("drying-spoilage-modal").classList.add("open");
+}
+function closeDryingSpoilageModal(){
+    document.getElementById("drying-spoilage-modal").classList.remove("open");
+    activeDryingBatchId = null;
+}
+async function submitDryingSpoilage(){
+    if(!activeDryingBatchId) return;
+    const pid = parseInt(document.getElementById("dry-spl-product").value);
+    const qty = parseFloat(document.getElementById("dry-spl-qty").value);
+    const reason = document.getElementById("dry-spl-reason").value;
+    const detail = document.getElementById("dry-spl-detail").value;
+    if(!pid || !qty || qty <= 0 || !reason){
+        alert("Fill in product, quantity, and reason.");
+        return;
+    }
+    const body = {
+        product_id: pid,
+        qty: qty,
+        reason: reason,
+        detail: detail || null,
+    };
+    try {
+        const resp = await fetch(`/production/drying/api/batches/${activeDryingBatchId}/spoilage`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(body),
+        });
+        if(!resp.ok){
+            const err = await resp.json().catch(() => ({}));
+            alert("Failed to log spoilage: " + (err.detail || resp.status));
+            return;
+        }
+        closeDryingSpoilageModal();
+        await loadDrying();
+    } catch(e){
+        alert("Network error: " + e.message);
+    }
+}
+
+["batch-modal","pkg-modal","recipe-modal","spoilage-modal","drying-start-modal","drying-complete-modal","drying-spoilage-modal"].forEach(id => {
     document.getElementById(id).addEventListener("click", function(e){ if(e.target===this) this.classList.remove("open"); });
 });
 
