@@ -116,6 +116,7 @@ async def start_drying_batch(
     current_user: User = Depends(get_current_user),
 ):
     batch = await drying_service.start_batch(db, data, current_user)
+    batch = await drying_service.get_batch(db, batch.id)
     return _serialize_batch(batch)
 
 
@@ -150,6 +151,7 @@ async def add_drying_next_stage(
     current_user: User = Depends(get_current_user),
 ):
     batch = await drying_service.add_next_stage(db, batch_id, data, current_user)
+    batch = await drying_service.get_batch(db, batch.id)
     return _serialize_batch(batch)
 
 
@@ -162,6 +164,7 @@ async def finalize_drying_batch(
     current_user: User = Depends(get_current_user),
 ):
     batch = await drying_service.finalize_batch(db, batch_id, data, current_user)
+    batch = await drying_service.get_batch(db, batch.id)
     return _serialize_batch(batch)
 
 
@@ -174,6 +177,7 @@ async def cancel_drying_batch(
     current_user: User = Depends(get_current_user),
 ):
     batch = await drying_service.cancel_batch(db, batch_id, data, current_user)
+    batch = await drying_service.get_batch(db, batch.id)
     return _serialize_batch(batch)
 
 
