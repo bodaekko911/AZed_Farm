@@ -1,13 +1,15 @@
-"""Drying Batch service.
+"""Drying Batch service — multi-stage workflow.
 
-Manages multi-day stateful processing batches (drying, fermenting, curing, etc).
-Distinct from the one-shot ProductionBatch — drying batches span real wall-clock
-time and move stock only at terminal transitions:
+Each batch progresses through N transformation stages:
+  • start_batch      — creates DryingBatch + Stage 1 (open); deducts input stock
+  • add_next_stage   — closes the open stage (writes outputs, metrics, credits stock);
+                       opens Stage N+1 (deducts new input stock)
+  • finalize_batch   — closes the open stage; marks batch completed
+  • cancel_batch     — clawbacks closed outputs, refunds all inputs (reverse order)
+  • log_spoilage     — deducts spoiled qty mid-batch
 
-  • start_batch     — deducts input stock immediately
-  • complete_batch  — credits output stock and computes actual yield %
-  • cancel_batch    — refunds input stock
-  • log_spoilage    — deducts spoiled stock at log time (mid-batch)
+An "open stage" is one where total_output_qty IS NULL.
+At any moment of an in_progress batch, exactly one stage is open.
 """
 from __future__ import annotations
 
@@ -19,21 +21,23 @@ from sqlalchemy.orm import selectinload
 from app.core.log import record
 from app.models.drying import (
     DryingBatch,
-    DryingBatchInput,
-    DryingBatchOutput,
+    DryingBatchStage,
+    DryingBatchStageInput,
+    DryingBatchStageOutput,
     DryingBatchSpoilage,
 )
 from app.models.inventory import StockMove
 from app.models.product import Product
 from app.schemas.drying import (
     DryingBatchCancelRequest,
-    DryingBatchCompleteRequest,
+    DryingBatchFinalizeRequest,
+    DryingBatchNextStageRequest,
     DryingBatchSpoilageCreate,
     DryingBatchStartCreate,
 )
 
-# Units treated as weight for yield % calculation
-WEIGHT_UNITS = {"gram", "g", "kg", "ml", "l", "liter", "ltr", "litre"}
+# Units treated as weight/volume for yield % calculation
+WEIGHT_UNITS = ("gram", "g", "kg", "ml", "l", "liter", "ltr", "litre")
 
 VALID_SPOILAGE_REASONS = {"mold", "pest", "weather", "other"}
 
@@ -43,7 +47,133 @@ VALID_SPOILAGE_REASONS = {"mold", "pest", "weather", "other"}
 # ---------------------------------------------------------------------------
 
 def _is_weight_unit(unit: str) -> bool:
-    return (unit or "").lower() in WEIGHT_UNITS
+    return (unit or "").lower().strip() in WEIGHT_UNITS
+
+
+def _compute_stage_metrics(
+    stage_inputs: list,
+    stage_outputs: list,
+    stage_1_inputs: list,
+) -> dict:
+    """Compute per-stage and cumulative yield metrics.
+
+    Returns a dict with keys:
+      total_input_qty, total_output_qty, stage_loss_pct, cumulative_yield_pct
+    All values may be None if any product is non-weight-unit.
+    """
+    # Check all inputs are weight units
+    if not stage_inputs or any(
+        not _is_weight_unit(getattr(inp.product, "unit", "") or "")
+        for inp in stage_inputs
+    ):
+        return {
+            "total_input_qty": None,
+            "total_output_qty": None,
+            "stage_loss_pct": None,
+            "cumulative_yield_pct": None,
+        }
+    if not stage_outputs or any(
+        not _is_weight_unit(getattr(out.product, "unit", "") or "")
+        for out in stage_outputs
+    ):
+        return {
+            "total_input_qty": None,
+            "total_output_qty": None,
+            "stage_loss_pct": None,
+            "cumulative_yield_pct": None,
+        }
+
+    total_in  = sum(float(inp.qty) for inp in stage_inputs)
+    total_out = sum(float(out.qty) for out in stage_outputs)
+
+    stage_loss_pct = round((1 - total_out / total_in) * 100, 2) if total_in > 0 else None
+
+    # Cumulative yield vs Stage 1 inputs
+    stage1_weight = None
+    if stage_1_inputs and all(
+        _is_weight_unit(getattr(inp.product, "unit", "") or "")
+        for inp in stage_1_inputs
+    ):
+        stage1_weight = sum(float(inp.qty) for inp in stage_1_inputs)
+
+    cumulative_yield_pct = None
+    if stage1_weight and stage1_weight > 0:
+        cumulative_yield_pct = round(total_out / stage1_weight * 100, 2)
+
+    return {
+        "total_input_qty": round(total_in, 3),
+        "total_output_qty": round(total_out, 3),
+        "stage_loss_pct": stage_loss_pct,
+        "cumulative_yield_pct": cumulative_yield_pct,
+    }
+
+
+def _find_open_stage(batch) -> DryingBatchStage:
+    """Return the single open stage (total_output_qty IS NULL).
+
+    Raises HTTPException(400) if not exactly one.
+    """
+    open_stages = [s for s in batch.stages if s.total_output_qty is None]
+    if len(open_stages) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Batch {batch.batch_number} has no open stage — it may already be finalized.",
+        )
+    if len(open_stages) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Batch {batch.batch_number} has {len(open_stages)} open stages — data inconsistency.",
+        )
+    return open_stages[0]
+
+
+async def _close_open_stage(
+    db: AsyncSession,
+    batch,
+    outputs_payload: list,
+    stage_1_inputs: list,
+    current_user,
+    batch_number: str,
+) -> None:
+    """Find the open stage, write its outputs, credit stock, compute metrics."""
+    open_stage = _find_open_stage(batch)
+
+    for item in outputs_payload:
+        product = await _load_product_or_404(db, item.product_id)
+        before = float(product.stock)
+        product.stock = before + float(item.qty)
+        after = float(product.stock)
+        db.add(DryingBatchStageOutput(
+            stage_id=open_stage.id,
+            product_id=product.id,
+            qty=item.qty,
+        ))
+        db.add(StockMove(
+            product_id=product.id,
+            type="in",
+            user_id=current_user.id,
+            qty=float(item.qty),
+            qty_before=before,
+            qty_after=after,
+            ref_type="drying_batch",
+            ref_id=batch.id,
+            note=f"Output from {batch_number} stage {open_stage.stage_number}",
+        ))
+
+    # Flush so the output rows have IDs, then reload stage with products attached
+    await db.flush()
+
+    # Re-read stage inputs/outputs with products for metrics (already in memory from eager load)
+    metrics = _compute_stage_metrics(
+        open_stage.inputs,
+        open_stage.outputs,
+        stage_1_inputs,
+    )
+
+    open_stage.total_input_qty      = metrics["total_input_qty"]
+    open_stage.total_output_qty     = metrics["total_output_qty"] if metrics["total_output_qty"] is not None else sum(float(i.qty) for i in outputs_payload)
+    open_stage.stage_loss_pct       = metrics["stage_loss_pct"]
+    open_stage.cumulative_yield_pct = metrics["cumulative_yield_pct"]
 
 
 async def _load_product_or_404(db: AsyncSession, product_id: int) -> Product:
@@ -58,21 +188,18 @@ async def _load_batch_or_404(
     db: AsyncSession,
     batch_id: int,
     *,
-    with_inputs: bool = False,
-    with_outputs: bool = False,
-    with_spoilage: bool = False,
+    with_stages: bool = False,
 ) -> DryingBatch:
     stmt = select(DryingBatch).where(DryingBatch.id == batch_id)
-    options = []
-    if with_inputs:
-        options.append(selectinload(DryingBatch.inputs).selectinload(DryingBatchInput.product))
-    if with_outputs:
-        options.append(selectinload(DryingBatch.outputs).selectinload(DryingBatchOutput.product))
-    if with_spoilage:
-        options.append(selectinload(DryingBatch.spoilage).selectinload(DryingBatchSpoilage.product))
-    if options:
-        stmt = stmt.options(*options)
-
+    if with_stages:
+        stmt = stmt.options(
+            selectinload(DryingBatch.stages)
+            .selectinload(DryingBatchStage.inputs)
+            .selectinload(DryingBatchStageInput.product),
+            selectinload(DryingBatch.stages)
+            .selectinload(DryingBatchStage.outputs)
+            .selectinload(DryingBatchStageOutput.product),
+        )
     result = await db.execute(stmt)
     batch = result.scalar_one_or_none()
     if not batch:
@@ -98,14 +225,11 @@ async def start_batch(
 ) -> DryingBatch:
     """Start a new drying batch.
 
-    1. Verify sufficient stock for each input product.
-    2. Generate batch_number.
-    3. Insert DryingBatch (status=in_progress).
-    4. For each input: insert DryingBatchInput, deduct stock, insert StockMove.
-    5. Log activity.
-    6. Commit and return.
+    1. Validate stock for all inputs.
+    2. Create DryingBatch (status=in_progress).
+    3. Create Stage 1 (open — no outputs yet).
+    4. Insert DryingBatchStageInput rows, deduct stock, insert StockMoves.
     """
-    # Pre-validate stock for all inputs
     input_products = []
     for item in data.inputs:
         product = await _load_product_or_404(db, item.product_id)
@@ -123,15 +247,24 @@ async def start_batch(
         batch_number=batch_number,
         status="in_progress",
         started_by_id=current_user.id,
-        expected_yield_pct=data.expected_yield_pct,
         notes=data.notes,
     )
     db.add(batch)
     await db.flush()  # get batch.id
 
+    stage = DryingBatchStage(
+        batch_id=batch.id,
+        stage_number=1,
+        label=data.label,
+        logged_by_id=current_user.id,
+        # Metrics columns stay NULL — stage is open
+    )
+    db.add(stage)
+    await db.flush()  # get stage.id
+
     for item, product in input_products:
-        db.add(DryingBatchInput(
-            batch_id=batch.id,
+        db.add(DryingBatchStageInput(
+            stage_id=stage.id,
             product_id=product.id,
             qty=item.qty,
         ))
@@ -141,20 +274,20 @@ async def start_batch(
         db.add(StockMove(
             product_id=product.id,
             type="out",
+            user_id=current_user.id,
             qty=float(item.qty),
             qty_before=before,
             qty_after=after,
             ref_type="drying_batch",
             ref_id=batch.id,
-            note=f"Input to {batch_number}",
-            user_id=current_user.id,
+            note=f"Input to {batch_number} stage 1",
         ))
 
     record(
         db,
         "Drying",
         "start_batch",
-        f"Batch {batch_number} started — {len(data.inputs)} inputs",
+        f"Batch {batch_number} started — {len(data.inputs)} inputs in stage 1",
         user=current_user,
         ref_type="drying_batch",
         ref_id=batch.id,
@@ -165,71 +298,124 @@ async def start_batch(
     return batch
 
 
-async def complete_batch(
+async def add_next_stage(
     db: AsyncSession,
     batch_id: int,
-    data: DryingBatchCompleteRequest,
+    data: DryingBatchNextStageRequest,
     current_user,
 ) -> DryingBatch:
-    """Complete a drying batch.
+    """Close the current open stage and open a new one.
 
-    1. Load batch + inputs. Validate status=in_progress.
-    2. For each output: create DryingBatchOutput, add to product.stock, StockMove.
-    3. Compute actual_yield_pct from weight-unit products only.
-    4. Update batch fields and optionally append completion notes.
-    5. Log, commit, return.
+    1. Load batch with all stage inputs/outputs.
+    2. Validate status=in_progress.
+    3. Close the open stage: write outputs, credit stock, compute metrics.
+    4. Open Stage N+1: write new inputs, deduct stock.
     """
-    batch = await _load_batch_or_404(db, batch_id, with_inputs=True)
+    batch = await _load_batch_or_404(db, batch_id, with_stages=True)
 
     if batch.status != "in_progress":
         raise HTTPException(status_code=400, detail="Batch is not in progress")
 
-    output_products = []
-    for item in data.outputs:
-        product = await _load_product_or_404(db, item.product_id)
-        output_products.append((item, product))
+    stage_1_inputs = batch.stages[0].inputs if batch.stages else []
+    open_stage = _find_open_stage(batch)
 
-    for item, product in output_products:
-        db.add(DryingBatchOutput(
-            batch_id=batch.id,
+    if data.prev_stage_notes:
+        open_stage.notes = data.prev_stage_notes
+
+    await _close_open_stage(
+        db, batch, data.prev_stage_outputs, stage_1_inputs, current_user, batch.batch_number
+    )
+
+    # Open next stage
+    new_stage_number = open_stage.stage_number + 1
+    new_stage = DryingBatchStage(
+        batch_id=batch.id,
+        stage_number=new_stage_number,
+        label=data.new_stage_label,
+        notes=data.new_stage_notes,
+        logged_by_id=current_user.id,
+        # Metrics NULL — stage open
+    )
+    db.add(new_stage)
+    await db.flush()  # get new_stage.id
+
+    new_input_products = []
+    for item in data.new_stage_inputs:
+        product = await _load_product_or_404(db, item.product_id)
+        if float(product.stock) < item.qty:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not enough stock for '{product.name}' in stage {new_stage_number}. "
+                       f"Available: {float(product.stock)}, requested: {item.qty}",
+            )
+        new_input_products.append((item, product))
+
+    for item, product in new_input_products:
+        db.add(DryingBatchStageInput(
+            stage_id=new_stage.id,
             product_id=product.id,
             qty=item.qty,
         ))
         before = float(product.stock)
-        product.stock = before + float(item.qty)
+        product.stock = before - float(item.qty)
         after = float(product.stock)
         db.add(StockMove(
             product_id=product.id,
-            type="in",
+            type="out",
+            user_id=current_user.id,
             qty=float(item.qty),
             qty_before=before,
             qty_after=after,
             ref_type="drying_batch",
             ref_id=batch.id,
-            note=f"Output from {batch.batch_number}",
-            user_id=current_user.id,
+            note=f"Input to {batch.batch_number} stage {new_stage_number}",
         ))
 
-    # Compute actual_yield_pct from weight-unit products
-    total_in_kg = sum(
-        float(inp.qty)
-        for inp in batch.inputs
-        if _is_weight_unit(inp.product.unit if inp.product else "")
+    record(
+        db,
+        "Drying",
+        "add_next_stage",
+        f"Batch {batch.batch_number}: stage {open_stage.stage_number} closed, "
+        f"stage {new_stage_number} opened",
+        user=current_user,
+        ref_type="drying_batch",
+        ref_id=batch.id,
     )
-    total_out_kg = sum(
-        float(item.qty)
-        for item, product in output_products
-        if _is_weight_unit(product.unit)
+
+    await db.commit()
+    await db.refresh(batch)
+    return batch
+
+
+async def finalize_batch(
+    db: AsyncSession,
+    batch_id: int,
+    data: DryingBatchFinalizeRequest,
+    current_user,
+) -> DryingBatch:
+    """Finalize a drying batch — close the open stage and mark completed.
+
+    1. Load batch with all stage data.
+    2. Validate status=in_progress.
+    3. Close the open stage: write final outputs, credit stock, compute metrics.
+    4. Mark batch completed.
+    """
+    batch = await _load_batch_or_404(db, batch_id, with_stages=True)
+
+    if batch.status != "in_progress":
+        raise HTTPException(status_code=400, detail="Batch is not in progress")
+
+    stage_1_inputs = batch.stages[0].inputs if batch.stages else []
+
+    open_stage = _find_open_stage(batch)
+
+    await _close_open_stage(
+        db, batch, data.final_outputs, stage_1_inputs, current_user, batch.batch_number
     )
-    if total_in_kg > 0:
-        actual_yield_pct = round(total_out_kg / total_in_kg * 100, 2)
-    else:
-        actual_yield_pct = None
 
     batch.status = "completed"
     batch.completed_at = func.now()
     batch.completed_by_id = current_user.id
-    batch.actual_yield_pct = actual_yield_pct
 
     if data.notes:
         batch.notes = f"{batch.notes or ''}\n\n[completion] {data.notes}".strip()
@@ -237,9 +423,8 @@ async def complete_batch(
     record(
         db,
         "Drying",
-        "complete_batch",
-        f"Batch {batch.batch_number} completed — {len(data.outputs)} outputs, "
-        f"yield {actual_yield_pct}%",
+        "finalize_batch",
+        f"Batch {batch.batch_number} finalized after {len(batch.stages)} stage(s)",
         user=current_user,
         ref_type="drying_batch",
         ref_id=batch.id,
@@ -258,29 +443,52 @@ async def cancel_batch(
 ) -> DryingBatch:
     """Cancel an in-progress drying batch.
 
-    Refunds all input stock back to inventory and marks batch as cancelled.
+    Iterates stages in REVERSE order:
+      - For each closed stage (total_output_qty is not None): clawback outputs (deduct stock).
+      - For each stage: refund inputs (credit stock).
     """
-    batch = await _load_batch_or_404(db, batch_id, with_inputs=True)
+    batch = await _load_batch_or_404(db, batch_id, with_stages=True)
 
     if batch.status != "in_progress":
         raise HTTPException(status_code=400, detail="Batch is not in progress")
 
-    for inp in batch.inputs:
-        product = await _load_product_or_404(db, inp.product_id)
-        before = float(product.stock)
-        product.stock = before + float(inp.qty)
-        after = float(product.stock)
-        db.add(StockMove(
-            product_id=product.id,
-            type="in",
-            qty=float(inp.qty),
-            qty_before=before,
-            qty_after=after,
-            ref_type="drying_batch",
-            ref_id=batch.id,
-            note=f"Cancelled {batch.batch_number} — input refunded",
-            user_id=current_user.id,
-        ))
+    for stage in reversed(batch.stages):
+        # Clawback outputs of closed stages
+        if stage.total_output_qty is not None:
+            for out in stage.outputs:
+                product = await _load_product_or_404(db, out.product_id)
+                before = float(product.stock)
+                product.stock = before - float(out.qty)
+                after = float(product.stock)
+                db.add(StockMove(
+                    product_id=product.id,
+                    type="out",
+                    user_id=current_user.id,
+                    qty=float(out.qty),
+                    qty_before=before,
+                    qty_after=after,
+                    ref_type="drying_batch",
+                    ref_id=batch.id,
+                    note=f"Clawback: cancelled {batch.batch_number} stage {stage.stage_number} output",
+                ))
+
+        # Refund all inputs of this stage
+        for inp in stage.inputs:
+            product = await _load_product_or_404(db, inp.product_id)
+            before = float(product.stock)
+            product.stock = before + float(inp.qty)
+            after = float(product.stock)
+            db.add(StockMove(
+                product_id=product.id,
+                type="in",
+                user_id=current_user.id,
+                qty=float(inp.qty),
+                qty_before=before,
+                qty_after=after,
+                ref_type="drying_batch",
+                ref_id=batch.id,
+                note=f"Refund: cancelled {batch.batch_number} stage {stage.stage_number} input",
+            ))
 
     batch.status = "cancelled"
     batch.cancelled_at = func.now()
@@ -292,7 +500,7 @@ async def cancel_batch(
         db,
         "Drying",
         "cancel_batch",
-        f"Batch {batch.batch_number} cancelled",
+        f"Batch {batch.batch_number} cancelled across {len(batch.stages)} stage(s)",
         user=current_user,
         ref_type="drying_batch",
         ref_id=batch.id,
@@ -311,8 +519,7 @@ async def log_spoilage(
 ) -> DryingBatchSpoilage:
     """Log a spoilage event on an in-progress batch.
 
-    Deducts the spoiled qty from product.stock immediately (material removed and
-    discarded). Inserts a StockMove with ref_type="drying_batch_spoilage".
+    Deducts the spoiled qty from product.stock immediately.
     """
     batch = await _load_batch_or_404(db, batch_id)
 
@@ -345,20 +552,20 @@ async def log_spoilage(
     db.add(StockMove(
         product_id=product.id,
         type="out",
+        user_id=current_user.id,
         qty=float(data.qty),
         qty_before=before,
         qty_after=after,
         ref_type="drying_batch_spoilage",
         ref_id=spoilage.id,
         note=f"Spoilage in {batch.batch_number} ({data.reason})",
-        user_id=current_user.id,
     ))
 
     record(
         db,
         "Drying",
         "log_spoilage",
-        f"Spoilage logged in {batch.batch_number}: {data.qty} of product {product.name} ({data.reason})",
+        f"Spoilage logged in {batch.batch_number}: {data.qty} of {product.name} ({data.reason})",
         user=current_user,
         ref_type="drying_batch",
         ref_id=batch.id,
@@ -376,13 +583,19 @@ async def list_batches(
     skip: int = 0,
     limit: int = 50,
 ) -> list[DryingBatch]:
-    """Return drying batches with inputs/outputs eagerly loaded."""
+    """Return drying batches with stages eagerly loaded."""
     stmt = (
         select(DryingBatch)
         .options(
-            selectinload(DryingBatch.inputs).selectinload(DryingBatchInput.product),
-            selectinload(DryingBatch.outputs).selectinload(DryingBatchOutput.product),
-            selectinload(DryingBatch.spoilage).selectinload(DryingBatchSpoilage.product),
+            selectinload(DryingBatch.stages)
+            .selectinload(DryingBatchStage.inputs)
+            .selectinload(DryingBatchStageInput.product),
+            selectinload(DryingBatch.stages)
+            .selectinload(DryingBatchStage.outputs)
+            .selectinload(DryingBatchStageOutput.product),
+            selectinload(DryingBatch.spoilage),
+            selectinload(DryingBatch.started_by),
+            selectinload(DryingBatch.completed_by),
         )
         .order_by(DryingBatch.started_at.desc())
         .offset(skip)
@@ -401,9 +614,13 @@ async def get_batch(db: AsyncSession, batch_id: int) -> DryingBatch:
         select(DryingBatch)
         .where(DryingBatch.id == batch_id)
         .options(
-            selectinload(DryingBatch.inputs).selectinload(DryingBatchInput.product),
-            selectinload(DryingBatch.outputs).selectinload(DryingBatchOutput.product),
-            selectinload(DryingBatch.spoilage).selectinload(DryingBatchSpoilage.product),
+            selectinload(DryingBatch.stages)
+            .selectinload(DryingBatchStage.inputs)
+            .selectinload(DryingBatchStageInput.product),
+            selectinload(DryingBatch.stages)
+            .selectinload(DryingBatchStage.outputs)
+            .selectinload(DryingBatchStageOutput.product),
+            selectinload(DryingBatch.spoilage),
             selectinload(DryingBatch.started_by),
             selectinload(DryingBatch.completed_by),
         )
