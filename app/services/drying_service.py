@@ -135,11 +135,15 @@ async def start_batch(
             product_id=product.id,
             qty=item.qty,
         ))
-        product.stock = float(product.stock) - item.qty
+        before = float(product.stock)
+        product.stock = before - float(item.qty)
+        after = float(product.stock)
         db.add(StockMove(
             product_id=product.id,
             type="out",
-            qty=-item.qty,
+            qty=float(item.qty),
+            qty_before=before,
+            qty_after=after,
             ref_type="drying_batch",
             ref_id=batch.id,
             note=f"Input to {batch_number}",
@@ -191,11 +195,15 @@ async def complete_batch(
             product_id=product.id,
             qty=item.qty,
         ))
-        product.stock = float(product.stock) + item.qty
+        before = float(product.stock)
+        product.stock = before + float(item.qty)
+        after = float(product.stock)
         db.add(StockMove(
             product_id=product.id,
             type="in",
-            qty=item.qty,
+            qty=float(item.qty),
+            qty_before=before,
+            qty_after=after,
             ref_type="drying_batch",
             ref_id=batch.id,
             note=f"Output from {batch.batch_number}",
@@ -259,11 +267,15 @@ async def cancel_batch(
 
     for inp in batch.inputs:
         product = await _load_product_or_404(db, inp.product_id)
-        product.stock = float(product.stock) + float(inp.qty)
+        before = float(product.stock)
+        product.stock = before + float(inp.qty)
+        after = float(product.stock)
         db.add(StockMove(
             product_id=product.id,
             type="in",
             qty=float(inp.qty),
+            qty_before=before,
+            qty_after=after,
             ref_type="drying_batch",
             ref_id=batch.id,
             note=f"Cancelled {batch.batch_number} — input refunded",
@@ -327,11 +339,15 @@ async def log_spoilage(
     db.add(spoilage)
     await db.flush()  # get spoilage.id
 
-    product.stock = float(product.stock) - data.qty
+    before = float(product.stock)
+    product.stock = before - float(data.qty)
+    after = float(product.stock)
     db.add(StockMove(
         product_id=product.id,
         type="out",
-        qty=-data.qty,
+        qty=float(data.qty),
+        qty_before=before,
+        qty_after=after,
         ref_type="drying_batch_spoilage",
         ref_id=spoilage.id,
         note=f"Spoilage in {batch.batch_number} ({data.reason})",

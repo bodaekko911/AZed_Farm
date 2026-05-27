@@ -189,7 +189,7 @@ def test_start_batch_deducts_input_stock():
 
 
 def test_start_batch_creates_stock_move():
-    """start_batch must add a StockMove with type='out' and negative qty."""
+    """start_batch must add a StockMove with type='out', positive qty, and qty_before/after."""
     product = _make_product(stock=100.0)
     user    = _make_user()
 
@@ -206,7 +206,9 @@ def test_start_batch_creates_stock_move():
     stock_moves = [obj for obj in db.added if isinstance(obj, StockMove)]
     assert len(stock_moves) == 1
     assert stock_moves[0].type == "out"
-    assert float(stock_moves[0].qty) == -40.0
+    assert float(stock_moves[0].qty) == 40.0       # positive — direction encoded in type
+    assert stock_moves[0].qty_before == 100.0
+    assert stock_moves[0].qty_after == 60.0
     assert stock_moves[0].ref_type == "drying_batch"
 
 
