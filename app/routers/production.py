@@ -1888,18 +1888,9 @@ function closeDryingStartModal(){
     document.getElementById("drying-start-modal").classList.remove("open");
 }
 async function submitDryingStart(){
-    const inputs = [];
-    document.querySelectorAll("#drying-inputs .item-row").forEach(row => {
-        const sel = row.querySelector("select");
-        const qtyInput = row.querySelector("input[type=number]");
-        const pid = parseInt(sel?.value);
-        const qty = parseFloat(qtyInput?.value);
-        if(pid && qty > 0){
-            inputs.push({product_id: pid, qty: qty});
-        }
-    });
+    const inputs = getRows("drying-inputs");
     if(!inputs.length){
-        alert("Add at least one raw material input.");
+        alert("Add at least one raw material input. Pick a product from the search dropdown and enter a quantity.");
         return;
     }
     const expectedYield = parseFloat(document.getElementById("dry-expected-yield").value);
@@ -1943,18 +1934,9 @@ function closeDryingCompleteModal(){
 }
 async function submitDryingComplete(){
     if(!activeDryingBatchId) return;
-    const outputs = [];
-    document.querySelectorAll("#drying-outputs .item-row").forEach(row => {
-        const sel = row.querySelector("select");
-        const qtyInput = row.querySelector("input[type=number]");
-        const pid = parseInt(sel?.value);
-        const qty = parseFloat(qtyInput?.value);
-        if(pid && qty > 0){
-            outputs.push({product_id: pid, qty: qty});
-        }
-    });
+    const outputs = getRows("drying-outputs");
     if(!outputs.length){
-        alert("Add at least one finished output product.");
+        alert("Add at least one finished output product. Pick a product from the search dropdown and enter a quantity.");
         return;
     }
     const body = {
