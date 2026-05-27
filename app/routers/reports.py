@@ -22,6 +22,7 @@ from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.spoilage import SpoilageRecord
 from app.models.refund import RetailRefund, RetailRefundItem
 from app.models.production import ProductionBatch, BatchInput, BatchOutput
+from app.models.drying import DryingBatch, DryingBatchStage, DryingBatchStageInput, DryingBatchStageOutput
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.receipt import ProductReceipt
 from app.models.expense import Expense, ExpenseCategory
@@ -1592,9 +1593,56 @@ async def production_report(date_from: Optional[str] = None, date_to: Optional[s
             "inputs_str":inputs_str,"outputs_str":outputs_str,"user_name":b.user.name if b.user else "—"})
         if is_pkg: total_pkg  += 1
         else:      total_proc += 1; losses.append(float(b.waste_pct))
+    # ── Drying batches ──────────────────────────────────
+    drying_res = await db.execute(
+        select(DryingBatch)
+        .where(DryingBatch.started_at >= d_from, DryingBatch.started_at <= d_to)
+        .order_by(DryingBatch.started_at.desc())
+        .options(
+            selectinload(DryingBatch.stages)
+                .selectinload(DryingBatchStage.inputs)
+                .selectinload(DryingBatchStageInput.product),
+            selectinload(DryingBatch.stages)
+                .selectinload(DryingBatchStage.outputs)
+                .selectinload(DryingBatchStageOutput.product),
+            selectinload(DryingBatch.started_by),
+        )
+    )
+    drying_batches = drying_res.scalars().all()
+    total_drying = len(drying_batches)
+    for db_b in drying_batches:
+        stages = db_b.stages or []
+        stage1 = stages[0] if stages else None
+        last_closed = next((s for s in reversed(stages) if s.total_output_qty is not None), None)
+        inputs_str  = ", ".join(
+            f"{float(i.qty):.0f}{i.product.unit if i.product else ''} {i.product.name if i.product else '—'}"
+            for i in (stage1.inputs if stage1 else [])
+        )
+        outputs_str = ", ".join(
+            f"{float(o.qty):.0f}{o.product.unit if o.product else ''} {o.product.name if o.product else '—'}"
+            for o in (last_closed.outputs if last_closed else [])
+        )
+        yield_pct = float(last_closed.cumulative_yield_pct) if (last_closed and last_closed.cumulative_yield_pct is not None) else None
+        waste_pct = (100.0 - yield_pct) if yield_pct is not None else 0.0
+        rows.append({
+            "batch_number": db_b.batch_number,
+            "type": "Drying",
+            "recipe": "—",
+            "waste_pct": waste_pct,
+            "notes": db_b.notes or "",
+            "date": db_b.started_at.strftime("%Y-%m-%d") if db_b.started_at else "—",
+            "inputs_str": inputs_str,
+            "outputs_str": outputs_str,
+            "user_name": db_b.started_by.name if db_b.started_by else "—",
+        })
+        if yield_pct is not None:
+            losses.append(waste_pct)
+
+    # Re-sort all rows by date desc
+    rows.sort(key=lambda r: r["date"], reverse=True)
     total_batches = len(rows)
     rows = rows[skip : skip + limit]
-    return {"batches":rows,"total_processing":total_proc,"total_packaging":total_pkg,
+    return {"batches":rows,"total_processing":total_proc,"total_packaging":total_pkg,"total_drying":total_drying,
             "avg_loss_pct":round(sum(losses)/len(losses),2) if losses else 0,"total_batches":total_batches}
 
 @router.get("/export/production", dependencies=[Depends(require_permission("action_export_excel"))])
@@ -1612,6 +1660,7 @@ async def export_production(date_from: str = None, date_to: str = None, db: Asyn
             ("Total Batches", data["total_batches"]),
             ("Processing Batches", data["total_processing"]),
             ("Packaging Batches", data["total_packaging"]),
+            ("Drying Batches", data.get("total_drying", 0)),
             ("Average Loss %", f"{data['avg_loss_pct']:.2f}%"),
         ],
         column_formats={"Loss %": "percent_value", "Date": "date"},
@@ -3623,6 +3672,7 @@ td.mono{font-family:var(--mono);}
         <div class="stats-row">
             <div class="stat-card sc-orange"><div class="stat-label">Processing Batches</div><div class="stat-value sv-orange" id="prod-proc">—</div></div>
             <div class="stat-card sc-teal"  ><div class="stat-label">Packaging Runs</div>   <div class="stat-value sv-teal"   id="prod-pkg">—</div></div>
+            <div class="stat-card sc-orange"><div class="stat-label">Drying Batches</div>   <div class="stat-value sv-orange" id="prod-drying">—</div></div>
             <div class="stat-card sc-danger"><div class="stat-label">Avg Loss %</div>        <div class="stat-value sv-danger" id="prod-loss">—</div></div>
         </div>
         <div class="table-wrap">
@@ -4503,21 +4553,25 @@ async function loadSpoilage(){
 async function loadProduction(){
     let r = getRange("prod-from","prod-to");
     let data = await fetchReportJson(`/reports/api/production?date_from=${r.from}&date_to=${r.to}`);
-    document.getElementById("prod-proc").innerText = data.total_processing;
-    document.getElementById("prod-pkg").innerText  = data.total_packaging;
-    document.getElementById("prod-loss").innerText = data.avg_loss_pct.toFixed(1)+"%";
+    document.getElementById("prod-proc").innerText   = data.total_processing;
+    document.getElementById("prod-pkg").innerText    = data.total_packaging;
+    document.getElementById("prod-drying").innerText = data.total_drying || 0;
+    document.getElementById("prod-loss").innerText   = data.avg_loss_pct.toFixed(1)+"%";
     setPrintDates("ph-prod-dates", r.from, r.to);
     document.getElementById("prod-body").innerHTML = data.batches.length
-        ? data.batches.map(b=>`<tr>
-            <td class="mono" style="font-size:12px;color:${b.type==="Packaging"?"var(--teal)":"var(--orange)"}">${b.batch_number}</td>
-            <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:${b.type==="Packaging"?"rgba(45,212,191,.1)":"rgba(251,146,60,.1)"};color:${b.type==="Packaging"?"var(--teal)":"var(--orange)"}">${b.type}</span></td>
+        ? data.batches.map(b=>{
+            const typeColor = (b.type==="Packaging") ? "var(--teal)" : (b.type==="Drying") ? "var(--warn)" : "var(--orange)";
+            const typeBg    = (b.type==="Packaging") ? "rgba(45,212,191,.1)" : (b.type==="Drying") ? "rgba(245,158,11,.1)" : "rgba(251,146,60,.1)";
+            return `<tr>
+            <td class="mono" style="font-size:12px;color:${typeColor}">${b.batch_number}</td>
+            <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:${typeBg};color:${typeColor}">${b.type}</span></td>
             <td class="name" style="font-size:12px">${b.recipe}</td>
             <td style="font-size:11px;color:var(--sub);max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.inputs_str||"—"}</td>
             <td style="font-size:11px;color:var(--green);max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.outputs_str||"—"}</td>
             <td class="mono" style="color:${b.waste_pct<10?"var(--green)":b.waste_pct<25?"var(--warn)":"var(--danger)"}">${b.waste_pct.toFixed(1)}%</td>
             <td class="mono" style="font-size:12px;color:var(--muted)">${b.date}</td>
             <td style="font-size:12px;color:var(--muted);white-space:nowrap">${b.user_name}</td>
-          </tr>`).join("")
+          </tr>`;}).join("")
         : `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:30px">No batches in this period</td></tr>`;
 }
 
