@@ -56,6 +56,10 @@ class BaseAppSettings(BaseSettings):
     WORKERS: int = 2
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = str(LOG_DIR / "app.log")
+    # When false, log only to stdout/stderr (container-native). Defaults to
+    # true to preserve local-dev file logging; production containers set this
+    # to false so no writable log directory is required inside the image.
+    LOG_TO_FILE: bool = True
     ALLOWED_HOSTS: Annotated[list[str], NoDecode] = []
 
     CORS_ALLOW_ORIGINS: Annotated[list[str], NoDecode] = []
