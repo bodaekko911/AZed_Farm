@@ -169,6 +169,26 @@ def test_production_log_spoilage_requires_explicit_permission() -> None:
     _denied(r, "action_production_log_spoilage", db)
 
 
+def test_production_delete_recipe_requires_explicit_permission() -> None:
+    client, db = _make_client(_viewer_with("page_production"))
+    r = client.delete("/production/api/recipes/1")
+    _denied(r, "action_production_manage_recipes", db)
+
+
+def test_production_update_batch_requires_explicit_permission() -> None:
+    client, db = _make_client(_viewer_with("page_production"))
+    r = client.put("/production/api/batches/1", json={
+        "inputs": [{"product_id": 1, "qty": 1}], "outputs": [{"product_id": 2, "qty": 1}],
+    })
+    _denied(r, "action_production_update_batch", db)
+
+
+def test_production_delete_spoilage_requires_explicit_permission() -> None:
+    client, db = _make_client(_viewer_with("page_production"))
+    r = client.delete("/production/api/spoilage/1")
+    _denied(r, "action_production_log_spoilage", db)
+
+
 # ── HR ────────────────────────────────────────────────────────────────────────
 def test_hr_employee_create_requires_explicit_permission() -> None:
     client, db = _make_client(_viewer_with("page_hr", "tab_hr_employees"))
