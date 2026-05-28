@@ -82,7 +82,7 @@ async def get_recipes(db: AsyncSession = Depends(get_async_session)):
         for r in recipes
     ]
 
-@router.post("/api/recipes")
+@router.post("/api/recipes", dependencies=[Depends(require_permission("action_production_manage_recipes"))])
 async def create_recipe(data: RecipeCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     if not data.inputs or not data.outputs:
         raise HTTPException(status_code=400, detail="Recipe must have at least one input and one output")
@@ -140,7 +140,7 @@ async def get_batches(skip: int = 0, limit: int = 50, db: AsyncSession = Depends
         ],
     }
 
-@router.post("/api/batches")
+@router.post("/api/batches", dependencies=[Depends(require_permission("action_production_create_batch"))])
 async def create_batch(data: BatchCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     if not data.inputs or not data.outputs:
         raise HTTPException(status_code=400, detail="Batch must have at least one input and one output")
@@ -280,7 +280,7 @@ async def edit_batch(batch_id: int, data: BatchCreate, db: AsyncSession = Depend
     return {"ok": True, "batch_number": batch.batch_number, "waste_pct": float(batch.waste_pct)}
 
 
-@router.delete("/api/batches/{batch_id}")
+@router.delete("/api/batches/{batch_id}", dependencies=[Depends(require_permission("action_production_delete_batch"))])
 async def delete_batch(batch_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     batch_result = await db.execute(
         select(ProductionBatch)
@@ -341,7 +341,7 @@ async def get_spoilage(skip: int = 0, limit: int = 100, db: AsyncSession = Depen
         ],
     }
 
-@router.post("/api/spoilage")
+@router.post("/api/spoilage", dependencies=[Depends(require_permission("action_production_log_spoilage"))])
 async def create_spoilage(data: SpoilageCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     from app.models.accounting import Account, Journal, JournalEntry
     prod_r = await db.execute(select(Product).where(Product.id == data.product_id))

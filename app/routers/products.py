@@ -126,7 +126,7 @@ async def get_products(
     }
 
 
-@router.post("/api/add")
+@router.post("/api/add", dependencies=[Depends(require_permission("action_products_create"))])
 async def add_product(data: ProductCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     sku_result = await db.execute(select(Product).where(Product.sku == data.sku))
     if sku_result.scalar_one_or_none():
