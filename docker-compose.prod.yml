@@ -45,7 +45,7 @@ services:
       API_PORT: 8000
       WORKERS: ${WORKERS:-2}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      LOG_FILE: ${LOG_FILE:-logs/app.log}
+      LOG_TO_FILE: ${LOG_TO_FILE:-false}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:?ALLOWED_HOSTS must be set}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
@@ -64,8 +64,6 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     ports:
       - "${API_PORT:-8000}:8000"
-    volumes:
-      - ./logs:/app/logs
     command: ["gunicorn", "-c", "gunicorn.conf.py", "app.main:app"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live').read()"]

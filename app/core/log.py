@@ -83,8 +83,6 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging() -> None:
-    log_path = Path(settings.LOG_FILE)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
     formatter = JsonFormatter()
 
     root_logger = logging.getLogger()
@@ -93,17 +91,20 @@ def configure_logging() -> None:
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
-
-    file_handler = RotatingFileHandler(
-        log_path,
-        maxBytes=5 * 1024 * 1024,
-        backupCount=3,
-        encoding="utf-8",
-    )
-    file_handler.setFormatter(formatter)
-
     root_logger.addHandler(console_handler)
-    root_logger.addHandler(file_handler)
+
+    if settings.LOG_TO_FILE:
+        log_path = Path(settings.LOG_FILE)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
     logging.captureWarnings(True)
 
 

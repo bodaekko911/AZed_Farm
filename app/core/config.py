@@ -56,6 +56,7 @@ class BaseAppSettings(BaseSettings):
     WORKERS: int = 2
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = str(LOG_DIR / "app.log")
+    LOG_TO_FILE: bool = True
     ALLOWED_HOSTS: Annotated[list[str], NoDecode] = []
 
     CORS_ALLOW_ORIGINS: Annotated[list[str], NoDecode] = []
