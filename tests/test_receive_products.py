@@ -256,12 +256,18 @@ def test_create_receipt_with_cost_creates_expense_and_journal():
     # execute() call sequence (with-cost, category already exists):
     #   1. select(Product)                → product
     #   2. select(max(ProductReceipt.id)) → None
-    #   3. select(ExpenseCategory 5011)   → category  (found, skip creation)
-    #   4. select(max(Expense.id))        → None      (first expense)
-    #   5. select(Account 5011)           → exp_acc
-    #   6. select(Account 1000)           → cash_acc
+    #   3. select(StockLocation by code)  → None (default location auto-created)
+    #   4. select(StockLocation by name)  → None
+    #   5. select(LocationStock)          → None (per-location row auto-created)
+    #   6. select(ExpenseCategory 5011)   → category  (found, skip creation)
+    #   7. select(max(Expense.id))        → None      (first expense)
+    #   8. select(Account 5011)           → exp_acc
+    #   9. select(Account 1000)           → cash_acc
     db = FakeReceiveSession([
         FakeScalarResult(product),
+        FakeScalarResult(None),
+        FakeScalarResult(None),
+        FakeScalarResult(None),
         FakeScalarResult(None),
         FakeScalarResult(category),
         FakeScalarResult(None),
@@ -308,6 +314,9 @@ def test_create_receipt_links_expense_to_receipt():
     db = FakeReceiveSession([
         FakeScalarResult(product),
         FakeScalarResult(None),
+        FakeScalarResult(None),     # StockLocation by code → auto-create default
+        FakeScalarResult(None),     # StockLocation by name → still none
+        FakeScalarResult(None),     # LocationStock         → auto-create
         FakeScalarResult(category),
         FakeScalarResult(None),
         FakeScalarResult(exp_acc),
@@ -370,12 +379,22 @@ def test_batch_receive_two_products():
 
     # execute() sequence for two products, no cost (no expense path):
     #  product 1: select(Product) → p1 ; select(max(Receipt.id)) → None
-    #  product 2: select(Product) → p2 ; select(max(Receipt.id)) → 1 (first flushed)
+    #             select(StockLocation by code) → None ; by name → None
+    #             select(LocationStock)         → None
+    #  product 2: select(Product) → p2 ; select(max(Receipt.id)) → 1
+    #             select(StockLocation by code) → None ; by name → None
+    #             select(LocationStock)         → None
     db = FakeReceiveSession([
         FakeScalarResult(p1),
         FakeScalarResult(None),  # max receipt id → RCV-00001
+        FakeScalarResult(None),  # StockLocation by code  (item 1)
+        FakeScalarResult(None),  # StockLocation by name  (item 1)
+        FakeScalarResult(None),  # LocationStock          (item 1)
         FakeScalarResult(p2),
         FakeScalarResult(1),     # max receipt id → RCV-00002
+        FakeScalarResult(None),  # StockLocation by code  (item 2)
+        FakeScalarResult(None),  # StockLocation by name  (item 2)
+        FakeScalarResult(None),  # LocationStock          (item 2)
     ])
 
     data = BatchReceiptCreate(
@@ -406,6 +425,9 @@ def test_batch_receive_single_commit_even_with_cost():
     db = FakeReceiveSession([
         FakeScalarResult(product),
         FakeScalarResult(None),    # max receipt id
+        FakeScalarResult(None),    # StockLocation by code → auto-create default
+        FakeScalarResult(None),    # StockLocation by name → still none
+        FakeScalarResult(None),    # LocationStock         → auto-create
         FakeScalarResult(category),
         FakeScalarResult(None),    # max expense id
         FakeScalarResult(exp_acc),
