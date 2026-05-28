@@ -95,7 +95,7 @@ async def create_recipe(data: RecipeCreate, db: AsyncSession = Depends(get_async
     await db.commit(); await db.refresh(recipe)
     return {"id": recipe.id, "name": recipe.name}
 
-@router.delete("/api/recipes/{recipe_id}")
+@router.delete("/api/recipes/{recipe_id}", dependencies=[Depends(require_permission("action_production_manage_recipes"))])
 async def delete_recipe(recipe_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Recipe).where(Recipe.id == recipe_id))
     r = result.scalar_one_or_none()
@@ -207,7 +207,7 @@ async def create_batch(data: BatchCreate, db: AsyncSession = Depends(get_async_s
     return {"id": batch.id, "batch_number": batch_number, "waste_pct": float(batch.waste_pct)}
 
 
-@router.put("/api/batches/{batch_id}")
+@router.put("/api/batches/{batch_id}", dependencies=[Depends(require_permission("action_production_update_batch"))])
 async def edit_batch(batch_id: int, data: BatchCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     batch_result = await db.execute(
         select(ProductionBatch)
@@ -380,7 +380,7 @@ async def create_spoilage(data: SpoilageCreate, db: AsyncSession = Depends(get_a
     await db.commit()
     return {"id": spoilage_rec.id, "ref_number": ref, "qty": data.qty, "product": product.name}
 
-@router.delete("/api/spoilage/{record_id}")
+@router.delete("/api/spoilage/{record_id}", dependencies=[Depends(require_permission("action_production_log_spoilage"))])
 async def delete_spoilage(record_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     rec_r = await db.execute(select(SpoilageRecord).where(SpoilageRecord.id == record_id))
     spoilage_rec = rec_r.scalar_one_or_none()
