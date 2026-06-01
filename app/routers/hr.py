@@ -1260,10 +1260,63 @@ async def delete_attendance(
     return {"ok": True}
 
 
+# Maximum number of days back that auto-today will fill in. This bounds the
+# work done when an install has been dormant for a long time, while still
+# comfortably covering the previous full month (so gaps from, e.g., May are
+# filled when the page is next opened in June).
+AUTO_ATTENDANCE_BACKFILL_DAYS = 92
+
+
+async def _auto_fill_missing_days(
+    db: AsyncSession,
+    employee: Employee,
+    start_date: date,
+    end_date: date,
+) -> int:
+    """Fill missing attendance for [start_date, end_date] inclusive using the
+    employee's persistent auto status. Skips any day that already has a record
+    so manual edits and explicit absences are never overwritten."""
+    from datetime import timedelta
+    if start_date > end_date:
+        return 0
+    status = _normalize_auto_attendance_status(
+        getattr(employee, "attendance_auto_status", None)
+    )
+    _existing = await db.execute(
+        select(Attendance.date).where(
+            Attendance.employee_id == employee.id,
+            Attendance.date >= start_date,
+            Attendance.date <= end_date,
+        )
+    )
+    existing_dates = {row[0] for row in _existing.all()}
+    created = 0
+    current = start_date
+    while current <= end_date:
+        if current not in existing_dates:
+            db.add(Attendance(employee_id=employee.id, date=current, status=status))
+            created += 1
+        current += timedelta(days=1)
+    return created
+
+
 @router.post("/api/attendance/auto-today", dependencies=[Depends(require_permission("action_hr_log_attendance"))])
 async def auto_mark_today(db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
-    """Auto-log all active employees today using their persistent attendance mode."""
+    """Auto-log all active employees up to today using their persistent
+    attendance mode.
+
+    This fills *every* missing day within a bounded recent window (up to
+    today) using each employee's persistent attendance mode — not just today —
+    so days on which nobody opened the HR page no longer leave gaps in the
+    month. Existing records are never overwritten — only genuinely-missing
+    days are created — so manual edits and explicit absences are preserved.
+    Days before an employee's hire date are skipped. The window is bounded by
+    AUTO_ATTENDANCE_BACKFILL_DAYS.
+    """
+    from datetime import timedelta
     today = date.today()
+    earliest = today - timedelta(days=AUTO_ATTENDANCE_BACKFILL_DAYS)
+
     _r = await db.execute(select(Employee).where(Employee.is_active == True))
     employees = _r.scalars().all()
     created = 0
@@ -1271,14 +1324,21 @@ async def auto_mark_today(db: AsyncSession = Depends(get_async_session), current
     absent = 0
     for emp in employees:
         status = _normalize_auto_attendance_status(getattr(emp, "attendance_auto_status", None))
-        exists = await _get_attendance_for_day(db, emp.id, today)
-        if not exists:
-            db.add(Attendance(employee_id=emp.id, date=today, status=status))
-            created += 1
-            if status == ATTENDANCE_STATUS_ABSENT:
-                absent += 1
-            else:
-                present += 1
+        # Fill the whole window, skipping days that already have a record. We
+        # scan the full window (not just days after the latest record) because
+        # gaps can sit *before* the most recent entry — e.g. today's row may
+        # exist while early-month days are still missing. Never fill days
+        # before the employee's hire date.
+        start = earliest
+        hire = getattr(emp, "hire_date", None)
+        if hire and hire > start:
+            start = hire
+        n = await _auto_fill_missing_days(db, emp, start, today)
+        created += n
+        if status == ATTENDANCE_STATUS_ABSENT:
+            absent += n
+        else:
+            present += n
     await db.commit()
     return {
         "ok": True,
