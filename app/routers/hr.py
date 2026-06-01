@@ -327,17 +327,19 @@ def _employee_payload(employee: Employee) -> dict:
 def _paid_days_and_rate(employee: Employee, working_days: int = 30) -> tuple[Decimal, Decimal]:
     """Return (paid_days, daily_rate) for an employee in a month.
 
-    Daily rate = base_salary / working_days   (working_days = actual days in
-    the payroll month, 28-31). Earned = daily_rate * days_present, so being
-    present every day of the month earns exactly the base salary and every
-    absence reduces pay by one day's share. Vacation days are NOT subtracted
-    from the divisor — doing so inflates the daily rate and lets absences slip
-    through unpaid-but-uncounted. (If vacation should be *paid* time off, that
-    needs a separate mechanism that counts allotted vacation days as present,
-    not a divisor change.)
+    paid_days  = working_days - vacation_days   (the days the employee is
+                 expected to work to earn the full base salary)
+    daily_rate = base_salary / paid_days
+    earned     = daily_rate * days_present   (NO cap)
+
+    `working_days` is the actual number of days in the payroll month (28-31).
+    Because there is no cap, working more than `paid_days` days (e.g. working
+    through allotted vacation days) earns more than the base salary, and each
+    day short of `paid_days` reduces pay by one day's share.
     """
     safe_working_days = max(1, int(working_days or 0))
-    paid_days = _days(safe_working_days)
+    vacation  = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
+    paid_days = _days(max(1, safe_working_days - vacation))   # required attendance days
     base_salary = _money(employee.base_salary)
     daily_rate  = _money(base_salary / paid_days) if paid_days > 0 else Decimal("0")
     return paid_days, daily_rate
@@ -989,7 +991,9 @@ async def create_day_deduction(
     year, month = int(period.split("-")[0]), int(period.split("-")[1])
     total_days = monthrange(year, month)[1]
     working_days = _days(total_days)   # all days in month, no weekend skip
-    daily_rate = _money(base_salary / working_days) if working_days > 0 else Decimal("0")
+    # Use the same daily rate the payroll uses (base / (working_days - vacation))
+    # so docking one day equals exactly one day's pay.
+    _paid_days, daily_rate = _paid_days_and_rate(employee, total_days)
     amount = _money(daily_rate * days)
     deduction = EmployeePayrollDeduction(
         employee_id=employee.id,
@@ -1120,13 +1124,10 @@ async def _payroll_preview_for_employee(
     vacation     = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
     paid_days, daily_rate = _paid_days_and_rate(employee, working_days)
 
-    # Earned salary = days_present × daily_rate, but full attendance pays
-    # exactly the base salary (avoids a few-piaster rounding drift from the
-    # per-day rate). Allowance is prorated by attendance separately.
-    if _dec(days_present) >= paid_days:
-        earned_base = base_salary
-    else:
-        earned_base = _money(min(daily_rate * _dec(days_present), base_salary))
+    # Earned salary = days_present × daily_rate, with NO cap — working beyond
+    # the required (paid) days earns more than base, and absences reduce pay.
+    # Allowance is prorated by attendance separately.
+    earned_base  = _money(daily_rate * _dec(days_present))
     earned_total = _money(earned_base + earned_allowance)
 
     pending_day_days = Decimal("0")
@@ -1554,12 +1555,8 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
                 existing_manual_deductions = Decimal("0")
 
             paid_days_val, daily_rate_val = _paid_days_and_rate(emp, working_days)
-            # Full attendance pays exactly the base salary; otherwise prorate
-            # by days present. Mirrors the preview logic exactly.
-            if _dec(days_present) >= paid_days_val:
-                earned_base = _money(emp.base_salary)
-            else:
-                earned_base = _money(min(daily_rate_val * _dec(days_present), _money(emp.base_salary)))
+            # Earned = days_present × daily_rate, NO cap. Mirrors preview.
+            earned_base = _money(daily_rate_val * _dec(days_present))
 
             # Allowances — mirror the preview logic exactly:
             #   Food allowance      → prorated by attendance (daily rate x days present)
