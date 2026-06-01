@@ -1579,6 +1579,18 @@ td{padding:8px 12px;border-top:1px solid var(--border);color:var(--sub);white-sp
 </div>
 
 <script>
+  // --- XSS-safe output helpers (shared) -------------------------------------
+  // esc(): escape a value for safe use as HTML text OR inside a quoted attribute.
+  function esc(s){
+    return String(s ?? "").replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    }[c]));
+  }
+  // escJsInAttr(): produce a value safe to drop into a JS string literal that
+  // itself lives inside an HTML attribute (e.g. onclick="fn(<here>)"). Returns a
+  // complete, quoted JS literal — do NOT add your own surrounding quotes.
+  function escJsInAttr(s){ return esc(JSON.stringify(String(s ?? ""))); }
+  // --------------------------------------------------------------------------
   function setModeButton(isLight){
     const btn = document.getElementById("mode-btn");
     if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -1784,13 +1796,13 @@ function renderReceiveProductsResult(data) {
             <thead><tr><th>Row</th><th>SKU</th><th>Product</th><th>QTY</th><th>Unit Price</th><th>Product Type</th><th>Date</th><th>Reason</th></tr></thead>
             <tbody>${data.errors.map(e => `<tr>
                 <td>${e.row}</td>
-                <td>${e.sku || ''}</td>
-                <td>${e.product || ''}</td>
+                <td>${esc(e.sku || '')}</td>
+                <td>${esc(e.product || '')}</td>
                 <td>${e.qty || ''}</td>
                 <td>${e.unit_price || ''}</td>
                 <td>${e.product_type || ''}</td>
                 <td>${e.date || ''}</td>
-                <td style="color:var(--danger)">${e.reason}</td>
+                <td style="color:var(--danger)">${esc(e.reason)}</td>
             </tr>`).join('')}</tbody>
         </table></div>`;
     }
@@ -1951,14 +1963,14 @@ function renderExpensesResult(data) {
         html += `<br><details style="margin-top:6px" ${isDry ? 'open' : ''}><summary style="font-size:12px;cursor:pointer;color:var(--sub)">
             ${isDry ? 'Categories to auto-create' : 'Auto-created categories'} (${data.auto_created_categories.length})
         </summary><div style="margin-top:4px;font-size:11px;color:var(--muted)">
-            ${data.auto_created_categories.map(c => c.account_code ? `${c.name} (${c.account_code})` : c.name).join(', ')}
+            ${data.auto_created_categories.map(c => c.account_code ? `${esc(c.name)} (${esc(c.account_code)})` : esc(c.name)).join(', ')}
         </div></details>`;
     }
 
     if (data.warnings && data.warnings.length) {
         html += `<br><div style="margin-top:6px;padding:8px 12px;background:rgba(255,181,71,.08);
             border:1px solid rgba(255,181,71,.2);border-radius:8px;font-size:12px;color:var(--warn)">
-            ${data.warnings.map(w => `Warning: ${w}`).join('<br>')}
+            ${data.warnings.map(w => `Warning: ${esc(w)}`).join('<br>')}
         </div>`;
     }
 
@@ -1969,11 +1981,11 @@ function renderExpensesResult(data) {
             <thead><tr><th>Row</th><th>Category</th><th>Amount</th><th>Farm</th><th>Date</th><th>Reason</th></tr></thead>
             <tbody>${data.errors.map(e => `<tr>
                 <td>${e.row}</td>
-                <td>${e.category || ''}</td>
+                <td>${esc(e.category || '')}</td>
                 <td>${e.amount || ''}</td>
-                <td>${e.farm || 'General Expense'}</td>
+                <td>${esc(e.farm || 'General Expense')}</td>
                 <td>${e.date || ''}</td>
-                <td style="color:var(--danger)">${e.reason}</td>
+                <td style="color:var(--danger)">${esc(e.reason)}</td>
             </tr>`).join('')}</tbody>
         </table></div>`;
     }
@@ -2151,8 +2163,8 @@ function renderSalesResult(data, wasDryRun) {
         <table style="font-size:11px;width:100%">
             <thead><tr><th>SKU</th><th>Name</th><th>Price</th><th>Cost</th></tr></thead>
             <tbody>${data.auto_created_products.slice(0,10).map(p=>`<tr>
-                <td style="font-family:var(--mono)">${p.sku}</td>
-                <td>${p.name}</td>
+                <td style="font-family:var(--mono)">${esc(p.sku)}</td>
+                <td>${esc(p.name)}</td>
                 <td>${p.price.toFixed(2)}</td>
                 <td>${p.cost === 0 ? '<span style="color:var(--warn)">0 — not set</span>' : p.cost.toFixed(2)}</td>
             </tr>`).join('')}</tbody>
@@ -2165,7 +2177,7 @@ function renderSalesResult(data, wasDryRun) {
     if (data.warnings && data.warnings.length) {
         html += `<br><div style="margin-top:6px;padding:8px 12px;background:rgba(255,181,71,.08);
             border:1px solid rgba(255,181,71,.2);border-radius:8px;font-size:12px;color:var(--warn)">
-            ${data.warnings.map(w=>`⚠ ${w}`).join('<br>')}
+            ${data.warnings.map(w=>`⚠ ${esc(w)}`).join('<br>')}
         </div>`;
     }
 
@@ -2175,9 +2187,9 @@ function renderSalesResult(data, wasDryRun) {
         <table style="font-size:11px;width:100%">
             <thead><tr><th>Row</th><th>SKU</th><th>Customer</th><th>Date</th><th>Reason</th></tr></thead>
             <tbody>${data.errors.map(e=>`<tr>
-                <td>${e.row}</td><td style="font-family:var(--mono)">${e.sku}</td>
-                <td>${e.customer}</td><td>${e.date}</td>
-                <td style="color:var(--danger)">${e.reason}</td>
+                <td>${e.row}</td><td style="font-family:var(--mono)">${esc(e.sku)}</td>
+                <td>${esc(e.customer)}</td><td>${e.date}</td>
+                <td style="color:var(--danger)">${esc(e.reason)}</td>
             </tr>`).join('')}</tbody>
         </table></div>`;
     }
@@ -2344,14 +2356,14 @@ function renderFarmIntakeResult(data) {
         html += `<br><details style="margin-top:6px"><summary style="font-size:12px;cursor:pointer;color:var(--sub)">
             Auto-created farms (${data.auto_created_farms.length})
         </summary><div style="margin-top:4px;font-size:11px;color:var(--muted)">
-            ${data.auto_created_farms.map(f=>f.name).join(', ')}
+            ${data.auto_created_farms.map(f=>esc(f.name)).join(', ')}
         </div></details>`;
     }
 
     if (data.warnings && data.warnings.length) {
         html += `<br><div style="margin-top:6px;padding:8px 12px;background:rgba(255,181,71,.08);
             border:1px solid rgba(255,181,71,.2);border-radius:8px;font-size:12px;color:var(--warn)">
-            ${data.warnings.map(w=>`Warning: ${w}`).join('<br>')}
+            ${data.warnings.map(w=>`Warning: ${esc(w)}`).join('<br>')}
         </div>`;
     }
 
@@ -2362,11 +2374,11 @@ function renderFarmIntakeResult(data) {
             <thead><tr><th>Row</th><th>SKU</th><th>Product</th><th>Farm</th><th>Date</th><th>Reason</th></tr></thead>
             <tbody>${data.errors.map(e=>`<tr>
                 <td>${e.row}</td>
-                <td style="font-family:var(--mono)">${e.sku || ''}</td>
-                <td>${e.product || ''}</td>
-                <td>${e.farm || ''}</td>
+                <td style="font-family:var(--mono)">${esc(e.sku || '')}</td>
+                <td>${esc(e.product || '')}</td>
+                <td>${esc(e.farm || '')}</td>
                 <td>${e.date || ''}</td>
-                <td style="color:var(--danger)">${e.reason}</td>
+                <td style="color:var(--danger)">${esc(e.reason)}</td>
             </tr>`).join('')}</tbody>
         </table></div>`;
     }
@@ -2568,9 +2580,9 @@ function renderB2BResult(data) {
                 ? `<span style="color:var(--green);font-size:10px">✓ auto-applied</span>`
                 : `<span style="color:var(--warn);font-size:10px">⚠ manual review needed</span>`;
             html += `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--border)">
-                <b>${s.client}</b>: current ${s.current}% → suggested <b>${s.suggested}%</b> ${badge}`;
+                <b>${esc(s.client)}</b>: current ${s.current}% → suggested <b>${s.suggested}%</b> ${badge}`;
             if (!s.applied && !isDry) {
-                html += ` <button onclick="applyClientDiscount('${s.client}', ${s.suggested})"
+                html += ` <button onclick="applyClientDiscount(${escJsInAttr(s.client)}, ${s.suggested})"
                     style="margin-left:6px;padding:2px 8px;border-radius:4px;border:1px solid var(--blue);
                     background:transparent;color:var(--blue);font-size:10px;cursor:pointer">Apply</button>`;
             }
@@ -2585,7 +2597,7 @@ function renderB2BResult(data) {
             Auto-created clients (${data.auto_created_clients.length})
         </summary><div style="margin-top:4px;font-size:11px;color:var(--muted)">
         ${data.auto_created_clients.map(c=>
-            `${c.name} · ${c.payment_terms} · discount ${c.discount_pct}%`
+            `${esc(c.name)} · ${esc(c.payment_terms)} · discount ${c.discount_pct}%`
         ).join('<br>')}
         </div></details>`;
     }
@@ -2597,8 +2609,8 @@ function renderB2BResult(data) {
         <table style="font-size:11px;width:100%">
             <thead><tr><th>SKU</th><th>Name</th></tr></thead>
             <tbody>${data.auto_created_products.slice(0,10).map(p=>`<tr>
-                <td style="font-family:var(--mono)">${p.sku}</td>
-                <td>${p.name}</td>
+                <td style="font-family:var(--mono)">${esc(p.sku)}</td>
+                <td>${esc(p.name)}</td>
             </tr>`).join('')}</tbody>
         </table>
         ${data.auto_created_products.length > 10 ? `<div style="font-size:11px;color:var(--muted);padding-top:4px">…and ${data.auto_created_products.length - 10} more</div>` : ''}
@@ -2608,7 +2620,7 @@ function renderB2BResult(data) {
     if (data.warnings && data.warnings.length) {
         html += `<br><div style="margin-top:6px;padding:8px 12px;background:rgba(255,181,71,.08);
             border:1px solid rgba(255,181,71,.2);border-radius:8px;font-size:12px;color:var(--warn)">
-            ${data.warnings.map(w=>`⚠ ${w}`).join('<br>')}
+            ${data.warnings.map(w=>`⚠ ${esc(w)}`).join('<br>')}
         </div>`;
     }
 
@@ -2618,9 +2630,9 @@ function renderB2BResult(data) {
         <table style="font-size:11px;width:100%">
             <thead><tr><th>Row</th><th>SKU</th><th>Client</th><th>Date</th><th>Reason</th></tr></thead>
             <tbody>${data.errors.map(e=>`<tr>
-                <td>${e.row}</td><td style="font-family:var(--mono)">${e.sku||''}</td>
-                <td>${e.client||''}</td><td>${e.date||''}</td>
-                <td style="color:var(--danger)">${e.reason}</td>
+                <td>${e.row}</td><td style="font-family:var(--mono)">${esc(e.sku||'')}</td>
+                <td>${esc(e.client||'')}</td><td>${e.date||''}</td>
+                <td style="color:var(--danger)">${esc(e.reason)}</td>
             </tr>`).join('')}</tbody>
         </table></div>`;
     }
