@@ -327,12 +327,17 @@ def _employee_payload(employee: Employee) -> dict:
 def _paid_days_and_rate(employee: Employee, working_days: int = 30) -> tuple[Decimal, Decimal]:
     """Return (paid_days, daily_rate) for an employee in a month.
 
-    Daily rate = base_salary / (30 - vacation_days)
-    Earned     = daily_rate  * days_present
+    Daily rate = base_salary / (working_days - vacation_days)
+    Earned     = daily_rate  * days_present   (capped at base_salary)
     Allowances are added on top separately.
+
+    `working_days` is the actual number of days in the payroll month (28-31),
+    so being present every working day earns the full base salary in any month
+    and each absence costs exactly one day's share of that month.
     """
+    safe_working_days = max(1, int(working_days or 0))
     vacation  = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
-    paid_days = _days(max(1, 30 - vacation))   # always base on 30-day month
+    paid_days = _days(max(1, safe_working_days - vacation))   # required attendance days
     base_salary = _money(employee.base_salary)
     daily_rate  = _money(base_salary / paid_days) if paid_days > 0 else Decimal("0")
     return paid_days, daily_rate
@@ -1113,7 +1118,7 @@ async def _payroll_preview_for_employee(
     earned_allowance = _money(earned_food + trans_all)
     total_allowance  = earned_allowance
     vacation     = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
-    paid_days, daily_rate = _paid_days_and_rate(employee)
+    paid_days, daily_rate = _paid_days_and_rate(employee, working_days)
 
     # Earned salary = days_present × daily_rate (capped at base_salary)
     # Allowance is prorated by attendance (working_days * days_present)
@@ -1483,6 +1488,10 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
     year, month = int(period.split("-")[0]), int(period.split("-")[1])
     total_days   = monthrange(year, month)[1]
     working_days = total_days   # all days in month
+    # Date used to stamp payroll-driven repayments/deductions. Use the last day
+    # of the *selected* payroll month so loan repayments land in the correct
+    # accounting month, regardless of which day payroll is actually run on.
+    period_date = date(year, month, total_days)
 
     emp_stmt = select(Employee).where(Employee.is_active == True)
     if data.emp_ids:
@@ -1540,7 +1549,7 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
                 existing_day_deductions = Decimal("0")
                 existing_manual_deductions = Decimal("0")
 
-            paid_days_val, daily_rate_val = _paid_days_and_rate(emp)
+            paid_days_val, daily_rate_val = _paid_days_and_rate(emp, working_days)
             earned_base   = _money(min(daily_rate_val * _dec(days_present), _money(emp.base_salary)))
 
             # Allowances — mirror the preview logic exactly:
@@ -1577,7 +1586,7 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
                     db,
                     employee_id=emp.id,
                     amount=requested_loan_repayment,
-                    repayment_date=date.today(),
+                    repayment_date=period_date,
                     payroll_id=payroll.id,
                     note=f"Payroll loan repayment - {period}",
                     current_user=current_user,
@@ -1587,7 +1596,7 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
                         employee_id=emp.id,
                         payroll_id=payroll.id,
                         period=period,
-                        deduction_date=date.today(),
+                        deduction_date=period_date,
                         type="loan_repayment",
                         amount=applied,
                         note=f"Payroll loan repayment - {period}",
@@ -1740,8 +1749,11 @@ async def hr_summary(db: AsyncSession = Depends(get_async_session)):
     # to_pay_today = salary daily rate + food daily rate (transport is full monthly, not daily)
     to_pay_today = sum(
         float(
-            _paid_days_and_rate(emp)[1]
-            + _money(_money(getattr(emp, "food_allowance", 0) or 0) / Decimal("30"))
+            _paid_days_and_rate(emp, working_days)[1]
+            + (
+                _money(_money(getattr(emp, "food_allowance", 0) or 0) / Decimal(str(working_days)))
+                if working_days > 0 else Decimal("0")
+            )
         )
         for emp in present_employees
     )
@@ -2610,7 +2622,7 @@ function updateEmpDailyRatePreview(){
     const dailyRate = salary / paidDays;
     const totalMonthly = salary + food + transport;
     preview.innerHTML =
-        `Daily rate: <b>${money(dailyRate)} EGP</b> &nbsp;(${money(salary)} ÷ ${paidDays} days = 30 − ${vacation||0} vacation)<br>` +
+        `Daily rate: <b>${money(dailyRate)} EGP</b> &nbsp;(approx — ${money(salary)} ÷ ${paidDays} days, based on a 30-day month minus ${vacation||0} vacation; actual payroll uses each month's real day count)<br>` +
         `Total monthly: <b>${money(totalMonthly)} EGP</b> &nbsp;(salary ${money(salary)} + food ${money(food)} + transport ${money(transport)})`;
 }
 
