@@ -1174,7 +1174,16 @@ async def get_attendance(emp_id: int = None, period: str = None, db: AsyncSessio
             func.extract("year",  Attendance.date) == int(year),
             func.extract("month", Attendance.date) == int(month),
         )
-    stmt = stmt.order_by(Attendance.date.desc()).limit(200)
+    stmt = stmt.order_by(Attendance.date.desc(), Attendance.employee_id)
+    # When a month and/or employee is selected the result set is naturally
+    # bounded (employees × days in the month), so return all of it — capping
+    # here would silently drop the earliest days of the month for businesses
+    # with several employees. Only the unfiltered "recent activity" view keeps
+    # a small cap.
+    if period or emp_id:
+        stmt = stmt.limit(10000)
+    else:
+        stmt = stmt.limit(200)
     _r = await db.execute(stmt)
     records = _r.scalars().all()
     return [
