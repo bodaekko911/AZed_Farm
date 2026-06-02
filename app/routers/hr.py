@@ -852,9 +852,15 @@ async def get_employee_vacation(employee_id: int, db: AsyncSession = Depends(get
 
 @router.get("/api/vacation-summary")
 async def get_vacation_summary(db: AsyncSession = Depends(get_async_session)):
-    """Days-off credit summary for every active employee (for the Days Off tab)."""
+    """Days-off credit summary for active employees who have a monthly days-off
+    allowance (vacation_days_per_month > 0). Used by the Days Off tab."""
     _r = await db.execute(
-        select(Employee).where(Employee.is_active == True).order_by(Employee.name)
+        select(Employee)
+        .where(
+            Employee.is_active == True,
+            Employee.vacation_days_per_month > 0,
+        )
+        .order_by(Employee.name)
     )
     employees = _r.scalars().all()
     out = []
@@ -3287,7 +3293,7 @@ async function loadDaysOffBoard(){
     try{
         const rows = await (await fetch("/hr/api/vacation-summary")).json();
         if(!rows.length){
-            body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No active employees.</td></tr>`;
+            body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No employees have a monthly days-off allowance set. Add one in the employee profile (Vacation Days / Month).</td></tr>`;
             return;
         }
         body.innerHTML = rows.map(r=>{
