@@ -885,6 +885,51 @@ async def cancel_employee_loan(
     return {"ok": True, "loan_id": loan.id, "status": loan.status}
 
 
+@router.delete("/api/loans/{loan_id}", dependencies=[Depends(require_permission("action_hr_delete_loans"))])
+async def delete_employee_loan(
+    loan_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(EmployeeLoan).where(EmployeeLoan.id == loan_id))
+    loan = result.scalar_one_or_none()
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    # Block deletion if any repayment is tied to a finalised payroll run —
+    # removing it would desync that payroll's recorded loan deductions. Those
+    # loans should be cancelled, not deleted.
+    _r = await db.execute(
+        select(func.count(EmployeeLoanRepayment.id)).where(
+            EmployeeLoanRepayment.loan_id == loan.id,
+            EmployeeLoanRepayment.payroll_id.isnot(None),
+        )
+    )
+    payroll_linked = _r.scalar() or 0
+    if payroll_linked:
+        raise HTTPException(
+            status_code=400,
+            detail="This loan has repayments already applied to a payroll run and can't be deleted. Cancel it instead.",
+        )
+    loan_amount = _money(loan.amount)
+    # Remove any standalone (non-payroll) repayments first to satisfy the FK,
+    # then the loan itself.
+    await db.execute(
+        delete(EmployeeLoanRepayment).where(EmployeeLoanRepayment.loan_id == loan.id)
+    )
+    record(
+        db,
+        "HR",
+        "delete_employee_loan",
+        f"Deleted loan #{loan.id} ({loan_amount:.2f}) for employee #{loan.employee_id}",
+        user=current_user,
+        ref_type="employee_loan",
+        ref_id=loan.id,
+    )
+    await db.delete(loan)
+    await db.commit()
+    return {"ok": True, "loan_id": loan_id, "deleted": True}
+
+
 # ── ALLOWANCE ADVANCES API ─────────────────────────────
 @router.get("/api/employees/{employee_id}/allowance-advances")
 async def get_allowance_advances(employee_id: int, db: AsyncSession = Depends(get_async_session)):
@@ -2825,6 +2870,7 @@ async function loadEmployeeLoans(){
                 <td><span class="status-${loan.status==="open"?"pending":loan.status==="paid"?"success":"danger"}">${displayText(loan.status)}</span></td>
                 <td>
                     ${loan.status==="open" && hasPermission("action_hr_manage_loans") ? `<button class="action-btn danger" onclick="cancelLoan(${numberValue(loan.id)})">Cancel</button>` : ""}
+                    ${hasPermission("action_hr_delete_loans") ? `<button class="action-btn danger" onclick="deleteLoan(${numberValue(loan.id)})">Delete</button>` : ""}
                 </td>
             </tr>`).join("") || `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:18px">No loans yet</td></tr>`;
         if(totalBalance>0) body.innerHTML += `<tr style="background:var(--card2)"><td colspan="3" style="font-weight:700;color:var(--sub)">Total Outstanding</td><td class="mono" style="font-weight:700;color:var(--warn)">${money(totalBalance)}</td><td colspan="2"></td></tr>`;
@@ -2894,6 +2940,17 @@ async function cancelLoan(loanId){
         showToast("Loan cancelled");
         await loadEmployeeLoans();
     }catch(err){ showToast("Error: "+(err.message||"Could not cancel loan")); }
+}
+
+async function deleteLoan(loanId){
+    if(!hasPermission("action_hr_delete_loans")) return;
+    if(!confirm("Permanently delete this loan and its repayment history? This cannot be undone.")) return;
+    try{
+        const res = await fetch(`/hr/api/loans/${loanId}`,{method:"DELETE"});
+        await readApiResponse(res);
+        showToast("Loan deleted");
+        await loadEmployeeLoans();
+    }catch(err){ showToast("Error: "+(err.message||"Could not delete loan")); }
 }
 
 function setDeductDays(d){

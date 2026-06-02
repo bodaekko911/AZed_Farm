@@ -213,6 +213,7 @@ PERMISSION_MATRIX = [
             {"action": "mark_paid", "key": "action_hr_mark_paid", "label": "Mark payroll paid"},
             {"action": "view_loans", "key": "action_hr_view_loans", "label": "View employee loans"},
             {"action": "manage_loans", "key": "action_hr_manage_loans", "label": "Manage employee loans"},
+            {"action": "delete_loans", "key": "action_hr_delete_loans", "label": "Delete employee loans"},
             {"action": "view_deductions", "key": "action_hr_view_deductions", "label": "View payroll deductions"},
             {"action": "manage_deductions", "key": "action_hr_manage_deductions", "label": "Manage payroll deductions"},
             {"action": "edit_attendance", "key": "action_hr_edit_attendance", "label": "Edit / delete attendance records"},
