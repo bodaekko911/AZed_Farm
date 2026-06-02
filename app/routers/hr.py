@@ -1252,6 +1252,43 @@ async def edit_attendance(
     return {"ok": True, "id": att.id, "status": att.status}
 
 
+@router.delete("/api/employees/{emp_id}/deductions/{deduction_id}", dependencies=[Depends(require_permission("action_hr_manage_deductions"))])
+async def delete_employee_deduction(
+    emp_id: int,
+    deduction_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    _r = await db.execute(
+        select(EmployeePayrollDeduction).where(
+            EmployeePayrollDeduction.id == deduction_id,
+            EmployeePayrollDeduction.employee_id == emp_id,
+        )
+    )
+    deduction = _r.scalar_one_or_none()
+    if not deduction:
+        raise HTTPException(status_code=404, detail="Deduction not found")
+    # Only pending deductions can be removed. Once a deduction is locked into a
+    # saved payroll run, deleting it here would desync that payroll's totals.
+    if deduction.payroll_id is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="This deduction is already applied to a payroll run and can't be deleted.",
+        )
+    if deduction.type == "loan_repayment":
+        raise HTTPException(
+            status_code=400,
+            detail="Loan repayments are managed from the loan, not here.",
+        )
+    record(db, "HR", "delete_deduction",
+           f"Deleted pending {deduction.type} deduction #{deduction.id} "
+           f"({deduction.period}): {_money(deduction.amount):.2f}",
+           user=current_user, ref_type="employee_payroll_deduction", ref_id=deduction.id)
+    await db.delete(deduction)
+    await db.commit()
+    return {"ok": True}
+
+
 @router.delete("/api/attendance/{att_id}", dependencies=[Depends(require_permission("action_hr_edit_attendance"))])
 async def delete_attendance(
     att_id: int,
@@ -2204,8 +2241,8 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div id="deduction-section">
                 <div class="hr-ledger-title" style="margin-bottom:10px">Add Penalty / Deduction</div>
                 <div class="form-row" id="day-deduction-form">
-                    <div class="fld"><label>Period</label><input id="deduct-period" type="month"></div>
-                    <div class="fld"><label>Date</label><input id="deduct-date" type="date"></div>
+                    <div class="fld"><label>Month applied</label><input id="deduct-period" type="month" readonly title="Set automatically from the Date below"></div>
+                    <div class="fld"><label>Date</label><input id="deduct-date" type="date" onchange="syncDeductPeriodFromDate()" oninput="syncDeductPeriodFromDate()"></div>
                     <div class="fld">
                         <label>Days Deducted</label>
                         <div style="display:flex;gap:6px;align-items:center">
@@ -2716,6 +2753,15 @@ function openLoanDeductionModalFromButton(btn){
     );
 }
 
+function syncDeductPeriodFromDate(){
+    const dateEl   = document.getElementById("deduct-date");
+    const periodEl = document.getElementById("deduct-period");
+    if(dateEl && periodEl && dateEl.value && dateEl.value.length >= 7){
+        periodEl.value = dateEl.value.slice(0, 7);   // YYYY-MM from the chosen date
+    }
+    updateDayDeductionPreview();
+}
+
 function setDefaultLoanDeductionDates(){
     const today = new Date().toISOString().split("T")[0];
     const period = today.slice(0, 7);
@@ -2800,11 +2846,22 @@ async function loadEmployeeDeductions(){
                 <td class="mono" style="color:var(--muted)">${d.daily_rate!==null&&d.daily_rate!==undefined ? money(d.daily_rate) : "-"}</td>
                 <td class="mono" style="font-weight:700;color:var(--danger)">${money(d.amount)}</td>
                 <td style="font-size:11px;color:${d.payroll_id?"var(--green)":"var(--warn)"}">${d.payroll_id?"Applied to payroll":"Pending"}</td>
-                <td style="color:var(--muted);font-size:12px">${escapeHtml(d.note||"-")}</td>
+                <td style="color:var(--muted);font-size:12px">${escapeHtml(d.note||"-")}${(!d.payroll_id && hasPermission("action_hr_manage_deductions")) ? ` &nbsp;<button class="link-danger" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:12px;padding:0" onclick="deleteDeduction(${d.id})">Delete</button>` : ""}</td>
             </tr>`).join("") || `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:18px">No deductions yet</td></tr>`;
     }catch(err){
         body.innerHTML = `<tr><td colspan="7" style="color:var(--danger);padding:18px">Could not load deductions</td></tr>`;
     }
+}
+
+async function deleteDeduction(deductionId){
+    if(!hasPermission("action_hr_manage_deductions")) return;
+    if(!confirm("Delete this pending deduction?")) return;
+    try{
+        const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/deductions/${deductionId}`,{method:"DELETE"});
+        await readApiResponse(res);
+        showToast("Deduction deleted");
+        await loadEmployeeDeductions();
+    }catch(err){ showToast("Error: "+(err.message||"Could not delete deduction")); }
 }
 
 async function saveEmployeeLoan(){
@@ -2866,9 +2923,13 @@ async function saveDayDeduction(){
     if(!hasPermission("action_hr_manage_deductions")) return;
     const days = parseFloat(document.getElementById("deduct-days").value||"0");
     if(!days||days<=0){ showToast("Enter days to deduct (e.g. 1, 0.5, 0.25)"); return; }
+    const deductDate = document.getElementById("deduct-date").value;
+    if(!deductDate){ showToast("Pick a date for the deduction"); return; }
+    // The month the deduction applies to is always taken from the date, so a
+    // deduction dated 31 May is applied to May — never the current month.
     const body = {
-        period: document.getElementById("deduct-period").value,
-        deduction_date: document.getElementById("deduct-date").value,
+        period: deductDate.slice(0, 7),
+        deduction_date: deductDate,
         days: days,
         note: document.getElementById("deduct-note").value.trim()||null,
     };
