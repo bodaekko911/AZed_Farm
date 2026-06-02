@@ -376,6 +376,28 @@ async def _loan_balance(db: AsyncSession, loan: EmployeeLoan) -> Decimal:
     return _money(_money(loan.amount) - repaid.get(loan.id, Decimal("0")))
 
 
+async def _employee_loan_balance_for_period(
+    db: AsyncSession, employee_id: int, year: int, month: int
+) -> Decimal:
+    """Outstanding balance of loans *dated in the given month*.
+
+    Payroll deducts a loan in the period that matches its loan_date, so a loan
+    recorded in May is recovered by May's payroll run — not by whichever run
+    happens to come next.
+    """
+    loans_result = await db.execute(
+        select(EmployeeLoan).where(
+            EmployeeLoan.employee_id == employee_id,
+            EmployeeLoan.status != "cancelled",
+            func.extract("year",  EmployeeLoan.loan_date) == year,
+            func.extract("month", EmployeeLoan.loan_date) == month,
+        )
+    )
+    loans = loans_result.scalars().all()
+    repaid = await _loan_repaid_amounts(db, [loan.id for loan in loans])
+    return _money(sum((_money(loan.amount) - repaid.get(loan.id, Decimal("0"))) for loan in loans))
+
+
 def _loan_payload(loan: EmployeeLoan, repaid: Decimal) -> dict:
     amount = _money(loan.amount)
     balance = Decimal("0") if loan.status == "cancelled" else _money(amount - repaid)
@@ -428,23 +450,36 @@ async def _apply_loan_repayment_to_oldest_loans(
     payroll_id: int | None,
     note: str,
     current_user: User,
+    loan_year: int | None = None,
+    loan_month: int | None = None,
 ) -> Decimal:
     amount = _money(amount)
     if amount <= 0:
         return Decimal("0")
 
-    outstanding = await _employee_loan_balance(db, employee_id)
-    # Allow repayment even if it exceeds balance — cap to actual outstanding
-    if outstanding <= 0:
-        return Decimal("0")
-    amount = min(amount, outstanding)
-
-    loans_result = await db.execute(
+    loans_stmt = (
         select(EmployeeLoan)
         .where(EmployeeLoan.employee_id == employee_id, EmployeeLoan.status == "open")
-        .order_by(EmployeeLoan.loan_date, EmployeeLoan.id)
     )
+    # When a payroll period is supplied, only repay loans dated in that month so
+    # a loan is recovered in its own month rather than the next run.
+    if loan_year is not None and loan_month is not None:
+        loans_stmt = loans_stmt.where(
+            func.extract("year",  EmployeeLoan.loan_date) == loan_year,
+            func.extract("month", EmployeeLoan.loan_date) == loan_month,
+        )
+    loans_stmt = loans_stmt.order_by(EmployeeLoan.loan_date, EmployeeLoan.id)
+    loans_result = await db.execute(loans_stmt)
     loans = loans_result.scalars().all()
+
+    # Cap the repayment to what is actually outstanding among these loans.
+    outstanding = Decimal("0")
+    for loan in loans:
+        outstanding += await _loan_balance(db, loan)
+    if outstanding <= 0:
+        return Decimal("0")
+    amount = min(amount, _money(outstanding))
+
     remaining = amount
     for loan in loans:
         if remaining <= 0:
@@ -1234,7 +1269,7 @@ async def _payroll_preview_for_employee(
             employee.id,
             period,
         )
-    outstanding_loan_balance = await _employee_loan_balance(db, employee.id) if include_loans else None
+    outstanding_loan_balance = await _employee_loan_balance_for_period(db, employee.id, year, month) if include_loans else None
     total_pending = _money(pending_day_amount + pending_manual_amount)
     net_before_loan = _money(earned_total - total_pending)
     return {
@@ -1728,6 +1763,8 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
                     payroll_id=payroll.id,
                     note=f"Payroll loan repayment - {period}",
                     current_user=current_user,
+                    loan_year=year,
+                    loan_month=month,
                 )
                 db.add(
                     EmployeePayrollDeduction(
