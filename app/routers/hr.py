@@ -2994,7 +2994,7 @@ async function cancelLoan(loanId){
 
 async function deleteLoan(loanId){
     if(!hasPermission("action_hr_delete_loans")) return;
-    if(!confirm("Permanently delete this loan and its repayment history?\n\nDeductions taken in unpaid payroll runs will be added back. Already-paid runs are left unchanged. This cannot be undone.")) return;
+    if(!confirm("Permanently delete this loan and its repayment history? Deductions taken in unpaid payroll runs will be added back; already-paid runs are left unchanged. This cannot be undone.")) return;
     try{
         const res = await fetch(`/hr/api/loans/${loanId}`,{method:"DELETE"});
         const out = await readApiResponse(res);
