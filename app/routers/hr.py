@@ -382,7 +382,7 @@ def _vacation_months_accrued(employee: Employee, as_of: date | None = None) -> i
 async def _employee_vacation_summary(db: AsyncSession, employee: Employee) -> dict:
     """Leave balance: monthly allowance accrued from hire (carried over) plus
     days off credited via partial payroll payments, minus days taken (attendance
-    marked 'leave')."""
+    marked 'Day Off', stored as status 'absent')."""
     per_month = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
     months = _vacation_months_accrued(employee)
     accrued = _days(per_month * months)
@@ -397,7 +397,7 @@ async def _employee_vacation_summary(db: AsyncSession, employee: Employee) -> di
     _taken = await db.execute(
         select(func.count(Attendance.id)).where(
             Attendance.employee_id == employee.id,
-            Attendance.status == "leave",
+            Attendance.status == "absent",   # the "Day Off" option is stored as 'absent'
         )
     )
     taken = _days(_taken.scalar() or 0)
@@ -2394,7 +2394,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <tbody id="daysoff-body"></tbody>
         </table>
         <div style="max-width:1100px;margin:10px auto 0;font-size:11px;color:var(--muted);line-height:1.5">
-            Credit = monthly allowance accrued from hire (carried over) + days off earned by paying salary partially &minus; days taken (attendance marked "Leave"). A negative balance means more days off were taken than available.
+            Credit = monthly allowance accrued from hire (carried over) + days off earned by paying salary partially &minus; days taken (attendance marked "Day Off"). A negative balance means more days off were taken than available.
         </div>
     </div>
 </div>
@@ -3712,7 +3712,8 @@ async function loadPayrollRecords(){
             `<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:40px">No payroll records. Use preview above to generate.</td></tr>`;
         return;
     }
-    let totalNet = records.reduce((s,r)=>s+numberValue(r.net_salary),0);
+    let totalNet = records.reduce((s,r)=>s + (r.paid ? 0 : numberValue(r.net_salary)), 0);
+    let totalPaid = records.reduce((s,r)=>s + (r.paid ? numberValue(r.paid_amount!=null ? r.paid_amount : r.net_salary) : 0), 0);
     document.getElementById("pay-body").innerHTML = records.map(r=>`
         <tr>
             <td class="name">${displayText(r.employee)}</td>
@@ -3732,7 +3733,7 @@ async function loadPayrollRecords(){
             </td>
         </tr>`).join("") +
         `<tr style="background:var(--card2)">
-            <td colspan="9" style="font-weight:700;color:var(--sub)">Total</td>
+            <td colspan="9" style="font-weight:700;color:var(--sub)">Remaining to Pay${totalPaid>0?` <span style="font-weight:400;color:var(--muted);font-size:12px">(already paid ${money(totalPaid)})</span>`:""}</td>
             <td style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green)">${money(totalNet)}</td>
             <td colspan="2"></td>
         </tr>`;
