@@ -895,39 +895,89 @@ async def delete_employee_loan(
     loan = result.scalar_one_or_none()
     if not loan:
         raise HTTPException(status_code=404, detail="Loan not found")
-    # Block deletion if any repayment is tied to a finalised payroll run —
-    # removing it would desync that payroll's recorded loan deductions. Those
-    # loans should be cancelled, not deleted.
-    _r = await db.execute(
-        select(func.count(EmployeeLoanRepayment.id)).where(
-            EmployeeLoanRepayment.loan_id == loan.id,
-            EmployeeLoanRepayment.payroll_id.isnot(None),
-        )
-    )
-    payroll_linked = _r.scalar() or 0
-    if payroll_linked:
-        raise HTTPException(
-            status_code=400,
-            detail="This loan has repayments already applied to a payroll run and can't be deleted. Cancel it instead.",
-        )
+
     loan_amount = _money(loan.amount)
-    # Remove any standalone (non-payroll) repayments first to satisfy the FK,
-    # then the loan itself.
+
+    # Gather this loan's repayments and total how much each payroll run deducted
+    # for it, so we can reverse those that haven't been paid out yet.
+    _reps = await db.execute(
+        select(EmployeeLoanRepayment).where(EmployeeLoanRepayment.loan_id == loan.id)
+    )
+    repayments = _reps.scalars().all()
+    reverse_by_payroll: dict[int, Decimal] = {}
+    for rep in repayments:
+        if rep.payroll_id:
+            reverse_by_payroll[rep.payroll_id] = (
+                reverse_by_payroll.get(rep.payroll_id, Decimal("0")) + _money(rep.amount)
+            )
+
+    reversed_total = Decimal("0")
+    skipped_paid = Decimal("0")
+    for payroll_id, amount in reverse_by_payroll.items():
+        _p = await db.execute(select(Payroll).where(Payroll.id == payroll_id))
+        payroll = _p.scalar_one_or_none()
+        if payroll is None:
+            continue
+        if payroll.paid:
+            # The money was already withheld and paid out — leave the paid
+            # record exactly as it was; we only drop the repayment link below.
+            skipped_paid += amount
+            continue
+        # Unpaid run: give the deduction back so the loan that no longer exists
+        # isn't withheld at payout time.
+        give_back = min(amount, _money(payroll.loan_deductions))
+        payroll.loan_deductions = _money(_money(payroll.loan_deductions) - give_back)
+        payroll.deductions = _money(_money(payroll.deductions) - give_back)
+        payroll.net_salary = _money(_money(payroll.net_salary) + give_back)
+        reversed_total += give_back
+        # Reduce/remove the matching aggregate loan_repayment deduction line(s)
+        _lines = await db.execute(
+            select(EmployeePayrollDeduction)
+            .where(
+                EmployeePayrollDeduction.payroll_id == payroll_id,
+                EmployeePayrollDeduction.type == "loan_repayment",
+            )
+            .order_by(EmployeePayrollDeduction.id)
+        )
+        remaining = give_back
+        for line in _lines.scalars().all():
+            if remaining <= 0:
+                break
+            line_amount = _money(line.amount)
+            if line_amount <= remaining:
+                remaining -= line_amount
+                await db.delete(line)
+            else:
+                line.amount = _money(line_amount - remaining)
+                remaining = Decimal("0")
+
+    # Remove the loan's repayments (FK requires this before the loan), then the loan.
     await db.execute(
         delete(EmployeeLoanRepayment).where(EmployeeLoanRepayment.loan_id == loan.id)
     )
+    detail = f"Deleted loan #{loan.id} ({loan_amount:.2f}) for employee #{loan.employee_id}"
+    if reversed_total > 0:
+        detail += f"; reversed {reversed_total:.2f} from unpaid payroll runs"
+    if skipped_paid > 0:
+        detail += f"; left {skipped_paid:.2f} on already-paid runs unchanged"
     record(
         db,
         "HR",
         "delete_employee_loan",
-        f"Deleted loan #{loan.id} ({loan_amount:.2f}) for employee #{loan.employee_id}",
+        detail,
         user=current_user,
         ref_type="employee_loan",
         ref_id=loan.id,
     )
     await db.delete(loan)
     await db.commit()
-    return {"ok": True, "loan_id": loan_id, "deleted": True}
+    return {
+        "ok": True,
+        "loan_id": loan_id,
+        "deleted": True,
+        "reversed_from_unpaid": _as_float(reversed_total),
+        "left_on_paid": _as_float(skipped_paid),
+    }
 
 
 # ── ALLOWANCE ADVANCES API ─────────────────────────────
@@ -2944,11 +2994,13 @@ async function cancelLoan(loanId){
 
 async function deleteLoan(loanId){
     if(!hasPermission("action_hr_delete_loans")) return;
-    if(!confirm("Permanently delete this loan and its repayment history? This cannot be undone.")) return;
+    if(!confirm("Permanently delete this loan and its repayment history?\n\nDeductions taken in unpaid payroll runs will be added back. Already-paid runs are left unchanged. This cannot be undone.")) return;
     try{
         const res = await fetch(`/hr/api/loans/${loanId}`,{method:"DELETE"});
-        await readApiResponse(res);
-        showToast("Loan deleted");
+        const out = await readApiResponse(res);
+        let msg = "Loan deleted";
+        if(out && numberValue(out.reversed_from_unpaid) > 0) msg += ` — ${money(out.reversed_from_unpaid)} reversed from unpaid payroll`;
+        showToast(msg);
         await loadEmployeeLoans();
     }catch(err){ showToast("Error: "+(err.message||"Could not delete loan")); }
 }
