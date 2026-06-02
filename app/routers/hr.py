@@ -850,6 +850,23 @@ async def get_employee_vacation(employee_id: int, db: AsyncSession = Depends(get
     return await _employee_vacation_summary(db, employee)
 
 
+@router.get("/api/vacation-summary")
+async def get_vacation_summary(db: AsyncSession = Depends(get_async_session)):
+    """Days-off credit summary for every active employee (for the Days Off tab)."""
+    _r = await db.execute(
+        select(Employee).where(Employee.is_active == True).order_by(Employee.name)
+    )
+    employees = _r.scalars().all()
+    out = []
+    for emp in employees:
+        summary = await _employee_vacation_summary(db, emp)
+        summary["employee_id"] = emp.id
+        summary["employee"] = emp.name
+        summary["position"] = emp.position or "—"
+        out.append(summary)
+    return out
+
+
 @router.get("/api/employees/{employee_id}/loans", dependencies=[Depends(require_permission("action_hr_view_loans"))])
 async def get_employee_loans(employee_id: int, db: AsyncSession = Depends(get_async_session)):
     await _get_employee_or_404(db, employee_id)
@@ -2254,6 +2271,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <button class="tab"        id="tab-att"        onclick="switchTab('attendance')">Attendance</button>
             <button class="tab"        id="tab-pay"        onclick="switchTab('payroll')">Payroll</button>
             <button class="tab"        id="tab-allow"      onclick="switchTab('allowances')">Allowances</button>
+            <button class="tab"        id="tab-daysoff"    onclick="switchTab('daysoff')">Days Off</button>
         </div>
         <div style="display:flex;gap:10px;" id="tab-actions">
             <button class="btn btn-green"  id="btn-add-emp"  onclick="openAddEmpModal()">+ Add Employee</button>
@@ -2359,6 +2377,25 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <thead><tr><th>Employee</th><th>Position</th><th style="text-align:center">Food</th><th style="text-align:center">Transport</th><th style="text-align:center">Total / Month</th><th style="text-align:center">Open Advances</th><th style="text-align:center"></th></tr></thead>
             <tbody id="allowance-body"></tbody>
         </table>
+    </div>
+</div>
+
+<div id="tab-panel-daysoff" style="display:none">
+    <div class="table-wrap" style="max-width:1100px;margin:0 auto">
+        <table style="margin:0 auto">
+            <thead><tr>
+                <th>Employee</th><th>Position</th>
+                <th style="text-align:center">Allowance / mo</th>
+                <th style="text-align:center">Accrued</th>
+                <th style="text-align:center">From payroll</th>
+                <th style="text-align:center">Taken</th>
+                <th style="text-align:center">Days off credit</th>
+            </tr></thead>
+            <tbody id="daysoff-body"></tbody>
+        </table>
+        <div style="max-width:1100px;margin:10px auto 0;font-size:11px;color:var(--muted);line-height:1.5">
+            Credit = monthly allowance accrued from hire (carried over) + days off earned by paying salary partially &minus; days taken (attendance marked "Leave"). A negative balance means more days off were taken than available.
+        </div>
     </div>
 </div>
 
@@ -2708,9 +2745,15 @@ function switchTab(tab){
     const allowTab = document.getElementById("tab-allow");
     if(allowEl)  allowEl.style.display  = tab==="allowances" ? "" : "none";
     if(allowTab) allowTab.classList.toggle("active", tab==="allowances");
+    // Days Off tab
+    const daysoffEl  = document.getElementById("tab-panel-daysoff");
+    const daysoffTab = document.getElementById("tab-daysoff");
+    if(daysoffEl)  daysoffEl.style.display  = tab==="daysoff" ? "" : "none";
+    if(daysoffTab) daysoffTab.classList.toggle("active", tab==="daysoff");
     if(tab==="attendance")  initAttendanceTab();
     if(tab==="payroll")     initPayrollTab();
     if(tab==="allowances")  loadAllowanceBoard();
+    if(tab==="daysoff")     loadDaysOffBoard();
 }
 
 /* ── EMPLOYEES ── */
@@ -3236,6 +3279,34 @@ function applyHireDateLock(isEdit){
 /* ── ALLOWANCE BOARD ── */
 let allowanceAdvanceEmployeeId = null;
 let allowanceAdvanceEmployeeName = "";
+
+async function loadDaysOffBoard(){
+    const body = document.getElementById("daysoff-body");
+    if(!body) return;
+    body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">Loading\u2026</td></tr>`;
+    try{
+        const rows = await (await fetch("/hr/api/vacation-summary")).json();
+        if(!rows.length){
+            body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No active employees.</td></tr>`;
+            return;
+        }
+        body.innerHTML = rows.map(r=>{
+            const left = numberValue(r.days_left);
+            const color = left < 0 ? "var(--danger)" : (left > 0 ? "var(--green)" : "var(--muted)");
+            return `<tr>
+                <td class="name">${displayText(r.employee)}</td>
+                <td style="color:var(--muted)">${displayText(r.position)}</td>
+                <td style="text-align:center;font-family:var(--mono)">${numberValue(r.per_month)}</td>
+                <td style="text-align:center;font-family:var(--mono);color:var(--muted)">${numberValue(r.accrued).toFixed(2)}</td>
+                <td style="text-align:center;font-family:var(--mono);color:var(--muted)">${numberValue(r.credited_from_payroll).toFixed(2)}</td>
+                <td style="text-align:center;font-family:var(--mono);color:var(--muted)">${numberValue(r.taken).toFixed(2)}</td>
+                <td style="text-align:center;font-family:var(--mono);font-weight:700;color:${color}">${left.toFixed(2)}</td>
+            </tr>`;
+        }).join("");
+    }catch(err){
+        body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--danger);padding:20px">Could not load days-off credit</td></tr>`;
+    }
+}
 
 async function loadAllowanceBoard(){
     const body = document.getElementById("allowance-body");
