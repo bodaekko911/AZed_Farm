@@ -25,6 +25,28 @@ from app.core.rate_limit import limiter
 from app.database import get_async_session
 
 
+async def ensure_payroll_columns() -> None:
+    """Self-healing guard: ensure recently-added payroll columns exist even if
+    the alembic migration hasn't applied yet. Idempotent and safe to run on
+    every startup. Without these columns, every query against the payroll table
+    fails (e.g. the Payroll tab hangs on 'Loading...')."""
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal
+
+    statements = [
+        "ALTER TABLE payroll ADD COLUMN IF NOT EXISTS paid_amount NUMERIC(12,2)",
+        "ALTER TABLE payroll ADD COLUMN IF NOT EXISTS days_off_credited NUMERIC(8,2) NOT NULL DEFAULT 0",
+    ]
+    try:
+        async with AsyncSessionLocal() as db:
+            for stmt in statements:
+                await db.execute(text(stmt))
+            await db.commit()
+            logger.info("ensure_payroll_columns: payroll columns ready")
+    except Exception:
+        logger.exception("ensure_payroll_columns: failed")
+
+
 async def seed_chart_of_accounts() -> None:
     """Ensure core accounting accounts exist. Safe to run on every startup."""
     from decimal import Decimal
@@ -109,6 +131,7 @@ async def lifespan(_: FastAPI):
     configure_logging()
     configure_monitoring()
     await verify_migration_status()
+    await ensure_payroll_columns()
     await seed_chart_of_accounts()
     from app.core.cache import init_redis_pool, close_redis_pool
     await init_redis_pool()
