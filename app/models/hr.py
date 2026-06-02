@@ -65,6 +65,12 @@ class Payroll(Base):
     manual_deductions = Column(Numeric(12, 2), default=0, server_default="0")
     net_salary  = Column(Numeric(12, 2))
     paid        = Column(Boolean, default=False)
+    # Cash actually paid out (may be less than net_salary for a partial payment).
+    # Null on older records / full payments where it equals net_salary.
+    paid_amount = Column(Numeric(12, 2), nullable=True)
+    # Days off credited to the employee in lieu of the unpaid remainder
+    # (remaining cash / daily rate). Adds to their leave balance.
+    days_off_credited = Column(Numeric(8, 2), default=0, server_default="0", nullable=False)
     days_worked  = Column(Integer, nullable=True)
     working_days = Column(Integer, nullable=True)
     paid_at      = Column(DateTime(timezone=True), nullable=True)

@@ -604,11 +604,17 @@ async def create_payroll_expense(
     *,
     payment_method: str = "cash",
     paid_date: Optional[date_type] = None,
+    amount_override: Optional[float] = None,
 ) -> Expense:
     if payment_method not in {"cash", "bank_transfer", "card"}:
         raise HTTPException(status_code=400, detail="Invalid payment method")
 
-    amount = round(float(payroll.net_salary or 0), 2)
+    # For a partial payment the recorded expense is the cash actually paid out,
+    # not the full net salary (the unpaid remainder is settled as days off).
+    if amount_override is not None:
+        amount = round(float(amount_override), 2)
+    else:
+        amount = round(float(payroll.net_salary or 0), 2)
     if amount <= 0:
         raise HTTPException(status_code=400, detail="Payroll net salary must be greater than 0")
 

@@ -87,6 +87,11 @@ class PayrollUpdate(BaseModel):
 
 class PayrollPayRequest(BaseModel):
     payment_method: Optional[str] = "cash"
+    # Cash actually paid. If omitted, the full net salary is paid.
+    paid_amount: Optional[Decimal] = None
+    # If true, the unpaid remainder (net - paid_amount) is converted to paid
+    # days off (remaining / daily_rate) and credited to the leave balance.
+    convert_remainder_to_days_off: Optional[bool] = False
 
 
 class EmployeeLoanCreate(BaseModel):
@@ -357,6 +362,55 @@ async def _loan_repaid_amounts(db: AsyncSession, loan_ids: list[int]) -> dict[in
         .group_by(EmployeeLoanRepayment.loan_id)
     )
     return {loan_id: _money(total) for loan_id, total in result.all()}
+
+
+def _vacation_months_accrued(employee: Employee, as_of: date | None = None) -> int:
+    """Number of monthly leave accruals from hire month through the current
+    month (inclusive). Each started employment month grants the monthly
+    allowance, and unused days carry over."""
+    as_of = as_of or date.today()
+    hire = getattr(employee, "hire_date", None)
+    if hire is None:
+        created = getattr(employee, "created_at", None)
+        hire = created.date() if created else None
+    if hire is None:
+        return 0
+    months = (as_of.year - hire.year) * 12 + (as_of.month - hire.month) + 1
+    return max(0, months)
+
+
+async def _employee_vacation_summary(db: AsyncSession, employee: Employee) -> dict:
+    """Leave balance: monthly allowance accrued from hire (carried over) plus
+    days off credited via partial payroll payments, minus days taken (attendance
+    marked 'leave')."""
+    per_month = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
+    months = _vacation_months_accrued(employee)
+    accrued = _days(per_month * months)
+
+    _credited = await db.execute(
+        select(func.coalesce(func.sum(Payroll.days_off_credited), 0)).where(
+            Payroll.employee_id == employee.id
+        )
+    )
+    credited = _days(_credited.scalar() or 0)
+
+    _taken = await db.execute(
+        select(func.count(Attendance.id)).where(
+            Attendance.employee_id == employee.id,
+            Attendance.status == "leave",
+        )
+    )
+    taken = _days(_taken.scalar() or 0)
+
+    left = _days(accrued + credited - taken)
+    return {
+        "per_month": per_month,
+        "months_accrued": months,
+        "accrued": _as_day_float(accrued),
+        "credited_from_payroll": _as_day_float(credited),
+        "taken": _as_day_float(taken),
+        "days_left": _as_day_float(left),
+    }
 
 
 async def _employee_loan_balance(db: AsyncSession, employee_id: int) -> Decimal:
@@ -790,6 +844,12 @@ async def deactivate_employee(emp_id: int, db: AsyncSession = Depends(get_async_
 
 
 # ── LOANS & DEDUCTIONS API ─────────────────────────────
+@router.get("/api/employees/{employee_id}/vacation")
+async def get_employee_vacation(employee_id: int, db: AsyncSession = Depends(get_async_session)):
+    employee = await _get_employee_or_404(db, employee_id)
+    return await _employee_vacation_summary(db, employee)
+
+
 @router.get("/api/employees/{employee_id}/loans", dependencies=[Depends(require_permission("action_hr_view_loans"))])
 async def get_employee_loans(employee_id: int, db: AsyncSession = Depends(get_async_session)):
     await _get_employee_or_404(db, employee_id)
@@ -1595,6 +1655,9 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
             "net_salary":  float(r.net_salary)  if r.net_salary  else 0,
             "paid":        r.paid,
             "paid_at":     str(r.paid_at) if r.paid_at else None,
+            "paid_amount": float(r.paid_amount) if getattr(r, "paid_amount", None) is not None else None,
+            "days_off_credited": float(r.days_off_credited) if getattr(r, "days_off_credited", None) else 0,
+            "daily_rate":  _as_float(_paid_days_and_rate(r.employee, int(r.working_days or 30) or 30)[1]) if r.employee else 0,
         }
         for r in records
     ]
@@ -1834,19 +1897,51 @@ async def mark_paid(payroll_id: int, data: Optional[PayrollPayRequest] = None, d
     p = _r.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Payroll record not found")
+    if p.paid:
+        raise HTTPException(status_code=400, detail="This payroll is already marked paid.")
+
     now = datetime.now(timezone.utc)
     payment_method = (data.payment_method if data else "cash") or "cash"
+
+    net = _money(p.net_salary or 0)
+    # How much cash is actually being paid out
+    if data and data.paid_amount is not None:
+        paid_amount = _money(data.paid_amount)
+    else:
+        paid_amount = net
+    if paid_amount <= 0:
+        raise HTTPException(status_code=400, detail="Payment amount must be greater than 0.")
+    if paid_amount > net:
+        raise HTTPException(status_code=400, detail="Payment can't exceed the net salary.")
+
+    remaining = _money(net - paid_amount)
+    days_off_credited = Decimal("0")
+    if data and data.convert_remainder_to_days_off and remaining > 0:
+        # Convert the unpaid remainder into paid days off using the same daily
+        # rate the payroll uses, and credit them to the employee's balance.
+        employee_for_rate = p.employee
+        working_days = int(p.working_days or 30) or 30
+        _paid_days, daily_rate = _paid_days_and_rate(employee_for_rate, working_days)
+        if daily_rate > 0:
+            days_off_credited = (remaining / daily_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
     expense = await create_payroll_expense(
         db,
         p,
         current_user,
         payment_method=payment_method,
         paid_date=now.date(),
+        amount_override=float(paid_amount),
     )
     p.paid    = True
     p.paid_at = now
+    p.paid_amount = paid_amount
+    p.days_off_credited = days_off_credited
+    pay_detail = f"Marked payroll #{payroll_id} as paid — net: {float(net):.2f}, cash: {float(paid_amount):.2f}"
+    if days_off_credited > 0:
+        pay_detail += f", credited {float(days_off_credited):.2f} days off"
     record(db, "HR", "mark_payroll_paid",
-           f"Marked payroll #{payroll_id} as paid — net: {float(p.net_salary):.2f}",
+           pay_detail,
            user=current_user, ref_type="payroll", ref_id=payroll_id)
     await db.commit()
     employee = p.employee
@@ -1861,6 +1956,8 @@ async def mark_paid(payroll_id: int, data: Optional[PayrollPayRequest] = None, d
         "farm_id": expense.farm_id,
         "farm_name": expense_farm.name if expense_farm else (employee_farm.name if employee_farm and expense.farm_id == employee_farm.id else None),
         "amount": float(expense.amount),
+        "paid_amount": _as_float(paid_amount),
+        "days_off_credited": _as_float(days_off_credited),
     }
     if expense.farm_id is None:
         response["warning"] = "Employee has no farm assigned, so salary expense was not linked to a farm."
@@ -2281,6 +2378,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="fld"><label>Food Allowance (EGP)</label><input id="e-food" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
             <div class="fld"><label>Transportation Allowance (EGP)</label><input id="e-transport" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
             <div class="fld span2" id="emp-rate-preview" style="color:var(--muted);font-size:13px;padding:6px 0"></div>
+            <div class="fld span2" id="emp-vacation-balance" style="font-size:13px;padding:6px 10px;border-radius:8px;background:var(--card2);display:none"></div>
         </div>
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeEmpModal()">Cancel</button>
@@ -2728,6 +2826,8 @@ function openAddEmpModal(){
     updateEmpDailyRatePreview();
     document.getElementById("e-hire").value = "";
     fillEmployeeFarmSelect("");
+    const vb = document.getElementById("emp-vacation-balance");
+    if(vb){ vb.style.display = "none"; vb.innerHTML = ""; }
     document.getElementById("emp-modal").classList.add("open");
 }
 
@@ -2748,10 +2848,30 @@ function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacati
     // otherwise preselect their farm (if any).
     fillEmployeeFarmSelect(worksWithAnimals ? "__animals__" : (farmId || ""));
     updateEmpDailyRatePreview();
+    loadEmpVacationBalance(id);
     document.getElementById("emp-modal").classList.add("open");
 }
 
-function closeEmpModal(){ document.getElementById("emp-modal").classList.remove("open"); }
+async function loadEmpVacationBalance(empId){
+    const box = document.getElementById("emp-vacation-balance");
+    if(!box) return;
+    box.style.display = "";
+    box.innerHTML = "Loading leave balance\u2026";
+    try{
+        const v = await (await fetch(`/hr/api/employees/${empId}/vacation`)).json();
+        const left = numberValue(v.days_left);
+        const color = left < 0 ? "var(--danger)" : "var(--green)";
+        box.innerHTML =
+            `<div style="display:flex;justify-content:space-between;align-items:center">`+
+            `<span>Vacation days left</span>`+
+            `<b style="color:${color};font-size:15px">${left.toFixed(2)} days</b></div>`+
+            `<div style="color:var(--muted);font-size:11px;margin-top:4px">`+
+            `${numberValue(v.accrued).toFixed(2)} accrued (${numberValue(v.per_month)}/mo \u00d7 ${numberValue(v.months_accrued)} mo) `+
+            `+ ${numberValue(v.credited_from_payroll).toFixed(2)} from payroll \u2212 ${numberValue(v.taken).toFixed(2)} taken</div>`;
+    }catch(err){
+        box.innerHTML = `<span style="color:var(--danger)">Could not load leave balance</span>`;
+    }
+}
 
 function formatApiDetail(detail){
     if(Array.isArray(detail)){
@@ -3512,6 +3632,7 @@ async function runPayroll(){
 async function loadPayrollRecords(){
     let period = document.getElementById("pay-period").value;
     let records = await (await fetch(`/hr/api/payroll${period?"?period="+period:""}`)).json();
+    window._payrollRecords = records;
     document.getElementById("payroll-preview-wrap").style.display = "none";
     document.getElementById("payroll-records-wrap").style.display = "";
 
@@ -3533,7 +3654,7 @@ async function loadPayrollRecords(){
             <td style="font-family:var(--mono);color:var(--danger)">-${money(r.manual_deductions)}</td>
             <td style="font-family:var(--mono);color:var(--danger)">-${money(r.deductions)}</td>
             <td style="font-family:var(--mono);font-size:15px;font-weight:700;color:var(--green)">${money(r.net_salary)}</td>
-            <td>${r.paid?`<span class="paid-badge">Paid</span>`:`<span class="unpaid-badge">Pending</span>`}</td>
+            <td>${r.paid?`<span class="paid-badge">Paid</span>${(r.paid_amount!=null && numberValue(r.paid_amount) < numberValue(r.net_salary))?`<div style="font-size:10px;color:var(--muted);margin-top:2px">cash ${money(r.paid_amount)}${numberValue(r.days_off_credited)>0?` · +${numberValue(r.days_off_credited).toFixed(2)}d off`:""}</div>`:""}`:`<span class="unpaid-badge">Pending</span>`}</td>
             <td style="display:flex;gap:6px">
                 <button class="action-btn purple" onclick="openEditPayFromButton(this)" data-id="${numberValue(r.id)}" data-employee="${escapeHtml(normalizeDashFallback(r.employee))}" data-bonuses="${numberValue(r.bonuses)}" data-deductions="${numberValue(r.manual_deductions)}">Edit</button>
                 ${!r.paid && hasPermission("action_hr_mark_paid")?`<button class="action-btn green" onclick="markPaid(${numberValue(r.id)})">Mark Paid</button>`:""}
@@ -3581,13 +3702,78 @@ async function savePayrollEdit(){
     loadPayrollRecords();
 }
 
-async function markPaid(id){
-    if(!confirm("Mark this payroll as paid?")) return;
-    let res = await fetch(`/hr/api/payroll/${id}/pay`,{method:"PATCH"});
-    let data = await res.json();
-    if(data.detail){ showToast("Error: "+data.detail); return; }
-    showToast(data.warning || `Marked as paid - expense ${data.expense_ref_number || ""}`);
-    loadPayrollRecords();
+function markPaid(id){
+    if(!hasPermission("action_hr_mark_paid")) return;
+    const rec = (window._payrollRecords||[]).find(r=>numberValue(r.id)===numberValue(id));
+    const net  = rec ? numberValue(rec.net_salary) : 0;
+    const rate = rec ? numberValue(rec.daily_rate) : 0;
+    openPayModal(id, net, rate);
+}
+
+function closePayModal(){
+    const o = document.getElementById("pay-modal-overlay");
+    if(o) o.remove();
+}
+
+function openPayModal(id, net, rate){
+    closePayModal();
+    const overlay = document.createElement("div");
+    overlay.id = "pay-modal-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML = `
+      <div style="background:var(--card2,#fff);color:var(--text,#111);padding:20px;border-radius:12px;width:min(92vw,360px);box-shadow:0 12px 40px rgba(0,0,0,.35)">
+        <div style="font-weight:700;font-size:16px;margin-bottom:10px">Pay salary</div>
+        <div style="font-size:13px;color:var(--muted,#888);margin-bottom:10px">Net owed: <b>${money(net)} EGP</b></div>
+        <label style="font-size:13px;display:block;margin-bottom:4px">Cash amount to pay</label>
+        <input id="pay-amount-input" type="number" step="0.01" min="0" max="${net}" value="${net}" style="width:100%;padding:8px;border:1px solid var(--border,#ccc);border-radius:8px;margin-bottom:10px;background:transparent;color:inherit">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:6px;cursor:pointer">
+          <input id="pay-convert-toggle" type="checkbox"> Convert remaining to paid days off
+        </label>
+        <div id="pay-days-hint" style="font-size:12px;color:var(--muted,#888);min-height:18px;margin-bottom:14px"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button onclick="closePayModal()" style="padding:8px 14px;border-radius:8px;border:1px solid var(--border,#ccc);background:none;color:inherit;cursor:pointer">Cancel</button>
+          <button id="pay-confirm-btn" style="padding:8px 14px;border-radius:8px;border:none;background:var(--green,#16a34a);color:#fff;cursor:pointer;font-weight:600">Confirm payment</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const amt  = document.getElementById("pay-amount-input");
+    const tog  = document.getElementById("pay-convert-toggle");
+    const hint = document.getElementById("pay-days-hint");
+    function refresh(){
+        const paid = numberValue(amt.value);
+        const remaining = Math.max(0, net - paid);
+        if(tog.checked && remaining>0 && rate>0){
+            hint.innerText = `Remaining ${money(remaining)} EGP \u2192 ${(remaining/rate).toFixed(2)} days off credited (rate ${money(rate)}/day)`;
+        } else if(remaining>0){
+            hint.innerText = `Remaining ${money(remaining)} EGP will not be paid`;
+        } else {
+            hint.innerText = "";
+        }
+    }
+    amt.addEventListener("input", refresh);
+    tog.addEventListener("change", refresh);
+    refresh();
+    document.getElementById("pay-confirm-btn").onclick = function(){ confirmPay(id, net); };
+}
+
+async function confirmPay(id, net){
+    const amt = numberValue(document.getElementById("pay-amount-input").value);
+    const convert = document.getElementById("pay-convert-toggle").checked;
+    if(amt<=0 || amt>net){ showToast("Enter an amount between 0 and "+money(net)); return; }
+    try{
+        const res = await fetch(`/hr/api/payroll/${id}/pay`,{
+            method:"PATCH",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({payment_method:"cash", paid_amount:amt, convert_remainder_to_days_off:convert})
+        });
+        const data = await res.json();
+        if(data.detail){ showToast("Error: "+data.detail); return; }
+        let msg = `Paid ${money(data.paid_amount!=null?data.paid_amount:amt)} EGP`;
+        if(numberValue(data.days_off_credited)>0) msg += ` \u2014 ${numberValue(data.days_off_credited).toFixed(2)} days off credited`;
+        showToast(data.warning || msg);
+        closePayModal();
+        loadPayrollRecords();
+    }catch(err){ showToast("Error: "+(err.message||"Could not record payment")); }
 }
 
 /* ── CLEAR HR DATA ── */
