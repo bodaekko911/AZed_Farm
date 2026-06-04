@@ -2797,6 +2797,9 @@ async def _build_hr_report(
             "manual_deductions",
         },
     })
+    payroll_payment_columns_available = await _schema_has_columns(db, {
+        "payroll": {"paid_amount", "days_off_credited"},
+    })
     hr_ledger_tables_available = await _schema_has_columns(db, {
         "employee_loans": {"id", "employee_id", "loan_date", "amount", "description", "status"},
         "employee_loan_repayments": {"id", "loan_id", "amount"},
@@ -2842,6 +2845,14 @@ async def _build_hr_report(
                 literal(0).label("day_deductions"),
                 literal(0).label("manual_deductions"),
             ])
+        if payroll_payment_columns_available:
+            payroll_columns.extend([
+                Payroll.paid_amount,
+                Payroll.days_off_credited,
+            ])
+        # When these columns don't exist yet, they're simply omitted from the
+        # row; readers use getattr(..., default) so paid_amount falls back to
+        # None (treated as a full cash payment) and days_off_credited to 0.
         payroll_stmt = select(*payroll_columns).where(Payroll.period.in_(periods))
         if has_employee_filter:
             payroll_stmt = payroll_stmt.where(Payroll.employee_id.in_(filtered_employee_ids))
@@ -2853,6 +2864,29 @@ async def _build_hr_report(
     payroll_employee_ids = {record.employee_id for record in payroll_records}
     included_ids = active_ids | attendance_employee_ids | payroll_employee_ids
     included_ids &= filtered_employee_ids
+
+    # ── Days-off credit (all-time snapshot, mirrors the Days Off tab) ──
+    # Credit = monthly allowance accrued from hire (carried over)
+    #          + days off earned via partial payroll payment
+    #          - days taken (attendance marked "Day Off", stored as 'absent').
+    days_off_credited_all_by_emp = defaultdict(float)
+    days_off_taken_all_by_emp = defaultdict(int)
+    if included_ids:
+        if payroll_payment_columns_available:
+            credited_res = await db.execute(
+                select(Payroll.employee_id, func.coalesce(func.sum(Payroll.days_off_credited), 0))
+                .where(Payroll.employee_id.in_(included_ids))
+                .group_by(Payroll.employee_id)
+            )
+            for emp_id, total in credited_res.all():
+                days_off_credited_all_by_emp[emp_id] = _num(total)
+        taken_res = await db.execute(
+            select(Attendance.employee_id, func.count(Attendance.id))
+            .where(Attendance.employee_id.in_(included_ids), Attendance.status == "absent")
+            .group_by(Attendance.employee_id)
+        )
+        for emp_id, cnt in taken_res.all():
+            days_off_taken_all_by_emp[emp_id] = int(cnt or 0)
 
     loan_balance_by_employee = defaultdict(float)
     loan_history = []
@@ -2982,6 +3016,21 @@ async def _build_hr_report(
         manual_deductions = round(sum(_num(getattr(payroll, "manual_deductions", 0)) for payroll in payrolls), 2)
         net_salary = round(sum(_num(payroll.net_salary) for payroll in payrolls), 2)
         paid = bool(payrolls) and all(bool(payroll.paid) for payroll in payrolls)
+        # Cash actually paid out (partial payments pay less than net; the rest
+        # becomes days off). Falls back to net for fully-paid older records.
+        def _cash_paid(p):
+            if not bool(p.paid):
+                return 0.0
+            pa = getattr(p, "paid_amount", None)
+            return _num(pa) if pa is not None else _num(p.net_salary)
+        paid_cash = round(sum(_cash_paid(payroll) for payroll in payrolls), 2)
+        days_off_credited = round(sum(_num(getattr(payroll, "days_off_credited", 0)) for payroll in payrolls), 2)
+        # All-time days-off credit balance (same definition as the Days Off tab)
+        per_month_allowance = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
+        hire = employee.hire_date or (employee.created_at.date() if getattr(employee, "created_at", None) else None)
+        months_accrued = max(0, (date.today().year - hire.year) * 12 + (date.today().month - hire.month) + 1) if (hire and per_month_allowance > 0) else 0
+        accrued_off = per_month_allowance * months_accrued
+        days_off_credit_balance = round(accrued_off + days_off_credited_all_by_emp.get(employee.id, 0.0) - days_off_taken_all_by_emp.get(employee.id, 0), 2)
         farm_name = _hr_farm_bucket_label(employee, animal_employee_ids)
         department_name = employee.department or "Unassigned"
 
@@ -3013,6 +3062,10 @@ async def _build_hr_report(
             "deductions": deductions,
             "net_salary": net_salary,
             "paid": paid,
+            "paid_cash": paid_cash,
+            "days_off_credited": days_off_credited,
+            "vacation_days_per_month": per_month_allowance,
+            "days_off_credit_balance": days_off_credit_balance,
         }
         employee_rows.append(row)
 
@@ -3077,6 +3130,12 @@ async def _build_hr_report(
     deductions_total = round(sum(_num(payroll.deductions) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
     net_salary_total = round(sum(_num(payroll.net_salary) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
     paid_salary = round(sum(_num(payroll.net_salary) for payroll in payroll_records if payroll.employee_id in included_ids and payroll.paid), 2)
+    paid_cash_total = round(sum(
+        (_num(getattr(payroll, "paid_amount", None)) if getattr(payroll, "paid_amount", None) is not None else _num(payroll.net_salary))
+        for payroll in payroll_records if payroll.employee_id in included_ids and payroll.paid
+    ), 2)
+    days_off_credited_total = round(sum(_num(getattr(payroll, "days_off_credited", 0)) for payroll in payroll_records if payroll.employee_id in included_ids), 2)
+    days_off_credit_balance_total = round(sum(row["days_off_credit_balance"] for row in employee_rows), 2)
     total_outstanding_loans = round(sum(loan_balance_by_employee.values()), 2)
 
     return {
@@ -3105,6 +3164,10 @@ async def _build_hr_report(
             "net_salary": net_salary_total,
             "paid_salary": paid_salary,
             "unpaid_salary": round(net_salary_total - paid_salary, 2),
+            "paid_cash": paid_cash_total,
+            "salary_settled_as_days_off": round(paid_salary - paid_cash_total, 2),
+            "days_off_credited": days_off_credited_total,
+            "days_off_credit_balance": days_off_credit_balance_total,
         },
         "by_department": by_department,
         "by_farm": by_farm,
@@ -3189,6 +3252,10 @@ async def export_hr(
                 ["Net Salary", summary["net_salary"]],
                 ["Paid Salary", summary["paid_salary"]],
                 ["Unpaid Salary", summary["unpaid_salary"]],
+                ["Paid in Cash", summary.get("paid_cash", summary["paid_salary"])],
+                ["Salary Settled as Days Off", summary.get("salary_settled_as_days_off", 0)],
+                ["Days Off Credited (from payroll)", summary.get("days_off_credited", 0)],
+                ["Days Off Credit Balance", summary.get("days_off_credit_balance", 0)],
             ],
             "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Payroll Period", data["period"] or "Range months")],
             "tab_color": "1F4E78",
@@ -3214,10 +3281,10 @@ async def export_hr(
         {
             "sheet_name": "Employees",
             "report_title": "HR Employee Detail",
-            "headers": ["Employee ID", "Employee", "Phone", "Position", "Department", "Farm", "Hire Date", "Base Salary", "Present Days", "Absent Days", "Late Days", "Leave Days", "Attendance Records", "Attendance Rate", "Payroll Period", "Days Worked", "Working Days", "Bonuses", "Outstanding Loan Balance", "Loan Deductions", "Day Deduction Days", "Day Deductions", "Manual Deductions", "Total Deductions", "Net Salary", "Paid"],
-            "rows": [[row["employee_id"], row["employee"], row["phone"], row["position"], row["department"], row["farm_name"], row["hire_date"], row["base_salary"], row["present_days"], row["absent_days"], row["late_days"], row["leave_days"], row["attendance_records"], row["attendance_rate"], row["payroll_period"], row["days_worked"], row["working_days"], row["bonuses"], row["outstanding_loan_balance"], row["loan_deductions"], row["day_deduction_days"], row["day_deductions"], row["manual_deductions"], row["total_deductions"], row["net_salary"], "Yes" if row["paid"] else "No"] for row in data["employees"]],
+            "headers": ["Employee ID", "Employee", "Phone", "Position", "Department", "Farm", "Hire Date", "Base Salary", "Present Days", "Absent Days", "Late Days", "Leave Days", "Attendance Records", "Attendance Rate", "Payroll Period", "Days Worked", "Working Days", "Bonuses", "Outstanding Loan Balance", "Loan Deductions", "Day Deduction Days", "Day Deductions", "Manual Deductions", "Total Deductions", "Net Salary", "Paid", "Paid in Cash", "Days Off Credited", "Days Off / Month", "Days Off Credit Balance"],
+            "rows": [[row["employee_id"], row["employee"], row["phone"], row["position"], row["department"], row["farm_name"], row["hire_date"], row["base_salary"], row["present_days"], row["absent_days"], row["late_days"], row["leave_days"], row["attendance_records"], row["attendance_rate"], row["payroll_period"], row["days_worked"], row["working_days"], row["bonuses"], row["outstanding_loan_balance"], row["loan_deductions"], row["day_deduction_days"], row["day_deductions"], row["manual_deductions"], row["total_deductions"], row["net_salary"], "Yes" if row["paid"] else "No", row.get("paid_cash", 0), row.get("days_off_credited", 0), row.get("vacation_days_per_month", 0), row.get("days_off_credit_balance", 0)] for row in data["employees"]],
             "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Payroll Period", data["period"] or "Range months"), ("Rows", data["total_rows"])],
-            "column_formats": {"Employee ID": "int", "Hire Date": "date", "Base Salary": "money", "Present Days": "int", "Absent Days": "int", "Late Days": "int", "Leave Days": "int", "Attendance Records": "int", "Attendance Rate": "percent_value", "Days Worked": "int", "Working Days": "int", "Bonuses": "money", "Outstanding Loan Balance": "money", "Loan Deductions": "money", "Day Deductions": "money", "Manual Deductions": "money", "Total Deductions": "money", "Net Salary": "money"},
+            "column_formats": {"Employee ID": "int", "Hire Date": "date", "Base Salary": "money", "Present Days": "int", "Absent Days": "int", "Late Days": "int", "Leave Days": "int", "Attendance Records": "int", "Attendance Rate": "percent_value", "Days Worked": "int", "Working Days": "int", "Bonuses": "money", "Outstanding Loan Balance": "money", "Loan Deductions": "money", "Day Deductions": "money", "Manual Deductions": "money", "Total Deductions": "money", "Net Salary": "money", "Paid in Cash": "money", "Days Off / Month": "int"},
             "tab_color": "7C3AED",
         },
         {
@@ -3717,6 +3784,8 @@ td.mono{font-family:var(--mono);}
             <div class="stat-card sc-orange"><div class="stat-label">Unpaid Salary</div><div class="stat-value sv-orange" id="hr-unpaid">—</div></div>
             <div class="stat-card sc-orange"><div class="stat-label">Outstanding Loans</div><div class="stat-value sv-orange" id="hr-loans">—</div></div>
             <div class="stat-card sc-danger"><div class="stat-label">Total Deductions</div><div class="stat-value sv-danger" id="hr-deductions">—</div></div>
+            <div class="stat-card sc-green"><div class="stat-label">Paid in Cash</div><div class="stat-value sv-green" id="hr-paid-cash">—</div></div>
+            <div class="stat-card sc-teal"><div class="stat-label">Days Off Credit</div><div class="stat-value sv-teal" id="hr-daysoff">—</div></div>
         </div>
         <div class="two-col">
             <div class="table-wrap">
@@ -3733,7 +3802,7 @@ td.mono{font-family:var(--mono);}
         <div class="table-wrap">
             <div class="table-title">Employee Detail</div>
             <div style="overflow-x:auto">
-            <table><thead><tr><th>Employee</th><th>Phone</th><th>Position</th><th>Department</th><th>Farm</th><th>Hire Date</th><th>Base Salary</th><th>Attendance</th><th>Rate</th><th>Payroll</th><th>Worked</th><th>Loan Bal.</th><th>Loan Ded.</th><th>Day Ded.</th><th>Manual Ded.</th><th>Total Ded.</th><th>Net Salary</th><th>Paid</th></tr></thead>
+            <table><thead><tr><th>Employee</th><th>Phone</th><th>Position</th><th>Department</th><th>Farm</th><th>Hire Date</th><th>Base Salary</th><th>Attendance</th><th>Rate</th><th>Payroll</th><th>Worked</th><th>Loan Bal.</th><th>Loan Ded.</th><th>Day Ded.</th><th>Manual Ded.</th><th>Total Ded.</th><th>Net Salary</th><th>Paid Cash</th><th>Days Off+</th><th>Days Off Bal.</th><th>Paid</th></tr></thead>
             <tbody id="hr-emp-body"></tbody></table>
             </div>
         </div>
@@ -4597,6 +4666,8 @@ async function loadHR(){
     document.getElementById("hr-unpaid").innerText = Number(summary.unpaid_salary || 0).toFixed(2);
     document.getElementById("hr-loans").innerText = Number(summary.total_outstanding_loans || 0).toFixed(2);
     document.getElementById("hr-deductions").innerText = Number(summary.deductions || 0).toFixed(2);
+    document.getElementById("hr-paid-cash").innerText = Number(summary.paid_cash || 0).toFixed(2);
+    document.getElementById("hr-daysoff").innerText = Number(summary.days_off_credit_balance || 0).toFixed(2) + "d";
 
     document.getElementById("hr-dept-body").innerHTML = data.by_department.length
         ? data.by_department.map(row=>`<tr>
@@ -4641,9 +4712,12 @@ async function loadHR(){
             <td class="mono" style="color:var(--danger)">${Number(row.manual_deductions || 0).toFixed(2)}</td>
             <td class="mono" style="color:var(--danger)">${Number(row.total_deductions || row.deductions || 0).toFixed(2)}</td>
             <td class="mono" style="color:var(--green)">${Number(row.net_salary || 0).toFixed(2)}</td>
+            <td class="mono" style="color:var(--green)">${Number(row.paid_cash || 0).toFixed(2)}</td>
+            <td class="mono" style="color:var(--blue)">${Number(row.days_off_credited || 0).toFixed(2)}</td>
+            <td class="mono" style="font-weight:700;color:${Number(row.days_off_credit_balance||0)<0?"var(--danger)":"var(--teal)"}">${Number(row.days_off_credit_balance || 0).toFixed(2)}</td>
             <td><span class="badge ${row.paid?"badge-ok":"badge-low"}">${row.paid?"Paid":"Unpaid"}</span></td>
           </tr>`).join("")
-        : `<tr><td colspan="18" style="text-align:center;color:var(--muted);padding:30px">No employee rows in this period</td></tr>`;
+        : `<tr><td colspan="21" style="text-align:center;color:var(--muted);padding:30px">No employee rows in this period</td></tr>`;
 }
 
 
