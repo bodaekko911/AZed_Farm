@@ -189,9 +189,23 @@
       // the flicker. Covers both the page-defined `.bg-orb` (dashboard.css,
       // home.py, etc.) and the injected `.app-bg-orb`. !important beats page CSS
       // regardless of stylesheet load order.
-      ".bg-orb,.app-bg-orb{animation:none!important;will-change:auto!important;transform:none!important;}"
+      ".bg-orb,.app-bg-orb{animation:none!important;will-change:auto!important;transform:none!important;}",
+      // FLICKER FIX (round 2): a backdrop-filter element (the sticky nav) sitting
+      // over a GPU-promoted fixed background can make Chromium re-sample the
+      // blurred backdrop every frame -> constant pulsing even with no animation.
+      // Remove the blur on the bars, make them opaque, and drop the forced
+      // compositing layer on the background so it's painted normally.
+      ".app-bg-layer,.bg-layer{transform:none!important;will-change:auto!important;}",
+      ":where(.app-nav,.top-nav,#topbar,.site-nav,.topbar){backdrop-filter:none!important;-webkit-backdrop-filter:none!important;}",
+      'html[data-theme="dark"] :where(.app-nav,.top-nav,#topbar,.site-nav,.topbar){background:#0B1120!important;}',
+      'html[data-theme="light"] :where(.app-nav,.top-nav,#topbar,.site-nav,.topbar){background:#ffffff!important;}'
     ].join("");
     (document.head || document.documentElement).appendChild(style);
+    // Visible/verifiable marker so the deployed file can be confirmed as live.
+    try {
+      document.documentElement.setAttribute("data-flicker-fix", "v3");
+      if (window.console && console.info) console.info("theme-init flicker-fix v3 active");
+    } catch (_e) {}
   }
 
   function mountDashboardBackground() {
