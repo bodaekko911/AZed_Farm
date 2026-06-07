@@ -172,7 +172,7 @@
     style.id = "app-dashboard-background-style";
     style.textContent = [
       ".app-bg-layer{position:fixed;inset:0;z-index:0;overflow:hidden;transform:translateZ(0);pointer-events:none;}",
-      ".app-bg-orb{position:absolute;border-radius:50%;filter:blur(80px);opacity:.18;animation:appBgOrbFloat 18s ease-in-out infinite alternate;}",
+      ".app-bg-orb{position:absolute;border-radius:50%;filter:blur(80px);opacity:.18;}",
       ".app-bg-orb:nth-child(1){width:700px;height:500px;top:-10%;left:-15%;background:radial-gradient(circle,#00E5FF,transparent 70%);animation-duration:20s;}",
       ".app-bg-orb:nth-child(2){width:500px;height:600px;top:30%;right:-10%;background:radial-gradient(circle,#38bdf8,transparent 70%);animation-duration:25s;animation-delay:-8s;}",
       ".app-bg-orb:nth-child(3){width:400px;height:400px;bottom:-10%;left:30%;background:radial-gradient(circle,#64748b,transparent 70%);animation-duration:22s;animation-delay:-4s;}",
@@ -181,7 +181,15 @@
       "html[data-theme=\"light\"] .app-bg-grain{opacity:.15;}",
       "body>:where(:not(.app-bg-layer):not(.app-bg-grain):not(.bg-layer):not(.bg-grain):not(script):not(style)){position:relative;z-index:2;}",
       "@keyframes appBgOrbFloat{0%{transform:translate(0,0);}33%{transform:translate(30px,-20px);}66%{transform:translate(-20px,30px);}100%{transform:translate(10px,10px);}}",
-      "@media print{.app-bg-layer,.app-bg-grain{display:none!important;}}"
+      "@media print{.app-bg-layer,.app-bg-grain{display:none!important;}}",
+      // FLICKER FIX: stop the continuously-animating background orbs. Large
+      // blur(80px) elements animating forever sit behind the nav/cards that use
+      // backdrop-filter, forcing Chrome to re-sample the blurred backdrop every
+      // frame -> constant full-page pulsing. Static orbs keep the glow without
+      // the flicker. Covers both the page-defined `.bg-orb` (dashboard.css,
+      // home.py, etc.) and the injected `.app-bg-orb`. !important beats page CSS
+      // regardless of stylesheet load order.
+      ".bg-orb,.app-bg-orb{animation:none!important;will-change:auto!important;transform:none!important;}"
     ].join("");
     (document.head || document.documentElement).appendChild(style);
   }
