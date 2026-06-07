@@ -350,6 +350,24 @@ def _paid_days_and_rate(employee: Employee, working_days: int = 30) -> tuple[Dec
     return paid_days, daily_rate
 
 
+def _earned_base(employee: Employee, days_present, working_days: int = 30) -> Decimal:
+    """Earned base salary for `days_present` days, computed WITHOUT pre-rounding
+    the daily rate.
+
+    Using a 2-decimal daily rate and then multiplying by the day count loses
+    precision, so a full month would not reconstruct the exact base salary
+    (e.g. 8000 / 26 -> 307.69, x 26 -> 7999.94, shown as 7999). Computing
+    `base_salary * days_present / paid_days` and rounding only the final result
+    makes full attendance (days_present == paid_days) land on the exact base
+    salary (8000), while still applying NO cap for overtime days.
+    """
+    paid_days, _rate = _paid_days_and_rate(employee, working_days)
+    if paid_days <= 0:
+        return Decimal("0")
+    base_salary = _money(employee.base_salary)
+    return _money(base_salary * _dec(days_present) / paid_days)
+
+
 async def _loan_repaid_amounts(db: AsyncSession, loan_ids: list[int]) -> dict[int, Decimal]:
     if not loan_ids:
         return {}
@@ -1337,10 +1355,11 @@ async def _payroll_preview_for_employee(
     vacation     = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
     paid_days, daily_rate = _paid_days_and_rate(employee, working_days)
 
-    # Earned salary = days_present × daily_rate, with NO cap — working beyond
-    # the required (paid) days earns more than base, and absences reduce pay.
-    # Allowance is prorated by attendance separately.
-    earned_base  = _money(daily_rate * _dec(days_present))
+    # Earned salary = base_salary × days_present / paid_days, with NO cap —
+    # working beyond the required (paid) days earns more than base, and absences
+    # reduce pay. Computed without pre-rounding the daily rate so a full month
+    # equals the exact base salary. Allowance is prorated by attendance separately.
+    earned_base  = _earned_base(employee, days_present, working_days)
     earned_total = _money(earned_base + earned_allowance)
 
     pending_day_days = Decimal("0")
@@ -1808,8 +1827,10 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
                 existing_manual_deductions = Decimal("0")
 
             paid_days_val, daily_rate_val = _paid_days_and_rate(emp, working_days)
-            # Earned = days_present × daily_rate, NO cap. Mirrors preview.
-            earned_base = _money(daily_rate_val * _dec(days_present))
+            # Earned = base_salary × days_present / paid_days, NO cap. Computed
+            # without pre-rounding the daily rate so a full month equals the
+            # exact base salary. Mirrors preview.
+            earned_base = _earned_base(emp, days_present, working_days)
 
             # Allowances — mirror the preview logic exactly:
             #   Food allowance      → prorated by attendance (daily rate x days present)
