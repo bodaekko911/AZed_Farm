@@ -40,77 +40,20 @@
     if (_earlyTheme === "light") document.documentElement.classList.add("light");
   } catch (_e) {}
 
-  // Inject splash CSS into <head> immediately.
-  try {
-    var _splashStyle = document.createElement("style");
-    _splashStyle.id = "app-splash-style";
-    _splashStyle.textContent =
-      // Hide everything in <body> except the splash, until .app-ready.
-      "html:not(.app-ready) body > *:not(#app-splash){visibility:hidden!important;}" +
-      // Body opacity transition (in case page content uses fade later).
-      "html:not(.app-ready) body{opacity:1;}" +
-      // Splash overlay.
-      "#app-splash{position:fixed;inset:0;z-index:2147483600;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;" +
-      "background:" + _earlyBg + ";opacity:1;transition:opacity 380ms ease-out;}" +
-      "#app-splash.app-splash-hide{opacity:0;pointer-events:none;}" +
-      "#app-splash .splash-logo{min-width:220px;height:96px;padding:0 28px;border-radius:22px;" +
-      "background:" + (_earlyTheme === "light" ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.04)") + ";" +
-      "border:1px solid " + (_earlyTheme === "light" ? "rgba(0,0,0,0.06)" : "rgba(255,255,255,0.08)") + ";" +
-      "display:flex;align-items:center;justify-content:center;" +
-      "box-shadow:0 20px 50px rgba(0,0,0,0.35);" +
-      "animation:splashLogoIn 520ms cubic-bezier(.22,.9,.3,1.2) both;}" +
-      "#app-splash .splash-logo img{height:56px;width:auto;object-fit:contain;display:block;}" +
-      "#app-splash .splash-name{font-family:'Outfit',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;" +
-      "font-size:13px;letter-spacing:4px;font-weight:600;text-transform:uppercase;" +
-      "color:" + (_earlyTheme === "light" ? "rgba(26,30,20,0.55)" : "rgba(240,244,255,0.55)") + ";" +
-      "animation:splashFadeUp 600ms ease-out 120ms both;}" +
-      "#app-splash .splash-bar{width:140px;height:2px;border-radius:2px;" +
-      "background:linear-gradient(90deg,transparent,#00E5FF,#d97706,transparent);background-size:200% 100%;" +
-      "animation:splashBar 1400ms ease-in-out infinite,splashFadeUp 600ms ease-out 220ms both;opacity:.85;}" +
-      "@keyframes splashLogoIn{0%{opacity:0;transform:scale(0.86) translateY(6px);}100%{opacity:1;transform:scale(1) translateY(0);}}" +
-      "@keyframes splashFadeUp{0%{opacity:0;transform:translateY(6px);}100%{opacity:1;transform:translateY(0);}}" +
-      "@keyframes splashBar{0%{background-position:100% 50%;}100%{background-position:-100% 50%;}}" +
-      "@media print{#app-splash{display:none!important;}html:not(.app-ready) body > *:not(#app-splash){visibility:visible!important;}}";
-    (document.head || document.documentElement).appendChild(_splashStyle);
-  } catch (_e) {}
+  // NOTE: The full-screen splash overlay was removed. It hid all <body>
+  // content behind a fixed 1s timer on EVERY page load, which on a
+  // multi-page (full-reload) app reads as a flash/flicker on every
+  // navigation. The pre-paint theme block above already prevents the
+  // white/colour flash (the genuinely useful part), so no overlay is
+  // needed. `.app-ready` is always set immediately so any leftover
+  // `:not(.app-ready)` rules from cached pages still resolve.
+  try { document.documentElement.classList.add("app-ready"); } catch (_e) {}
 
-  // Mount splash element. Body might not exist yet, so poll with rAF.
-  function _mountSplash() {
-    if (document.getElementById("app-splash")) return;
-    var s = document.createElement("div");
-    s.id = "app-splash";
-    s.setAttribute("aria-hidden", "true");
-    s.innerHTML =
-      '<div class="splash-logo"><img src="/static/ERP_logo.png" alt="AZed ERP" /></div>' +
-      '<div class="splash-name">Enterprise Resource Planning</div>' +
-      '<div class="splash-bar"></div>';
-    if (document.body) {
-      document.body.insertBefore(s, document.body.firstChild);
-    } else {
-      requestAnimationFrame(_mountSplash);
-    }
-  }
-  try { _mountSplash(); } catch (_e) {}
-
-  // GUARANTEED REVEAL: regardless of anything else, after MAX_SPLASH_MS,
-  // mark the page ready and fade the splash out. This is the safety net
-  // that makes sure the user always sees the page.
-  var MAX_SPLASH_MS = 1000;
-  function _revealPage() {
-    if (document.documentElement.classList.contains("app-ready")) return;
-    document.documentElement.classList.add("app-ready");
-    var s = document.getElementById("app-splash");
-    if (s) {
-      s.classList.add("app-splash-hide");
-      setTimeout(function () {
-        if (s && s.parentNode) s.parentNode.removeChild(s);
-      }, 450);
-    }
-  }
-  // Fire reveal after MAX_SPLASH_MS, no matter what.
-  setTimeout(_revealPage, MAX_SPLASH_MS);
-  // Also expose globally so other code can reveal early if it wants.
-  window.__appRevealPage = _revealPage;
+  // Kept as a harmless no-op for backward compatibility with any caller
+  // that still references it.
+  window.__appRevealPage = function () {
+    try { document.documentElement.classList.add("app-ready"); } catch (_e) {}
+  };
   // ──────────────────────────────────────────────────────────────────────
   var palettes = {
     dark: {
