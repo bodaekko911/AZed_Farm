@@ -2901,6 +2901,14 @@ function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacati
     document.getElementById("emp-modal").classList.add("open");
 }
 
+function closeEmpModal(){
+    const modal = document.getElementById("emp-modal");
+    if(modal) modal.classList.remove("open");
+    editingEmpId = null;
+    const vb = document.getElementById("emp-vacation-balance");
+    if(vb){ vb.style.display = "none"; vb.innerHTML = ""; }
+}
+
 async function loadEmpVacationBalance(empId){
     const box = document.getElementById("emp-vacation-balance");
     if(!box) return;
