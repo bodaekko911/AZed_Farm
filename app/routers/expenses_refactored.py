@@ -129,9 +129,18 @@ async def get_expense_cost_allocation(
     farm_id: str,
     date_from: str,
     date_to: str,
+    method: str = "quantity",
+    shared: str = "exclude",
     db: AsyncSession = Depends(get_async_session),
 ):
-    return await get_cost_allocation(db, farm_id=farm_id, date_from=date_from, date_to=date_to)
+    return await get_cost_allocation(
+        db,
+        farm_id=farm_id,
+        date_from=date_from,
+        date_to=date_to,
+        allocation_method=method,
+        shared_mode=shared,
+    )
 
 
 @router.get("/api/farms")

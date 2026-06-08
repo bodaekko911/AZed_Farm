@@ -808,6 +808,8 @@ async def get_cost_allocation(
     farm_id: int | str,
     date_from: str,
     date_to: str,
+    allocation_method: str = "quantity",   # "quantity" (kg/units) or "value" (qty × price)
+    shared_mode: str = "exclude",            # "exclude" | "separate" | "spread"
 ) -> dict:
     try:
         start_date = date_type.fromisoformat(date_from)
@@ -903,11 +905,77 @@ async def get_cost_allocation(
     estimated_revenue = sum(
         info["total_qty"] * info["sale_price"] for info in quantity_by_product.values()
     )
+
+    # ── Shared / unassigned organisation costs (expenses NOT tagged to a farm).
+    #    Charged to this scope only as its FAIR SHARE, weighted by revenue:
+    #    scope_revenue / all-active-farms_revenue ("Both Farms" => share 1.0).
+    #    Modes: exclude (ignore), separate (report only), spread (fold into
+    #    per-product cost). We subtract anything already counted in total_cost
+    #    (the "Both Farms" scope already pulls in untagged salary) to avoid
+    #    double-counting.
+    shared_norm = (shared_mode or "exclude").strip().lower()
+    if shared_norm not in {"exclude", "separate", "spread"}:
+        shared_norm = "exclude"
+
+    shared_cost_total = 0.0
+    shared_cost_allocated = 0.0
+    if shared_norm != "exclude":
+        shared_total_result = await db.execute(
+            select(func.coalesce(func.sum(Expense.amount), 0)).where(
+                Expense.farm_id.is_(None),
+                Expense.expense_date >= start_date,
+                Expense.expense_date <= end_date,
+            )
+        )
+        shared_cost_total = float(shared_total_result.scalar() or 0)
+        shared_remaining = max(0.0, shared_cost_total - unassigned_salary_cost)
+
+        all_farms_result = await db.execute(select(Farm.id).where(Farm.is_active == 1))
+        all_farm_ids = [row[0] for row in all_farms_result.all()]
+        org_value = 0.0
+        if all_farm_ids:
+            org_deliveries = await db.execute(
+                select(FarmDelivery)
+                .options(selectinload(FarmDelivery.items).selectinload(FarmDeliveryItem.product))
+                .where(
+                    FarmDelivery.farm_id.in_(all_farm_ids),
+                    FarmDelivery.delivery_date >= start_date,
+                    FarmDelivery.delivery_date <= end_date,
+                )
+            )
+            for delivery in org_deliveries.scalars().all():
+                for item in delivery.items:
+                    product = item.product
+                    org_value += float(item.qty) * (float(product.price) if product else 0)
+
+        if org_value > 0:
+            share_factor = estimated_revenue / org_value
+        elif all_farm_ids:
+            share_factor = len(selected_farm_ids) / len(all_farm_ids)
+        else:
+            share_factor = 0.0
+        share_factor = max(0.0, min(1.0, share_factor))
+        shared_cost_allocated = shared_remaining * share_factor
+
+    # Cost pool distributed across products. Only "spread" folds the shared
+    # share into per-product cost; "separate" keeps products on direct cost.
+    alloc_pool = total_cost + (shared_cost_allocated if shared_norm == "spread" else 0.0)
+
+    # Weighting: "quantity" (share of kg/units) or "value" (share of sale value,
+    # qty × price). Value falls back to quantity if there are no sale prices.
+    alloc_method = (allocation_method or "quantity").strip().lower()
+    if alloc_method not in {"quantity", "value"}:
+        alloc_method = "quantity"
+    use_value = alloc_method == "value" and estimated_revenue > 0
+
     products = []
     for product_id, info in quantity_by_product.items():
-        share = info["total_qty"] / total_quantity if total_quantity > 0 else 0
-        # Salary & Wages expenses are already included in total_cost above; do not add them again.
-        allocated_cost = total_cost * share
+        product_value = info["total_qty"] * info["sale_price"]
+        if use_value:
+            share = product_value / estimated_revenue if estimated_revenue > 0 else 0
+        else:
+            share = info["total_qty"] / total_quantity if total_quantity > 0 else 0
+        allocated_cost = alloc_pool * share
         cost_per_unit = allocated_cost / info["total_qty"] if info["total_qty"] > 0 else 0
         profit_per_unit = info["sale_price"] - cost_per_unit
         products.append(
@@ -943,6 +1011,11 @@ async def get_cost_allocation(
         "unassigned_salary_cost": round(unassigned_salary_cost, 2),
         "estimated_revenue": round(estimated_revenue, 2),
         "net_profit": round(estimated_revenue - total_cost, 2),
+        "allocation_method": "value" if use_value else "quantity",
+        "shared_mode": shared_norm,
+        "shared_cost_total": round(shared_cost_total, 2),
+        "shared_cost_allocated": round(shared_cost_allocated, 2),
+        "fully_absorbed_cost": round(total_cost + shared_cost_allocated, 2),
         "total_qty": round(total_quantity, 3),
         "cost_by_category": [
             {"name": name, "amount": round(amount, 2)}
