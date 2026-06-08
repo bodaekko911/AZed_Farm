@@ -3,7 +3,7 @@
 Supports partial salary payment (pay a specific cash amount) and converting the
 unpaid remainder into paid days off credited to the employee's leave balance.
 
-Revision ID: 20260602_0033_payroll_partial_pay
+Revision ID: 20260602_0033_partial_pay
 Revises: 20260527_0032_drying_multistage
 Create Date: 2026-06-02
 """
@@ -13,7 +13,7 @@ from alembic import context, op
 import sqlalchemy as sa
 
 
-revision: str = "20260602_0033_payroll_partial_pay"
+revision: str = "20260602_0033_partial_pay"
 down_revision: Union[str, None] = "20260527_0032_drying_multistage"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
