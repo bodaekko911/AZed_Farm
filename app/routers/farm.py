@@ -854,6 +854,13 @@ td.name{color:var(--text);font-weight:600;}
                     <label>Season End</label>
                     <input id="season-to" type="date" style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%">
                 </div>
+                <div class="fld" style="min-width:160px">
+                    <label>Allocate Costs By</label>
+                    <select class="filter-sel" id="season-method" style="width:100%">
+                        <option value="quantity">Quantity (kg / units)</option>
+                        <option value="value">Sale value (qty × price)</option>
+                    </select>
+                </div>
                 <button class="btn btn-lime" onclick="loadSeasonAnalysis()">Analyze</button>
             </div>
             <div style="font-size:12px;color:var(--muted);margin-top:8px;">
@@ -2070,12 +2077,13 @@ async function loadSeasonAnalysis(){
     let farmId   = document.getElementById("season-farm").value;
     let dateFrom = document.getElementById("season-from").value;
     let dateTo   = document.getElementById("season-to").value;
+    let method   = (document.getElementById("season-method") || {}).value || "quantity";
     if(!farmId)  { showToast("Select a farm first"); return; }
     if(!dateFrom || !dateTo){ showToast("Set a date range"); return; }
     if(dateFrom > dateTo){ showToast("Start date must be before end date"); return; }
 
     try{
-        let res  = await fetch(`/expenses/api/cost-allocation?farm_id=${encodeURIComponent(farmId)}&date_from=${dateFrom}&date_to=${dateTo}`);
+        let res  = await fetch(`/expenses/api/cost-allocation?farm_id=${encodeURIComponent(farmId)}&date_from=${dateFrom}&date_to=${dateTo}&method=${encodeURIComponent(method)}`);
         let data = null;
         try{
             data = await res.json();

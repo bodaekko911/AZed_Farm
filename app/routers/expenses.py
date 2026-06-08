@@ -637,6 +637,7 @@ async def cost_allocation(
     farm_id:   str,
     date_from: str,          # YYYY-MM-DD
     date_to:   str,
+    method:    str = "quantity",   # "quantity" (by kg/units) or "value" (by sale value)
     db: AsyncSession = Depends(get_async_session),
 ):
     """
@@ -717,11 +718,26 @@ async def cost_allocation(
             qty_by_product[pid]["total_qty"] += float(item.qty)
 
     total_qty = sum(v["total_qty"] for v in qty_by_product.values())
+    total_value = sum(v["total_qty"] * v["sale_price"] for v in qty_by_product.values())
 
-    # 3 ── Allocate costs proportionally by qty
+    # 3 ── Allocate total farm costs across products. Two modes:
+    #   • "quantity" (default): split by share of total kg/units harvested.
+    #   • "value": split by share of estimated sale value (qty × sale_price), so
+    #     higher-value crops carry proportionally more of the cost rather than
+    #     just higher-volume ones. Falls back to quantity weighting when no sale
+    #     prices are set (total_value == 0), so the report never divides by zero.
+    alloc_method = (method or "quantity").strip().lower()
+    if alloc_method not in {"quantity", "value"}:
+        alloc_method = "quantity"
+    use_value = alloc_method == "value" and total_value > 0
+
     products_out = []
     for pid, info in qty_by_product.items():
-        share = info["total_qty"] / total_qty if total_qty > 0 else 0
+        product_value = info["total_qty"] * info["sale_price"]
+        if use_value:
+            share = product_value / total_value if total_value > 0 else 0
+        else:
+            share = info["total_qty"] / total_qty if total_qty > 0 else 0
         allocated_cost = total_cost * share
         cost_per_unit  = allocated_cost / info["total_qty"] if info["total_qty"] > 0 else 0
         profit_per_unit = info["sale_price"] - cost_per_unit
@@ -748,6 +764,8 @@ async def cost_allocation(
         "date_to":          date_to,
         "total_cost":       round(total_cost, 2),
         "total_qty":        round(total_qty, 3),
+        "estimated_revenue": round(total_value, 2),
+        "allocation_method": "value" if use_value else "quantity",
         "cost_by_category": [{"name": k, "amount": round(v, 2)} for k, v in sorted(cost_by_category.items(), key=lambda x: -x[1])],
         "products":         products_out,
         "expense_count":    len(expenses),
