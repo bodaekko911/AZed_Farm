@@ -1,3 +1,4 @@
+import calendar
 from datetime import date as date_type
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -44,6 +45,27 @@ def _parse_filter_date(value: Optional[str]) -> Optional[date_type]:
             status_code=400,
             detail=f"Invalid date filter '{value}' - use YYYY-MM-DD",
         ) from None
+
+
+def _period_expense_date(period: Optional[str], fallback: date_type) -> date_type:
+    """Date used to attribute a salary expense to the payroll PERIOD it covers,
+    rather than the day the cash was handed over.
+
+    A May salary paid in June should land in *May's* expenses and P&L (accrual
+    basis), so we date the expense to the last day of the period month
+    ("YYYY-MM" -> month-end). The actual payment date is still preserved on the
+    payroll row (`paid_at`). Falls back to `fallback` if the period string is
+    missing or malformed.
+    """
+    try:
+        year = int(str(period)[:4])
+        month = int(str(period)[5:7])
+        if not (1 <= month <= 12):
+            return fallback
+        last_day = calendar.monthrange(year, month)[1]
+        return date_type(year, month, last_day)
+    except (TypeError, ValueError, IndexError):
+        return fallback
 
 
 async def _next_expense_reference(db: AsyncSession) -> str:
@@ -633,6 +655,11 @@ async def create_payroll_expense(
     farm_id = getattr(employee, "farm_id", None) or None
     is_animal = bool(getattr(employee, "works_with_animals", False))
     payment_date = paid_date or date_type.today()
+    # Attribute the salary expense to the PERIOD it covers (accrual basis): a
+    # May salary paid in June lands in May's expenses/P&L. The cash payment date
+    # is still recorded separately on the payroll row (paid_at). Falls back to
+    # the payment date if the period can't be parsed.
+    expense_date = _period_expense_date(getattr(payroll, "period", None), payment_date)
     reference_number = await _next_expense_reference(db)
     description = f"Salary payment - {employee_name} - {payroll.period} - payroll #{payroll.id}"
 
@@ -650,7 +677,7 @@ async def create_payroll_expense(
         category_id=category.id,
         category=category,
         user_id=current_user.id,
-        expense_date=payment_date,
+        expense_date=expense_date,
         amount=amount,
         payment_method=payment_method,
         vendor=employee_name,
