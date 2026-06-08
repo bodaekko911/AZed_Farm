@@ -861,6 +861,14 @@ td.name{color:var(--text);font-weight:600;}
                         <option value="value">Sale value (qty × price)</option>
                     </select>
                 </div>
+                <div class="fld" style="min-width:200px">
+                    <label>Shared Org Costs</label>
+                    <select class="filter-sel" id="season-shared" style="width:100%">
+                        <option value="exclude">Direct farm costs only</option>
+                        <option value="separate">Show shared costs separately</option>
+                        <option value="spread">Spread shared costs into products</option>
+                    </select>
+                </div>
                 <button class="btn btn-lime" onclick="loadSeasonAnalysis()">Analyze</button>
             </div>
             <div style="font-size:12px;color:var(--muted);margin-top:8px;">
@@ -2078,12 +2086,13 @@ async function loadSeasonAnalysis(){
     let dateFrom = document.getElementById("season-from").value;
     let dateTo   = document.getElementById("season-to").value;
     let method   = (document.getElementById("season-method") || {}).value || "quantity";
+    let shared   = (document.getElementById("season-shared") || {}).value || "exclude";
     if(!farmId)  { showToast("Select a farm first"); return; }
     if(!dateFrom || !dateTo){ showToast("Set a date range"); return; }
     if(dateFrom > dateTo){ showToast("Start date must be before end date"); return; }
 
     try{
-        let res  = await fetch(`/expenses/api/cost-allocation?farm_id=${encodeURIComponent(farmId)}&date_from=${dateFrom}&date_to=${dateTo}&method=${encodeURIComponent(method)}`);
+        let res  = await fetch(`/expenses/api/cost-allocation?farm_id=${encodeURIComponent(farmId)}&date_from=${dateFrom}&date_to=${dateTo}&method=${encodeURIComponent(method)}&shared=${encodeURIComponent(shared)}`);
         let data = null;
         try{
             data = await res.json();
@@ -2104,16 +2113,27 @@ async function loadSeasonAnalysis(){
         document.getElementById("season-empty").style.display  = "none";
         document.getElementById("season-result").style.display = "";
 
+        const fmt = (n)=>Number(n || 0).toLocaleString(undefined,{minimumFractionDigits:2});
+        const sharedOn = data.shared_mode && data.shared_mode !== "exclude";
+        const directLabel = (data.shared_mode === "spread") ? "Direct Farm Costs" : "Total Farm Costs";
+
         // Summary cards
-        document.getElementById("season-summary-cards").innerHTML = `
+        let cards = `
             <div class="stat-card" style="border-top:2px solid var(--blue)"><div class="stat-label">Scope</div><div class="stat-value" style="font-size:20px;color:var(--blue)">${data.farm_scope_label || data.farm_name}</div></div>
-            <div class="stat-card green"><div class="stat-label">Total Farm Costs</div><div class="stat-value green" style="font-size:20px">${Number(data.total_cost || 0).toLocaleString(undefined,{minimumFractionDigits:2})} EGP</div></div>
-            <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Salary & Wages</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${Number(data.salary_cost || 0).toLocaleString(undefined,{minimumFractionDigits:2})} EGP</div></div>
-            <div class="stat-card" style="border-top:2px solid var(--warn)"><div class="stat-label">Labor Cost</div><div class="stat-value" style="font-size:20px;color:var(--warn)">${Number(data.labor_cost || 0).toLocaleString(undefined,{minimumFractionDigits:2})} EGP</div></div>
+            <div class="stat-card green"><div class="stat-label">${directLabel}</div><div class="stat-value green" style="font-size:20px">${fmt(data.total_cost)} EGP</div></div>
+            <div class="stat-card" style="border-top:2px solid var(--blue)"><div class="stat-label">Est. Revenue</div><div class="stat-value" style="font-size:20px;color:var(--blue)">${fmt(data.estimated_revenue)} EGP</div></div>`;
+        if(sharedOn){
+            cards += `
+            <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Shared Org Costs (period)</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${fmt(data.shared_cost_total)} EGP</div></div>
+            <div class="stat-card" style="border-top:2px solid var(--warn)"><div class="stat-label">This Scope's Share</div><div class="stat-value" style="font-size:20px;color:var(--warn)">${fmt(data.shared_cost_allocated)} EGP</div></div>
+            <div class="stat-card" style="border-top:2px solid var(--danger)"><div class="stat-label">Fully-Absorbed Cost</div><div class="stat-value" style="font-size:20px;color:var(--danger)">${fmt(data.fully_absorbed_cost)} EGP</div></div>`;
+        }
+        cards += `
             <div class="stat-card lime"><div class="stat-label">Total Harvested</div><div class="stat-value lime" style="font-size:20px">${Number(data.total_qty || 0).toFixed(1)} units</div></div>
             <div class="stat-card teal"><div class="stat-label">Expenses Tagged</div><div class="stat-value teal" style="font-size:20px">${Number(data.expense_count || 0)}</div></div>
             <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Deliveries</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${Number(data.delivery_count || 0)}</div></div>
         `;
+        document.getElementById("season-summary-cards").innerHTML = cards;
 
         // Cost breakdown chart
         let maxCost = costCategories.length ? costCategories[0].amount : 1;
