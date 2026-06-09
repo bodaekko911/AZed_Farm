@@ -964,34 +964,46 @@ async def backfill_loan_expenses(
     loans = result.scalars().all()
     created = 0
     already = 0
+    retagged = 0
     without_farm = 0
     for loan in loans:
         employee = await db.get(Employee, loan.employee_id)
         if employee is None:
             continue
+        emp_farm = getattr(employee, "farm_id", None) or None
         existing = await db.execute(
-            select(Expense.id).where(Expense.description.like(f"%[loan:{loan.id}]%"))
+            select(Expense).where(Expense.description.like(f"%[loan:{loan.id}]%"))
         )
-        had_expense = existing.scalar_one_or_none() is not None
+        existing_expense = existing.scalar_one_or_none()
+        if existing_expense is not None:
+            already += 1
+            # Employee may have been assigned a farm after the expense was first
+            # booked untagged — sync the tag so it shows in that farm's analysis.
+            if existing_expense.farm_id != emp_farm:
+                existing_expense.farm_id = emp_farm
+                retagged += 1
+            if emp_farm is None:
+                without_farm += 1
+            continue
         expense = await create_loan_advance_expense(db, loan, employee, current_user)
         if expense is None:
             continue
-        if had_expense:
-            already += 1
-        else:
-            created += 1
-            if getattr(employee, "farm_id", None) is None:
-                without_farm += 1
+        created += 1
+        if emp_farm is None:
+            without_farm += 1
     await db.commit()
     return {
         "ok": True,
         "loans_scanned": len(loans),
         "expenses_created": created,
         "already_existed": already,
+        "retagged_to_farm": retagged,
         "created_without_farm_tag": without_farm,
         "note": (
             "Loans on employees without a farm don't appear in a single-farm "
-            "Season Analysis (no farm tag), but do show on the Expenses page."
+            "Season Analysis (no farm tag), but do show on the Expenses page "
+            "and under the Shared Org Costs toggle. Assign those employees a "
+            "farm and run this again to re-tag their loan expenses."
         ),
     }
 
