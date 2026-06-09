@@ -948,6 +948,54 @@ async def create_employee_loan(
     return {"ok": True, **_loan_payload(loan, Decimal("0"))}
 
 
+@router.get("/api/loans/backfill-expenses", dependencies=[Depends(require_permission("action_hr_manage_loans"))])
+async def backfill_loan_expenses(
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    """One-time backfill: book the Salaries & Wages expense for loans created
+    before loan->expense recording existed, so older loans appear in the Season
+    Analysis / cost reports. Idempotent — loans that already have an expense
+    (matched by the [loan:<id>] marker) are skipped, so it is safe to run more
+    than once. Cancelled loans are skipped (they no longer deduct from salary)."""
+    result = await db.execute(
+        select(EmployeeLoan).where(EmployeeLoan.status != "cancelled")
+    )
+    loans = result.scalars().all()
+    created = 0
+    already = 0
+    without_farm = 0
+    for loan in loans:
+        employee = await db.get(Employee, loan.employee_id)
+        if employee is None:
+            continue
+        existing = await db.execute(
+            select(Expense.id).where(Expense.description.like(f"%[loan:{loan.id}]%"))
+        )
+        had_expense = existing.scalar_one_or_none() is not None
+        expense = await create_loan_advance_expense(db, loan, employee, current_user)
+        if expense is None:
+            continue
+        if had_expense:
+            already += 1
+        else:
+            created += 1
+            if getattr(employee, "farm_id", None) is None:
+                without_farm += 1
+    await db.commit()
+    return {
+        "ok": True,
+        "loans_scanned": len(loans),
+        "expenses_created": created,
+        "already_existed": already,
+        "created_without_farm_tag": without_farm,
+        "note": (
+            "Loans on employees without a farm don't appear in a single-farm "
+            "Season Analysis (no farm tag), but do show on the Expenses page."
+        ),
+    }
+
+
 @router.post("/api/loans/{loan_id}/repayments", dependencies=[Depends(require_permission("action_hr_manage_loans"))])
 async def create_loan_repayment(
     loan_id: int,
