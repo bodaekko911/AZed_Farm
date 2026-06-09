@@ -27,7 +27,11 @@ from app.models.hr import (
 )
 from app.models.farm import Farm
 from app.models.user import User
-from app.services.expense_service import create_payroll_expense
+from app.services.expense_service import (
+    create_payroll_expense,
+    create_loan_advance_expense,
+    reverse_loan_advance_expense,
+)
 
 ATTENDANCE_STATUS_PRESENT = "present"
 ATTENDANCE_STATUS_ABSENT = "absent"
@@ -926,6 +930,10 @@ async def create_employee_loan(
     )
     db.add(loan)
     await db.flush()
+    # Book the loan as a Salaries & Wages expense (cash advanced against salary).
+    # Safe vs payroll because payroll books NET salary (repayments already
+    # deducted), so this does not double-count over the loan's life.
+    await create_loan_advance_expense(db, loan, employee, current_user)
     record(
         db,
         "HR",
@@ -1105,6 +1113,9 @@ async def delete_employee_loan(
         ref_type="employee_loan",
         ref_id=loan.id,
     )
+    # Reverse the Salaries & Wages expense booked when the loan was created,
+    # so deleting a loan doesn't leave labour cost overstated.
+    await reverse_loan_advance_expense(db, loan, current_user)
     await db.delete(loan)
     await db.commit()
     return {

@@ -701,6 +701,112 @@ async def create_payroll_expense(
     return expense
 
 
+async def create_loan_advance_expense(
+    db: AsyncSession,
+    loan,
+    employee,
+    current_user: User,
+    *,
+    payment_method: str = "cash",
+) -> Optional[Expense]:
+    """Book an employee loan/advance as a Salaries & Wages expense.
+
+    A loan is money paid out of (future) salary, so on a cash basis it belongs
+    in labour cost on the day it's handed over. This does NOT double-count
+    against payroll: payroll expenses are booked at NET salary (loan repayments
+    are already deducted from net), so over the loan's life
+        loan advance + sum(net payrolls) == gross wages.
+    The expense is tagged to the employee's farm so it flows into the season /
+    cost-allocation reports, and dated to the loan date.
+    Idempotent: re-running for the same loan returns the existing expense.
+    """
+    amount = round(float(loan.amount or 0), 2)
+    if amount <= 0:
+        return None
+
+    marker = f"[loan:{loan.id}]"  # stable token to link expense <-> loan
+    existing_result = await db.execute(
+        select(Expense)
+        .options(selectinload(Expense.category))
+        .where(Expense.description.like(f"%{marker}%"))
+    )
+    existing = existing_result.scalar_one_or_none()
+    if existing:
+        return existing
+
+    category = await _get_or_create_salary_category(db)
+    employee_name = getattr(employee, "name", None) or f"Employee #{loan.employee_id}"
+    farm_id = getattr(employee, "farm_id", None) or None
+    is_animal = bool(getattr(employee, "works_with_animals", False))
+    expense_date = getattr(loan, "loan_date", None) or date_type.today()
+    reference_number = await _next_expense_reference(db)
+    description = f"Salary advance (loan) {marker} - {employee_name}"
+
+    journal = await _post_expense_journal(
+        db,
+        description=f"Salary advance - {reference_number} - {employee_name}",
+        amount=amount,
+        expense_account_code=category.account_code,
+        payment_method=payment_method,
+        user_id=current_user.id,
+    )
+
+    expense = Expense(
+        ref_number=reference_number,
+        category_id=category.id,
+        category=category,
+        user_id=current_user.id,
+        expense_date=expense_date,
+        amount=amount,
+        payment_method=payment_method,
+        vendor=employee_name,
+        description=description,
+        journal_id=journal.id,
+        farm_id=farm_id,
+        is_animal_expense=is_animal,
+    )
+    db.add(expense)
+    await db.flush()
+    record(
+        db,
+        "Expenses",
+        "add_loan_advance_expense",
+        f"{SALARY_CATEGORY_NAME} - {reference_number} - {amount:.2f} - loan #{loan.id}",
+        user=current_user,
+        ref_type="expense",
+        ref_id=expense.id or 0,
+    )
+    return expense
+
+
+async def reverse_loan_advance_expense(db: AsyncSession, loan, current_user: User) -> bool:
+    """Remove the Salaries & Wages expense created for a loan (and its journal),
+    used when a loan is deleted/cancelled so labour cost isn't overstated.
+    Returns True if an expense was found and reversed."""
+    marker = f"[loan:{loan.id}]"
+    result = await db.execute(
+        select(Expense)
+        .options(selectinload(Expense.category))
+        .where(Expense.description.like(f"%{marker}%"))
+    )
+    expense = result.scalar_one_or_none()
+    if not expense:
+        return False
+    ref = expense.ref_number
+    await _reverse_expense_journal(db, expense)
+    await db.delete(expense)
+    record(
+        db,
+        "Expenses",
+        "reverse_loan_advance_expense",
+        f"Reversed loan advance expense {ref} - loan #{loan.id}",
+        user=current_user,
+        ref_type="expense",
+        ref_id=0,
+    )
+    return True
+
+
 async def update_expense_entry(
     db: AsyncSession,
     expense_id: int,
