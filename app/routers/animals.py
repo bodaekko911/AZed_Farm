@@ -86,6 +86,7 @@ class FeedingCreate(BaseModel):
 
 # Valid mortality causes — frontend dropdown values must match these exactly.
 VALID_CAUSES = {"illness", "injury", "age", "predator", "weather", "birth", "unknown", "other"}
+VALID_INTAKE_TYPES = {"purchase", "birth", "transfer", "other"}
 
 
 class MortalityCreate(BaseModel):
@@ -101,9 +102,10 @@ class IntakeCreate(BaseModel):
     new_group_name:  Optional[str] = None          # ...or create a new group
     new_group_type:  Optional[str] = "other"
     farm_id:         Optional[int] = None           # farm for a newly-created group
+    intake_type:     str           = Field("purchase", max_length=20)  # purchase|birth|transfer|other
     intake_date:     date_type
     count:           int           = Field(1, ge=1)
-    source:          Optional[str] = None           # supplier / origin
+    source:          Optional[str] = None           # supplier / origin (or dam, for births)
     unit_cost:       Optional[float] = None          # per-head price (EGP)
     total_cost:      Optional[float] = None          # total cost (EGP) — wins over unit_cost
     note:            Optional[str] = None
@@ -179,6 +181,7 @@ def _serialize_intake(i: AnimalIntakeLog) -> dict:
         "id":              i.id,
         "animal_group_id": i.animal_group_id,
         "group_name":      i.group.name if i.group else None,
+        "intake_type":     getattr(i, "intake_type", None) or "purchase",
         "intake_date":     i.intake_date.isoformat() if i.intake_date else None,
         "count":           int(i.count or 0),
         "source":          i.source,
@@ -686,6 +689,13 @@ async def create_intake(
     if data.count < 1:
         raise HTTPException(status_code=400, detail="Count must be at least 1")
 
+    intake_type = (data.intake_type or "purchase").strip().lower()
+    if intake_type not in VALID_INTAKE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid type '{intake_type}'. Must be one of: {', '.join(sorted(VALID_INTAKE_TYPES))}",
+        )
+
     # Resolve cost: an explicit total wins; otherwise unit_cost × count.
     total = None
     if data.total_cost is not None and float(data.total_cost) > 0:
@@ -711,6 +721,7 @@ async def create_intake(
 
     intake = AnimalIntakeLog(
         animal_group_id=group.id,
+        intake_type=intake_type,
         intake_date=data.intake_date,
         count=data.count,
         source=(data.source or "").strip() or None,
@@ -1294,11 +1305,11 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
         <div class="table-wrap">
             <table>
                 <thead><tr>
-                    <th>Date</th><th>Group</th><th>Count</th><th>Supplier</th>
+                    <th>Date</th><th>Group</th><th>Type</th><th>Count</th><th>Supplier</th>
                     <th>Cost</th><th>Note</th><th>By</th><th></th>
                 </tr></thead>
                 <tbody id="receive-body">
-                    <tr><td colspan="8" class="empty">Loading…</td></tr>
+                    <tr><td colspan="9" class="empty">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -1469,6 +1480,15 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
         <div class="modal-title">Receive Animals</div>
         <div class="modal-sub">Adds animals to a group's headcount and (optionally) books the purchase cost.</div>
         <div class="fld">
+            <label>Type</label>
+            <select id="rm-type" onchange="onReceiveTypeChange()">
+                <option value="purchase">Purchase (bought in)</option>
+                <option value="birth">Birth (born on farm)</option>
+                <option value="transfer">Transfer in</option>
+                <option value="other">Other</option>
+            </select>
+        </div>
+        <div class="fld">
             <label>Date</label>
             <input type="date" id="rm-date">
         </div>
@@ -1505,17 +1525,19 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
             <input type="number" id="rm-count" min="1" step="1" value="1" oninput="updateReceiveCostHint()">
         </div>
         <div class="fld">
-            <label>Supplier / Source <span style="color:var(--muted)">(optional)</span></label>
+            <label>Supplier / Source <span id="rm-source-label" style="color:var(--muted)">(optional)</span></label>
             <input type="text" id="rm-source" maxlength="150" placeholder="e.g. Nile Valley Livestock">
         </div>
-        <div class="fld">
-            <label>Cost per head <span style="color:var(--muted)">(optional, EGP)</span></label>
-            <input type="number" id="rm-unit" min="0" step="0.01" placeholder="0.00" oninput="updateReceiveCostHint()">
-        </div>
-        <div class="fld">
-            <label>Total cost <span style="color:var(--muted)">(optional, EGP — overrides per-head)</span></label>
-            <input type="number" id="rm-total" min="0" step="0.01" placeholder="0.00" oninput="updateReceiveCostHint()">
-            <div id="rm-cost-hint" class="stock-hint"></div>
+        <div id="rm-cost-wrap">
+            <div class="fld">
+                <label>Cost per head <span style="color:var(--muted)">(optional, EGP)</span></label>
+                <input type="number" id="rm-unit" min="0" step="0.01" placeholder="0.00" oninput="updateReceiveCostHint()">
+            </div>
+            <div class="fld">
+                <label>Total cost <span style="color:var(--muted)">(optional, EGP — overrides per-head)</span></label>
+                <input type="number" id="rm-total" min="0" step="0.01" placeholder="0.00" oninput="updateReceiveCostHint()">
+                <div id="rm-cost-hint" class="stock-hint"></div>
+            </div>
         </div>
         <div class="fld">
             <label>Note <span style="color:var(--muted)">(optional)</span></label>
@@ -1777,16 +1799,23 @@ async function loadIntakes(opts){{
     try {{
         const r = await fetch("/animals/api/intakes?limit=200");
         if (!r.ok) {{
-            if (!silent) document.getElementById("receive-body").innerHTML = `<tr><td colspan="8" class="empty">Could not load.</td></tr>`;
+            if (!silent) document.getElementById("receive-body").innerHTML = `<tr><td colspan="9" class="empty">Could not load.</td></tr>`;
             return;
         }}
         const d = await r.json();
         _intakes = (d && d.items) ? d.items : [];
         if (!silent) renderIntakes();
     }} catch(_) {{
-        if (!silent) document.getElementById("receive-body").innerHTML = `<tr><td colspan="8" class="empty">Error.</td></tr>`;
+        if (!silent) document.getElementById("receive-body").innerHTML = `<tr><td colspan="9" class="empty">Error.</td></tr>`;
     }}
 }}
+
+const INTAKE_TYPE_LABELS = {{
+    purchase: "Purchase",
+    birth:    "Birth",
+    transfer: "Transfer in",
+    other:    "Other",
+}};
 
 function renderIntakes(){{
     const q = (document.getElementById("r-search").value || "").toLowerCase().trim();
@@ -1794,16 +1823,18 @@ function renderIntakes(){{
     const filtered = q
         ? _intakes.filter(i => (i.group_name||"").toLowerCase().includes(q)
                             || (i.source||"").toLowerCase().includes(q)
+                            || (i.intake_type||"").toLowerCase().includes(q)
                             || (i.note||"").toLowerCase().includes(q))
         : _intakes;
     if (!filtered.length) {{
-        tbody.innerHTML = `<tr><td colspan="8" class="empty">No animals received yet. Click "+ Receive Animals" to add a batch.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" class="empty">No animals received yet. Click "+ Receive Animals" to add a batch.</td></tr>`;
         return;
     }}
     tbody.innerHTML = filtered.map(i => `
         <tr>
             <td style="color:var(--sub)">${{esc(i.intake_date||"")}}</td>
             <td><b>${{esc(i.group_name||"")}}</b></td>
+            <td style="color:var(--sub)">${{esc(INTAKE_TYPE_LABELS[i.intake_type] || i.intake_type || "—")}}</td>
             <td style="font-family:var(--mono)">${{i.count||0}}</td>
             <td style="color:var(--sub)">${{esc(i.source||"—")}}</td>
             <td style="font-family:var(--mono);color:var(--sub)">${{i.total_cost!=null ? Number(i.total_cost).toLocaleString(undefined,{{minimumFractionDigits:2}})+" EGP" : "—"}}</td>
@@ -1857,8 +1888,24 @@ function openReceiveModal(){{
     document.getElementById("rm-total").value = "";
     document.getElementById("rm-note").value = "";
     document.getElementById("rm-head-hint").textContent = "";
+    document.getElementById("rm-type").value = "purchase";
+    onReceiveTypeChange();
     updateReceiveCostHint();
     document.getElementById("receive-modal").classList.add("open");
+}}
+
+function onReceiveTypeChange(){{
+    const type = document.getElementById("rm-type").value;
+    const isBirth = type === "birth";
+    // Births have no purchase cost — hide the cost fields and clear them.
+    document.getElementById("rm-cost-wrap").style.display = isBirth ? "none" : "";
+    if (isBirth) {{
+        document.getElementById("rm-unit").value = "";
+        document.getElementById("rm-total").value = "";
+    }}
+    document.getElementById("rm-source-label").textContent =
+        isBirth ? "(optional — e.g. dam / line)" : "(optional)";
+    updateReceiveCostHint();
 }}
 
 function closeReceiveModal(){{
@@ -1867,19 +1914,21 @@ function closeReceiveModal(){{
 
 async function saveReceive(){{
     const sel = document.getElementById("rm-group");
+    const intake_type = document.getElementById("rm-type").value;
     const intake_date = document.getElementById("rm-date").value;
     const count = parseInt(document.getElementById("rm-count").value,10) || 0;
     const source = document.getElementById("rm-source").value.trim() || null;
+    const isBirth = intake_type === "birth";
     const unitRaw  = parseFloat(document.getElementById("rm-unit").value);
     const totalRaw = parseFloat(document.getElementById("rm-total").value);
-    const unit_cost  = isNaN(unitRaw)  ? null : unitRaw;
-    const total_cost = isNaN(totalRaw) ? null : totalRaw;
+    const unit_cost  = (isBirth || isNaN(unitRaw))  ? null : unitRaw;
+    const total_cost = (isBirth || isNaN(totalRaw)) ? null : totalRaw;
     const note = document.getElementById("rm-note").value.trim() || null;
 
     if (!intake_date) {{ showToast("Pick a date"); return; }}
     if (count < 1) {{ showToast("Count must be at least 1"); return; }}
 
-    const payload = {{intake_date, count, source, unit_cost, total_cost, note}};
+    const payload = {{intake_type, intake_date, count, source, unit_cost, total_cost, note}};
     if (sel.value === "__new__") {{
         const name = document.getElementById("rm-new-name").value.trim();
         if (!name) {{ showToast("Enter a name for the new group"); return; }}

@@ -116,6 +116,7 @@ class AnimalIntakeLog(Base):
 
     id              = Column(Integer, primary_key=True, index=True)
     animal_group_id = Column(Integer, ForeignKey("animal_groups.id"), nullable=False, index=True)
+    intake_type     = Column(String(20), nullable=False, default="purchase")  # purchase|birth|transfer|other
     intake_date     = Column(Date, nullable=False, index=True)
     count           = Column(Integer, nullable=False, default=1)
     source          = Column(String(150), nullable=True)   # supplier / origin
