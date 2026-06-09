@@ -45,6 +45,7 @@ class AnimalGroup(Base):
     farm     = relationship("Farm")
     feedings = relationship("FeedingLog", back_populates="group", cascade="all, delete-orphan")
     deaths   = relationship("MortalityLog", back_populates="group", cascade="all, delete-orphan")
+    intakes  = relationship("AnimalIntakeLog", back_populates="group", cascade="all, delete-orphan")
     # Expenses tagged against this group (not a cascade delete — archiving a
     # group keeps history intact). The Expense side defines the FK column.
     expenses = relationship(
@@ -100,4 +101,30 @@ class MortalityLog(Base):
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
 
     group = relationship("AnimalGroup", back_populates="deaths")
+    user  = relationship("User")
+
+
+class AnimalIntakeLog(Base):
+    """A recorded intake/receipt of animals into a group (purchase, birth, or
+    transfer-in). Submitting one INCREMENTS the parent group's headcount by
+    `count` — the inverse of MortalityLog. Deleting one decrements it again.
+
+    The purchase cost can be booked as an animal expense; `expense_id` links to
+    that expense so it can be reversed when the intake is undone.
+    """
+    __tablename__ = "animal_intake_logs"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    animal_group_id = Column(Integer, ForeignKey("animal_groups.id"), nullable=False, index=True)
+    intake_date     = Column(Date, nullable=False, index=True)
+    count           = Column(Integer, nullable=False, default=1)
+    source          = Column(String(150), nullable=True)   # supplier / origin
+    unit_cost       = Column(Numeric(14, 2), nullable=True) # per-head price (EGP)
+    total_cost      = Column(Numeric(14, 2), nullable=True) # total purchase cost (EGP)
+    note            = Column(Text, nullable=True)
+    expense_id      = Column(Integer, ForeignKey("expenses.id"), nullable=True, index=True)
+    user_id         = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at      = Column(DateTime(timezone=True), server_default=func.now())
+
+    group = relationship("AnimalGroup", back_populates="intakes")
     user  = relationship("User")

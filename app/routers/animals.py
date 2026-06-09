@@ -29,7 +29,7 @@ from app.core.log import record
 from app.core.navigation import render_app_header
 from app.core.permissions import require_permission
 from app.database import get_async_session
-from app.models.animal import AnimalGroup, FeedingLog, MortalityLog
+from app.models.animal import AnimalGroup, FeedingLog, MortalityLog, AnimalIntakeLog
 from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm
 from app.models.inventory import StockLocation, StockMove
@@ -38,6 +38,10 @@ from app.models.user import User
 from app.services.location_inventory_service import (
     get_or_create_location_stock,
     quantize_qty,
+)
+from app.services.expense_service import (
+    create_animal_intake_expense,
+    reverse_animal_intake_expense,
 )
 
 
@@ -89,6 +93,19 @@ class MortalityCreate(BaseModel):
     death_date:      date_type
     count:           int       = Field(1, ge=1)
     cause:           str       = Field("unknown", max_length=30)
+    note:            Optional[str] = None
+
+
+class IntakeCreate(BaseModel):
+    animal_group_id: Optional[int] = None          # receive into an existing group
+    new_group_name:  Optional[str] = None          # ...or create a new group
+    new_group_type:  Optional[str] = "other"
+    farm_id:         Optional[int] = None           # farm for a newly-created group
+    intake_date:     date_type
+    count:           int           = Field(1, ge=1)
+    source:          Optional[str] = None           # supplier / origin
+    unit_cost:       Optional[float] = None          # per-head price (EGP)
+    total_cost:      Optional[float] = None          # total cost (EGP) — wins over unit_cost
     note:            Optional[str] = None
 
 
@@ -154,6 +171,24 @@ def _serialize_death(d: MortalityLog) -> dict:
         "user_id":         d.user_id,
         "user_name":       d.user.name if d.user else None,
         "created_at":      d.created_at.isoformat() if d.created_at else None,
+    }
+
+
+def _serialize_intake(i: AnimalIntakeLog) -> dict:
+    return {
+        "id":              i.id,
+        "animal_group_id": i.animal_group_id,
+        "group_name":      i.group.name if i.group else None,
+        "intake_date":     i.intake_date.isoformat() if i.intake_date else None,
+        "count":           int(i.count or 0),
+        "source":          i.source,
+        "unit_cost":       float(i.unit_cost) if i.unit_cost is not None else None,
+        "total_cost":      float(i.total_cost) if i.total_cost is not None else None,
+        "note":            i.note,
+        "expense_id":      i.expense_id,
+        "user_id":         i.user_id,
+        "user_name":       i.user.name if i.user else None,
+        "created_at":      i.created_at.isoformat() if i.created_at else None,
     }
 
 
@@ -578,6 +613,161 @@ async def delete_death(
            f"Reversed mortality entry #{death.id} for {group_name} (restored {count})",
            user=current_user, ref_type="mortality_log", ref_id=death.id)
     await db.delete(death)
+    await db.commit()
+    return {"ok": True}
+
+
+# ── Animal Intake (Receive) API ──────────────────────────────────────
+
+@router.get("/api/intakes")
+async def list_intakes(
+    limit: int = Query(100, ge=1, le=500),
+    group_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_async_session),
+):
+    stmt = (
+        select(AnimalIntakeLog)
+        .options(
+            selectinload(AnimalIntakeLog.group),
+            selectinload(AnimalIntakeLog.user),
+        )
+        .order_by(AnimalIntakeLog.intake_date.desc(), AnimalIntakeLog.id.desc())
+        .limit(limit)
+    )
+    if group_id:
+        stmt = stmt.where(AnimalIntakeLog.animal_group_id == group_id)
+    result = await db.execute(stmt)
+    return {"items": [_serialize_intake(i) for i in result.scalars().all()]}
+
+
+@router.post(
+    "/api/intakes",
+    status_code=201,
+    dependencies=[Depends(require_permission("action_animals_create"))],
+)
+async def create_intake(
+    data: IntakeCreate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(require_permission("action_animals_create")),
+):
+    """Receive animals into a group (existing or newly created): increments the
+    group's headcount and, if a cost is given, books a Livestock Purchase
+    expense tagged to the group/farm."""
+    # Resolve the target group — an existing one, or create a new one.
+    if data.animal_group_id:
+        group = (
+            await db.execute(select(AnimalGroup).where(AnimalGroup.id == data.animal_group_id))
+        ).scalar_one_or_none()
+        if group is None:
+            raise HTTPException(status_code=400, detail="Animal group not found")
+        if group.status == "archived":
+            raise HTTPException(status_code=400, detail="Cannot receive into an archived group")
+    else:
+        name = (data.new_group_name or "").strip()
+        if not name:
+            raise HTTPException(
+                status_code=400,
+                detail="Choose an existing group or enter a new group name",
+            )
+        if data.farm_id is not None:
+            farm = (await db.execute(select(Farm).where(Farm.id == data.farm_id))).scalar_one_or_none()
+            if farm is None:
+                raise HTTPException(status_code=400, detail="Farm not found")
+        group = AnimalGroup(
+            name=name,
+            animal_type=(data.new_group_type or "other"),
+            headcount=0,
+            farm_id=data.farm_id,
+            status="active",
+        )
+        db.add(group)
+        await db.flush()
+
+    if data.count < 1:
+        raise HTTPException(status_code=400, detail="Count must be at least 1")
+
+    # Resolve cost: an explicit total wins; otherwise unit_cost × count.
+    total = None
+    if data.total_cost is not None and float(data.total_cost) > 0:
+        total = round(float(data.total_cost), 2)
+    elif data.unit_cost is not None and float(data.unit_cost) > 0:
+        total = round(float(data.unit_cost) * data.count, 2)
+
+    # Increment headcount by the received count.
+    group.headcount = int(group.headcount or 0) + data.count
+
+    # Optionally book the purchase as a Livestock Purchase expense.
+    expense = None
+    if total and total > 0:
+        expense = await create_animal_intake_expense(
+            db,
+            group=group,
+            intake_date=data.intake_date,
+            amount=total,
+            supplier=data.source,
+            count=data.count,
+            current_user=current_user,
+        )
+
+    intake = AnimalIntakeLog(
+        animal_group_id=group.id,
+        intake_date=data.intake_date,
+        count=data.count,
+        source=(data.source or "").strip() or None,
+        unit_cost=(Decimal(str(data.unit_cost)) if data.unit_cost is not None else None),
+        total_cost=(Decimal(str(total)) if total is not None else None),
+        note=(data.note or "").strip() or None,
+        expense_id=expense.id if expense else None,
+        user_id=current_user.id,
+    )
+    db.add(intake)
+    await db.flush()
+    await db.refresh(intake, attribute_names=["group", "user"])
+    record(
+        db, "Animals", "create_intake",
+        f"Received {data.count} animal(s) into {group.name}"
+        + (f" (cost {total:.2f})" if total else ""),
+        user=current_user, ref_type="animal_intake", ref_id=intake.id,
+    )
+    await db.commit()
+    return _serialize_intake(intake)
+
+
+@router.delete(
+    "/api/intakes/{intake_id}",
+    dependencies=[Depends(require_permission("action_animals_delete"))],
+)
+async def delete_intake(
+    intake_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(require_permission("action_animals_delete")),
+):
+    """Reverses an intake: removes the received count from the group's headcount
+    and reverses the linked Livestock Purchase expense (if any)."""
+    intake = (
+        await db.execute(
+            select(AnimalIntakeLog)
+            .options(selectinload(AnimalIntakeLog.group))
+            .where(AnimalIntakeLog.id == intake_id)
+        )
+    ).scalar_one_or_none()
+    if intake is None:
+        raise HTTPException(status_code=404, detail="Intake entry not found")
+
+    count = int(intake.count or 0)
+    group_name = intake.group.name if intake.group else "(unknown group)"
+    if intake.group is not None:
+        intake.group.headcount = max(0, int(intake.group.headcount or 0) - count)
+
+    if intake.expense_id:
+        await reverse_animal_intake_expense(db, intake.expense_id, current_user)
+
+    record(
+        db, "Animals", "delete_intake",
+        f"Reversed intake #{intake.id} for {group_name} (removed {count})",
+        user=current_user, ref_type="animal_intake", ref_id=intake.id,
+    )
+    await db.delete(intake)
     await db.commit()
     return {"ok": True}
 
@@ -1014,6 +1204,7 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
         <button class="tab active" id="tab-groups"   onclick="switchTab('groups')">Animal Groups</button>
         <button class="tab"        id="tab-feedings" onclick="switchTab('feedings')">Feeding Log</button>
         <button class="tab"        id="tab-deaths"   onclick="switchTab('deaths')">Mortality Log</button>
+        <button class="tab"        id="tab-receive"  onclick="switchTab('receive')">Receive</button>
         <button class="tab"        id="tab-analyze"  onclick="switchTab('analyze')">Analyze</button>
     </div>
 
@@ -1084,6 +1275,30 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
                 </tr></thead>
                 <tbody id="deaths-body">
                     <tr><td colspan="7" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- RECEIVE -->
+    <div id="receive-section" style="display:none">
+        <div class="toolbar">
+            <div class="search-box">
+                <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <input id="r-search" placeholder="Search by group, supplier, or note…" oninput="renderIntakes()">
+            </div>
+            <button class="btn btn-green" onclick="openReceiveModal()">+ Receive Animals</button>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr>
+                    <th>Date</th><th>Group</th><th>Count</th><th>Supplier</th>
+                    <th>Cost</th><th>Note</th><th>By</th><th></th>
+                </tr></thead>
+                <tbody id="receive-body">
+                    <tr><td colspan="8" class="empty">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -1249,6 +1464,70 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
     </div>
 </div>
 
+<div class="modal-bg" id="receive-modal">
+    <div class="modal">
+        <div class="modal-title">Receive Animals</div>
+        <div class="modal-sub">Adds animals to a group's headcount and (optionally) books the purchase cost.</div>
+        <div class="fld">
+            <label>Date</label>
+            <input type="date" id="rm-date">
+        </div>
+        <div class="fld">
+            <label>Animal Group</label>
+            <select id="rm-group" onchange="onReceiveGroupChange()">
+                <option value="">— Choose group —</option>
+                <option value="__new__">+ Create a new group…</option>
+            </select>
+            <div id="rm-head-hint" class="stock-hint"></div>
+        </div>
+        <div id="rm-new-group-wrap" style="display:none">
+            <div class="fld">
+                <label>New Group Name</label>
+                <input type="text" id="rm-new-name" maxlength="150" placeholder="e.g. Spring lambs 2026">
+            </div>
+            <div class="fld">
+                <label>Type</label>
+                <select id="rm-new-type">
+                    <option value="cattle">Cattle</option>
+                    <option value="poultry">Poultry</option>
+                    <option value="sheep">Sheep</option>
+                    <option value="goats">Goats</option>
+                    <option value="other" selected>Other</option>
+                </select>
+            </div>
+            <div class="fld">
+                <label>Farm <span style="color:var(--muted)">(optional)</span></label>
+                <select id="rm-new-farm"><option value="">— No farm —</option></select>
+            </div>
+        </div>
+        <div class="fld">
+            <label>Count (how many received)</label>
+            <input type="number" id="rm-count" min="1" step="1" value="1" oninput="updateReceiveCostHint()">
+        </div>
+        <div class="fld">
+            <label>Supplier / Source <span style="color:var(--muted)">(optional)</span></label>
+            <input type="text" id="rm-source" maxlength="150" placeholder="e.g. Nile Valley Livestock">
+        </div>
+        <div class="fld">
+            <label>Cost per head <span style="color:var(--muted)">(optional, EGP)</span></label>
+            <input type="number" id="rm-unit" min="0" step="0.01" placeholder="0.00" oninput="updateReceiveCostHint()">
+        </div>
+        <div class="fld">
+            <label>Total cost <span style="color:var(--muted)">(optional, EGP — overrides per-head)</span></label>
+            <input type="number" id="rm-total" min="0" step="0.01" placeholder="0.00" oninput="updateReceiveCostHint()">
+            <div id="rm-cost-hint" class="stock-hint"></div>
+        </div>
+        <div class="fld">
+            <label>Note <span style="color:var(--muted)">(optional)</span></label>
+            <textarea id="rm-note" maxlength="500" placeholder="e.g. Vaccinated on arrival"></textarea>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="closeReceiveModal()">Cancel</button>
+            <button class="btn btn-green" id="rm-save" onclick="saveReceive()">Receive</button>
+        </div>
+    </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script src="/static/auth-guard.js"></script>
@@ -1257,6 +1536,7 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
 let _groups = [];
 let _feedings = [];
 let _deaths = [];
+let _intakes = [];
 let _farms = [];
 let _products = [];
 let _locations = [];
@@ -1275,13 +1555,16 @@ function switchTab(tab){{
     document.getElementById("tab-groups").classList.toggle("active",   tab==="groups");
     document.getElementById("tab-feedings").classList.toggle("active", tab==="feedings");
     document.getElementById("tab-deaths").classList.toggle("active",   tab==="deaths");
+    document.getElementById("tab-receive").classList.toggle("active",  tab==="receive");
     document.getElementById("tab-analyze").classList.toggle("active",  tab==="analyze");
     document.getElementById("groups-section").style.display   = tab==="groups"   ? "" : "none";
     document.getElementById("feedings-section").style.display = tab==="feedings" ? "" : "none";
     document.getElementById("deaths-section").style.display   = tab==="deaths"   ? "" : "none";
+    document.getElementById("receive-section").style.display  = tab==="receive"  ? "" : "none";
     document.getElementById("analyze-section").style.display  = tab==="analyze"  ? "" : "none";
     if (tab==="feedings") loadFeedings();
     if (tab==="deaths")   loadDeaths();
+    if (tab==="receive")  loadIntakes();
     if (tab==="analyze")  initAnalyze();
 }}
 
@@ -1484,6 +1767,162 @@ async function deleteDeath(id){{
     }} else {{
         showToast("Entry reversed");
         loadDeaths();
+        loadGroups();
+    }}
+}}
+
+/* ── RECEIVE (INTAKE) ── */
+async function loadIntakes(opts){{
+    const silent = opts && opts.silent;
+    try {{
+        const r = await fetch("/animals/api/intakes?limit=200");
+        if (!r.ok) {{
+            if (!silent) document.getElementById("receive-body").innerHTML = `<tr><td colspan="8" class="empty">Could not load.</td></tr>`;
+            return;
+        }}
+        const d = await r.json();
+        _intakes = (d && d.items) ? d.items : [];
+        if (!silent) renderIntakes();
+    }} catch(_) {{
+        if (!silent) document.getElementById("receive-body").innerHTML = `<tr><td colspan="8" class="empty">Error.</td></tr>`;
+    }}
+}}
+
+function renderIntakes(){{
+    const q = (document.getElementById("r-search").value || "").toLowerCase().trim();
+    const tbody = document.getElementById("receive-body");
+    const filtered = q
+        ? _intakes.filter(i => (i.group_name||"").toLowerCase().includes(q)
+                            || (i.source||"").toLowerCase().includes(q)
+                            || (i.note||"").toLowerCase().includes(q))
+        : _intakes;
+    if (!filtered.length) {{
+        tbody.innerHTML = `<tr><td colspan="8" class="empty">No animals received yet. Click "+ Receive Animals" to add a batch.</td></tr>`;
+        return;
+    }}
+    tbody.innerHTML = filtered.map(i => `
+        <tr>
+            <td style="color:var(--sub)">${{esc(i.intake_date||"")}}</td>
+            <td><b>${{esc(i.group_name||"")}}</b></td>
+            <td style="font-family:var(--mono)">${{i.count||0}}</td>
+            <td style="color:var(--sub)">${{esc(i.source||"—")}}</td>
+            <td style="font-family:var(--mono);color:var(--sub)">${{i.total_cost!=null ? Number(i.total_cost).toLocaleString(undefined,{{minimumFractionDigits:2}})+" EGP" : "—"}}</td>
+            <td style="color:var(--sub);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${{esc(i.note||"")}}">${{esc(i.note||"—")}}</td>
+            <td style="color:var(--muted)">${{esc(i.user_name||"—")}}</td>
+            <td style="text-align:right">
+                <button class="btn btn-danger" onclick="deleteIntake(${{i.id}})">Undo</button>
+            </td>
+        </tr>
+    `).join("");
+}}
+
+function onReceiveGroupChange(){{
+    const sel = document.getElementById("rm-group");
+    const isNew = sel.value === "__new__";
+    document.getElementById("rm-new-group-wrap").style.display = isNew ? "" : "none";
+    const opt = sel.options[sel.selectedIndex];
+    const head = (opt && opt.dataset && opt.dataset.head) ? parseInt(opt.dataset.head,10)||0 : 0;
+    document.getElementById("rm-head-hint").textContent = (!isNew && sel.value) ? `Current headcount: ${{head}}` : "";
+}}
+
+function updateReceiveCostHint(){{
+    const count = parseInt(document.getElementById("rm-count").value,10) || 0;
+    const unit  = parseFloat(document.getElementById("rm-unit").value) || 0;
+    const total = parseFloat(document.getElementById("rm-total").value) || 0;
+    const hint  = document.getElementById("rm-cost-hint");
+    let effective = total > 0 ? total : (unit > 0 ? unit * count : 0);
+    hint.textContent = effective > 0
+        ? `Will book a Livestock Purchase expense of ${{effective.toLocaleString(undefined,{{minimumFractionDigits:2}})}} EGP`
+        : "No cost will be recorded (headcount only)";
+}}
+
+function openReceiveModal(){{
+    document.getElementById("rm-date").value = new Date().toISOString().slice(0,10);
+    const sel = document.getElementById("rm-group");
+    sel.innerHTML = `<option value="">— Choose group —</option>` +
+        `<option value="__new__">+ Create a new group…</option>` +
+        _groups.filter(g => g.status === "active")
+               .map(g => `<option value="${{g.id}}" data-head="${{g.headcount||0}}">${{esc(g.name)}} (${{g.headcount||0}} head)</option>`)
+               .join("");
+    // Farm options for a new group (reuse the farm list loaded for feedings).
+    const farmSel = document.getElementById("rm-new-farm");
+    farmSel.innerHTML = `<option value="">— No farm —</option>` +
+        (_farms||[]).map(f => `<option value="${{f.id}}">${{esc(f.name)}}</option>`).join("");
+    document.getElementById("rm-new-group-wrap").style.display = "none";
+    document.getElementById("rm-new-name").value = "";
+    document.getElementById("rm-new-type").value = "other";
+    document.getElementById("rm-count").value = "1";
+    document.getElementById("rm-source").value = "";
+    document.getElementById("rm-unit").value = "";
+    document.getElementById("rm-total").value = "";
+    document.getElementById("rm-note").value = "";
+    document.getElementById("rm-head-hint").textContent = "";
+    updateReceiveCostHint();
+    document.getElementById("receive-modal").classList.add("open");
+}}
+
+function closeReceiveModal(){{
+    document.getElementById("receive-modal").classList.remove("open");
+}}
+
+async function saveReceive(){{
+    const sel = document.getElementById("rm-group");
+    const intake_date = document.getElementById("rm-date").value;
+    const count = parseInt(document.getElementById("rm-count").value,10) || 0;
+    const source = document.getElementById("rm-source").value.trim() || null;
+    const unitRaw  = parseFloat(document.getElementById("rm-unit").value);
+    const totalRaw = parseFloat(document.getElementById("rm-total").value);
+    const unit_cost  = isNaN(unitRaw)  ? null : unitRaw;
+    const total_cost = isNaN(totalRaw) ? null : totalRaw;
+    const note = document.getElementById("rm-note").value.trim() || null;
+
+    if (!intake_date) {{ showToast("Pick a date"); return; }}
+    if (count < 1) {{ showToast("Count must be at least 1"); return; }}
+
+    const payload = {{intake_date, count, source, unit_cost, total_cost, note}};
+    if (sel.value === "__new__") {{
+        const name = document.getElementById("rm-new-name").value.trim();
+        if (!name) {{ showToast("Enter a name for the new group"); return; }}
+        payload.new_group_name = name;
+        payload.new_group_type = document.getElementById("rm-new-type").value;
+        const farm = document.getElementById("rm-new-farm").value;
+        payload.farm_id = farm ? parseInt(farm,10) : null;
+    }} else if (sel.value) {{
+        payload.animal_group_id = parseInt(sel.value,10);
+    }} else {{
+        showToast("Choose a group or create a new one"); return;
+    }}
+
+    const btn = document.getElementById("rm-save");
+    btn.disabled = true;
+    try {{
+        const r = await fetch("/animals/api/intakes", {{
+            method: "POST", headers: {{"Content-Type": "application/json"}},
+            body: JSON.stringify(payload),
+        }});
+        if (!r.ok) {{
+            const err = await r.json().catch(()=>({{}}));
+            showToast(err.detail || "Could not receive animals");
+        }} else {{
+            showToast("Animals received");
+            closeReceiveModal();
+            loadIntakes();
+            loadGroups();  // headcount changed
+        }}
+    }} finally {{
+        btn.disabled = false;
+    }}
+}}
+
+async function deleteIntake(id){{
+    if (!confirm("Undo this receipt? Headcount will be reduced and the purchase expense reversed.")) return;
+    const r = await fetch(`/animals/api/intakes/${{id}}`, {{method: "DELETE"}});
+    if (!r.ok) {{
+        const err = await r.json().catch(()=>({{}}));
+        showToast(err.detail || "Could not undo");
+    }} else {{
+        showToast("Receipt undone");
+        loadIntakes();
         loadGroups();
     }}
 }}

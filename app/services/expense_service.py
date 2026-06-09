@@ -25,6 +25,8 @@ from app.schemas.expense import (
 
 SALARY_CATEGORY_NAME = "Salaries & Wages"
 SALARY_ACCOUNT_CODE = "5006"
+ANIMAL_PURCHASE_CATEGORY_NAME = "Livestock Purchase"
+ANIMAL_PURCHASE_ACCOUNT_CODE = "5010"
 
 
 def _clean_text(value: Optional[str]) -> Optional[str]:
@@ -800,6 +802,124 @@ async def reverse_loan_advance_expense(db: AsyncSession, loan, current_user: Use
         "Expenses",
         "reverse_loan_advance_expense",
         f"Reversed loan advance expense {ref} - loan #{loan.id}",
+        user=current_user,
+        ref_type="expense",
+        ref_id=0,
+    )
+    return True
+
+
+async def _get_or_create_animal_purchase_category(db: AsyncSession) -> ExpenseCategory:
+    account = await _get_or_create_account(
+        db,
+        ANIMAL_PURCHASE_ACCOUNT_CODE,
+        account_name=ANIMAL_PURCHASE_CATEGORY_NAME,
+    )
+    account.type = "expense"
+    account.name = account.name or ANIMAL_PURCHASE_CATEGORY_NAME
+
+    result = await db.execute(
+        select(ExpenseCategory).where(ExpenseCategory.name == ANIMAL_PURCHASE_CATEGORY_NAME)
+    )
+    category = result.scalar_one_or_none()
+    if category:
+        category.account_code = ANIMAL_PURCHASE_ACCOUNT_CODE
+        category.is_active = "1"
+        return category
+
+    category = ExpenseCategory(
+        name=ANIMAL_PURCHASE_CATEGORY_NAME,
+        account_code=ANIMAL_PURCHASE_ACCOUNT_CODE,
+        description="Animals received / purchased into a group",
+        is_active="1",
+    )
+    db.add(category)
+    await db.flush()
+    return category
+
+
+async def create_animal_intake_expense(
+    db: AsyncSession,
+    *,
+    group,
+    intake_date,
+    amount,
+    supplier: Optional[str],
+    count: int,
+    current_user: User,
+    payment_method: str = "cash",
+) -> Optional[Expense]:
+    """Book a received-animals purchase as a Livestock Purchase expense, tagged
+    to the animal group (and its farm) so it flows into the animal/farm cost
+    reports. Returns the created Expense, or None if the amount is zero."""
+    amount = round(float(amount or 0), 2)
+    if amount <= 0:
+        return None
+
+    category = await _get_or_create_animal_purchase_category(db)
+    reference_number = await _next_expense_reference(db)
+    vendor = (supplier or "").strip() or None
+    description = f"Animals received - {count} head into {group.name}"
+    if vendor:
+        description += f" (from {vendor})"
+
+    journal = await _post_expense_journal(
+        db,
+        description=f"Animal purchase - {reference_number} - {group.name}",
+        amount=amount,
+        expense_account_code=category.account_code,
+        payment_method=payment_method,
+        user_id=current_user.id,
+    )
+
+    expense = Expense(
+        ref_number=reference_number,
+        category_id=category.id,
+        category=category,
+        user_id=current_user.id,
+        expense_date=intake_date or date_type.today(),
+        amount=amount,
+        payment_method=payment_method,
+        vendor=vendor or group.name,
+        description=description,
+        journal_id=journal.id,
+        farm_id=getattr(group, "farm_id", None),
+        animal_group_id=group.id,
+        is_animal_expense=True,
+    )
+    db.add(expense)
+    await db.flush()
+    record(
+        db,
+        "Expenses",
+        "add_animal_intake_expense",
+        f"{ANIMAL_PURCHASE_CATEGORY_NAME} - {reference_number} - {amount:.2f} - group #{group.id}",
+        user=current_user,
+        ref_type="expense",
+        ref_id=expense.id or 0,
+    )
+    return expense
+
+
+async def reverse_animal_intake_expense(db: AsyncSession, expense_id, current_user: User) -> bool:
+    """Reverse the Livestock Purchase expense (and journal) created for an animal
+    intake, used when an intake is undone. Returns True if it was found."""
+    if not expense_id:
+        return False
+    result = await db.execute(
+        select(Expense).options(selectinload(Expense.category)).where(Expense.id == expense_id)
+    )
+    expense = result.scalar_one_or_none()
+    if not expense:
+        return False
+    ref = expense.ref_number
+    await _reverse_expense_journal(db, expense)
+    await db.delete(expense)
+    record(
+        db,
+        "Expenses",
+        "reverse_animal_intake_expense",
+        f"Reversed animal purchase expense {ref}",
         user=current_user,
         ref_type="expense",
         ref_id=0,
