@@ -19,6 +19,7 @@ from app.models.invoice import Invoice, InvoiceItem
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund, B2BRefundItem
 from app.models.inventory import StockMove
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
+from app.models.animal import AnimalGroup, FeedingLog, MortalityLog, AnimalIntakeLog
 from app.models.spoilage import SpoilageRecord
 from app.models.refund import RetailRefund, RetailRefundItem
 from app.models.production import ProductionBatch, BatchInput, BatchOutput
@@ -247,6 +248,26 @@ def parse_dates(date_from, date_to):
         d_to_local   = today
 
     return utc_bounds(d_from_local, d_to_local)
+
+
+def _plain_date_range(date_from, date_to):
+    """Plain calendar-date range (no UTC conversion) for reports that filter
+    DATE columns directly (e.g. animal intake/death/feed dates). Defaults to the
+    current month-to-date. Avoids the off-by-one a UTC datetime bound would cause
+    when compared against a DATE column."""
+    from app.core.time_utils import today_local
+    from datetime import date as _date
+    today = today_local()
+    try:
+        today = today.date()
+    except AttributeError:
+        pass
+    try:
+        if date_from and date_to:
+            return _date.fromisoformat(date_from), _date.fromisoformat(date_to)
+    except Exception:
+        pass
+    return today.replace(day=1), today
 
 
 def _resolve_pagination(skip, limit, default_limit=100):
@@ -3311,6 +3332,212 @@ async def export_hr(
         headers={"Content-Disposition": f"attachment; filename=hr_report_{date.today()}.xlsx"})
 
 
+async def _build_animals_report(db, *, d_from, d_to, include_all=False):
+    """Per-group animal activity over a date range: headcount, intakes
+    (purchase/birth/transfer), deaths, purchase cost, feeding cost, cost/head."""
+    from collections import defaultdict
+
+    groups = (
+        await db.execute(select(AnimalGroup).options(selectinload(AnimalGroup.farm)))
+    ).scalars().all()
+
+    intakes = (
+        await db.execute(
+            select(AnimalIntakeLog)
+            .options(selectinload(AnimalIntakeLog.group))
+            .where(AnimalIntakeLog.intake_date >= d_from, AnimalIntakeLog.intake_date <= d_to)
+            .order_by(AnimalIntakeLog.intake_date.desc(), AnimalIntakeLog.id.desc())
+        )
+    ).scalars().all()
+
+    deaths = (
+        await db.execute(
+            select(MortalityLog)
+            .options(selectinload(MortalityLog.group))
+            .where(MortalityLog.death_date >= d_from, MortalityLog.death_date <= d_to)
+            .order_by(MortalityLog.death_date.desc(), MortalityLog.id.desc())
+        )
+    ).scalars().all()
+
+    feedings = (
+        await db.execute(
+            select(FeedingLog)
+            .options(selectinload(FeedingLog.product))
+            .where(FeedingLog.feed_date >= d_from, FeedingLog.feed_date <= d_to)
+        )
+    ).scalars().all()
+
+    per = defaultdict(lambda: {
+        "received": 0, "born": 0, "transferred": 0, "died": 0,
+        "purchase_cost": 0.0, "feeding_cost": 0.0, "feed_qty": 0.0,
+    })
+    for i in intakes:
+        p = per[i.animal_group_id]
+        c = int(i.count or 0)
+        t = (getattr(i, "intake_type", None) or "purchase").lower()
+        if t == "birth":
+            p["born"] += c
+        elif t == "transfer":
+            p["transferred"] += c
+        else:
+            p["received"] += c  # purchase + other
+        p["purchase_cost"] += float(i.total_cost or 0)
+    for d in deaths:
+        per[d.animal_group_id]["died"] += int(d.count or 0)
+    for f in feedings:
+        unit_cost = float(f.product.cost) if (f.product and f.product.cost is not None) else 0.0
+        per[f.animal_group_id]["feeding_cost"] += float(f.qty or 0) * unit_cost
+        per[f.animal_group_id]["feed_qty"] += float(f.qty or 0)
+
+    group_rows = []
+    for g in groups:
+        p = per.get(g.id, {})
+        received    = int(p.get("received", 0))
+        born        = int(p.get("born", 0))
+        transferred = int(p.get("transferred", 0))
+        died        = int(p.get("died", 0))
+        purchase_cost = round(float(p.get("purchase_cost", 0.0)), 2)
+        feeding_cost  = round(float(p.get("feeding_cost", 0.0)), 2)
+        head = int(g.headcount or 0)
+        total_cost = round(purchase_cost + feeding_cost, 2)
+        cost_per_head = round(total_cost / head, 2) if head > 0 else 0.0
+        had_activity = received or born or transferred or died or purchase_cost or feeding_cost
+        if not include_all and not (g.status == "active" or had_activity):
+            continue
+        group_rows.append({
+            "group_id": g.id,
+            "name": g.name,
+            "animal_type": g.animal_type,
+            "farm_name": g.farm.name if g.farm else None,
+            "status": g.status,
+            "headcount": head,
+            "received": received,
+            "born": born,
+            "transferred": transferred,
+            "received_total": received + born + transferred,
+            "died": died,
+            "net_change": received + born + transferred - died,
+            "purchase_cost": purchase_cost,
+            "feeding_cost": feeding_cost,
+            "total_cost": total_cost,
+            "cost_per_head": cost_per_head,
+        })
+    group_rows.sort(key=lambda r: r["headcount"], reverse=True)
+
+    summary = {
+        "active_groups":   sum(1 for g in groups if g.status == "active"),
+        "total_headcount": sum(int(g.headcount or 0) for g in groups if g.status == "active"),
+        "received":     sum(r["received"] for r in group_rows),
+        "born":         sum(r["born"] for r in group_rows),
+        "transferred":  sum(r["transferred"] for r in group_rows),
+        "died":         sum(r["died"] for r in group_rows),
+        "purchase_cost": round(sum(r["purchase_cost"] for r in group_rows), 2),
+        "feeding_cost":  round(sum(r["feeding_cost"] for r in group_rows), 2),
+        "total_cost":    round(sum(r["total_cost"] for r in group_rows), 2),
+    }
+    summary["net_change"] = summary["received"] + summary["born"] + summary["transferred"] - summary["died"]
+
+    intake_rows = [{
+        "date":   i.intake_date.isoformat() if i.intake_date else None,
+        "group":  i.group.name if i.group else None,
+        "type":   getattr(i, "intake_type", None) or "purchase",
+        "count":  int(i.count or 0),
+        "source": i.source,
+        "cost":   float(i.total_cost) if i.total_cost is not None else None,
+    } for i in intakes]
+
+    mortality_rows = [{
+        "date":  d.death_date.isoformat() if d.death_date else None,
+        "group": d.group.name if d.group else None,
+        "count": int(d.count or 0),
+        "cause": d.cause or "unknown",
+        "note":  d.note,
+    } for d in deaths]
+
+    return {
+        "date_from": d_from.isoformat(),
+        "date_to":   d_to.isoformat(),
+        "summary":   summary,
+        "groups":    group_rows,
+        "intakes":   intake_rows,
+        "mortality": mortality_rows,
+    }
+
+
+@router.get("/api/animals")
+async def animals_report(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(require_permission("tab_reports_animals")),
+):
+    d_from, d_to = _plain_date_range(date_from, date_to)
+    return await _build_animals_report(db, d_from=d_from, d_to=d_to)
+
+
+@router.get("/export/animals", dependencies=[Depends(require_permission("action_export_excel"))])
+async def export_animals(
+    date_from: str = None,
+    date_to: str = None,
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(require_permission("tab_reports_animals")),
+):
+    d_from, d_to = _plain_date_range(date_from, date_to)
+    data = await _build_animals_report(db, d_from=d_from, d_to=d_to, include_all=True)
+    s = data["summary"]
+    wb = build_report_workbook([
+        {
+            "sheet_name": "Animals Summary",
+            "report_title": "Animals Report Summary",
+            "headers": ["Metric", "Value"],
+            "rows": [
+                ["Active Groups", s["active_groups"]],
+                ["Total Headcount", s["total_headcount"]],
+                ["Received (purchased)", s["received"]],
+                ["Born", s["born"]],
+                ["Transferred In", s["transferred"]],
+                ["Died", s["died"]],
+                ["Net Change", s["net_change"]],
+                ["Purchase Cost", s["purchase_cost"]],
+                ["Feeding Cost", s["feeding_cost"]],
+                ["Total Animal Cost", s["total_cost"]],
+            ],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}")],
+            "tab_color": "1F4E78",
+        },
+        {
+            "sheet_name": "By Group",
+            "report_title": "Animals by Group",
+            "headers": ["Group ID", "Group", "Type", "Farm", "Status", "Headcount", "Received", "Born", "Transferred", "Died", "Net Change", "Purchase Cost", "Feeding Cost", "Total Cost", "Cost / Head"],
+            "rows": [[r["group_id"], r["name"], r["animal_type"], r["farm_name"], r["status"], r["headcount"], r["received"], r["born"], r["transferred"], r["died"], r["net_change"], r["purchase_cost"], r["feeding_cost"], r["total_cost"], r["cost_per_head"]] for r in data["groups"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Rows", len(data["groups"]))],
+            "column_formats": {"Group ID": "int", "Headcount": "int", "Received": "int", "Born": "int", "Transferred": "int", "Died": "int", "Net Change": "int", "Purchase Cost": "money", "Feeding Cost": "money", "Total Cost": "money", "Cost / Head": "money"},
+            "tab_color": "2F6F4F",
+        },
+        {
+            "sheet_name": "Intake Log",
+            "report_title": "Animal Intake (Receive) Log",
+            "headers": ["Date", "Group", "Type", "Count", "Source", "Cost"],
+            "rows": [[r["date"], r["group"], r["type"], r["count"], r["source"], r["cost"]] for r in data["intakes"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Rows", len(data["intakes"]))],
+            "column_formats": {"Count": "int", "Cost": "money"},
+            "tab_color": "7C3AED",
+        },
+        {
+            "sheet_name": "Mortality Log",
+            "report_title": "Animal Mortality Log",
+            "headers": ["Date", "Group", "Count", "Cause", "Note"],
+            "rows": [[r["date"], r["group"], r["count"], r["cause"], r["note"]] for r in data["mortality"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Rows", len(data["mortality"]))],
+            "column_formats": {"Count": "int"},
+            "tab_color": "BE123C",
+        },
+    ])
+    buf = workbook_to_buffer(wb)
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=animals_report_{date.today()}.xlsx"})
+
+
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
 def reports_ui(current_user: User = Depends(require_permission("page_reports"))):
@@ -3480,6 +3707,7 @@ td.mono{font-family:var(--mono);}
         <button class="tab"        onclick="switchTab('hr')">👥 HR</button>
         <button class="tab"        onclick="switchTab('utilities')">💧 Utilities</button>
         <button class="tab"        onclick="switchTab('pl')">💰 P&amp;L</button>
+        <button class="tab"        onclick="switchTab('animals')">🐄 Animals</button>
     </div>
 
     <!-- ──────────── SALES ──────────── -->
@@ -3866,6 +4094,31 @@ td.mono{font-family:var(--mono);}
     </div>
 
     <!-- ──────────── P&L ──────────── -->
+    <div id="section-animals" class="section">
+        <div class="print-header">
+            <div style="display:flex;align-items:center;gap:14px">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
+                <div>
+                    <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
+                    <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
+                </div>
+            </div>
+            <div style="text-align:right">
+                <div style="font-size:18px;font-weight:800;color:#2a7a2a">Animals Report</div>
+                <div style="font-size:12px;color:#666;margin-top:4px" id="ph-animals-dates"></div>
+            </div>
+        </div>
+        <div class="filter-bar no-print">
+            <label>From</label><input type="date" id="animals-from">
+            <label>To</label>  <input type="date" id="animals-to">
+            <div class="filter-sep"></div>
+            <button class="btn btn-lime"  onclick="loadAnimals()">Apply</button>
+            <button class="btn btn-excel" onclick="exportSection('animals')">⬇ Excel</button>
+            <button class="btn btn-print" onclick="window.print()">🖨 Print</button>
+        </div>
+        <div id="animals-content"></div>
+    </div>
+
     <div id="section-pl" class="section">
         <div class="print-header">
             <div style="display:flex;align-items:center;gap:14px">
@@ -3967,7 +4220,7 @@ function switchTab(tab){
     const section = document.getElementById("section-"+tab);
     if(!section) return;
     section.classList.add("active");
-    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, utilities:loadUtilities, pl:loadPL};
+    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, utilities:loadUtilities, pl:loadPL, animals:loadAnimals};
     if(loaders[tab]){
         loaders[tab]();
     } else {
@@ -3987,7 +4240,7 @@ function showToast(msg){
     clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove("show"),3000);
 }
 
-const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","hr","utilities","pl"];
+const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","hr","utilities","pl","animals"];
 const REPORT_TAB_PERMISSIONS = {
     sales: "tab_reports_sales",
     transactions: "tab_reports_transactions",
@@ -3999,6 +4252,7 @@ const REPORT_TAB_PERMISSIONS = {
     hr: "tab_reports_hr",
     utilities: "tab_reports_utilities",
     pl: "tab_reports_pl",
+    animals: "tab_reports_animals",
 };
 
 function ensureTabMetadata(){
@@ -4101,6 +4355,70 @@ function getDownloadFilename(response, fallback){
     return plainMatch ? plainMatch[1] : fallback;
 }
 
+async function loadAnimals(){
+    let r = getRange("animals-from","animals-to");
+    let data = await fetchReportJson(`/reports/api/animals?date_from=${r.from}&date_to=${r.to}`);
+    setPrintDates("ph-animals-dates", r.from, r.to);
+    const s = data.summary;
+    const money = v => Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+    const groupRows = data.groups.length
+        ? data.groups.map(row=>`<tr>
+            <td class="name">${row.name}</td>
+            <td>${row.animal_type||""}</td>
+            <td>${row.farm_name||"—"}</td>
+            <td class="mono">${row.headcount}</td>
+            <td class="mono" style="color:var(--green)">${row.received}</td>
+            <td class="mono" style="color:var(--green)">${row.born}</td>
+            <td class="mono">${row.transferred}</td>
+            <td class="mono" style="color:var(--orange)">${row.died}</td>
+            <td class="mono">${row.net_change}</td>
+            <td class="mono" style="color:var(--orange)">${money(row.purchase_cost)}</td>
+            <td class="mono" style="color:var(--orange)">${money(row.feeding_cost)}</td>
+            <td class="mono" style="color:var(--orange)">${money(row.total_cost)}</td>
+            <td class="mono">${money(row.cost_per_head)}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="13" style="text-align:center;color:var(--muted);padding:24px">No animal groups or activity in this period</td></tr>`;
+    const intakeRows = data.intakes.length
+        ? data.intakes.map(row=>`<tr>
+            <td class="mono">${row.date||""}</td>
+            <td class="name">${row.group||""}</td>
+            <td>${row.type||""}</td>
+            <td class="mono">${row.count}</td>
+            <td>${row.source||"—"}</td>
+            <td class="mono">${row.cost!=null?money(row.cost):"—"}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">No intakes in this period</td></tr>`;
+    const mortRows = data.mortality.length
+        ? data.mortality.map(row=>`<tr>
+            <td class="mono">${row.date||""}</td>
+            <td class="name">${row.group||""}</td>
+            <td class="mono">${row.count}</td>
+            <td>${row.cause||""}</td>
+            <td>${row.note||"—"}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:24px">No mortality in this period</td></tr>`;
+    document.getElementById("animals-content").innerHTML = `
+        <div class="stats-row">
+            <div class="stat-card sc-blue"><div class="stat-label">Active Groups</div><div class="stat-value sv-blue">${s.active_groups}</div></div>
+            <div class="stat-card sc-green"><div class="stat-label">Total Headcount</div><div class="stat-value sv-green">${s.total_headcount}</div></div>
+            <div class="stat-card sc-green"><div class="stat-label">Received + Born + In</div><div class="stat-value sv-green">${s.received+s.born+s.transferred}</div></div>
+            <div class="stat-card sc-orange"><div class="stat-label">Died</div><div class="stat-value sv-orange">${s.died}</div></div>
+            <div class="stat-card sc-orange"><div class="stat-label">Total Cost</div><div class="stat-value sv-orange">${money(s.total_cost)}</div></div>
+        </div>
+        <div class="table-wrap" style="margin-bottom:18px">
+            <div class="table-title">By Group</div>
+            <table><thead><tr><th>Group</th><th>Type</th><th>Farm</th><th>Headcount</th><th>Received</th><th>Born</th><th>Transferred</th><th>Died</th><th>Net</th><th>Purchase Cost</th><th>Feeding Cost</th><th>Total Cost</th><th>Cost/Head</th></tr></thead><tbody>${groupRows}</tbody></table>
+        </div>
+        <div class="table-wrap" style="margin-bottom:18px">
+            <div class="table-title">Intake (Receive) Log</div>
+            <table><thead><tr><th>Date</th><th>Group</th><th>Type</th><th>Count</th><th>Source</th><th>Cost</th></tr></thead><tbody>${intakeRows}</tbody></table>
+        </div>
+        <div class="table-wrap">
+            <div class="table-title">Mortality Log</div>
+            <table><thead><tr><th>Date</th><th>Group</th><th>Count</th><th>Cause</th><th>Note</th></tr></thead><tbody>${mortRows}</tbody></table>
+        </div>`;
+}
+
 async function exportSection(tab){
     const build = {
         sales:      ()=>{ let r=getRange("sales-from","sales-to"); return `/reports/export/sales?date_from=${r.from}&date_to=${r.to}`; },
@@ -4112,6 +4430,7 @@ async function exportSection(tab){
         hr:         ()=>{ let r=getRange("hr-from","hr-to"); let p=document.getElementById("hr-period").value; let d=document.getElementById("hr-department").value.trim(); let f=document.getElementById("hr-farm-id").value; return `/reports/export/hr?date_from=${r.from}&date_to=${r.to}${p?"&period="+encodeURIComponent(p):""}${d?"&department="+encodeURIComponent(d):""}${f?"&farm_id="+encodeURIComponent(f):""}`; },
         utilities:  ()=>{ let r=getRange("util-from","util-to"); return `/reports/export/utilities?date_from=${r.from}&date_to=${r.to}`; },
         pl:           ()=>{ let r=getRange("pl-from","pl-to");   return `/reports/export/pl?date_from=${r.from}&date_to=${r.to}`; },
+        animals:      ()=>{ let r=getRange("animals-from","animals-to"); return `/reports/export/animals?date_from=${r.from}&date_to=${r.to}`; },
         transactions: ()=>{ let r=getRange("tx-from","tx-to"); let s=document.getElementById("tx-source").value; return `/reports/export/transactions?date_from=${r.from}&date_to=${r.to}${s?"&source="+s:""}`; },
     };
     const fallbackFilename = `${tab}_report.xlsx`;
@@ -4909,6 +5228,7 @@ function togglePLDetail(id){
     setEl("hr-period",  t.slice(0,7));
     setEl("util-from",  m); setEl("util-to",   t);
     setEl("pl-from",    y); setEl("pl-to",     t);
+    setEl("animals-from", m); setEl("animals-to", t);
     const invMode = document.getElementById("inv-mode");
     const invFrom = document.getElementById("inv-from");
     const invTo = document.getElementById("inv-to");

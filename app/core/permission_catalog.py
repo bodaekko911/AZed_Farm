@@ -40,6 +40,7 @@ PERMISSION_MATRIX = [
             {"action": "view_production", "key": "tab_reports_production", "label": "Production tab"},
             {"action": "view_hr", "key": "tab_reports_hr", "label": "HR tab"},
             {"action": "view_utilities", "key": "tab_reports_utilities", "label": "Utilities tab"},
+            {"action": "view_animals", "key": "tab_reports_animals", "label": "Animals tab"},
             {"action": "export", "key": "action_export_excel", "label": "Export to Excel"},
         ],
     },
