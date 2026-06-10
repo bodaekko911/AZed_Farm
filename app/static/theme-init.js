@@ -29,6 +29,23 @@
     if (_stored === "light") _earlyTheme = "light";
   } catch (_e) {}
 
+  // ──────────────────────────────────────────────────────────────────────
+  // EARLY LANGUAGE (Arabic / RTL) — set dir + lang before first paint so
+  // there's no LTR→RTL layout flash, then load the i18n layer on every
+  // page. The actual translation work lives in /static/i18n.js.
+  // ──────────────────────────────────────────────────────────────────────
+  try {
+    var _earlyLang = localStorage.getItem("appLang") === "ar" ? "ar" : "en";
+    if (_earlyLang === "ar") {
+      document.documentElement.setAttribute("dir", "rtl");
+      document.documentElement.setAttribute("lang", "ar");
+    }
+    var _i18nScript = document.createElement("script");
+    _i18nScript.src = "/static/i18n.js";
+    _i18nScript.defer = true;
+    (document.head || document.documentElement).appendChild(_i18nScript);
+  } catch (_e) {}
+
   // Paint <html> with the theme color so there's never a white flash.
   var _earlyBg = _earlyTheme === "light" ? "#f4f5ef" : "#060810";
   var _earlyFg = _earlyTheme === "light" ? "#1a1e14" : "#f0f4ff";
