@@ -482,19 +482,30 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;pa
 .btn-blue:hover{filter:brightness(1.1);transform:translateY(-1px);}
 .btn-danger{background:linear-gradient(135deg,var(--danger),#c0392b);color:white;}
 .btn-danger:hover{filter:brightness(1.1);transform:translateY(-1px);}
-.recipes-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:14px;}
-.recipe-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:18px;display:flex;flex-direction:column;gap:12px;position:relative;overflow:hidden;}
-.recipe-card.processing::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--orange),transparent);}
-.recipe-card.packaging::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--teal),transparent);}
-.recipe-name{font-size:15px;font-weight:800;}
-.recipe-desc{font-size:12px;color:var(--muted);}
-.type-badge{display:inline-flex;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;width:fit-content;}
+.recipes-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;align-items:stretch;}
+.recipes-empty{grid-column:1/-1;text-align:center;padding:60px 20px;color:var(--muted);border:1px dashed var(--border2);border-radius:var(--r);font-size:13px;}
+.recipe-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);display:flex;flex-direction:column;position:relative;overflow:hidden;transition:border-color .2s,transform .2s,box-shadow .2s;}
+.recipe-card:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 14px 34px rgba(0,0,0,.28);}
+.recipe-card.processing::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--orange),transparent);}
+.recipe-card.packaging::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--teal),transparent);}
+.recipe-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:16px 18px 12px;}
+.recipe-name{font-size:15px;font-weight:800;line-height:1.3;word-break:break-word;}
+.recipe-desc{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.4;}
+.type-badge{display:inline-flex;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700;width:fit-content;white-space:nowrap;flex:0 0 auto;}
 .badge-proc{background:rgba(251,146,60,.1);color:var(--orange);}
 .badge-pkg{background:rgba(45,212,191,.1);color:var(--teal);}
+.recipe-body{display:flex;flex-direction:column;gap:4px;padding:0 18px 14px;flex:1;}
 .recipe-section{display:flex;flex-direction:column;gap:6px;}
-.recipe-section-title{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);}
-.recipe-item{display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:5px 8px;background:var(--card2);border-radius:7px;}
-.recipe-actions{display:flex;gap:8px;flex-wrap:wrap;}
+.recipe-section-title{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);}
+.recipe-section-title::before{content:'';width:7px;height:7px;border-radius:2px;background:currentColor;flex:0 0 auto;}
+.recipe-items{border:1px solid var(--border);border-radius:9px;overflow:hidden;}
+.recipe-item{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:12px;padding:7px 11px;background:var(--card2);}
+.recipe-item + .recipe-item{border-top:1px solid var(--border);}
+.recipe-item .ri-name{color:var(--sub);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.recipe-item .ri-qty{font-family:var(--mono);font-weight:700;white-space:nowrap;}
+.recipe-flow{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px;padding:4px 0;}
+.recipe-actions{display:flex;gap:8px;padding:12px 18px;border-top:1px solid var(--border);margin-top:auto;}
+.recipe-actions .action-btn{flex:1;text-align:center;}
 .action-btn{background:transparent;border:1px solid var(--border2);color:var(--sub);font-size:12px;font-weight:600;padding:6px 12px;border-radius:7px;cursor:pointer;transition:all .15s;font-family:var(--sans);}
 .action-btn:hover{border-color:var(--orange);color:var(--orange);}
 .action-btn.teal:hover{border-color:var(--teal);color:var(--teal);}
@@ -548,12 +559,20 @@ td.name{color:var(--text);font-weight:600;}
 .item-row{display:grid;grid-template-columns:1fr 110px 60px 32px;gap:8px;align-items:center;margin-bottom:8px;}
 .item-row select,.item-row input{background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;width:100%;}
 .item-row select:focus,.item-row input:focus{border-color:rgba(251,146,60,.4);}
+.item-row .product-search-input{padding-right:70px;}
+.item-row .qty-input{font-family:var(--mono);text-align:right;}
+.item-row .stock-hint{font-size:10px;color:var(--muted);font-family:var(--mono);position:absolute;right:10px;top:50%;transform:translateY(-50%);pointer-events:none;max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.row-group{border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:16px;}
+.row-cols{display:grid;grid-template-columns:1fr 110px 60px 32px;gap:8px;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:0 2px;margin:10px 0 6px;}
+.row-cols span:nth-child(2){text-align:right;}
+.row-cols span:nth-child(3){text-align:center;}
 .product-search-input.has-selection{border-color:rgba(0,255,157,.35);}
 .product-search-input.has-error{border-color:rgba(255,77,109,.55);}
 .unit-hint{font-size:10px;color:var(--muted);font-family:var(--mono);text-align:center;}
-.rm-btn{background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:0;transition:color .15s;}
-.rm-btn:hover{color:var(--danger);}
-.add-row-btn{border:1px dashed;font-family:var(--sans);font-size:13px;font-weight:600;padding:8px;border-radius:8px;cursor:pointer;width:100%;transition:all .2s;margin-bottom:16px;background:transparent;}
+.rm-btn{width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:1px solid transparent;border-radius:50%;color:var(--muted);font-size:16px;line-height:1;cursor:pointer;padding:0;transition:all .15s;}
+.rm-btn:hover{color:var(--danger);border-color:rgba(255,77,109,.35);background:rgba(255,77,109,.08);}
+.add-row-btn{border:1px dashed;font-family:var(--sans);font-size:12px;font-weight:600;padding:7px;border-radius:8px;cursor:pointer;width:100%;transition:all .2s;margin:2px 0 16px;background:transparent;}
+.row-group .add-row-btn{margin-bottom:0;}
 .add-row-btn.orange-btn{border-color:rgba(251,146,60,.3);color:var(--orange);}
 .add-row-btn.orange-btn:hover{background:rgba(251,146,60,.08);}
 .add-row-btn.green-btn{border-color:rgba(0,255,157,.3);color:var(--green);}
@@ -633,7 +652,7 @@ td.name{color:var(--text);font-weight:600;}
     <!-- RECIPES -->
     <div id="section-recipes" style="display:none">
         <div class="recipes-grid" id="recipes-grid">
-            <div style="color:var(--muted);padding:40px">Loading...</div>
+            <div class="recipes-empty">Loading...</div>
         </div>
     </div>
 
@@ -730,12 +749,18 @@ td.name{color:var(--text);font-weight:600;}
         <div class="modal-sub"   id="recipe-modal-sub">Save a reusable formula</div>
         <div class="fld"><label>Recipe Name *</label><input id="r-name" placeholder="e.g. Moringa Powder Processing"></div>
         <div class="fld"><label>Description</label><input id="r-desc" placeholder="e.g. 1kg fresh leaves to 100g powder"></div>
-        <div class="section-label" style="color:var(--orange)" id="r-input-label">Inputs per batch</div>
-        <div id="recipe-inputs"></div>
-        <button class="add-row-btn orange-btn" id="r-add-input" onclick="addItemRow('recipe-inputs',null)">+ Add Input</button>
-        <div class="section-label" id="r-output-label" style="color:var(--green)">Outputs per batch</div>
-        <div id="recipe-outputs"></div>
-        <button class="add-row-btn green-btn" id="r-add-output" onclick="addItemRow('recipe-outputs',null)">+ Add Output</button>
+        <div class="row-group">
+            <div class="section-label" style="color:var(--orange)" id="r-input-label">Inputs per batch</div>
+            <div class="row-cols"><span>Product</span><span>Qty</span><span>Unit</span><span></span></div>
+            <div id="recipe-inputs"></div>
+            <button class="add-row-btn orange-btn" id="r-add-input" onclick="addItemRow('recipe-inputs',null)">+ Add Input</button>
+        </div>
+        <div class="row-group">
+            <div class="section-label" id="r-output-label" style="color:var(--green)">Outputs per batch</div>
+            <div class="row-cols"><span>Product</span><span>Qty</span><span>Unit</span><span></span></div>
+            <div id="recipe-outputs"></div>
+            <button class="add-row-btn green-btn" id="r-add-output" onclick="addItemRow('recipe-outputs',null)">+ Add Output</button>
+        </div>
         <div class="modal-actions">
             <button class="btn-cancel" onclick="document.getElementById('recipe-modal').classList.remove('open')">Cancel</button>
             <button class="btn btn-blue" onclick="saveRecipe()">Save Recipe</button>
@@ -1320,7 +1345,7 @@ function addItemRow(containerId, callback){
     let div = document.createElement("div");
     div.className = "item-row";
     div.innerHTML = `
-        <div class="search-field" style="flex:1;">
+        <div class="search-field">
             <input type="text"
                 placeholder="Search by name or SKU..."
                 class="product-search-input"
@@ -1328,16 +1353,14 @@ function addItemRow(containerId, callback){
                 data-unit-target=".unit-hint"
                 data-stock-target=".stock-hint"
                 ${callback ? `data-on-product-change="${callback.name}"` : ""}
-                style="width:100%;background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;"
                 autocomplete="off">
             <input type="hidden" class="product-id-hidden" value="">
-            <span style="font-size:10px;color:var(--muted);position:absolute;right:8px;top:50%;transform:translateY(-50%)" class="stock-hint"></span>
+            <span class="stock-hint"></span>
             <div class="search-results"></div>
         </div>
-        <input type="number" placeholder="0" min="0.001" step="any"
-            style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;width:90px;">
-        <span class="unit-hint" style="font-size:12px;color:var(--muted);min-width:32px;text-align:center;">-</span>
-        <button class="rm-btn" onclick="this.closest('.item-row').remove();${callback?callback.name+'()':''}">×</button>
+        <input type="number" class="qty-input" placeholder="0" min="0.001" step="any">
+        <span class="unit-hint">-</span>
+        <button class="rm-btn" title="Remove" onclick="this.closest('.item-row').remove();${callback?callback.name+'()':''}">&times;</button>
     `;
     document.getElementById(containerId).appendChild(div);
     attachProductSearch(div.querySelector(".product-search-input"));
@@ -1635,25 +1658,31 @@ async function loadRecipes(){
     allRecipes = await (await fetch("/production/api/recipes")).json();
     splitRecipes();
     if(!allRecipes.length){
-        document.getElementById("recipes-grid").innerHTML=`<div style="color:var(--muted);font-size:13px;padding:40px 0">No recipes saved yet.</div>`;
+        document.getElementById("recipes-grid").innerHTML=`<div class="recipes-empty">No recipes saved yet.</div>`;
         return;
     }
     document.getElementById("recipes-grid").innerHTML = allRecipes.map(r => {
         let isPkg = pkgRecipes.includes(r);
         let desc  = (r.description||"").replace("[PKG]","").trim();
+        let outColor = isPkg ? "var(--teal)" : "var(--green)";
         return `<div class="recipe-card ${isPkg?"packaging":"processing"}">
-            <div>
+            <div class="recipe-head">
+                <div style="min-width:0">
+                    <div class="recipe-name">${escapeHtml(r.name)}</div>
+                    ${desc?`<div class="recipe-desc">${escapeHtml(desc)}</div>`:""}
+                </div>
                 <span class="type-badge ${isPkg?"badge-pkg":"badge-proc"}">${isPkg?"Packaging":"Processing"}</span>
-                <div class="recipe-name" style="margin-top:8px">${r.name}</div>
-                ${desc?`<div class="recipe-desc">${desc}</div>`:""}
             </div>
-            <div class="recipe-section">
-                <div class="recipe-section-title">Inputs${isPkg?" per 1 pack":""}</div>
-                ${r.inputs.map(i=>`<div class="recipe-item"><span style="color:var(--sub)">${i.product_name}</span><span style="font-family:var(--mono);font-weight:700;color:var(--orange)">${i.qty} ${i.unit}</span></div>`).join("")}
-            </div>
-            <div class="recipe-section">
-                <div class="recipe-section-title" style="color:${isPkg?"var(--teal)":"var(--green)"}">Outputs${isPkg?" per 1 pack":""}</div>
-                ${r.outputs.map(o=>`<div class="recipe-item"><span style="color:var(--sub)">${o.product_name}</span><span style="font-family:var(--mono);font-weight:700;color:${isPkg?"var(--teal)":"var(--green)"}">${o.qty} ${o.unit}</span></div>`).join("")}
+            <div class="recipe-body">
+                <div class="recipe-section">
+                    <div class="recipe-section-title" style="color:var(--orange)">Inputs${isPkg?" per 1 pack":""}</div>
+                    <div class="recipe-items">${r.inputs.map(i=>`<div class="recipe-item"><span class="ri-name">${escapeHtml(i.product_name)}</span><span class="ri-qty" style="color:var(--orange)">${i.qty} ${escapeHtml(i.unit||"")}</span></div>`).join("")}</div>
+                </div>
+                <div class="recipe-flow">&#9660;</div>
+                <div class="recipe-section">
+                    <div class="recipe-section-title" style="color:${outColor}">Outputs${isPkg?" per 1 pack":""}</div>
+                    <div class="recipe-items">${r.outputs.map(o=>`<div class="recipe-item"><span class="ri-name">${escapeHtml(o.product_name)}</span><span class="ri-qty" style="color:${outColor}">${o.qty} ${escapeHtml(o.unit||"")}</span></div>`).join("")}</div>
+                </div>
             </div>
             <div class="recipe-actions">
                 ${isPkg
