@@ -2997,8 +2997,10 @@ function renderInvoices(invoices){
     const typeLabel={cash:"💵 Cash",full_payment:"📋 Full Payment",consignment:"🔄 Consignment"};
     document.getElementById("invoices-body").innerHTML = invoices.map(i=>{
         // Payment collection is recorded in Accounting → B2B Clients, not from the B2B invoices list.
+        let editable = !(i.status === "paid" && i.amount_paid > 0);
         let actionBtns=`<div style="display:flex;gap:5px;flex-wrap:wrap">
             <button class="action-btn" onclick="window.open('/b2b/invoice/${i.id}/print','_blank')">🖨 Print</button>
+            ${(editable && (isAdmin || hasPermission("action_b2b_invoices_update")))?`<button class="action-btn teal" onclick="openEditInvoice(${i.id})">✏ Edit</button>`:""}
             ${(isAdmin || hasPermission("action_b2b_delete"))?`<button class="action-btn danger" onclick="deleteInvoice(${i.id},'${i.invoice_number}')">Delete</button>`:""}
         </div>`;
         return `<tr>
