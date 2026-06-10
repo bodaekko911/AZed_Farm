@@ -4030,7 +4030,7 @@ td.mono{font-family:var(--mono);}
         <div class="table-wrap">
             <div class="table-title">Employee Detail</div>
             <div style="overflow-x:auto">
-            <table><thead><tr><th>Employee</th><th>Phone</th><th>Position</th><th>Department</th><th>Farm</th><th>Hire Date</th><th>Base Salary</th><th>Attendance</th><th>Rate</th><th>Payroll</th><th>Worked</th><th>Loan Bal.</th><th>Loan Ded.</th><th>Day Ded.</th><th>Manual Ded.</th><th>Total Ded.</th><th>Net Salary</th><th>Paid Cash</th><th>Days Off+</th><th>Days Off Bal.</th><th>Paid</th></tr></thead>
+            <table><thead><tr><th>Employee</th><th>Phone</th><th>Position</th><th>Base Salary</th><th>Attendance</th><th>Worked</th><th>Loan Bal.</th><th>Loan Ded.</th><th>Day Ded.</th><th>Manual Ded.</th><th>Net Salary</th><th>Paid Cash</th><th>Days Off Bal.</th><th>Paid</th></tr></thead>
             <tbody id="hr-emp-body"></tbody></table>
             </div>
         </div>
@@ -5017,26 +5017,19 @@ async function loadHR(){
             <td class="name">${row.employee}</td>
             <td>${row.phone}</td>
             <td>${row.position}</td>
-            <td>${row.department}</td>
-            <td>${row.farm_name}</td>
-            <td class="mono">${row.hire_date}</td>
             <td class="mono">${Number(row.base_salary || 0).toFixed(2)}</td>
-            <td class="mono">${row.present_days}/${row.attendance_records} present</td>
-            <td class="mono">${Number(row.attendance_rate || 0).toFixed(1)}%</td>
-            <td class="mono">${row.payroll_period}</td>
+            <td class="mono">${row.present_days}/${row.attendance_records} present · ${Number(row.attendance_rate || 0).toFixed(1)}%</td>
             <td class="mono">${row.days_worked}/${row.working_days}</td>
             <td class="mono" style="color:var(--orange)">${Number(row.outstanding_loan_balance || 0).toFixed(2)}</td>
             <td class="mono" style="color:var(--danger)">${Number(row.loan_deductions || 0).toFixed(2)}</td>
             <td class="mono" style="color:var(--danger)">${Number(row.day_deduction_days || 0).toFixed(2)}d / ${Number(row.day_deductions || 0).toFixed(2)}</td>
             <td class="mono" style="color:var(--danger)">${Number(row.manual_deductions || 0).toFixed(2)}</td>
-            <td class="mono" style="color:var(--danger)">${Number(row.total_deductions || row.deductions || 0).toFixed(2)}</td>
             <td class="mono" style="color:var(--green)">${Number(row.net_salary || 0).toFixed(2)}</td>
             <td class="mono" style="color:var(--green)">${Number(row.paid_cash || 0).toFixed(2)}</td>
-            <td class="mono" style="color:var(--blue)">${Number(row.days_off_credited || 0).toFixed(2)}</td>
             <td class="mono" style="font-weight:700;color:${Number(row.days_off_credit_balance||0)<0?"var(--danger)":"var(--teal)"}">${Number(row.days_off_credit_balance || 0).toFixed(2)}</td>
             <td><span class="badge ${row.paid?"badge-ok":"badge-low"}">${row.paid?"Paid":"Unpaid"}</span></td>
           </tr>`).join("")
-        : `<tr><td colspan="21" style="text-align:center;color:var(--muted);padding:30px">No employee rows in this period</td></tr>`;
+        : `<tr><td colspan="14" style="text-align:center;color:var(--muted);padding:30px">No employee rows in this period</td></tr>`;
 }
 
 
