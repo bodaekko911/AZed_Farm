@@ -962,10 +962,16 @@ async def update_expense_entry(
         expense.vendor = _clean_text(data.vendor)
     if data.description is not None:
         expense.description = _clean_text(data.description)
-    if data.farm_id is not None:
+    _sent = getattr(data, "model_fields_set", None) or getattr(data, "__fields_set__", set())
+    if "farm_id" in _sent:
+        # The edit modal always sends farm_id; an explicit null means
+        # "General expense" / "Animals" and must clear the assignment.
         expense.farm_id = data.farm_id or None
-    if data.animal_group_id is not None:
-        expense.animal_group_id = await _validate_animal_group(db, data.animal_group_id)
+    if "animal_group_id" in _sent:
+        if data.animal_group_id:
+            expense.animal_group_id = await _validate_animal_group(db, data.animal_group_id)
+        else:
+            expense.animal_group_id = None
     if getattr(data, "is_animal_expense", None) is not None:
         expense.is_animal_expense = bool(data.is_animal_expense)
 
