@@ -725,7 +725,9 @@ async def cost_allocation(
 
     # 1 ── Farm expenses in the period
     _re = await db.execute(
-        select(Expense).where(
+        select(Expense)
+        .options(selectinload(Expense.category))
+        .where(
             Expense.farm_id.in_(selected_farm_ids),
             Expense.expense_date >= d_from,
             Expense.expense_date <= d_to,
@@ -740,7 +742,9 @@ async def cost_allocation(
 
     # 2 ── Deliveries from this farm in the period
     _rd = await db.execute(
-        select(FarmDelivery).where(
+        select(FarmDelivery)
+        .options(selectinload(FarmDelivery.items).selectinload(FarmDeliveryItem.product))
+        .where(
             FarmDelivery.farm_id.in_(selected_farm_ids),
             FarmDelivery.delivery_date >= d_from,
             FarmDelivery.delivery_date <= d_to,
@@ -797,7 +801,9 @@ async def cost_allocation(
         org_value = 0.0
         if all_farm_ids:
             _rad = await db.execute(
-                select(FarmDelivery).where(
+                select(FarmDelivery)
+                .options(selectinload(FarmDelivery.items).selectinload(FarmDeliveryItem.product))
+                .where(
                     FarmDelivery.farm_id.in_(all_farm_ids),
                     FarmDelivery.delivery_date >= d_from,
                     FarmDelivery.delivery_date <= d_to,
