@@ -47,6 +47,90 @@ async def ensure_payroll_columns() -> None:
         logger.exception("ensure_payroll_columns: failed")
 
 
+async def ensure_carbon_methodology() -> None:
+    """Self-healing guard for the carbon module's methodology upgrade.
+
+    1. Adds GHG Protocol provenance columns to carbon_emission_factors
+       (scope, methodology_source, source_year, region) if missing.
+    2. Seeds a set of documented default emission factors (inserted only
+       when the source_key does not already exist — never overwrites
+       user-edited values).
+    3. Backfills methodology fields on known seeded keys where they are
+       still NULL, so pre-existing installs gain citations too.
+
+    Idempotent and safe to run on every startup. Default factor values are
+    indicative figures from widely used public datasets (DEFRA GHG
+    Conversion Factors; IFI Harmonised Grid Emission Factors for the Egypt
+    grid) and are fully editable in the Factors admin page.
+    """
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal
+
+    column_statements = [
+        "ALTER TABLE carbon_emission_factors ADD COLUMN IF NOT EXISTS scope INTEGER",
+        "ALTER TABLE carbon_emission_factors ADD COLUMN IF NOT EXISTS methodology_source VARCHAR(200)",
+        "ALTER TABLE carbon_emission_factors ADD COLUMN IF NOT EXISTS source_year INTEGER",
+        "ALTER TABLE carbon_emission_factors ADD COLUMN IF NOT EXISTS region VARCHAR(80)",
+    ]
+
+    # (source_type, source_key, label, factor, unit, scope, methodology_source, source_year, region)
+    DEFAULT_FACTORS = [
+        ("energy", "diesel_liter", "Diesel fuel (per litre)", 2.68, "litre", 1,
+         "DEFRA GHG Conversion Factors 2024 — diesel (average biofuel blend)", 2024, "Global default"),
+        ("energy", "petrol_liter", "Petrol fuel (per litre)", 2.31, "litre", 1,
+         "DEFRA GHG Conversion Factors 2024 — petrol (average biofuel blend)", 2024, "Global default"),
+        ("energy", "lpg_liter", "LPG (per litre)", 1.56, "litre", 1,
+         "DEFRA GHG Conversion Factors 2024 — LPG", 2024, "Global default"),
+        ("energy", "electricity_kwh", "Grid electricity (per kWh)", 0.46, "kWh", 2,
+         "IFI Harmonised Grid Emission Factors — Egypt national grid (indicative; verify against latest dataset)", 2023, "Egypt"),
+        ("transport", "van_km", "Van / pickup transport (per km)", 0.23, "km", 1,
+         "DEFRA GHG Conversion Factors 2024 — average van, diesel", 2024, "Global default"),
+        ("transport", "truck_km", "Rigid truck transport (per km)", 0.81, "km", 1,
+         "DEFRA GHG Conversion Factors 2024 — rigid HGV, average laden", 2024, "Global default"),
+        ("waste", "organic_waste_kg", "Organic waste to landfill (per kg)", 0.58, "kg", 3,
+         "DEFRA GHG Conversion Factors 2024 — organic/food waste to landfill (indicative)", 2024, "Global default"),
+        ("waste", "compost_kg", "Organic waste composted (per kg)", 0.01, "kg", 3,
+         "DEFRA GHG Conversion Factors 2024 — open-loop composting", 2024, "Global default"),
+        ("production", "processing_kwh", "Processing energy (per kWh)", 0.46, "kWh", 2,
+         "Grid electricity factor — Egypt (IFI Harmonised Grid Emission Factors)", 2023, "Egypt"),
+    ]
+
+    try:
+        async with AsyncSessionLocal() as db:
+            for stmt in column_statements:
+                await db.execute(text(stmt))
+            await db.commit()
+
+            for (stype, skey, label, factor, unit, scope, msrc, syear, region) in DEFAULT_FACTORS:
+                await db.execute(text("""
+                    INSERT INTO carbon_emission_factors
+                        (source_type, source_key, label, factor_kg_co2e_per_unit, unit,
+                         scope, methodology_source, source_year, region, is_active)
+                    SELECT :stype, :skey, :label, :factor, :unit,
+                           :scope, :msrc, :syear, :region, TRUE
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM carbon_emission_factors WHERE source_key = :skey
+                    )
+                """), {"stype": stype, "skey": skey, "label": label, "factor": factor,
+                       "unit": unit, "scope": scope, "msrc": msrc, "syear": syear, "region": region})
+
+                # Backfill methodology on pre-existing rows with the same key
+                # (never touches factor values or labels the user may have edited).
+                await db.execute(text("""
+                    UPDATE carbon_emission_factors
+                       SET scope = COALESCE(scope, :scope),
+                           methodology_source = COALESCE(methodology_source, :msrc),
+                           source_year = COALESCE(source_year, :syear),
+                           region = COALESCE(region, :region)
+                     WHERE source_key = :skey
+                """), {"skey": skey, "scope": scope, "msrc": msrc, "syear": syear, "region": region})
+
+            await db.commit()
+            logger.info("ensure_carbon_methodology: carbon methodology columns and default factors ready")
+    except Exception:
+        logger.exception("ensure_carbon_methodology: failed")
+
+
 async def seed_chart_of_accounts() -> None:
     """Ensure core accounting accounts exist. Safe to run on every startup."""
     from decimal import Decimal
@@ -132,6 +216,7 @@ async def lifespan(_: FastAPI):
     configure_monitoring()
     await verify_migration_status()
     await ensure_payroll_columns()
+    await ensure_carbon_methodology()
     await seed_chart_of_accounts()
     from app.core.cache import init_redis_pool, close_redis_pool
     await init_redis_pool()

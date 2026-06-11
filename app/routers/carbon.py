@@ -74,6 +74,10 @@ class FactorCreate(BaseModel):
     factor_kg_co2e_per_unit: float
     unit: str
     description: Optional[str] = None
+    scope: Optional[int] = None                 # GHG Protocol: 1 | 2 | 3
+    methodology_source: Optional[str] = None    # e.g. "DEFRA GHG Conversion Factors 2024"
+    source_year: Optional[int] = None
+    region: Optional[str] = None
 
 
 class FactorUpdate(BaseModel):
@@ -82,6 +86,10 @@ class FactorUpdate(BaseModel):
     unit: Optional[str] = None
     description: Optional[str] = None
     is_active: Optional[bool] = None
+    scope: Optional[int] = None
+    methodology_source: Optional[str] = None
+    source_year: Optional[int] = None
+    region: Optional[str] = None
 
 
 class TargetCreate(BaseModel):
@@ -534,6 +542,7 @@ async def carbon_dashboard(
     </div>
     <div class="page-actions">
       <a href="/carbon/log" class="btn btn-primary">+ Log Emission</a>
+      <a href="/carbon/report?date_from={d_from.isoformat()}&date_to={d_to.isoformat()}" class="btn btn-secondary">📄 Sustainability Report</a>
       <a href="/carbon/factors" class="btn btn-secondary">Manage Factors</a>
     </div>
   </div>
@@ -836,6 +845,16 @@ async def factors_page(
     rows = ""
     for f in factors:
         active_badge = '<span style="color:var(--teal,#2dd4bf)">Active</span>' if f.is_active else '<span style="color:var(--text-muted)">Inactive</span>'
+        scope_html = f'<span class="scope-chip scope-{int(f.scope)}">Scope {int(f.scope)}</span>' if f.scope else '<span style="color:var(--text-muted)">—</span>'
+        method_bits = []
+        if f.methodology_source:
+            method_bits.append(_safe(f.methodology_source))
+        meta = " · ".join(x for x in [str(f.source_year) if f.source_year else "", _safe(f.region) if f.region else ""] if x)
+        method_html = (
+            f'<div style="font-size:.82rem;line-height:1.35">{method_bits[0]}'
+            + (f'<div style="color:var(--text-muted);font-size:.74rem;margin-top:2px">{meta}</div>' if meta else "")
+            + "</div>"
+        ) if method_bits else '<span style="color:var(--text-muted)">—</span>'
         rows += f"""
         <tr>
           <td>{_badge_html(f.source_type)}</td>
@@ -843,11 +862,13 @@ async def factors_page(
           <td>{_safe(f.label)}</td>
           <td class="num">{float(f.factor_kg_co2e_per_unit)}</td>
           <td>{_safe(f.unit)}</td>
+          <td>{scope_html}</td>
+          <td>{method_html}</td>
           <td>{active_badge}</td>
         </tr>"""
 
     if not rows:
-        rows = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:28px">No emission factors found.</td></tr>'
+        rows = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:28px">No emission factors found.</td></tr>'
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -875,6 +896,10 @@ async def factors_page(
     .carbon-badge-energy {{background:color-mix(in srgb,var(--negative,#f87171) 14%,transparent);color:var(--negative,#f87171);border-color:color-mix(in srgb,var(--negative,#f87171) 30%,transparent)}}
     .carbon-badge-waste {{background:color-mix(in srgb,var(--green,#22c55e) 14%,transparent);color:var(--green,#22c55e);border-color:color-mix(in srgb,var(--green,#22c55e) 30%,transparent)}}
     .carbon-badge-production {{background:color-mix(in srgb,var(--purple,#a855f7) 14%,transparent);color:var(--purple,#a855f7);border-color:color-mix(in srgb,var(--purple,#a855f7) 30%,transparent)}}
+    .scope-chip {{display:inline-flex;align-items:center;border-radius:999px;padding:4px 9px;font-size:.72rem;font-weight:900;white-space:nowrap;border:1px solid transparent}}
+    .scope-1 {{background:color-mix(in srgb,var(--negative,#f87171) 14%,transparent);color:var(--negative,#f87171);border-color:color-mix(in srgb,var(--negative,#f87171) 30%,transparent)}}
+    .scope-2 {{background:color-mix(in srgb,var(--amber,#f59e0b) 14%,transparent);color:var(--amber,#f59e0b);border-color:color-mix(in srgb,var(--amber,#f59e0b) 30%,transparent)}}
+    .scope-3 {{background:color-mix(in srgb,var(--blue,#4d9fff) 14%,transparent);color:var(--blue,#4d9fff);border-color:color-mix(in srgb,var(--blue,#4d9fff) 30%,transparent)}}
   </style>
 </head>
 <body>
@@ -890,12 +915,299 @@ async def factors_page(
   <div class="table-wrap">
     <table class="data-table">
       <thead>
-        <tr><th>Category</th><th>Key</th><th>Label</th><th class="num">Factor</th><th>Unit</th><th>Status</th></tr>
+        <tr><th>Category</th><th>Key</th><th>Label</th><th class="num">Factor</th><th>Unit</th><th>Scope</th><th>Methodology</th><th>Status</th></tr>
       </thead>
       <tbody>{rows}</tbody>
     </table>
   </div>
 </main>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+
+# ── Farm Sustainability Report (printable) ──────────────────────────────────
+
+@router.get("/report", response_class=HTMLResponse)
+async def sustainability_report(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Print-first sustainability report: totals, GHG Protocol scope breakdown,
+    category breakdown, emission intensity vs production output, monthly trend,
+    target progress, and a methodology appendix listing every active factor
+    with its provenance."""
+    from app.models.production import ProductionBatch, BatchOutput
+
+    d_from, d_to = _date_range_defaults(date_from, date_to)
+    days_in_range = max((d_to - d_from).days + 1, 1)
+
+    # ── Core aggregates ──
+    by_type = await _totals_by_source(db, d_from, d_to)
+    grand_total = sum(by_type.values())
+    entry_count = await _entry_count(db, d_from, d_to)
+    daily_average = grand_total / days_in_range if days_in_range else 0.0
+
+    previous_to = d_from - timedelta(days=1)
+    previous_from = previous_to - timedelta(days=days_in_range - 1)
+    previous_total = sum((await _totals_by_source(db, previous_from, previous_to)).values())
+    if previous_total > 0:
+        delta_pct = ((grand_total - previous_total) / previous_total) * 100
+        delta_text = f"{delta_pct:+.1f}% vs previous {days_in_range} days"
+    else:
+        delta_text = "no data for previous period"
+
+    # ── Scope breakdown (GHG Protocol) ──
+    scope_q = await db.execute(
+        select(CarbonEmissionFactor.scope, func.coalesce(func.sum(CarbonLog.kg_co2e), 0))
+        .join(CarbonLog, CarbonLog.factor_id == CarbonEmissionFactor.id)
+        .where(CarbonLog.log_date >= d_from, CarbonLog.log_date <= d_to)
+        .group_by(CarbonEmissionFactor.scope)
+    )
+    scope_totals = {row[0]: float(row[1] or 0) for row in scope_q.all()}
+    SCOPE_DESCRIPTIONS = {
+        1: "Direct emissions — fuel burned in owned equipment and vehicles",
+        2: "Indirect emissions — purchased electricity",
+        3: "Value-chain emissions — waste disposal and other indirect sources",
+    }
+
+    # ── Emission intensity: kg CO₂e per kg of production output ──
+    output_q = await db.execute(
+        select(func.coalesce(func.sum(BatchOutput.qty), 0))
+        .join(ProductionBatch, BatchOutput.batch_id == ProductionBatch.id)
+        .where(
+            func.date(ProductionBatch.created_at) >= d_from,
+            func.date(ProductionBatch.created_at) <= d_to,
+            ProductionBatch.status == "completed",
+        )
+    )
+    production_output_kg = float(output_q.scalar() or 0)
+    intensity = (grand_total / production_output_kg) if production_output_kg > 0 else None
+
+    # ── Monthly trend ──
+    month_expr = func.to_char(CarbonLog.log_date, "YYYY-MM")
+    trend_q = await db.execute(
+        select(month_expr, func.coalesce(func.sum(CarbonLog.kg_co2e), 0), func.count(CarbonLog.id))
+        .where(CarbonLog.log_date >= d_from, CarbonLog.log_date <= d_to)
+        .group_by(month_expr)
+        .order_by(month_expr)
+    )
+    trend_rows = trend_q.all()
+
+    # ── Targets overlapping the period ──
+    targets_q = await db.execute(
+        select(CarbonTarget)
+        .where(CarbonTarget.period_start <= d_to, CarbonTarget.period_end >= d_from)
+        .order_by(CarbonTarget.period_start)
+    )
+    targets = targets_q.scalars().all()
+
+    # ── Active factors for the methodology appendix ──
+    factors_q = await db.execute(
+        select(CarbonEmissionFactor)
+        .where(CarbonEmissionFactor.is_active == True)
+        .order_by(CarbonEmissionFactor.scope.nulls_last(), CarbonEmissionFactor.source_type, CarbonEmissionFactor.label)
+    )
+    factors = factors_q.scalars().all()
+
+    # ── HTML fragments ──
+    scope_rows_html = ""
+    for s in (1, 2, 3):
+        val = scope_totals.get(s, 0.0)
+        pct = (val / grand_total * 100) if grand_total > 0 else 0
+        scope_rows_html += f"""
+        <tr>
+          <td><strong>Scope {s}</strong></td>
+          <td>{SCOPE_DESCRIPTIONS[s]}</td>
+          <td class="num">{_fmt_kg(val)}</td>
+          <td class="num">{pct:.1f}%</td>
+        </tr>"""
+    unscoped = scope_totals.get(None, 0.0)
+    if unscoped > 0:
+        pct = (unscoped / grand_total * 100) if grand_total > 0 else 0
+        scope_rows_html += f"""
+        <tr>
+          <td><strong>Unclassified</strong></td>
+          <td>Logged against factors without a scope assignment</td>
+          <td class="num">{_fmt_kg(unscoped)}</td>
+          <td class="num">{pct:.1f}%</td>
+        </tr>"""
+
+    cat_rows_html = ""
+    for stype in SOURCE_ORDER:
+        val = by_type.get(stype, 0.0)
+        pct = (val / grand_total * 100) if grand_total > 0 else 0
+        cat_rows_html += f"""
+        <tr>
+          <td>{_source_label(stype)}</td>
+          <td class="num">{_fmt_kg(val)}</td>
+          <td class="num">{pct:.1f}%</td>
+        </tr>"""
+
+    trend_html = "".join(
+        f'<tr><td>{row[0]}</td><td class="num">{_fmt_kg(float(row[1] or 0))}</td><td class="num">{int(row[2])}</td></tr>'
+        for row in trend_rows
+    ) or '<tr><td colspan="3" class="muted-cell">No emissions logged in this period.</td></tr>'
+
+    targets_html = ""
+    for t in targets:
+        target_val = float(t.target_kg_co2e or 0)
+        progress_pct = (grand_total / target_val * 100) if target_val > 0 else 0
+        status = "On track" if progress_pct < 80 else ("Approaching limit" if progress_pct <= 100 else "Exceeded")
+        targets_html += f"""
+        <tr>
+          <td>{_safe(t.label)}</td>
+          <td>{t.period_start.isoformat()} → {t.period_end.isoformat()}</td>
+          <td class="num">{_fmt_kg(target_val)}</td>
+          <td class="num">{_fmt_kg(grand_total)}</td>
+          <td class="num">{progress_pct:.0f}%</td>
+          <td>{status}</td>
+        </tr>"""
+    if not targets_html:
+        targets_html = '<tr><td colspan="6" class="muted-cell">No reduction targets defined for this period.</td></tr>'
+
+    factor_rows_html = "".join(
+        f"""<tr>
+          <td>{f"Scope {int(f.scope)}" if f.scope else "—"}</td>
+          <td>{_safe(f.label)}</td>
+          <td class="num">{float(f.factor_kg_co2e_per_unit)}</td>
+          <td>kg CO₂e / {_safe(f.unit)}</td>
+          <td>{_safe(f.methodology_source) if f.methodology_source else "—"}</td>
+          <td class="num">{f.source_year or "—"}</td>
+          <td>{_safe(f.region) if f.region else "—"}</td>
+        </tr>"""
+        for f in factors
+    ) or '<tr><td colspan="7" class="muted-cell">No active emission factors.</td></tr>'
+
+    intensity_html = (
+        f"<strong>{intensity:.3f}</strong> kg CO₂e per kg produced"
+        if intensity is not None
+        else '<span class="muted">— (no completed production output in this period)</span>'
+    )
+
+    generated = date.today().isoformat()
+    period_label = _period_label(d_from, d_to)
+
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Farm Sustainability Report | AZed ERP</title>
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{font-family:'Segoe UI',Arial,sans-serif;background:#f4f4f2;color:#1c1c1c;font-size:13px;line-height:1.5}}
+    .sheet{{max-width:900px;margin:0 auto;background:#fff;padding:42px 48px;min-height:100vh}}
+    .toolbar{{max-width:900px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;padding:14px 4px}}
+    .toolbar a,.toolbar button{{font-size:13px;font-weight:700;padding:8px 16px;border-radius:8px;border:1px solid #c9c9c4;background:#fff;color:#1c1c1c;cursor:pointer;text-decoration:none}}
+    .toolbar .print-btn{{background:#2a7a2a;border-color:#2a7a2a;color:#fff}}
+    .rpt-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;border-bottom:3px solid #2a7a2a;padding-bottom:16px;margin-bottom:22px}}
+    .rpt-head img{{height:90px;object-fit:contain}}
+    .org-name{{font-size:16px;font-weight:900;color:#2a7a2a}}
+    .org-meta{{font-size:10.5px;color:#666;margin-top:2px}}
+    .rpt-title{{font-size:21px;font-weight:800;color:#2a7a2a;text-align:right}}
+    .rpt-meta{{font-size:11px;color:#666;margin-top:4px;text-align:right}}
+    h2{{font-size:14px;font-weight:800;color:#2a7a2a;margin:26px 0 8px;text-transform:uppercase;letter-spacing:.06em}}
+    .kpis{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:6px}}
+    .kpi{{border:1px solid #e2e2dd;border-radius:10px;padding:12px 14px}}
+    .kpi .lab{{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:#777;font-weight:700}}
+    .kpi .val{{font-size:18px;font-weight:800;margin-top:4px}}
+    .kpi .sub{{font-size:10.5px;color:#888;margin-top:2px}}
+    table{{width:100%;border-collapse:collapse;margin-top:6px}}
+    th,td{{padding:8px 10px;border-bottom:1px solid #e7e7e2;text-align:left;vertical-align:top}}
+    th{{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#777;background:#fafaf8}}
+    .num{{text-align:right;font-variant-numeric:tabular-nums}}
+    .muted,.muted-cell{{color:#999}}
+    .muted-cell{{text-align:center;padding:18px}}
+    .note{{font-size:11px;color:#666;background:#f7f7f4;border:1px solid #e7e7e2;border-radius:10px;padding:12px 14px;margin-top:8px;line-height:1.55}}
+    .intensity-line{{font-size:15px;margin-top:6px}}
+    @media print{{
+      body{{background:#fff}}
+      .toolbar{{display:none}}
+      .sheet{{padding:0;max-width:none}}
+      h2{{page-break-after:avoid}}
+      table{{page-break-inside:auto}}
+      tr{{page-break-inside:avoid}}
+    }}
+  </style>
+  <script src="/static/theme-init.js"></script>
+</head>
+<body data-no-i18n>
+  <div class="toolbar">
+    <a href="/carbon/?date_from={d_from.isoformat()}&date_to={d_to.isoformat()}">← Back to Carbon Dashboard</a>
+    <button class="print-btn" onclick="window.print()">🖨 Print / Save PDF</button>
+  </div>
+  <div class="sheet">
+    <div class="rpt-head">
+      <div style="display:flex;align-items:center;gap:14px">
+        <img src="/static/Logo.png" alt="">
+        <div>
+          <div class="org-name">Habiba Organic Farm</div>
+          <div class="org-meta">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
+        </div>
+      </div>
+      <div>
+        <div class="rpt-title">Farm Sustainability Report</div>
+        <div class="rpt-meta">Period: {period_label}</div>
+        <div class="rpt-meta">Generated: {generated} · AZed ERP Carbon Module</div>
+      </div>
+    </div>
+
+    <h2>Summary</h2>
+    <div class="kpis">
+      <div class="kpi"><div class="lab">Total emissions</div><div class="val">{_fmt_kg(grand_total)}</div><div class="sub">kg CO₂e · {delta_text}</div></div>
+      <div class="kpi"><div class="lab">Daily average</div><div class="val">{_fmt_kg(daily_average)}</div><div class="sub">kg CO₂e / day over {days_in_range} days</div></div>
+      <div class="kpi"><div class="lab">Logged events</div><div class="val">{entry_count}</div><div class="sub">emission records in period</div></div>
+      <div class="kpi"><div class="lab">Production output</div><div class="val">{_fmt_kg(production_output_kg)}</div><div class="sub">kg of completed batch output</div></div>
+    </div>
+
+    <h2>Emission Intensity</h2>
+    <div class="intensity-line">{intensity_html}</div>
+    <div class="note">Emission intensity divides total logged emissions by the total quantity of completed
+    production output recorded in AZed for the same period. It allows comparison across periods of different
+    production volume — a falling intensity means the farm produces more per unit of emissions.</div>
+
+    <h2>Emissions by GHG Protocol Scope</h2>
+    <table>
+      <thead><tr><th>Scope</th><th>Definition</th><th class="num">kg CO₂e</th><th class="num">Share</th></tr></thead>
+      <tbody>{scope_rows_html}</tbody>
+    </table>
+
+    <h2>Emissions by Category</h2>
+    <table>
+      <thead><tr><th>Category</th><th class="num">kg CO₂e</th><th class="num">Share</th></tr></thead>
+      <tbody>{cat_rows_html}</tbody>
+    </table>
+
+    <h2>Monthly Trend</h2>
+    <table>
+      <thead><tr><th>Month</th><th class="num">kg CO₂e</th><th class="num">Events</th></tr></thead>
+      <tbody>{trend_html}</tbody>
+    </table>
+
+    <h2>Reduction Targets</h2>
+    <table>
+      <thead><tr><th>Target</th><th>Period</th><th class="num">Target kg CO₂e</th><th class="num">Actual (selected range)</th><th class="num">Used</th><th>Status</th></tr></thead>
+      <tbody>{targets_html}</tbody>
+    </table>
+
+    <h2>Methodology</h2>
+    <div class="note">
+      Emissions are calculated as <strong>activity quantity × emission factor</strong> for each logged event,
+      following the operational approach of the <strong>GHG Protocol Corporate Standard</strong> (Scope 1: direct
+      fuel combustion; Scope 2: purchased electricity; Scope 3: value-chain sources such as waste disposal).
+      Default factors are indicative values from public datasets (DEFRA GHG Conversion Factors; IFI Harmonised
+      Grid Emission Factors for the Egypt national grid) and are reviewed and editable by the administrator.
+      Each event is linked to an operational record in the ERP (delivery, production batch, expense, or spoilage
+      entry), providing an auditable trail from reported totals back to source transactions.
+    </div>
+    <table>
+      <thead><tr><th>Scope</th><th>Factor</th><th class="num">Value</th><th>Unit</th><th>Source</th><th class="num">Year</th><th>Region</th></tr></thead>
+      <tbody>{factor_rows_html}</tbody>
+    </table>
+  </div>
 </body>
 </html>"""
     return HTMLResponse(html)
@@ -1040,6 +1352,10 @@ async def api_list_factors(db: AsyncSession = Depends(get_async_session)):
             "factor_kg_co2e_per_unit": float(f.factor_kg_co2e_per_unit),
             "unit": f.unit,
             "description": f.description,
+            "scope": f.scope,
+            "methodology_source": f.methodology_source,
+            "source_year": f.source_year,
+            "region": f.region,
         }
         for f in q.scalars().all()
     ]

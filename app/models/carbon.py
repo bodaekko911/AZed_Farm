@@ -48,6 +48,11 @@ class CarbonEmissionFactor(Base):
     unit                 = Column(String(30),  nullable=False)          # km | kWh | litre | kg
     description          = Column(Text, nullable=True)
     is_active            = Column(Boolean, default=True)
+    # ── Methodology provenance (GHG Protocol alignment) ──
+    scope                = Column(Integer, nullable=True)               # 1 = direct, 2 = purchased energy, 3 = value chain
+    methodology_source   = Column(String(200), nullable=True)           # e.g. "DEFRA GHG Conversion Factors 2024"
+    source_year          = Column(Integer, nullable=True)               # publication year of the factor
+    region               = Column(String(80), nullable=True)            # e.g. "Egypt", "Global default"
     created_at           = Column(DateTime(timezone=True), server_default=func.now())
 
     logs = relationship("CarbonLog", back_populates="factor")
