@@ -20,12 +20,65 @@ from app.models.production import (
     ProductionBatch, BatchInput, BatchOutput,
 )
 from app.models.spoilage import SpoilageRecord
+from app.models.carbon import CarbonEmissionFactor, CarbonLog
 
 router = APIRouter(
     prefix="/production",
     tags=["Production"],
     dependencies=[Depends(require_permission("page_production"))],
 )
+
+
+# ── Carbon auto-logging for spoilage ───────────────────
+# Mirrors _create_carbon_log_for_expense in the expenses module: when a
+# spoilage record is saved, an emission event is logged automatically
+# against the "organic_waste_kg" factor. The factor is per kilogram, so
+# only mass-based product units are logged (kg directly, grams converted);
+# any other unit is skipped silently rather than logged with a wrong unit.
+
+_MASS_UNITS_KG = {"kg", "kgs", "kilo", "kilogram", "kilograms", "كجم", "كيلو", "كيلوجرام"}
+_MASS_UNITS_G  = {"g", "gm", "gr", "gram", "grams", "جم", "جرام"}
+
+
+async def _create_carbon_log_for_spoilage(
+    db: AsyncSession,
+    spoilage_rec: SpoilageRecord,
+    product: Product,
+    current_user: User,
+) -> None:
+    """Auto-create a CarbonLog for a spoilage record (organic waste)."""
+    unit = (product.unit or "").strip().lower()
+    qty = Decimal(str(spoilage_rec.qty))
+    if unit in _MASS_UNITS_KG:
+        qty_kg = qty
+    elif unit in _MASS_UNITS_G:
+        qty_kg = qty / Decimal("1000")
+    else:
+        return
+    if qty_kg <= 0:
+        return
+    f_r = await db.execute(
+        select(CarbonEmissionFactor).where(
+            CarbonEmissionFactor.source_key == "organic_waste_kg",
+            CarbonEmissionFactor.is_active == True,
+        )
+    )
+    factor = f_r.scalar_one_or_none()
+    if not factor:
+        return
+    kg_co2e = (qty_kg * factor.factor_kg_co2e_per_unit).quantize(Decimal("0.0001"))
+    db.add(CarbonLog(
+        factor_id=factor.id,
+        farm_id=spoilage_rec.farm_id,
+        user_id=current_user.id,
+        log_date=spoilage_rec.spoilage_date,
+        quantity=qty_kg,
+        kg_co2e=kg_co2e,
+        ref_type="spoilage",
+        ref_id=spoilage_rec.id,
+        notes=f"Auto-logged from spoilage {spoilage_rec.ref_number}"
+              + (f" ({spoilage_rec.reason})" if spoilage_rec.reason else ""),
+    ))
 
 
 # ── Schemas ────────────────────────────────────────────
@@ -377,6 +430,7 @@ async def create_spoilage(data: SpoilageCreate, db: AsyncSession = Depends(get_a
                f"Spoilage {ref} — {product.name} — qty: {data.qty}"
                + (f" — {data.reason}" if data.reason else ""),
                user=current_user, ref_type="spoilage", ref_id=spoilage_rec.id)
+    await _create_carbon_log_for_spoilage(db, spoilage_rec, product, current_user)
     await db.commit()
     return {"id": spoilage_rec.id, "ref_number": ref, "qty": data.qty, "product": product.name}
 
@@ -394,6 +448,12 @@ async def delete_spoilage(record_id: int, db: AsyncSession = Depends(get_async_s
     log_record(db, "Production", "delete_spoilage",
                f"Deleted spoilage {spoilage_rec.ref_number} — stock restored",
                ref_type="spoilage", ref_id=record_id)
+    # Remove the auto-created carbon log (if any) so emissions stay consistent
+    carbon_q = await db.execute(
+        select(CarbonLog).where(CarbonLog.ref_type == "spoilage", CarbonLog.ref_id == record_id)
+    )
+    for _cl in carbon_q.scalars().all():
+        await db.delete(_cl)
     await db.delete(spoilage_rec); await db.commit()
     return {"ok": True}
 
