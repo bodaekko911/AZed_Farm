@@ -113,6 +113,7 @@ async def get_products(
                 "reorder_qty": float(p.reorder_qty) if p.reorder_qty is not None else None,
                 "preferred_supplier_id": p.preferred_supplier_id,
                 "unit":      p.unit,
+                "unit_weight_kg": float(p.unit_weight_kg) if p.unit_weight_kg is not None else None,
                 "category":  p.category or "—",
                 "item_type": normalize_item_type(p.item_type),
                 "is_active": True if p.is_active is None else p.is_active,
@@ -142,7 +143,7 @@ async def add_product(data: ProductCreate, db: AsyncSession = Depends(get_async_
         cost=data.cost, stock=initial_stock, min_stock=data.min_stock,
         reorder_level=data.reorder_level, reorder_qty=data.reorder_qty,
         preferred_supplier_id=data.preferred_supplier_id,
-        unit=data.unit, is_active=True,
+        unit=data.unit, unit_weight_kg=data.unit_weight_kg, is_active=True,
     )
     if hasattr(p, 'category'):  p.category  = data.category
     if hasattr(p, 'item_type'): p.item_type = item_type
@@ -477,6 +478,12 @@ tr:hover td{background:rgba(255,255,255,.02);}
                 </select>
             </div>
 
+            <!-- Avg piece weight (carbon metrics) -->
+            <div class="fld">
+                <label>Avg Weight / Piece (kg)</label>
+                <input id="f-unit-weight" type="number" min="0" step="0.001" placeholder="e.g. 0.5 — for pcs/box/pack units">
+            </div>
+
             <!-- Name -->
             <div class="fld span2">
                 <label>Name *</label>
@@ -775,7 +782,7 @@ async function loadProducts(){
         <td class="mono" style="color:${stockColor};font-weight:700">${stockText}</td>
         <td style="font-size:12px;color:var(--muted)">${p.unit}</td>
         <td style="display:flex;gap:6px">
-            <button class="action-btn" onclick="openEditModal(${p.id},'${escapeJsString(p.sku)}','${escapeJsString(p.name)}',${p.price},${p.cost},${p.stock},${p.min_stock},'${escapeJsString(p.unit)}','${escapeJsString(p.category==="—"?"":p.category)}','${escapeJsString(p.item_type)}')">Edit</button>
+            <button class="action-btn" onclick="openEditModal(${p.id},'${escapeJsString(p.sku)}','${escapeJsString(p.name)}',${p.price},${p.cost},${p.stock},${p.min_stock},'${escapeJsString(p.unit)}','${escapeJsString(p.category==="—"?"":p.category)}','${escapeJsString(p.item_type)}',${p.unit_weight_kg ?? null})">Edit</button>
             <button class="action-btn danger" onclick="deleteProduct(${p.id},'${escapeJsString(p.name)}')">Delete</button>
         </td>
     </tr>`;
@@ -822,6 +829,7 @@ async function openAddModal(){
     document.getElementById("f-stock").value   = "0";
     document.getElementById("f-min-stock").value = "5";
     document.getElementById("f-unit").value    = "gram";
+    document.getElementById("f-unit-weight").value = "";
     document.getElementById("f-category").value = "";
     document.getElementById("f-item-type").value = "finished";
     syncServiceStockFields();
@@ -831,7 +839,7 @@ async function openAddModal(){
     document.getElementById("modal").classList.add("open");
 }
 
-function openEditModal(id,sku,name,price,cost,stock,min_stock,unit,category,item_type){
+function openEditModal(id,sku,name,price,cost,stock,min_stock,unit,category,item_type,unit_weight){
     editingId = id;
     document.getElementById("modal-title").innerText   = "Edit Product";
     document.getElementById("f-sku").value             = sku;
@@ -842,6 +850,7 @@ function openEditModal(id,sku,name,price,cost,stock,min_stock,unit,category,item
     document.getElementById("f-stock").value           = stock;
     document.getElementById("f-min-stock").value       = min_stock;
     document.getElementById("f-unit").value            = unit;
+    document.getElementById("f-unit-weight").value     = (unit_weight!=null && unit_weight!==undefined) ? unit_weight : "";
     document.getElementById("f-category").value        = category||"";
     document.getElementById("f-item-type").value       = item_type||"finished";
     syncServiceStockFields();
@@ -861,6 +870,7 @@ async function saveProduct(){
     let stock    = parseFloat(document.getElementById("f-stock").value)||0;
     let minStock = parseFloat(document.getElementById("f-min-stock").value)||5;
     let unit     = document.getElementById("f-unit").value;
+    let unitWeight = parseFloat(document.getElementById("f-unit-weight").value)||null;
     let category = document.getElementById("f-category").value||null;
     let itemType = document.getElementById("f-item-type").value;
     if(itemType === "service"){
@@ -875,7 +885,7 @@ async function saveProduct(){
     if(editingId){
         let res  = await fetch(`/products/api/edit/${editingId}`,{
             method:"PUT", headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({name,price,cost,stock,min_stock:minStock,unit,category,item_type:itemType}),
+            body:JSON.stringify({name,price,cost,stock,min_stock:minStock,unit,unit_weight_kg:unitWeight,category,item_type:itemType}),
         });
         let data = await res.json();
         if(data.detail){ showToast("Error: "+data.detail); return; }
@@ -883,7 +893,7 @@ async function saveProduct(){
     } else {
         let res  = await fetch("/products/api/add",{
             method:"POST", headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({sku,name,price,cost,stock,min_stock:minStock,unit,category,item_type:itemType}),
+            body:JSON.stringify({sku,name,price,cost,stock,min_stock:minStock,unit,unit_weight_kg:unitWeight,category,item_type:itemType}),
         });
         let data = await res.json();
         if(data.detail){ showToast("Error: "+data.detail); return; }

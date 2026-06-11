@@ -13,6 +13,9 @@ class ProductCreate(BaseModel):
     reorder_qty: Optional[float] = Field(None, ge=0)
     preferred_supplier_id: Optional[int] = Field(None, ge=1)
     unit:      str = Field("pcs", min_length=1, max_length=50)
+    # Average weight of one piece in kg — lets piece/bunch products be counted
+    # in mass-based carbon metrics (intake intensity, spoilage waste).
+    unit_weight_kg: Optional[float] = Field(None, ge=0)
     category:  Optional[str] = Field(None, max_length=100)
     item_type: str = Field("finished", min_length=1, max_length=50)
 
@@ -27,6 +30,7 @@ class ProductUpdate(BaseModel):
     reorder_qty: Optional[float] = Field(None, ge=0)
     preferred_supplier_id: Optional[int] = Field(None, ge=1)
     unit:      Optional[str] = Field(None, min_length=1, max_length=50)
+    unit_weight_kg: Optional[float] = Field(None, ge=0)
     category:  Optional[str] = Field(None, max_length=100)
     item_type: Optional[str] = Field(None, max_length=50)
     is_active: Optional[bool] = None

@@ -1021,17 +1021,21 @@ async def sustainability_report(
     from app.routers.production import _MASS_UNITS_G, _MASS_UNITS_KG
 
     def _mass_kg(rows) -> float:
+        """Sum quantities as kilograms: kg as-is, g ÷1000, and piece/box/pack
+        units via the product's configured average weight per piece."""
         total = 0.0
-        for _qty, _unit in rows:
+        for _qty, _unit, _piece_kg in rows:
             u = (_unit or "").strip().lower()
             if u in _MASS_UNITS_KG:
                 total += float(_qty or 0)
             elif u in _MASS_UNITS_G:
                 total += float(_qty or 0) / 1000.0
+            elif _piece_kg and float(_piece_kg) > 0:
+                total += float(_qty or 0) * float(_piece_kg)
         return total
 
     intake_q = await db.execute(
-        select(_FDI.qty, func.coalesce(_FDI.unit, _Product.unit))
+        select(_FDI.qty, func.coalesce(_FDI.unit, _Product.unit), _Product.unit_weight_kg)
         .join(_FD, _FDI.delivery_id == _FD.id)
         .join(_Product, _FDI.product_id == _Product.id)
         .where(_FD.delivery_date >= d_from, _FD.delivery_date <= d_to)
@@ -1039,7 +1043,7 @@ async def sustainability_report(
     farm_intake_kg = _mass_kg(intake_q.all())
 
     output_q = await db.execute(
-        select(BatchOutput.qty, _Product.unit)
+        select(BatchOutput.qty, _Product.unit, _Product.unit_weight_kg)
         .join(ProductionBatch, BatchOutput.batch_id == ProductionBatch.id)
         .join(_Product, BatchOutput.product_id == _Product.id)
         .where(
@@ -1226,7 +1230,7 @@ async def sustainability_report(
       <div class="kpi"><div class="lab">Total emissions</div><div class="val">{_fmt_kg(grand_total)}</div><div class="sub">kg CO₂e · {delta_text}</div></div>
       <div class="kpi"><div class="lab">Daily average</div><div class="val">{_fmt_kg(daily_average)}</div><div class="sub">kg CO₂e / day over {days_in_range} days</div></div>
       <div class="kpi"><div class="lab">Logged events</div><div class="val">{entry_count}</div><div class="sub">emission records in period</div></div>
-      <div class="kpi"><div class="lab">Farm produce (intake)</div><div class="val">{_fmt_kg(farm_intake_kg)}</div><div class="sub">kg received from farms (mass-based products only)</div></div>
+      <div class="kpi"><div class="lab">Farm produce (intake)</div><div class="val">{_fmt_kg(farm_intake_kg)}</div><div class="sub">kg received from farms (incl. piece products via avg weight)</div></div>
       <div class="kpi"><div class="lab">Processed output</div><div class="val">{_fmt_kg(production_output_kg)}</div><div class="sub">kg of completed batch output (subset of intake)</div></div>
     </div>
 
@@ -1234,7 +1238,8 @@ async def sustainability_report(
     <div class="intensity-line">{intensity_html}</div>
     <div class="note">Emission intensity divides total logged emissions by the farm's produce volume for the
     same period, measured as farm intake — every kilogram recorded as delivered from the farms, whether sold
-    fresh or processed afterwards. Only products measured by mass (kg/g, grams converted to kg) are counted.
+    fresh or processed afterwards. Products measured by mass count directly (grams converted to kg); products
+    sold by piece, bunch, box or pack count via their configured average weight per piece.
     Intake is used rather than sales or processing output because it is the upstream total: it covers fresh
     vegetable sales and avoids double-counting produce that also passes through processing. A falling
     intensity means the farm produces more per unit of emissions.</div>

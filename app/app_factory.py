@@ -72,6 +72,9 @@ async def ensure_delivery_transport_columns() -> None:
     statements = [
         "ALTER TABLE farm_deliveries ADD COLUMN IF NOT EXISTS distance_km NUMERIC(8,1)",
         "ALTER TABLE farm_deliveries ADD COLUMN IF NOT EXISTS vehicle_type VARCHAR(20)",
+        # Average weight of one piece in kg — lets piece/bunch products be
+        # counted in mass-based carbon metrics (mirrors migration 20260611_0037).
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS unit_weight_kg NUMERIC(8,3)",
     ]
     try:
         async with AsyncSessionLocal() as db:

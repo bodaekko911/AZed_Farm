@@ -18,6 +18,9 @@ class Product(Base):
     reorder_qty = Column(Numeric(12, 3), nullable=True)
     preferred_supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
     unit      = Column(String(30), default="pcs")
+    # Average weight of one piece in kg (piece/bunch products) — used by the
+    # carbon module to include piece-based produce in mass-based metrics.
+    unit_weight_kg = Column(Numeric(8, 3), nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     category  = Column(String(100), nullable=True)

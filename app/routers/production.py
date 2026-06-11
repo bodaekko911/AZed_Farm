@@ -53,6 +53,9 @@ async def _create_carbon_log_for_spoilage(
         qty_kg = qty
     elif unit in _MASS_UNITS_G:
         qty_kg = qty / Decimal("1000")
+    elif getattr(product, "unit_weight_kg", None) and Decimal(str(product.unit_weight_kg)) > 0:
+        # Piece/bunch/box products: convert via the configured avg weight.
+        qty_kg = qty * Decimal(str(product.unit_weight_kg))
     else:
         return
     if qty_kg <= 0:
