@@ -357,9 +357,19 @@ async def carbon_dashboard(
     best_target_status = "No active target"
     for t in targets:
         target_value = _as_float(t.target_kg_co2e)
-        raw_pct = round(grand_total / target_value * 100, 1) if target_value else 0
+        # Actual emissions over the TARGET's own period (not the page's
+        # selected range) — otherwise progress depends on what range the
+        # viewer happens to have picked.
+        t_actual_q = await db.execute(
+            select(func.coalesce(func.sum(CarbonLog.kg_co2e), 0)).where(
+                CarbonLog.log_date >= t.period_start,
+                CarbonLog.log_date <= t.period_end,
+            )
+        )
+        t_actual = _as_float(t_actual_q.scalar() or 0)
+        raw_pct = round(t_actual / target_value * 100, 1) if target_value else 0
         visual_pct = min(100, raw_pct)
-        remaining = target_value - grand_total
+        remaining = target_value - t_actual
         bar_class = "progress-ok" if raw_pct < 80 else ("progress-warn" if raw_pct < 100 else "progress-over")
         status_text = f"{_fmt_kg(max(remaining, 0))} remaining" if remaining >= 0 else f"{_fmt_kg(abs(remaining))} over target"
         best_target_status = f"{raw_pct}% of target" if target_value else best_target_status
@@ -376,7 +386,7 @@ async def carbon_dashboard(
             <div class="progress-bar {bar_class}" style="width:{visual_pct}%"></div>
           </div>
           <div class="target-stats">
-            <span>{_fmt_kg(grand_total)} used</span>
+            <span>{_fmt_kg(t_actual)} used</span>
             <span>Target: {_fmt_kg(target_value)}</span>
             <span>{raw_pct}%</span>
             <span>{status_text}</span>
@@ -607,7 +617,7 @@ async def carbon_dashboard(
   </section>
 
   <section class="panel-card" aria-label="Reduction targets">
-    <div class="section-title-row"><h2>Reduction Targets</h2><span>Progress uses selected range total</span></div>
+    <div class="section-title-row"><h2>Reduction Targets</h2><span>Progress measured over each target's period</span></div>
     {target_section}
     <div class="add-target-card">
       <button class="add-target-toggle" type="button" onclick="document.getElementById('targetForm').classList.toggle('hidden')">+ Add target</button>
@@ -1106,7 +1116,13 @@ async def sustainability_report(
         </tr>"""
 
     cat_rows_html = ""
-    for stype in SOURCE_ORDER:
+    # Known categories first, then any custom source types so every logged
+    # kilogram appears in a row and the percentages sum to 100.
+    report_source_types = [s for s in SOURCE_ORDER if s in by_type]
+    report_source_types.extend(sorted(s for s in by_type if s not in report_source_types))
+    if not report_source_types:
+        report_source_types = list(SOURCE_ORDER)
+    for stype in report_source_types:
         val = by_type.get(stype, 0.0)
         pct = (val / grand_total * 100) if grand_total > 0 else 0
         cat_rows_html += f"""
@@ -1124,14 +1140,24 @@ async def sustainability_report(
     targets_html = ""
     for t in targets:
         target_val = float(t.target_kg_co2e or 0)
-        progress_pct = (grand_total / target_val * 100) if target_val > 0 else 0
+        # Progress must be measured over the TARGET's own period — comparing
+        # the report range's total against a target with a different period
+        # would under- or overstate progress depending on the range printed.
+        actual_q = await db.execute(
+            select(func.coalesce(func.sum(CarbonLog.kg_co2e), 0)).where(
+                CarbonLog.log_date >= t.period_start,
+                CarbonLog.log_date <= t.period_end,
+            )
+        )
+        actual_val = float(actual_q.scalar() or 0)
+        progress_pct = (actual_val / target_val * 100) if target_val > 0 else 0
         status = "On track" if progress_pct < 80 else ("Approaching limit" if progress_pct <= 100 else "Exceeded")
         targets_html += f"""
         <tr>
           <td>{_safe(t.label)}</td>
           <td>{t.period_start.isoformat()} → {t.period_end.isoformat()}</td>
           <td class="num">{_fmt_kg(target_val)}</td>
-          <td class="num">{_fmt_kg(grand_total)}</td>
+          <td class="num">{_fmt_kg(actual_val)}</td>
           <td class="num">{progress_pct:.0f}%</td>
           <td>{status}</td>
         </tr>"""
@@ -1264,7 +1290,7 @@ async def sustainability_report(
 
     <h2>Reduction Targets</h2>
     <table>
-      <thead><tr><th>Target</th><th>Period</th><th class="num">Target kg CO₂e</th><th class="num">Actual (selected range)</th><th class="num">Used</th><th>Status</th></tr></thead>
+      <thead><tr><th>Target</th><th>Period</th><th class="num">Target kg CO₂e</th><th class="num">Actual (target period)</th><th class="num">Used</th><th>Status</th></tr></thead>
       <tbody>{targets_html}</tbody>
     </table>
 
