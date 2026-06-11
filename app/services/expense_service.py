@@ -315,6 +315,7 @@ async def update_category(
     if data.carbon_factor_key is not None:
         # Accept "" to clear; validate non-empty keys against the catalog.
         key = data.carbon_factor_key.strip()
+        old_key = category.carbon_factor_key
         if key:
             check = await db.execute(
                 select(CarbonEmissionFactor).where(
@@ -330,6 +331,36 @@ async def update_category(
             category.carbon_factor_key = key
         else:
             category.carbon_factor_key = None
+
+        # ── Resync existing emissions when the mapping actually changed ──
+        # CarbonLog.kg_co2e is computed and stored at expense-save time, so
+        # without this, changing a category's factor only affects *future*
+        # expenses and the Carbon page keeps showing totals from the old
+        # factor. Rule (same as expense edit): rebuild auto-logs from current
+        # state — re-point to the new factor and recompute, create logs where
+        # none existed (key was empty), or remove them when the key is cleared.
+        if (key or None) != (old_key or None):
+            expenses_result = await db.execute(
+                select(Expense).where(Expense.category_id == category.id)
+            )
+            cat_expenses = expenses_result.scalars().all()
+            if cat_expenses:
+                ids = [e.id for e in cat_expenses]
+                old_logs = await db.execute(
+                    select(CarbonLog).where(
+                        CarbonLog.ref_type == "expense",
+                        CarbonLog.ref_id.in_(ids),
+                    )
+                )
+                for _cl in old_logs.scalars().all():
+                    await db.delete(_cl)
+                if category.carbon_factor_key:
+                    for exp in cat_expenses:
+                        cons = float(exp.consumption or 0)
+                        if cons > 0:
+                            await _create_carbon_log_for_expense(
+                                db, exp, category, cons, current_user
+                            )
 
     record(
         db,
