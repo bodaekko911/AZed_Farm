@@ -159,14 +159,26 @@ async def ensure_carbon_methodology() -> None:
     # ── Phase 0: do the carbon tables even exist? ─────────────────────────
     try:
         async with AsyncSessionLocal() as db:
-            res = await db.execute(text("SELECT to_regclass('carbon_emission_factors')"))
-            table_exists = res.scalar() is not None
-            if not table_exists:
+            res = await db.execute(text(
+                "SELECT to_regclass('carbon_emission_factors'), "
+                "       to_regclass('carbon_logs'), "
+                "       to_regclass('carbon_targets')"
+            ))
+            factors_t, logs_t, targets_t = res.one()
+            missing = [name for name, reg in (
+                ("carbon_emission_factors", factors_t),
+                ("carbon_logs", logs_t),
+                ("carbon_targets", targets_t),
+            ) if reg is None]
+            if missing:
                 logger.warning(
-                    "ensure_carbon_methodology: carbon_emission_factors table is MISSING — "
-                    "alembic migration 20260510_0018 likely never applied "
-                    "(entrypoint tolerates failed upgrades). Creating carbon tables now."
+                    "ensure_carbon_methodology: carbon table(s) MISSING: %s — "
+                    "alembic migration 20260510_0018 likely never (fully) applied "
+                    "(entrypoint tolerates failed upgrades). Creating now.",
+                    ", ".join(missing),
                 )
+                # All statements are CREATE ... IF NOT EXISTS, so running the
+                # full set is safe even when only one table is missing.
                 for stmt in table_statements:
                     try:
                         await db.execute(text(stmt))

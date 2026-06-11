@@ -36,7 +36,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -1501,11 +1501,33 @@ async def api_update_factor(
     f = await db.get(CarbonEmissionFactor, factor_id)
     if not f:
         raise HTTPException(404, "Factor not found")
+    old_value = float(f.factor_kg_co2e_per_unit)
     for field, val in _model_dump(payload, exclude_none=True).items():
         setattr(f, field, val)
-    record(db, "Carbon", "update_factor", f"Updated emission factor {f.source_key}", user=current_user, ref_type="carbon_factor", ref_id=f.id)
+
+    # If the coefficient itself changed, recompute every log that references
+    # this factor (kg_co2e is stored as quantity × factor at save time, so
+    # dashboards/reports would otherwise keep showing totals based on the old
+    # value forever). Quantities are untouched — only the derived kg CO₂e.
+    recalculated = 0
+    new_value = float(f.factor_kg_co2e_per_unit)
+    if payload.factor_kg_co2e_per_unit is not None and new_value != old_value:
+        result = await db.execute(
+            text(
+                "UPDATE carbon_logs "
+                "   SET kg_co2e = ROUND(quantity * CAST(:new_factor AS NUMERIC), 4) "
+                " WHERE factor_id = :fid"
+            ),
+            {"new_factor": new_value, "fid": factor_id},
+        )
+        recalculated = result.rowcount or 0
+
+    detail = f"Updated emission factor {f.source_key}"
+    if recalculated:
+        detail += f" ({old_value} → {new_value}; recalculated {recalculated} logs)"
+    record(db, "Carbon", "update_factor", detail, user=current_user, ref_type="carbon_factor", ref_id=f.id)
     await db.commit()
-    return {"ok": True}
+    return {"ok": True, "recalculated_logs": recalculated}
 
 
 # ── API: Targets ──────────────────────────────────────────────────────────────
