@@ -1267,7 +1267,7 @@ async def backfill_auto_logs(
     from app.models.expense import Expense, ExpenseCategory
     from app.models.spoilage import SpoilageRecord
     from app.models.product import Product
-    from app.routers.expenses import _create_carbon_log_for_expense
+    from app.services.expense_service import _create_carbon_log_for_expense
     from app.routers.production import _create_carbon_log_for_spoilage
 
     # ── Expenses missing a carbon log ──

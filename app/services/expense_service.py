@@ -981,6 +981,31 @@ async def update_expense_entry(
         )
         expense.category = category_result.scalar_one_or_none()
 
+    # Recompute consumption + unit price snapshot with the same precedence as
+    # creation (explicit value > category default > derived from amount), then
+    # resync the auto-created carbon log so edits don't leave stale emissions.
+    _cat = expense.category
+    unit_price_used = None
+    consumption = None
+    if data.unit_price_used is not None and data.unit_price_used > 0:
+        unit_price_used = round(float(data.unit_price_used), 4)
+    elif _cat and _cat.unit_price is not None and float(_cat.unit_price) > 0:
+        unit_price_used = float(_cat.unit_price)
+    if data.consumption is not None and data.consumption > 0:
+        consumption = round(float(data.consumption), 4)
+    elif unit_price_used and unit_price_used > 0:
+        consumption = round(float(expense.amount) / unit_price_used, 4)
+    expense.unit_price_used = unit_price_used
+    expense.consumption = consumption
+
+    _old_logs = await db.execute(
+        select(CarbonLog).where(CarbonLog.ref_type == "expense", CarbonLog.ref_id == expense.id)
+    )
+    for _cl in _old_logs.scalars().all():
+        await db.delete(_cl)
+    if _cat and consumption and consumption > 0 and _cat.carbon_factor_key:
+        await _create_carbon_log_for_expense(db, expense, _cat, consumption, current_user)
+
     journal = await _post_expense_journal(
         db,
         description=f"{expense.category.name} expense (edited) - {expense.ref_number}",
@@ -1020,6 +1045,12 @@ async def delete_expense_entry(
 
     reference_number = expense.ref_number
     await _reverse_expense_journal(db, expense)
+    # Remove the auto-created carbon log (if any) so emissions stay consistent
+    _old_logs = await db.execute(
+        select(CarbonLog).where(CarbonLog.ref_type == "expense", CarbonLog.ref_id == expense.id)
+    )
+    for _cl in _old_logs.scalars().all():
+        await db.delete(_cl)
     await db.delete(expense)
     record(
         db,
