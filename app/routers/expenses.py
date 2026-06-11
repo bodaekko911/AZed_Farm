@@ -579,9 +579,12 @@ async def edit_expense(
         expense.vendor = data.vendor.strip() or None
     if data.description is not None:
         expense.description = data.description.strip() or None
-    if data.farm_id is not None:
+    _sent = getattr(data, "model_fields_set", None) or getattr(data, "__fields_set__", set())
+    if "farm_id" in _sent:
+        # The edit modal always sends farm_id — null means "no farm" / "Animals",
+        # so an explicitly sent null must clear the farm (not be skipped).
         expense.farm_id = data.farm_id or None
-    if data.animal_group_id is not None:
+    if "animal_group_id" in _sent:
         if data.animal_group_id:
             _rg = await db.execute(
                 select(AnimalGroup).where(AnimalGroup.id == data.animal_group_id)
