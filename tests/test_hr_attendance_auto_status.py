@@ -72,11 +72,15 @@ def test_absent_auto_status_persists_until_marked_present(monkeypatch):
 
     with Session() as session:
         db = AsyncSessionAdapter(session)
-        employee = Employee(name="Mona Salary", base_salary=1000)
+        day_one = real_date(2026, 5, 5)
+        # hire_date anchors the auto-fill window: auto_mark_today deliberately
+        # backfills every missing day from max(hire_date, today - 92) so gaps
+        # earlier in the month get filled. Without it, the full 92-day window
+        # is created and the per-day assertions below stop making sense.
+        employee = Employee(name="Mona Salary", base_salary=1000, hire_date=day_one)
         session.add(employee)
         session.commit()
 
-        day_one = real_date(2026, 5, 5)
         set_today(monkeypatch, day_one)
         result = run(hr.auto_mark_today(db=db, current_user=user))
         assert result["created"] == 1

@@ -24,6 +24,20 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Idempotency guard: the app's self-healing startup guard
+    # (app_factory.ensure_carbon_methodology) creates these tables itself when
+    # this migration hasn't applied (entrypoint.sh tolerates failed upgrades).
+    # If the tables already exist, skip creation/seeding so a later successful
+    # `alembic upgrade head` doesn't crash on DuplicateTable.
+    bind = op.get_bind()
+    existing_tables = set(sa.inspect(bind).get_table_names())
+    if "carbon_emission_factors" in existing_tables:
+        print("20260510_0018_carbon_footprint: carbon tables already exist — skipping create/seed")
+        if "carbon_logs" not in existing_tables or "carbon_targets" not in existing_tables:
+            print("20260510_0018_carbon_footprint: WARNING — partial carbon schema detected; "
+                  "the startup guard will repair missing tables on next boot")
+        return
+
     # ── carbon_emission_factors ───────────────────────────────────────
     op.create_table(
         "carbon_emission_factors",

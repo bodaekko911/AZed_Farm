@@ -39,12 +39,27 @@ async def ensure_payroll_columns() -> None:
     ]
     try:
         async with AsyncSessionLocal() as db:
+            ok = 0
             for stmt in statements:
-                await db.execute(text(stmt))
-            await db.commit()
-            logger.info("ensure_payroll_columns: payroll columns ready")
+                # One statement per transaction: on Postgres, a single failed
+                # statement poisons the whole transaction (InFailedSQLTransaction)
+                # and would silently kill every statement after it.
+                try:
+                    await db.execute(text(stmt))
+                    await db.commit()
+                    ok += 1
+                except Exception:
+                    await db.rollback()
+                    logger.exception("ensure_payroll_columns: statement failed: %s", stmt)
+            if ok == len(statements):
+                logger.info("ensure_payroll_columns: payroll columns ready")
+            else:
+                logger.error(
+                    "ensure_payroll_columns: only %d/%d statements succeeded — "
+                    "payroll pages may fail; see tracebacks above", ok, len(statements)
+                )
     except Exception:
-        logger.exception("ensure_payroll_columns: failed")
+        logger.exception("ensure_payroll_columns: failed (could not open DB session)")
 
 
 async def ensure_carbon_methodology() -> None:
@@ -65,6 +80,52 @@ async def ensure_carbon_methodology() -> None:
     """
     from sqlalchemy import text
     from app.db.session import AsyncSessionLocal
+
+    # DDL to (re)create the carbon tables if alembic migration
+    # 20260510_0018_carbon_footprint never applied. entrypoint.sh tolerates a
+    # failed `alembic upgrade head`, so a stuck migration chain leaves these
+    # tables missing entirely — in which case every ALTER/INSERT below would
+    # fail with UndefinedTable. Mirrors app/models/carbon.py exactly.
+    # The 0018 migration is now idempotent, so a later successful alembic run
+    # will not collide with tables created here.
+    table_statements = [
+        """CREATE TABLE IF NOT EXISTS carbon_emission_factors (
+               id SERIAL PRIMARY KEY,
+               source_type VARCHAR(30) NOT NULL,
+               source_key VARCHAR(60) NOT NULL UNIQUE,
+               label VARCHAR(150) NOT NULL,
+               factor_kg_co2e_per_unit NUMERIC(10,4) NOT NULL,
+               unit VARCHAR(30) NOT NULL,
+               description TEXT,
+               is_active BOOLEAN NOT NULL DEFAULT TRUE,
+               created_at TIMESTAMPTZ DEFAULT now()
+           )""",
+        """CREATE TABLE IF NOT EXISTS carbon_logs (
+               id SERIAL PRIMARY KEY,
+               factor_id INTEGER NOT NULL REFERENCES carbon_emission_factors(id),
+               farm_id INTEGER REFERENCES farms(id),
+               user_id INTEGER REFERENCES users(id),
+               log_date DATE NOT NULL,
+               quantity NUMERIC(14,3) NOT NULL,
+               kg_co2e NUMERIC(14,4) NOT NULL,
+               ref_type VARCHAR(40),
+               ref_id INTEGER,
+               notes TEXT,
+               created_at TIMESTAMPTZ DEFAULT now()
+           )""",
+        "CREATE INDEX IF NOT EXISTS ix_carbon_logs_log_date ON carbon_logs (log_date)",
+        "CREATE INDEX IF NOT EXISTS ix_carbon_logs_ref ON carbon_logs (ref_type, ref_id)",
+        "CREATE INDEX IF NOT EXISTS ix_carbon_logs_farm_id ON carbon_logs (farm_id)",
+        """CREATE TABLE IF NOT EXISTS carbon_targets (
+               id SERIAL PRIMARY KEY,
+               label VARCHAR(150) NOT NULL,
+               period_start DATE NOT NULL,
+               period_end DATE NOT NULL,
+               target_kg_co2e NUMERIC(14,2) NOT NULL,
+               notes TEXT,
+               created_at TIMESTAMPTZ DEFAULT now()
+           )""",
+    ]
 
     column_statements = [
         "ALTER TABLE carbon_emission_factors ADD COLUMN IF NOT EXISTS scope INTEGER",
@@ -95,16 +156,49 @@ async def ensure_carbon_methodology() -> None:
          "Grid electricity factor — Egypt (IFI Harmonised Grid Emission Factors)", 2023, "Egypt"),
     ]
 
+    # ── Phase 0: do the carbon tables even exist? ─────────────────────────
+    try:
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(text("SELECT to_regclass('carbon_emission_factors')"))
+            table_exists = res.scalar() is not None
+            if not table_exists:
+                logger.warning(
+                    "ensure_carbon_methodology: carbon_emission_factors table is MISSING — "
+                    "alembic migration 20260510_0018 likely never applied "
+                    "(entrypoint tolerates failed upgrades). Creating carbon tables now."
+                )
+                for stmt in table_statements:
+                    try:
+                        await db.execute(text(stmt))
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        logger.exception(
+                            "ensure_carbon_methodology: table create failed: %s",
+                            stmt.split("(")[0].strip(),
+                        )
+    except Exception:
+        logger.exception("ensure_carbon_methodology: table existence check failed")
+
+    # ── Phase 1: methodology columns (one statement per transaction so a
+    #    single failure cannot poison the rest — Postgres aborts the whole
+    #    transaction on the first error otherwise) ──────────────────────────
     try:
         async with AsyncSessionLocal() as db:
             for stmt in column_statements:
-                await db.execute(text(stmt))
-            await db.commit()
+                try:
+                    await db.execute(text(stmt))
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("ensure_carbon_methodology: column add failed: %s", stmt)
     except Exception:
-        logger.exception("ensure_carbon_methodology: column add failed")
+        logger.exception("ensure_carbon_methodology: column add failed (could not open DB session)")
 
+    # ── Phase 2: seed + backfill, one factor per transaction ──────────────
     try:
         async with AsyncSessionLocal() as db:
+            failed_keys: list[str] = []
             for (stype, skey, label, factor, unit, scope, msrc, syear, region) in DEFAULT_FACTORS:
                 try:
                     await db.execute(text("""
@@ -114,7 +208,13 @@ async def ensure_carbon_methodology() -> None:
                         SELECT :stype, :skey, :label, :factor, :unit,
                                :scope, :msrc, :syear, :region, TRUE
                         WHERE NOT EXISTS (
-                            SELECT 1 FROM carbon_emission_factors WHERE source_key = :skey
+                            -- CAST is required: asyncpg deduces conflicting types
+                            -- (varchar vs text) when :skey is reused both as an
+                            -- inserted value and in a comparison, and fails with
+                            -- AmbiguousParameterError. This was the root cause of
+                            -- the silent 9/9 seed failure at startup.
+                            SELECT 1 FROM carbon_emission_factors
+                             WHERE source_key = CAST(:skey AS VARCHAR(60))
                         )
                     """), {"stype": stype, "skey": skey, "label": label, "factor": factor,
                            "unit": unit, "scope": scope, "msrc": msrc, "syear": syear, "region": region})
@@ -134,8 +234,16 @@ async def ensure_carbon_methodology() -> None:
                     # One bad row must not abort the rest — roll back just this
                     # statement's transaction and continue with the next factor.
                     await db.rollback()
+                    failed_keys.append(skey)
                     logger.exception("ensure_carbon_methodology: seed failed for key=%s", skey)
-            logger.info("ensure_carbon_methodology: carbon methodology columns and default factors ready")
+            if failed_keys:
+                logger.error(
+                    "ensure_carbon_methodology: %d/%d factor seeds FAILED (%s) — "
+                    "see tracebacks above",
+                    len(failed_keys), len(DEFAULT_FACTORS), ", ".join(failed_keys),
+                )
+            else:
+                logger.info("ensure_carbon_methodology: carbon methodology columns and default factors ready")
     except Exception:
         logger.exception("ensure_carbon_methodology: factor seed failed")
 

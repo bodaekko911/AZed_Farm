@@ -3,6 +3,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
@@ -219,14 +220,19 @@ def test_mark_payroll_paid_creates_one_salary_expense_linked_to_employee_farm():
                 current_user=user,
             )
         )
-        second = run(
-            hr.mark_paid(
-                payroll.id,
-                data=hr.PayrollPayRequest(payment_method="cash"),
-                db=db,
-                current_user=user,
+        # Paying twice is now rejected outright (partial-payment overhaul):
+        # the route raises 400 instead of returning the same expense again.
+        # Double-payment protection — exactly one salary expense — still holds.
+        with pytest.raises(HTTPException) as exc_info:
+            run(
+                hr.mark_paid(
+                    payroll.id,
+                    data=hr.PayrollPayRequest(payment_method="cash"),
+                    db=db,
+                    current_user=user,
+                )
             )
-        )
+        assert exc_info.value.status_code == 400
 
         expenses = session.execute(select(Expense).where(Expense.payroll_id == payroll.id)).scalars().all()
         category = session.execute(
@@ -239,7 +245,7 @@ def test_mark_payroll_paid_creates_one_salary_expense_linked_to_employee_farm():
         assert expenses[0].category_id == category.id
         assert expenses[0].farm_id == farm.id
         assert float(expenses[0].amount) == 1000.0
-        assert first["expense_id"] == second["expense_id"] == expenses[0].id
+        assert first["expense_id"] == expenses[0].id
         assert first["category"] == SALARY_CATEGORY_NAME
         assert first["farm_id"] == farm.id
         assert first["farm_name"] == "Main Farm"

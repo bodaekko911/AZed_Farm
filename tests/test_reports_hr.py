@@ -208,6 +208,12 @@ def test_hr_report_data_totals_groups_and_employee_rows():
         "net_salary": 5050.0,
         "paid_salary": 3150.0,
         "unpaid_salary": 1900.0,
+        # Partial-payment / days-off overhaul fields
+        "paid_cash": 3150.0,
+        "days_off_credited": 0.0,
+        "salary_settled_as_days_off": 0.0,
+        # 1 leave day taken, no monthly allowance and nothing credited → -1.0
+        "days_off_credit_balance": -1.0,
     }
 
     by_department = {row["department"]: row for row in data["by_department"]}
