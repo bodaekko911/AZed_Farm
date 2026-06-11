@@ -1009,16 +1009,30 @@ async def sustainability_report(
     }
 
     # ── Emission intensity: kg CO₂e per kg of production output ──
+    # Mass-aware: only outputs of products measured in kg/g count, with g→kg
+    # conversion (same guard as the spoilage auto-logger). Piece/bunch-based
+    # products are excluded — summing them as kilograms would silently corrupt
+    # the intensity metric.
+    from app.models.product import Product as _Product
+    from app.routers.production import _MASS_UNITS_G, _MASS_UNITS_KG
+
     output_q = await db.execute(
-        select(func.coalesce(func.sum(BatchOutput.qty), 0))
+        select(BatchOutput.qty, _Product.unit)
         .join(ProductionBatch, BatchOutput.batch_id == ProductionBatch.id)
+        .join(_Product, BatchOutput.product_id == _Product.id)
         .where(
             func.date(ProductionBatch.created_at) >= d_from,
             func.date(ProductionBatch.created_at) <= d_to,
             ProductionBatch.status == "completed",
         )
     )
-    production_output_kg = float(output_q.scalar() or 0)
+    production_output_kg = 0.0
+    for _qty, _unit in output_q.all():
+        u = (_unit or "").strip().lower()
+        if u in _MASS_UNITS_KG:
+            production_output_kg += float(_qty or 0)
+        elif u in _MASS_UNITS_G:
+            production_output_kg += float(_qty or 0) / 1000.0
     intensity = (grand_total / production_output_kg) if production_output_kg > 0 else None
 
     # ── Monthly trend ──
@@ -1195,14 +1209,16 @@ async def sustainability_report(
       <div class="kpi"><div class="lab">Total emissions</div><div class="val">{_fmt_kg(grand_total)}</div><div class="sub">kg CO₂e · {delta_text}</div></div>
       <div class="kpi"><div class="lab">Daily average</div><div class="val">{_fmt_kg(daily_average)}</div><div class="sub">kg CO₂e / day over {days_in_range} days</div></div>
       <div class="kpi"><div class="lab">Logged events</div><div class="val">{entry_count}</div><div class="sub">emission records in period</div></div>
-      <div class="kpi"><div class="lab">Production output</div><div class="val">{_fmt_kg(production_output_kg)}</div><div class="sub">kg of completed batch output</div></div>
+      <div class="kpi"><div class="lab">Production output</div><div class="val">{_fmt_kg(production_output_kg)}</div><div class="sub">kg of completed batch output (mass-based products only)</div></div>
     </div>
 
     <h2>Emission Intensity</h2>
     <div class="intensity-line">{intensity_html}</div>
-    <div class="note">Emission intensity divides total logged emissions by the total quantity of completed
-    production output recorded in AZed for the same period. It allows comparison across periods of different
-    production volume — a falling intensity means the farm produces more per unit of emissions.</div>
+    <div class="note">Emission intensity divides total logged emissions by the quantity of completed
+    production (processing) output recorded in AZed for the same period, counting only products measured
+    by mass (kg/g, grams converted to kg). It allows comparison across periods of different production
+    volume — a falling intensity means more output per unit of emissions. Fresh produce sold without
+    passing through a production batch is not included in the denominator.</div>
 
     <h2>Emissions by GHG Protocol Scope</h2>
     <table>
