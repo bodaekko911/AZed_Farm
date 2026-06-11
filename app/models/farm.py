@@ -30,6 +30,9 @@ class FarmDelivery(Base):
     received_by    = Column(String(150))
     quality_notes  = Column(Text)
     notes          = Column(Text)
+    # ── Transport (carbon footprint) ──
+    distance_km    = Column(Numeric(8, 1), nullable=True)   # one-way km farm → site
+    vehicle_type   = Column(String(20), nullable=True)       # 'van' | 'truck' → carbon factor
     created_at     = Column(DateTime(timezone=True), server_default=func.now())
 
     farm  = relationship("Farm", back_populates="deliveries")

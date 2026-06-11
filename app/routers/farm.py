@@ -15,7 +15,11 @@ from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, WeatherLog
 from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.user import User
-from app.services.farm_intake_service import create_farm_delivery
+from app.services.farm_intake_service import (
+    create_farm_delivery,
+    delete_carbon_log_for_delivery,
+    resync_carbon_log_for_delivery,
+)
 
 router = APIRouter(
     prefix="/farm",
@@ -36,6 +40,9 @@ class DeliveryCreate(BaseModel):
     received_by:   Optional[str] = None
     quality_notes: Optional[str] = None
     notes:         Optional[str] = None
+    # Transport (carbon footprint) — optional; logs Scope 1 emissions when set
+    distance_km:   Optional[float] = None
+    vehicle_type:  Optional[str]   = None   # 'van' | 'truck'
     items:         List[DeliveryItemIn]
 
 
@@ -277,6 +284,8 @@ async def get_deliveries(farm_id: int = None, skip: int = 0, limit: int = 50, db
                 "farm_id":         d.farm_id,
                 "delivery_date":   str(d.delivery_date),
                 "received_by":     d.received_by or "—",
+                "distance_km":     float(d.distance_km) if d.distance_km is not None else None,
+                "vehicle_type":    d.vehicle_type or "",
                 "quality_notes":   d.quality_notes or "",
                 "notes":           d.notes or "",
                 "created_at":      d.created_at.strftime("%Y-%m-%d %H:%M") if d.created_at else "—",
@@ -323,6 +332,8 @@ async def create_delivery(data: DeliveryCreate, db: AsyncSession = Depends(get_a
             received_by=data.received_by,
             quality_notes=data.quality_notes,
             notes=data.notes,
+            distance_km=data.distance_km,
+            vehicle_type=data.vehicle_type,
             record_stock_movement=True,
             activity_user=current_user,
         )
@@ -373,6 +384,13 @@ async def edit_delivery(delivery_id: int, data: DeliveryCreate, db: AsyncSession
     delivery.received_by   = data.received_by
     delivery.quality_notes = data.quality_notes
     delivery.notes         = data.notes
+    # Transport (carbon) — same normalisation rules as create
+    delivery.distance_km   = data.distance_km if data.distance_km and data.distance_km > 0 else None
+    delivery.vehicle_type  = (data.vehicle_type or "").strip().lower() or None
+
+    # Rebuild this delivery's transport emission log from current state so
+    # distance/vehicle/date changes never leave stale kg CO₂e behind.
+    await resync_carbon_log_for_delivery(db, delivery, current_user.id)
 
     # Apply new items
     for item in data.items:
@@ -430,6 +448,8 @@ async def delete_delivery(delivery_id: int, db: AsyncSession = Depends(get_async
     record(db, "Farm", "delete_delivery",
            f"Deleted delivery {delivery.delivery_number} — stock reversed",
            ref_type="farm_delivery", ref_id=delivery_id)
+    # Remove the auto-created transport emission log (if any)
+    await delete_carbon_log_for_delivery(db, delivery_id)
     await db.delete(delivery)
     await db.commit()
     return {"ok": True}
@@ -1035,6 +1055,17 @@ td.name{color:var(--text);font-weight:600;}
                 <label>Received By</label>
                 <input id="d-receiver" placeholder="Your name">
             </div>
+            <div class="fld">
+                <label>Transport Distance (km)</label>
+                <input id="d-distance" type="number" min="0" step="0.1" placeholder="e.g. 35 — for carbon footprint (optional)">
+            </div>
+            <div class="fld">
+                <label>Vehicle</label>
+                <select id="d-vehicle">
+                    <option value="van">Van / Pickup</option>
+                    <option value="truck">Truck</option>
+                </select>
+            </div>
             <div class="fld span2">
                 <label>Quality Notes</label>
                 <textarea id="d-quality" placeholder="e.g. Fresh, good condition. Some wilting on kale."></textarea>
@@ -1352,7 +1383,7 @@ async function loadDeliveries(){
             <td style="font-family:var(--mono);font-size:12px;color:var(--lime)">${d.delivery_number}</td>
             <td><span class="farm-badge ${farmCls}">${d.farm}</span></td>
             <td style="font-family:var(--mono);font-size:12px">${d.delivery_date}</td>
-            <td style="font-size:12px">${d.received_by}</td>
+            <td style="font-size:12px">${d.received_by}${d.distance_km ? ` <span style="font-family:var(--mono);font-size:10px;color:var(--muted)" title="Transport logged to carbon footprint">🚚 ${d.distance_km} km</span>` : ""}</td>
             <td style="font-family:var(--mono);color:var(--blue)">${d.total_items}</td>
             <td style="font-family:var(--mono);color:var(--green);font-weight:700">${d.total_qty.toFixed(1)}</td>
             <td style="font-size:12px;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.quality_notes||"—"}</td>
@@ -1435,6 +1466,8 @@ function openDeliveryModal(){
     document.getElementById("delivery-items").innerHTML = "";
     document.getElementById("d-date").value     = new Date().toISOString().split("T")[0];
     document.getElementById("d-receiver").value = "";
+    document.getElementById("d-distance").value = "";
+    document.getElementById("d-vehicle").value  = "van";
     document.getElementById("d-quality").value  = "";
     document.getElementById("d-notes").value    = "";
 
@@ -1466,6 +1499,8 @@ async function openEditDelivery(id){
     selectFarm(d.farm_id);
     document.getElementById("d-date").value     = d.delivery_date;
     document.getElementById("d-receiver").value = d.received_by === "—" ? "" : d.received_by;
+    document.getElementById("d-distance").value = d.distance_km != null ? d.distance_km : "";
+    document.getElementById("d-vehicle").value  = d.vehicle_type || "van";
     document.getElementById("d-quality").value  = d.quality_notes;
     document.getElementById("d-notes").value    = d.notes;
 
@@ -1520,6 +1555,8 @@ async function saveDelivery(){
         received_by:   document.getElementById("d-receiver").value.trim()||null,
         quality_notes: document.getElementById("d-quality").value.trim()||null,
         notes:         document.getElementById("d-notes").value.trim()||null,
+        distance_km:   parseFloat(document.getElementById("d-distance").value)||null,
+        vehicle_type:  document.getElementById("d-vehicle").value||null,
         items,
     };
 

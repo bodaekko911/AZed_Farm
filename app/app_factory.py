@@ -62,6 +62,39 @@ async def ensure_payroll_columns() -> None:
         logger.exception("ensure_payroll_columns: failed (could not open DB session)")
 
 
+async def ensure_delivery_transport_columns() -> None:
+    """Self-healing guard: transport columns on farm_deliveries used by the
+    carbon module to auto-log Scope 1 delivery transport emissions. Idempotent
+    and safe to run on every startup (mirrors migration 20260611_0036)."""
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal
+
+    statements = [
+        "ALTER TABLE farm_deliveries ADD COLUMN IF NOT EXISTS distance_km NUMERIC(8,1)",
+        "ALTER TABLE farm_deliveries ADD COLUMN IF NOT EXISTS vehicle_type VARCHAR(20)",
+    ]
+    try:
+        async with AsyncSessionLocal() as db:
+            ok = 0
+            for stmt in statements:
+                try:
+                    await db.execute(text(stmt))
+                    await db.commit()
+                    ok += 1
+                except Exception:
+                    await db.rollback()
+                    logger.exception("ensure_delivery_transport_columns: statement failed: %s", stmt)
+            if ok == len(statements):
+                logger.info("ensure_delivery_transport_columns: delivery transport columns ready")
+            else:
+                logger.error(
+                    "ensure_delivery_transport_columns: only %d/%d statements succeeded — "
+                    "delivery transport logging may fail; see tracebacks above", ok, len(statements)
+                )
+    except Exception:
+        logger.exception("ensure_delivery_transport_columns: failed (could not open DB session)")
+
+
 async def ensure_carbon_methodology() -> None:
     """Self-healing guard for the carbon module's methodology upgrade.
 
@@ -345,6 +378,7 @@ async def lifespan(_: FastAPI):
     configure_monitoring()
     await verify_migration_status()
     await ensure_payroll_columns()
+    await ensure_delivery_transport_columns()
     await ensure_carbon_methodology()
     await seed_chart_of_accounts()
     from app.core.cache import init_redis_pool, close_redis_pool

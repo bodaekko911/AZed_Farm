@@ -1267,7 +1267,9 @@ async def backfill_auto_logs(
     from app.models.expense import Expense, ExpenseCategory
     from app.models.spoilage import SpoilageRecord
     from app.models.product import Product
+    from app.models.farm import FarmDelivery
     from app.services.expense_service import _create_carbon_log_for_expense
+    from app.services.farm_intake_service import create_carbon_log_for_delivery
     from app.routers.production import _create_carbon_log_for_spoilage
 
     # ── Expenses missing a carbon log ──
@@ -1299,17 +1301,34 @@ async def backfill_auto_logs(
     for spoilage_rec, product in spoilage_rows:
         await _create_carbon_log_for_spoilage(db, spoilage_rec, product, current_user)
 
+    # ── Farm deliveries with a recorded distance but no transport log ──
+    logged_delivery_ids = select(CarbonLog.ref_id).where(CarbonLog.ref_type == "farm_delivery")
+    dl_q = await db.execute(
+        select(FarmDelivery)
+        .where(
+            FarmDelivery.distance_km.is_not(None),
+            FarmDelivery.distance_km > 0,
+            FarmDelivery.id.not_in(logged_delivery_ids),
+        )
+        .order_by(FarmDelivery.id)
+    )
+    delivery_rows = dl_q.scalars().all()
+    for delivery in delivery_rows:
+        await create_carbon_log_for_delivery(db, delivery, current_user.id)
+
     # Count what the helpers actually queued (they skip silently when the
     # factor is missing/inactive or the unit isn't mass-based).
     created = [obj for obj in db.new if isinstance(obj, CarbonLog)]
     expenses_logged = sum(1 for c in created if c.ref_type == "expense")
     spoilage_logged = sum(1 for c in created if c.ref_type == "spoilage")
+    deliveries_logged = sum(1 for c in created if c.ref_type == "farm_delivery")
 
     if dry_run:
         await db.rollback()
     else:
         record(db, "Carbon", "backfill_auto_logs",
-               f"Backfilled carbon logs — {expenses_logged} from expenses, {spoilage_logged} from spoilage",
+               f"Backfilled carbon logs — {expenses_logged} from expenses, "
+               f"{spoilage_logged} from spoilage, {deliveries_logged} from deliveries",
                user=current_user)
         await db.commit()
 
@@ -1319,7 +1338,11 @@ async def backfill_auto_logs(
         "expenses_logged": expenses_logged,
         "spoilage_scanned": len(spoilage_rows),
         "spoilage_logged": spoilage_logged,
-        "skipped": (len(expense_rows) - expenses_logged) + (len(spoilage_rows) - spoilage_logged),
+        "deliveries_scanned": len(delivery_rows),
+        "deliveries_logged": deliveries_logged,
+        "skipped": (len(expense_rows) - expenses_logged)
+                 + (len(spoilage_rows) - spoilage_logged)
+                 + (len(delivery_rows) - deliveries_logged),
     }
 
 
@@ -1600,48 +1623,50 @@ async def api_delete_target(
 async def api_auto_log_farm_delivery(
     delivery_id: int,
     distance_km: float,
-    vehicle_type: str = "truck",    # truck | van | refrigerated_truck
+    vehicle_type: str = "truck",    # truck | van
     db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Auto-generate a transport CarbonLog from a farm delivery.
-    Pass the one-way distance in km and the vehicle type.
-    The system uses the correct emission factor and logs the result.
+    Set transport details on a farm delivery and (re)generate its CarbonLog.
+    Persists distance/vehicle onto the delivery itself and rebuilds the log,
+    so calling this twice updates the emissions instead of duplicating them.
+    The Farm Intake form is the primary path; this endpoint covers deliveries
+    recorded before transport tracking existed.
     """
+    from app.services.farm_intake_service import (
+        VEHICLE_FACTOR_KEYS,
+        resync_carbon_log_for_delivery,
+    )
+
     if distance_km <= 0:
         raise HTTPException(400, "Distance must be greater than zero")
+    vt = (vehicle_type or "").strip().lower()
+    if vt not in VEHICLE_FACTOR_KEYS:
+        raise HTTPException(400, f"Unknown vehicle type '{vehicle_type}' — use one of: {', '.join(VEHICLE_FACTOR_KEYS)}")
 
     delivery = await db.get(FarmDelivery, delivery_id)
     if not delivery:
         raise HTTPException(404, "Farm delivery not found")
 
-    source_key = f"{vehicle_type}_km"
-    factor_q = await db.execute(
-        select(CarbonEmissionFactor).where(
-            CarbonEmissionFactor.source_key == source_key,
-            CarbonEmissionFactor.is_active == True,
+    delivery.distance_km = distance_km
+    delivery.vehicle_type = vt
+    await resync_carbon_log_for_delivery(db, delivery, current_user.id)
+
+    log_q = await db.execute(
+        select(CarbonLog).where(
+            CarbonLog.ref_type == "farm_delivery",
+            CarbonLog.ref_id == delivery_id,
         )
     )
-    factor = factor_q.scalar_one_or_none()
-    if not factor:
-        raise HTTPException(404, f"No active emission factor found for vehicle type '{vehicle_type}'")
+    lg = log_q.scalars().first()
+    if not lg:
+        raise HTTPException(404, f"No active emission factor found for vehicle type '{vt}'")
 
-    kg = float(factor.factor_kg_co2e_per_unit) * distance_km
-    lg = CarbonLog(
-        factor_id=factor.id,
-        farm_id=delivery.farm_id,
-        user_id=current_user.id,
-        log_date=delivery.delivery_date,
-        quantity=distance_km,
-        kg_co2e=round(kg, 4),
-        ref_type="farm_delivery",
-        ref_id=delivery_id,
-        notes=f"Auto-logged from delivery {delivery.delivery_number}",
-    )
-    db.add(lg)
+    record(db, "Carbon", "auto_log_farm_delivery",
+           f"Logged transport for delivery {delivery.delivery_number}: "
+           f"{distance_km:g} km by {vt} = {float(lg.kg_co2e):.4f} kg CO₂e",
+           user=current_user, ref_type="farm_delivery", ref_id=delivery_id)
     await db.commit()
     await db.refresh(lg)
-    record(db, "Carbon", "auto_log_farm_delivery", f"Auto-logged delivery {delivery.delivery_number}: {kg:.4f} kg CO₂e", user=current_user, ref_type="carbon_log", ref_id=lg.id)
-    await db.commit()
-    return {"id": lg.id, "kg_co2e": _as_float(lg.kg_co2e), "factor_used": factor.label}
+    return {"id": lg.id, "kg_co2e": _as_float(lg.kg_co2e), "delivery_number": delivery.delivery_number}

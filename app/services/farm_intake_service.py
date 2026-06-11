@@ -7,9 +7,88 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.log import record
+from app.models.carbon import CarbonEmissionFactor, CarbonLog
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.inventory import StockMove
 from app.models.product import Product
+
+# vehicle_type → carbon factor source_key (per-km, Scope 1)
+VEHICLE_FACTOR_KEYS = {"van": "van_km", "truck": "truck_km"}
+
+
+async def create_carbon_log_for_delivery(
+    db: AsyncSession,
+    delivery: FarmDelivery,
+    user_id: int | None = None,
+) -> bool:
+    """Auto-create a transport CarbonLog for a farm delivery.
+
+    Uses the delivery's vehicle_type to pick the per-km factor (van_km /
+    truck_km) and distance_km as the quantity. Skips silently when distance
+    is missing/zero or the factor is missing/inactive — same contract as the
+    expense and spoilage auto-loggers. Returns True if a log was queued.
+    """
+    from decimal import Decimal
+
+    distance = float(delivery.distance_km or 0)
+    if distance <= 0:
+        return False
+    key = VEHICLE_FACTOR_KEYS.get((delivery.vehicle_type or "").strip().lower(), "van_km")
+    result = await db.execute(
+        select(CarbonEmissionFactor).where(
+            CarbonEmissionFactor.source_key == key,
+            CarbonEmissionFactor.is_active == True,
+        )
+    )
+    factor = result.scalar_one_or_none()
+    if not factor:
+        return False
+    qty = Decimal(str(distance))
+    kg_co2e = (qty * factor.factor_kg_co2e_per_unit).quantize(Decimal("0.0001"))
+    db.add(CarbonLog(
+        factor_id=factor.id,
+        farm_id=delivery.farm_id,
+        user_id=user_id if user_id is not None else delivery.user_id,
+        log_date=delivery.delivery_date,
+        quantity=qty,
+        kg_co2e=kg_co2e,
+        ref_type="farm_delivery",
+        ref_id=delivery.id,
+        notes=f"Auto-logged from delivery {delivery.delivery_number} "
+              f"({delivery.vehicle_type or 'van'}, {distance:g} km)",
+    ))
+    return True
+
+
+async def resync_carbon_log_for_delivery(
+    db: AsyncSession,
+    delivery: FarmDelivery,
+    user_id: int | None = None,
+) -> None:
+    """Delete this delivery's transport logs and recreate from current state.
+    Used on delivery edit so distance/vehicle/date changes never leave stale
+    emissions behind."""
+    old_logs = await db.execute(
+        select(CarbonLog).where(
+            CarbonLog.ref_type == "farm_delivery",
+            CarbonLog.ref_id == delivery.id,
+        )
+    )
+    for _cl in old_logs.scalars().all():
+        await db.delete(_cl)
+    await create_carbon_log_for_delivery(db, delivery, user_id)
+
+
+async def delete_carbon_log_for_delivery(db: AsyncSession, delivery_id: int) -> None:
+    """Remove the auto-created transport logs when a delivery is deleted."""
+    old_logs = await db.execute(
+        select(CarbonLog).where(
+            CarbonLog.ref_type == "farm_delivery",
+            CarbonLog.ref_id == delivery_id,
+        )
+    )
+    for _cl in old_logs.scalars().all():
+        await db.delete(_cl)
 
 
 async def create_farm_delivery(
@@ -22,6 +101,8 @@ async def create_farm_delivery(
     received_by: str | None = None,
     quality_notes: str | None = None,
     notes: str | None = None,
+    distance_km: float | None = None,
+    vehicle_type: str | None = None,
     record_stock_movement: bool = True,
     activity_user=None,
 ) -> tuple[FarmDelivery, int]:
@@ -40,9 +121,14 @@ async def create_farm_delivery(
         received_by=received_by,
         quality_notes=quality_notes,
         notes=notes,
+        distance_km=distance_km if distance_km and distance_km > 0 else None,
+        vehicle_type=(vehicle_type or "").strip().lower() or None,
     )
     db.add(delivery)
     await db.flush()
+
+    # Transport emissions (carbon module) — skips silently when no distance.
+    await create_carbon_log_for_delivery(db, delivery, user_id)
 
     stock_moves_created = 0
     for item in items:
