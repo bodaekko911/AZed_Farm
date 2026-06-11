@@ -910,7 +910,10 @@ async def factors_page(
       <h1 class="page-title">Emission Factors</h1>
       <p class="page-subtitle">CO₂e coefficients used to calculate emissions</p>
     </div>
-    <a href="/carbon/" class="btn btn-secondary">← Back</a>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-secondary" id="backfill-btn" onclick="backfillAutoLogs()">↻ Backfill from history</button>
+      <a href="/carbon/" class="btn btn-secondary">← Back</a>
+    </div>
   </div>
   <div class="table-wrap">
     <table class="data-table">
@@ -921,6 +924,38 @@ async def factors_page(
     </table>
   </div>
 </main>
+<script>
+async function backfillAutoLogs(){{
+    const btn = document.getElementById("backfill-btn");
+    btn.disabled = true;
+    try {{
+        // 1. Dry run — find out what would be created
+        let res = await fetch("/carbon/api/backfill-auto-logs?dry_run=true", {{method:"POST"}});
+        let d = await res.json();
+        if (d.detail) {{ alert(d.detail); return; }}
+        const total = (d.expenses_logged || 0) + (d.spoilage_logged || 0);
+        if (total === 0) {{
+            alert("Nothing to backfill — all mapped historical records already have carbon logs."
+                + (d.skipped ? " (" + d.skipped + " records skipped: no matching active factor or non-mass unit.)" : ""));
+            return;
+        }}
+        // 2. Confirm with real counts, then run for real
+        if (!confirm("This will create " + d.expenses_logged + " carbon log(s) from past expenses and "
+                   + d.spoilage_logged + " from past spoilage records."
+                   + (d.skipped ? " " + d.skipped + " record(s) will be skipped." : "")
+                   + " Existing logs are never modified. Proceed?")) return;
+        res = await fetch("/carbon/api/backfill-auto-logs?dry_run=false", {{method:"POST"}});
+        d = await res.json();
+        if (d.detail) {{ alert(d.detail); return; }}
+        alert("Done — created " + ((d.expenses_logged||0) + (d.spoilage_logged||0)) + " carbon log(s).");
+        window.location.href = "/carbon/";
+    }} catch(e) {{
+        alert("Backfill failed — check the server logs.");
+    }} finally {{
+        btn.disabled = false;
+    }}
+}}
+</script>
 </body>
 </html>"""
     return HTMLResponse(html)
@@ -1211,6 +1246,81 @@ async def sustainability_report(
 </body>
 </html>"""
     return HTMLResponse(html)
+
+
+# ── API: Backfill auto-logs from history ────────────────────────────────────
+
+@router.post("/api/backfill-auto-logs", dependencies=[Depends(require_permission("action_carbon_factors"))])
+async def backfill_auto_logs(
+    dry_run: bool = True,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Create carbon logs for historical records that predate their factor
+    mapping: expenses whose category now has a carbon_factor_key, and
+    spoilage records (organic waste).
+
+    Only creates logs that are MISSING — records that already have a carbon
+    log are never touched, and existing logs are never recalculated, so the
+    reported history stays stable. Run with dry_run=true first to see counts.
+    """
+    from app.models.expense import Expense, ExpenseCategory
+    from app.models.spoilage import SpoilageRecord
+    from app.models.product import Product
+    from app.routers.expenses import _create_carbon_log_for_expense
+    from app.routers.production import _create_carbon_log_for_spoilage
+
+    # ── Expenses missing a carbon log ──
+    logged_expense_ids = select(CarbonLog.ref_id).where(CarbonLog.ref_type == "expense")
+    exp_q = await db.execute(
+        select(Expense, ExpenseCategory)
+        .join(ExpenseCategory, Expense.category_id == ExpenseCategory.id)
+        .where(
+            ExpenseCategory.carbon_factor_key.is_not(None),
+            Expense.consumption.is_not(None),
+            Expense.consumption > 0,
+            Expense.id.not_in(logged_expense_ids),
+        )
+        .order_by(Expense.id)
+    )
+    expense_rows = exp_q.all()
+    for expense, cat in expense_rows:
+        await _create_carbon_log_for_expense(db, expense, cat, float(expense.consumption), current_user)
+
+    # ── Spoilage records missing a carbon log ──
+    logged_spoilage_ids = select(CarbonLog.ref_id).where(CarbonLog.ref_type == "spoilage")
+    sp_q = await db.execute(
+        select(SpoilageRecord, Product)
+        .join(Product, SpoilageRecord.product_id == Product.id)
+        .where(SpoilageRecord.id.not_in(logged_spoilage_ids))
+        .order_by(SpoilageRecord.id)
+    )
+    spoilage_rows = sp_q.all()
+    for spoilage_rec, product in spoilage_rows:
+        await _create_carbon_log_for_spoilage(db, spoilage_rec, product, current_user)
+
+    # Count what the helpers actually queued (they skip silently when the
+    # factor is missing/inactive or the unit isn't mass-based).
+    created = [obj for obj in db.new if isinstance(obj, CarbonLog)]
+    expenses_logged = sum(1 for c in created if c.ref_type == "expense")
+    spoilage_logged = sum(1 for c in created if c.ref_type == "spoilage")
+
+    if dry_run:
+        await db.rollback()
+    else:
+        record(db, "Carbon", "backfill_auto_logs",
+               f"Backfilled carbon logs — {expenses_logged} from expenses, {spoilage_logged} from spoilage",
+               user=current_user)
+        await db.commit()
+
+    return {
+        "dry_run": dry_run,
+        "expenses_scanned": len(expense_rows),
+        "expenses_logged": expenses_logged,
+        "spoilage_scanned": len(spoilage_rows),
+        "spoilage_logged": spoilage_logged,
+        "skipped": (len(expense_rows) - expenses_logged) + (len(spoilage_rows) - spoilage_logged),
+    }
 
 
 # ── API: Summary ──────────────────────────────────────────────────────────────
