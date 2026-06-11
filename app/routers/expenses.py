@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.log import record
@@ -539,7 +540,11 @@ async def edit_expense(
     db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
-    _r = await db.execute(select(Expense).where(Expense.id == expense_id))
+    _r = await db.execute(
+        select(Expense)
+        .options(selectinload(Expense.category))
+        .where(Expense.id == expense_id)
+    )
     expense = _r.scalar_one_or_none()
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found")
@@ -592,6 +597,32 @@ async def edit_expense(
     # Post new journal
     _rcat = await db.execute(select(ExpenseCategory).where(ExpenseCategory.id == expense.category_id))
     cat = _rcat.scalar_one_or_none()
+
+    # Recompute unit price / consumption with the same precedence as add_expense:
+    # explicit value > category default > derived from amount.
+    unit_price_used = None
+    consumption = None
+    if data.unit_price_used is not None and data.unit_price_used > 0:
+        unit_price_used = round(float(data.unit_price_used), 4)
+    elif cat and cat.unit_price is not None and float(cat.unit_price) > 0:
+        unit_price_used = float(cat.unit_price)
+    if data.consumption is not None and data.consumption > 0:
+        consumption = round(float(data.consumption), 4)
+    elif unit_price_used and unit_price_used > 0:
+        consumption = round(float(expense.amount) / unit_price_used, 4)
+    expense.unit_price_used = unit_price_used
+    expense.consumption = consumption
+
+    # Resync the auto-created carbon log: drop the old one(s), recreate from
+    # the edited values (same behavior as creation).
+    _old_logs = await db.execute(
+        select(CarbonLog).where(CarbonLog.ref_type == "expense", CarbonLog.ref_id == expense.id)
+    )
+    for _cl in _old_logs.scalars().all():
+        await db.delete(_cl)
+    if cat and consumption and cat.carbon_factor_key:
+        await _create_carbon_log_for_expense(db, expense, cat, consumption, current_user)
+
     journal = await _post_expense_journal(
         db=db,
         description=f"{cat.name} expense (edited) — {expense.ref_number}",
@@ -615,13 +646,23 @@ async def delete_expense(
     db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),
 ):
-    _r = await db.execute(select(Expense).where(Expense.id == expense_id))
+    _r = await db.execute(
+        select(Expense)
+        .options(selectinload(Expense.category))
+        .where(Expense.id == expense_id)
+    )
     expense = _r.scalar_one_or_none()
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found")
 
     ref = expense.ref_number
     await _reverse_expense_journal(db, expense)
+    # Remove the auto-created carbon log (if any) so emissions stay consistent
+    _old_logs = await db.execute(
+        select(CarbonLog).where(CarbonLog.ref_type == "expense", CarbonLog.ref_id == expense.id)
+    )
+    for _cl in _old_logs.scalars().all():
+        await db.delete(_cl)
     await db.delete(expense)
     record(db, "Expenses", "delete_expense",
            f"Deleted {ref} — journal reversed",
