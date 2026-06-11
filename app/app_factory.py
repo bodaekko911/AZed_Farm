@@ -100,35 +100,44 @@ async def ensure_carbon_methodology() -> None:
             for stmt in column_statements:
                 await db.execute(text(stmt))
             await db.commit()
+    except Exception:
+        logger.exception("ensure_carbon_methodology: column add failed")
 
+    try:
+        async with AsyncSessionLocal() as db:
             for (stype, skey, label, factor, unit, scope, msrc, syear, region) in DEFAULT_FACTORS:
-                await db.execute(text("""
-                    INSERT INTO carbon_emission_factors
-                        (source_type, source_key, label, factor_kg_co2e_per_unit, unit,
-                         scope, methodology_source, source_year, region, is_active)
-                    SELECT :stype, :skey, :label, :factor, :unit,
-                           :scope, :msrc, :syear, :region, TRUE
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM carbon_emission_factors WHERE source_key = :skey
-                    )
-                """), {"stype": stype, "skey": skey, "label": label, "factor": factor,
-                       "unit": unit, "scope": scope, "msrc": msrc, "syear": syear, "region": region})
+                try:
+                    await db.execute(text("""
+                        INSERT INTO carbon_emission_factors
+                            (source_type, source_key, label, factor_kg_co2e_per_unit, unit,
+                             scope, methodology_source, source_year, region, is_active)
+                        SELECT :stype, :skey, :label, :factor, :unit,
+                               :scope, :msrc, :syear, :region, TRUE
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM carbon_emission_factors WHERE source_key = :skey
+                        )
+                    """), {"stype": stype, "skey": skey, "label": label, "factor": factor,
+                           "unit": unit, "scope": scope, "msrc": msrc, "syear": syear, "region": region})
 
-                # Backfill methodology on pre-existing rows with the same key
-                # (never touches factor values or labels the user may have edited).
-                await db.execute(text("""
-                    UPDATE carbon_emission_factors
-                       SET scope = COALESCE(scope, :scope),
-                           methodology_source = COALESCE(methodology_source, :msrc),
-                           source_year = COALESCE(source_year, :syear),
-                           region = COALESCE(region, :region)
-                     WHERE source_key = :skey
-                """), {"skey": skey, "scope": scope, "msrc": msrc, "syear": syear, "region": region})
-
-            await db.commit()
+                    # Backfill methodology on pre-existing rows with the same key
+                    # (never touches factor values or labels the user may have edited).
+                    await db.execute(text("""
+                        UPDATE carbon_emission_factors
+                           SET scope = COALESCE(scope, :scope),
+                               methodology_source = COALESCE(methodology_source, :msrc),
+                               source_year = COALESCE(source_year, :syear),
+                               region = COALESCE(region, :region)
+                         WHERE source_key = :skey
+                    """), {"skey": skey, "scope": scope, "msrc": msrc, "syear": syear, "region": region})
+                    await db.commit()
+                except Exception:
+                    # One bad row must not abort the rest — roll back just this
+                    # statement's transaction and continue with the next factor.
+                    await db.rollback()
+                    logger.exception("ensure_carbon_methodology: seed failed for key=%s", skey)
             logger.info("ensure_carbon_methodology: carbon methodology columns and default factors ready")
     except Exception:
-        logger.exception("ensure_carbon_methodology: failed")
+        logger.exception("ensure_carbon_methodology: factor seed failed")
 
 
 async def seed_chart_of_accounts() -> None:
