@@ -757,7 +757,7 @@ td.name{color:var(--text);font-weight:600;}
                     <th>Latest stage</th>
                     <th>Original input</th>
                     <th>Latest output</th>
-                    <th>Final yield %</th>
+                    <th>Total loss %</th>
                     <th>Spoilage</th>
                     <th></th>
                 </tr></thead>
@@ -2021,9 +2021,10 @@ function openDryingDetailsModal(batchId){
 
     // Summary stats
     const finalYield = b.final_yield_pct;
+    const totalLoss = (finalYield != null) ? (100 - Number(finalYield)) : null;
     body += `<div style="margin:4px 0 16px">`;
     body += `<span class="dry-det-stat">Stages: <b>${stages.length}</b></span>`;
-    if(finalYield != null) body += `<span class="dry-det-stat">Final yield: <b>${Number(finalYield).toFixed(1)}%</b></span>`;
+    if(totalLoss != null) body += `<span class="dry-det-stat">Total loss: <b>${totalLoss.toFixed(1)}%</b></span>`;
     if(b.spoilage_count)   body += `<span class="dry-det-stat">Spoilage events: <b>${b.spoilage_count}</b></span>`;
     body += `</div>`;
 
@@ -2043,13 +2044,17 @@ function openDryingDetailsModal(batchId){
             if(s.total_input_qty  != null) stageStats.push(`in ${Number(s.total_input_qty).toFixed(2)}`);
             if(s.total_output_qty != null) stageStats.push(`out ${Number(s.total_output_qty).toFixed(2)}`);
             if(s.stage_loss_pct   != null) stageStats.push(`loss ${Number(s.stage_loss_pct).toFixed(1)}%`);
-            if(s.cumulative_yield_pct != null) stageStats.push(`cum. yield ${Number(s.cumulative_yield_pct).toFixed(1)}%`);
+
+            const lossBadge = (s.stage_loss_pct != null)
+                ? `<span style="font-family:var(--mono);font-size:12px;font-weight:700;color:${Number(s.stage_loss_pct) > 60 ? 'var(--danger)' : (Number(s.stage_loss_pct) > 40 ? 'var(--warn)' : 'var(--green)')}">−${Number(s.stage_loss_pct).toFixed(1)}% loss</span>`
+                : (s.is_open ? `<span class="dsc-meta">open</span>` : "");
 
             body += `<div class="dry-stage-card">
                 <div class="dsc-head">
                     <span class="dsc-title">${escapeHtml(label)}</span>
                     <span class="dsc-meta">${escapeHtml(meta.join(" · "))}</span>
                 </div>
+                ${lossBadge ? `<div style="margin-bottom:8px">${lossBadge}</div>` : ""}
                 ${stageStats.length ? `<div class="dsc-meta" style="margin-bottom:8px">${escapeHtml(stageStats.join("  ·  "))}</div>` : ""}
                 <div class="dry-io">
                     <div class="dio-col">
@@ -2107,8 +2112,10 @@ function renderDryingTable(){
         const latestStage = stages[stages.length - 1];
         const isInProgress = b.status === "in_progress";
         const finalYield = b.final_yield_pct;
-        const yieldDisplay = (finalYield !== null && finalYield !== undefined) ? `${Number(finalYield).toFixed(1)}%` : "-";
-        const yieldColor = (finalYield && finalYield < 15) ? "var(--danger)" : (finalYield && finalYield < 30) ? "var(--warn)" : (finalYield ? "var(--green)" : "var(--muted)");
+        // Total loss across the whole process = 100% − final cumulative yield.
+        const totalLoss = (finalYield !== null && finalYield !== undefined) ? (100 - Number(finalYield)) : null;
+        const lossDisplay = (totalLoss !== null) ? `${totalLoss.toFixed(1)}%` : "-";
+        const lossColor = (totalLoss === null) ? "var(--muted)" : (totalLoss > 85 ? "var(--danger)" : (totalLoss > 70 ? "var(--warn)" : "var(--green)"));
 
         const origInputSummary = stage1 ? (stage1.inputs || []).slice(0,2).map(i => `${(i.qty||0).toFixed(2)}${i.unit||""} ${(i.product_name||"").split(" ")[0]}`).join(", ") : "-";
         const latestOutputSummary = latestStage && latestStage.outputs && latestStage.outputs.length ?
@@ -2138,7 +2145,7 @@ function renderDryingTable(){
             <td style="font-size:12px;color:var(--sub)">${escapeHtml(b.current_stage_label || (latestStage && latestStage.label ? latestStage.label : "—"))}</td>
             <td style="font-size:12px;color:var(--sub);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(origInputSummary)}</td>
             <td style="font-size:12px;color:var(--green);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(latestOutputSummary)}</td>
-            <td style="font-family:var(--mono);color:${yieldColor}">${yieldDisplay}</td>
+            <td style="font-family:var(--mono);color:${lossColor}">${lossDisplay}</td>
             <td style="font-size:12px;color:${b.spoilage_count?'var(--danger)':'var(--muted)'}">${b.spoilage_count || '-'}</td>
             <td><div style="display:flex;gap:6px;flex-wrap:wrap">${actions.join("")}</div></td>
         </tr>`;
