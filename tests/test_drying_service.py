@@ -688,3 +688,72 @@ def test_log_spoilage_rejects_on_completed_batch():
 
     assert exc.value.status_code == 400
     assert "not in progress" in exc.value.detail.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: edit_finalized_batch
+# ---------------------------------------------------------------------------
+
+def _import_edit():
+    from app.services.drying_service import edit_finalized_batch
+    from app.schemas.drying import DryingBatchEditRequest
+    return edit_finalized_batch, DryingBatchEditRequest
+
+
+def test_edit_finalized_recomputes_stock_and_loss():
+    """Editing a completed batch's output must clawback the old output,
+    credit the new one, leave inputs untouched, and recompute loss."""
+    edit_finalized_batch, DryingBatchEditRequest = _import_edit()
+    user = _user()
+
+    inp = _stage_input(id=100, stage_id=10, product_id=1, qty=10.0, unit="kg")
+    old_out = _stage_output(id=200, stage_id=10, product_id=2, qty=1.5, unit="kg")
+    stage = _closed_stage(id=10, inputs=[inp], outputs=[old_out])
+    batch = _batch_completed(stages=[stage])
+
+    dried = SimpleNamespace(id=2, name="Dried", unit="kg", stock=1.5)  # current stock after finalize
+
+    session = FakeDryingSession(responses=[
+        batch,    # _load_batch_or_404(with_stages=True)
+        dried,    # clawback: _load_product_or_404(old output product)
+        dried,    # credit: _load_product_or_404(new output product)
+    ])
+
+    req = DryingBatchEditRequest(stage_outputs=[{"stage_id": 10, "outputs": [{"product_id": 2, "qty": 2.0}]}], reason="recount")
+    asyncio.run(edit_finalized_batch(session, 1, req, user))
+
+    # stock: 1.5 - 1.5 (clawback) + 2.0 (credit) = 2.0
+    assert dried.stock == 2.0
+    # input product stock never touched (not even loaded)
+    assert inp.product.stock == 100.0
+    # loss recomputed: (1 - 2/10)*100 = 80
+    assert abs(stage.stage_loss_pct - 80.0) < 0.01
+    assert stage.total_output_qty == 2.0
+    assert session.committed
+    # a clawback (out) and a corrected credit (in) move were recorded
+    moves = [o for o in session.added if isinstance(o, StockMove)]
+    assert any(m.type == "out" and float(m.qty) == 1.5 for m in moves)
+    assert any(m.type == "in" and float(m.qty) == 2.0 for m in moves)
+
+
+def test_edit_rejects_non_completed_batch():
+    edit_finalized_batch, DryingBatchEditRequest = _import_edit()
+    from fastapi import HTTPException
+    batch = _batch_in_progress(stages=[_open_stage(id=10)])
+    session = FakeDryingSession(responses=[batch])
+    req = DryingBatchEditRequest(stage_outputs=[{"stage_id": 10, "outputs": [{"product_id": 2, "qty": 1.0}]}])
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(edit_finalized_batch(session, 1, req, _user()))
+    assert ei.value.status_code == 400
+
+
+def test_edit_rejects_unknown_stage():
+    edit_finalized_batch, DryingBatchEditRequest = _import_edit()
+    from fastapi import HTTPException
+    stage = _closed_stage(id=10, inputs=[_stage_input()], outputs=[_stage_output()])
+    batch = _batch_completed(stages=[stage])
+    session = FakeDryingSession(responses=[batch])
+    req = DryingBatchEditRequest(stage_outputs=[{"stage_id": 999, "outputs": [{"product_id": 2, "qty": 1.0}]}])
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(edit_finalized_batch(session, 1, req, _user()))
+    assert ei.value.status_code == 404

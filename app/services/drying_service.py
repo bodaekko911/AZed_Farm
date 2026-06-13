@@ -516,6 +516,129 @@ async def cancel_batch(
     return batch
 
 
+async def edit_finalized_batch(
+    db: AsyncSession,
+    batch_id: int,
+    data,  # DryingBatchEditRequest
+    current_user,
+) -> DryingBatch:
+    """Correct the outputs of one or more stages on a COMPLETED batch.
+
+    For each edited stage:
+      1. Clawback the stage's existing outputs from stock (reverse the credit).
+      2. Delete the old output rows.
+      3. Write the corrected outputs and credit stock for them.
+      4. Recompute the stage's metrics (total_output_qty, loss %, cumulative
+         yield) from its unchanged inputs and the new outputs.
+
+    Inputs are intentionally immutable here: editing an input would cascade
+    stock and yield through every later stage, which is not what a correction
+    is for. To change inputs, cancel and re-create the batch.
+    """
+    batch = await _load_batch_or_404(db, batch_id, with_stages=True)
+
+    if batch.status != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail="Only completed batches can be edited here. In-progress batches "
+                   "use the stage / finalize actions; cancelled batches cannot be edited.",
+        )
+
+    stages_by_id = {s.id: s for s in batch.stages}
+    stage_1_inputs = batch.stages[0].inputs if batch.stages else []
+    edited_labels = []
+
+    for entry in data.stage_outputs:
+        stage = stages_by_id.get(entry.stage_id)
+        if stage is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Stage {entry.stage_id} does not belong to batch {batch.batch_number}",
+            )
+        if stage.total_output_qty is None:
+            # A completed batch should have no open stage, but guard anyway.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Stage {stage.stage_number} is still open and cannot be edited.",
+            )
+
+        # 1+2. Clawback and remove the existing outputs.
+        for out in list(stage.outputs):
+            product = await _load_product_or_404(db, out.product_id)
+            before = float(product.stock)
+            product.stock = before - float(out.qty)
+            after = float(product.stock)
+            db.add(StockMove(
+                product_id=product.id,
+                type="out",
+                user_id=current_user.id,
+                qty=float(out.qty),
+                qty_before=before,
+                qty_after=after,
+                ref_type="drying_batch",
+                ref_id=batch.id,
+                note=f"Edit clawback: {batch.batch_number} stage {stage.stage_number} old output",
+            ))
+            await db.delete(out)
+        await db.flush()
+
+        # 3. Write the corrected outputs and credit stock.
+        new_output_objs = []
+        for item in entry.outputs:
+            product = await _load_product_or_404(db, item.product_id)
+            before = float(product.stock)
+            product.stock = before + float(item.qty)
+            after = float(product.stock)
+            new_out = DryingBatchStageOutput(
+                stage_id=stage.id,
+                product_id=product.id,
+                qty=item.qty,
+            )
+            new_out.product = product  # attach for in-memory metrics
+            db.add(new_out)
+            new_output_objs.append(new_out)
+            db.add(StockMove(
+                product_id=product.id,
+                type="in",
+                user_id=current_user.id,
+                qty=float(item.qty),
+                qty_before=before,
+                qty_after=after,
+                ref_type="drying_batch",
+                ref_id=batch.id,
+                note=f"Edit: {batch.batch_number} stage {stage.stage_number} corrected output",
+            ))
+        await db.flush()
+
+        # 4. Recompute this stage's metrics from its (unchanged) inputs.
+        metrics = _compute_stage_metrics(stage.inputs, new_output_objs, stage_1_inputs)
+        stage.total_input_qty      = metrics["total_input_qty"]
+        stage.total_output_qty     = (
+            metrics["total_output_qty"]
+            if metrics["total_output_qty"] is not None
+            else sum(float(i.qty) for i in entry.outputs)
+        )
+        stage.stage_loss_pct       = metrics["stage_loss_pct"]
+        stage.cumulative_yield_pct = metrics["cumulative_yield_pct"]
+        edited_labels.append(stage.label or f"Stage {stage.stage_number}")
+
+    reason_suffix = f" — {data.reason}" if getattr(data, "reason", None) else ""
+    batch.notes = f"{batch.notes or ''}\n\n[edited] outputs corrected for: {', '.join(edited_labels)}{reason_suffix}".strip()
+
+    record(
+        db,
+        "Drying",
+        "edit_batch",
+        f"Batch {batch.batch_number} edited (finalized) — stages: {', '.join(edited_labels)}{reason_suffix}",
+        user=current_user,
+        ref_type="drying_batch",
+        ref_id=batch.id,
+    )
+
+    await db.commit()
+    return batch
+
+
 async def log_spoilage(
     db: AsyncSession,
     batch_id: int,

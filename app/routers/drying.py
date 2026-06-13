@@ -11,6 +11,7 @@ from app.schemas.drying import (
     DryingBatchFinalizeRequest,
     DryingBatchSpoilageCreate,
     DryingBatchCancelRequest,
+    DryingBatchEditRequest,
 )
 from app.services import drying_service
 
@@ -177,6 +178,19 @@ async def cancel_drying_batch(
     current_user: User = Depends(get_current_user),
 ):
     batch = await drying_service.cancel_batch(db, batch_id, data, current_user)
+    batch = await drying_service.get_batch(db, batch.id)
+    return _serialize_batch(batch)
+
+
+@router.post("/api/batches/{batch_id}/edit",
+             dependencies=[Depends(require_permission("action_drying_edit_batch"))])
+async def edit_drying_batch(
+    batch_id: int,
+    data: DryingBatchEditRequest,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    batch = await drying_service.edit_finalized_batch(db, batch_id, data, current_user)
     batch = await drying_service.get_batch(db, batch.id)
     return _serialize_batch(batch)
 

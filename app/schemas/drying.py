@@ -38,3 +38,21 @@ class DryingBatchSpoilageCreate(BaseModel):
 
 class DryingBatchCancelRequest(BaseModel):
     reason: Optional[str] = Field(None, max_length=500)
+
+
+class DryingBatchEditStageOutputs(BaseModel):
+    """Corrected outputs for one stage of a finalized batch."""
+    stage_id: int
+    outputs:  List[_StageItem] = Field(..., min_length=1)
+
+
+class DryingBatchEditRequest(BaseModel):
+    """Edit a finalized (completed) drying batch.
+
+    Only stage OUTPUTS can be corrected — inputs are immutable post-finalization
+    because changing an input would cascade stock through every later stage.
+    Each entry replaces that stage's outputs wholesale; stock and loss metrics
+    are re-derived. Stages not listed are left untouched.
+    """
+    stage_outputs: List[DryingBatchEditStageOutputs] = Field(..., min_length=1)
+    reason:        Optional[str] = Field(None, max_length=500)

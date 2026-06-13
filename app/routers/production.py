@@ -1010,6 +1010,20 @@ td.name{color:var(--text);font-weight:600;}
     </div>
 </div>
 
+<!-- DRYING EDIT (finalized) MODAL -->
+<div class="modal-bg" id="drying-edit-modal">
+    <div class="modal" style="width:640px;max-width:94vw">
+        <div class="modal-title">Edit Finalized Batch</div>
+        <div class="modal-sub" id="dry-edit-sub">Correct the recorded outputs of a completed batch. Stock and loss are recalculated. Inputs cannot be changed here.</div>
+        <div id="dry-edit-stages" style="max-height:56vh;overflow-y:auto"></div>
+        <div class="fld" style="margin-top:10px"><label>Reason for edit (optional)</label><input id="dry-edit-reason" placeholder="e.g. Miscounted powder output"></div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeDryingEditModal()">Cancel</button>
+            <button class="btn btn-orange" onclick="submitDryingEdit()">Save Corrections</button>
+        </div>
+    </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -2100,6 +2114,104 @@ function dryingStatusBadgeText(status){
     return status || "";
 }
 
+/* ── DRYING EDIT (finalized batch) ── */
+// Build an item-row pre-filled with a known product + qty, matching the
+// structure getRows() reads. Reuses the standard product search so the row
+// can be re-pointed to a different product if needed.
+function addPrefilledOutputRow(containerId, productId, productName, unit, qty){
+    const div = document.createElement("div");
+    div.className = "item-row";
+    div.innerHTML = `
+        <div class="search-field">
+            <input type="text"
+                placeholder="Search by name or SKU..."
+                class="product-search-input"
+                data-hidden-target=".product-id-hidden"
+                data-unit-target=".unit-hint"
+                data-stock-target=".stock-hint"
+                autocomplete="off"
+                value="${escapeHtml(productName||"")}">
+            <input type="hidden" class="product-id-hidden" value="${productId||""}">
+            <span class="stock-hint"></span>
+            <div class="search-results"></div>
+        </div>
+        <input type="number" class="qty-input" placeholder="0" min="0.001" step="any" value="${qty!=null?qty:""}">
+        <span class="unit-hint">${escapeHtml(unit||"-")}</span>
+        <button class="rm-btn" title="Remove" onclick="this.closest('.item-row').remove();">&times;</button>
+    `;
+    document.getElementById(containerId).appendChild(div);
+    attachProductSearch(div.querySelector(".product-search-input"));
+}
+
+function openDryingEditModal(batchId){
+    const b = dryingBatches.find(x => x.id === batchId);
+    if(!b){ alert("Batch not found — try refreshing."); return; }
+    if(b.status !== "completed"){ alert("Only completed batches can be edited here."); return; }
+    activeDryingBatchId = batchId;
+    document.getElementById("dry-edit-sub").innerText =
+        `Correcting outputs for ${b.batch_number}. Stock and loss are recalculated. Inputs cannot be changed here.`;
+    document.getElementById("dry-edit-reason").value = "";
+
+    const wrap = document.getElementById("dry-edit-stages");
+    wrap.innerHTML = "";
+    (b.stages || []).forEach(s => {
+        const label = s.label || `Stage ${s.stage_number}`;
+        const containerId = `dry-edit-stage-${s.id}`;
+        const block = document.createElement("div");
+        block.className = "dry-stage-card";
+        block.dataset.stageId = s.id;
+        block.innerHTML = `
+            <div class="dsc-head">
+                <span class="dsc-title">${escapeHtml(label)}</span>
+                <span class="dsc-meta">inputs fixed${s.stage_loss_pct!=null?` · was ${Number(s.stage_loss_pct).toFixed(1)}% loss`:""}</span>
+            </div>
+            <div class="dio-label" style="color:var(--green);font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:6px">Outputs</div>
+            <div id="${containerId}"></div>
+            <button class="add-row-btn green-btn" onclick="addItemRow('${containerId}',null)" style="margin-top:6px">+ Add Output</button>
+        `;
+        wrap.appendChild(block);
+        (s.outputs || []).forEach(o =>
+            addPrefilledOutputRow(containerId, o.product_id, o.product_name, o.unit, o.qty));
+        if(!(s.outputs || []).length) addItemRow(containerId, null);
+    });
+
+    document.getElementById("drying-edit-modal").classList.add("open");
+}
+function closeDryingEditModal(){
+    document.getElementById("drying-edit-modal").classList.remove("open");
+    activeDryingBatchId = null;
+}
+async function submitDryingEdit(){
+    if(!activeDryingBatchId) return;
+    const blocks = document.querySelectorAll("#dry-edit-stages .dry-stage-card");
+    const stage_outputs = [];
+    for(const blk of blocks){
+        const stageId = parseInt(blk.dataset.stageId);
+        const outputs = getRows(`dry-edit-stage-${stageId}`);
+        if(!outputs.length){
+            alert("Each stage must have at least one output. Use Cancel on the batch if you want to remove it entirely.");
+            return;
+        }
+        stage_outputs.push({stage_id: stageId, outputs});
+    }
+    if(!stage_outputs.length) return;
+    const body = {
+        stage_outputs,
+        reason: document.getElementById("dry-edit-reason").value || null,
+    };
+    try {
+        const resp = await fetch(`/production/drying/api/batches/${activeDryingBatchId}/edit`, {
+            method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+        if(!resp.ok){
+            const err = await resp.json().catch(()=>({}));
+            alert("Failed to save edits: " + (err.detail || resp.status));
+            return;
+        }
+        closeDryingEditModal();
+        await loadDrying();
+    } catch(e){ alert("Network error: " + e.message); }
+}
+
 function renderDryingTable(){
     if(!dryingBatches.length){
         document.getElementById("drying-body").innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:60px">No drying batches yet.</td></tr>`;
@@ -2136,6 +2248,10 @@ function renderDryingTable(){
         }
         // Details is available for every batch, in any status.
         actions.push(`<button class="action-btn" onclick="openDryingDetailsModal(${b.id})">Details</button>`);
+        // Edit corrections on a finalized batch, behind its own permission.
+        if(b.status === "completed" && hasPermission("action_drying_edit_batch")){
+            actions.push(`<button class="action-btn blue" onclick="openDryingEditModal(${b.id})">Edit</button>`);
+        }
 
         html += `<tr>
             <td style="font-family:var(--mono);font-size:12px;color:var(--orange)"><a href="#" onclick="openDryingDetailsModal(${b.id});return false;" style="color:var(--orange);text-decoration:underline;cursor:pointer">${escapeHtml(b.batch_number)}</a></td>
