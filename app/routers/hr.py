@@ -699,9 +699,11 @@ async def _clear_hr_data(db: AsyncSession, current_user: User) -> dict:
 
 # ── EMPLOYEE API ───────────────────────────────────────
 @router.get("/api/employees")
-async def get_employees(q: str = "", db: AsyncSession = Depends(get_async_session)):
+async def get_employees(q: str = "", include_inactive: bool = False, db: AsyncSession = Depends(get_async_session)):
     try:
-        stmt = select(Employee).options(selectinload(Employee.farm)).where(Employee.is_active == True)
+        stmt = select(Employee).options(selectinload(Employee.farm))
+        if not include_inactive:
+            stmt = stmt.where(Employee.is_active == True)
         if q:
             stmt = stmt.where(
                 Employee.name.ilike(f"%{q}%") |
@@ -2385,6 +2387,9 @@ td.mono { font-family: var(--mono); color: var(--green); }
                 <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
                 <input id="emp-search" placeholder="Search by name, position or department..." oninput="onEmpSearch()">
             </div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;white-space:nowrap">
+                <input type="checkbox" id="emp-show-inactive" onchange="loadEmployees()" style="cursor:pointer"> Show inactive
+            </label>
         </div>
         <div id="farm-load-error" style="display:none;margin-bottom:12px;padding:10px 12px;border:1px solid rgba(255,181,71,.25);border-radius:10px;background:rgba(255,181,71,.08);color:var(--warn);font-size:12px;font-weight:600"></div>
         <div class="table-wrap">
@@ -2513,6 +2518,13 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="fld"><label>Food Allowance (EGP)</label><input id="e-food" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
             <div class="fld"><label>Transportation Allowance (EGP)</label><input id="e-transport" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
             <div class="fld span2" id="emp-rate-preview" style="color:var(--muted);font-size:13px;padding:6px 0"></div>
+            <div class="fld span2" id="emp-active-row" style="display:none">
+                <label>Employment Status</label>
+                <select id="e-active">
+                    <option value="1">Active</option>
+                    <option value="0">Inactive (not paid, hidden from payroll &amp; lists)</option>
+                </select>
+            </div>
             <div class="fld span2" id="emp-vacation-balance" style="font-size:13px;padding:6px 10px;border-radius:8px;background:var(--card2);display:none"></div>
         </div>
         <div class="modal-actions">
@@ -2862,7 +2874,11 @@ function onEmpSearch(){
 
 async function loadEmployees(){
     let q   = document.getElementById("emp-search").value.trim();
-    let url = `/hr/api/employees${q?"?q="+encodeURIComponent(q):""}`;
+    const showInactive = document.getElementById("emp-show-inactive")?.checked;
+    const params = [];
+    if(q) params.push("q=" + encodeURIComponent(q));
+    if(showInactive) params.push("include_inactive=true");
+    let url = `/hr/api/employees${params.length ? "?" + params.join("&") : ""}`;
     let resp;
     try{
         resp = await fetch(url);
@@ -2917,8 +2933,8 @@ async function loadEmployees(){
             ? `<span style="color:#84cc16;font-weight:600">🐾 Animals</span>`
             : displayText(e.farm_name);
         return `
-        <tr>
-            <td class="name">${displayText(e.name)}</td>
+        <tr${e.is_active === false ? ' style="opacity:.55"' : ""}>
+            <td class="name">${displayText(e.name)}${e.is_active === false ? ' <span style="font-size:10px;font-weight:700;color:var(--danger);border:1px solid var(--danger);border-radius:6px;padding:1px 6px;margin-left:6px">INACTIVE</span>' : ""}</td>
             <td>${displayText(e.position)}</td>
             <td>${displayText(e.department)}</td>
             <td>${farmCell}</td>
@@ -2926,9 +2942,11 @@ async function loadEmployees(){
             <td style="font-size:12px;color:var(--muted)">${displayText(e.hire_date)}</td>
             <td class="mono">${money(salary)}</td>
             <td style="display:flex;gap:6px">
-                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}" data-works-animals="${e.works_with_animals ? "1" : ""}" data-vacation="${numberValue(e.vacation_days_per_month)||0}" data-food="${numberValue(e.food_allowance)||0}" data-transport="${numberValue(e.transportation_allowance)||0}" data-hire-date="${escapeHtml(e.hire_date||'')}">Edit</button>
-                ${(hasPermission("action_hr_view_loans") || hasPermission("action_hr_view_deductions"))?`<button class="action-btn purple" onclick="openLoanDeductionModalFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-salary="${salary}">Loans & Deductions</button>`:""}
-                ${hasPermission("action_hr_run_payroll")?`<button class="action-btn danger" onclick="deactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Remove</button>`:""}
+                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}" data-works-animals="${e.works_with_animals ? "1" : ""}" data-vacation="${numberValue(e.vacation_days_per_month)||0}" data-food="${numberValue(e.food_allowance)||0}" data-transport="${numberValue(e.transportation_allowance)||0}" data-hire-date="${escapeHtml(e.hire_date||'')}" data-active="${e.is_active === false ? "0" : "1"}">Edit</button>
+                ${(hasPermission("action_hr_view_loans") || hasPermission("action_hr_view_deductions"))?`<button class="action-btn purple" onclick="openLoanDeductionModalFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-salary="${salary}">Loans &amp; Deductions</button>`:""}
+                ${hasPermission("action_hr_run_payroll") ? (e.is_active === false
+                    ? `<button class="action-btn green" onclick="reactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Reactivate</button>`
+                    : `<button class="action-btn danger" onclick="deactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Remove</button>`) : ""}
             </td>
         </tr>`;
     }).join("");
@@ -2951,8 +2969,13 @@ function openEditEmpFromButton(btn){
         numberValue(btn.dataset.food) || 0,
         numberValue(btn.dataset.transport) || 0,
         btn.dataset.hireDate || "",
-        btn.dataset.worksAnimals === "1"
+        btn.dataset.worksAnimals === "1",
+        btn.dataset.active !== "0"
     );
+}
+
+function reactivateEmployeeFromButton(btn){
+    reactivateEmployee(numberValue(btn.dataset.id), btn.dataset.name || "");
 }
 
 function deactivateEmployeeFromButton(btn){
@@ -2962,6 +2985,8 @@ function deactivateEmployeeFromButton(btn){
 function openAddEmpModal(){
     editingEmpId = null;
     document.getElementById("emp-modal-title").innerText = "Add Employee";
+    const activeRow = document.getElementById("emp-active-row");
+    if(activeRow) activeRow.style.display = "none";
     ["e-name","e-position","e-department","e-phone","e-salary","e-vacation","e-food","e-transport","e-hire"].forEach(id=>document.getElementById(id).value="");
     applyHireDateLock(false);
     updateEmpDailyRatePreview();
@@ -2972,7 +2997,7 @@ function openAddEmpModal(){
     document.getElementById("emp-modal").classList.add("open");
 }
 
-function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacationDays,food,transport,hireDate,worksWithAnimals){
+function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacationDays,food,transport,hireDate,worksWithAnimals,isActive){
     editingEmpId = id;
     document.getElementById("emp-modal-title").innerText = "Edit Employee";
     document.getElementById("e-name").value       = name;
@@ -2984,6 +3009,12 @@ function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacati
     document.getElementById("e-food").value       = food || 0;
     document.getElementById("e-transport").value  = transport || 0;
     document.getElementById("e-hire").value       = (hireDate && hireDate !== "—") ? hireDate : "";
+    // Status control: visible only when editing.
+    const activeRow = document.getElementById("emp-active-row");
+    if(activeRow){
+        activeRow.style.display = "";
+        document.getElementById("e-active").value = (isActive === false) ? "0" : "1";
+    }
     applyHireDateLock(true);
     // If the employee is flagged works_with_animals, preselect the Animals sentinel;
     // otherwise preselect their farm (if any).
@@ -3089,6 +3120,11 @@ async function saveEmployee(){
         farm_id:                 farmIdVal,
         works_with_animals:      worksAnimals,
     };
+    // Employment status is only part of the edit flow (the control is hidden
+    // when adding). Send it explicitly so a toggle takes effect.
+    if(editingEmpId){
+        body.is_active = document.getElementById("e-active").value === "1";
+    }
     let url    = editingEmpId ? `/hr/api/employees/${editingEmpId}` : "/hr/api/employees";
     let method = editingEmpId ? "PUT" : "POST";
     try{
@@ -3142,6 +3178,20 @@ async function deactivateEmployee(id,name){
         loadEmployees(); loadSummary();
     }catch(err){
         showToast("Error: " + (err.message || "Could not remove employee"));
+    }
+}
+
+async function reactivateEmployee(id,name){
+    if(!confirm(`Reactivate "${name}"? They will reappear in payroll and active lists.`)) return;
+    try{
+        const res = await fetch(`/hr/api/employees/${id}`,{
+            method:"PUT", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({is_active: true})});
+        await readApiResponse(res);
+        showToast("Employee reactivated");
+        loadEmployees(); loadSummary();
+    }catch(err){
+        showToast("Error: " + (err.message || "Could not reactivate employee"));
     }
 }
 
