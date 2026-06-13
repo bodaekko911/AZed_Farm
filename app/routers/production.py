@@ -635,6 +635,22 @@ td.name{color:var(--text);font-weight:600;}
 .rm-btn{width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:transparent;border:1px solid transparent;border-radius:50%;color:var(--muted);font-size:16px;line-height:1;cursor:pointer;padding:0;transition:all .15s;}
 .rm-btn:hover{color:var(--danger);border-color:rgba(255,77,109,.35);background:rgba(255,77,109,.08);}
 .add-row-btn{border:1px dashed;font-family:var(--sans);font-size:12px;font-weight:600;padding:7px;border-radius:8px;cursor:pointer;width:100%;transition:all .2s;margin:2px 0 16px;background:transparent;}
+.dry-current-panel{background:rgba(255,255,255,.03);border:1px solid var(--border,rgba(255,255,255,.1));border-radius:10px;padding:12px 14px;margin-bottom:18px;}
+.dry-current-panel:empty{display:none;}
+.dry-current-panel .dcp-head{font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:var(--sub);margin-bottom:8px;}
+.dry-current-panel .dcp-row{display:flex;justify-content:space-between;font-size:13px;padding:3px 0;}
+.dry-current-panel .dcp-row .q{font-family:var(--mono);color:var(--orange);}
+.dry-current-panel .dcp-empty{font-size:12px;color:var(--muted);font-style:italic;}
+.dry-stage-card{border:1px solid var(--border,rgba(255,255,255,.1));border-radius:10px;padding:12px 14px;margin-bottom:12px;}
+.dry-stage-card .dsc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+.dry-stage-card .dsc-title{font-weight:700;font-size:14px;}
+.dry-stage-card .dsc-meta{font-size:11px;color:var(--muted);}
+.dry-io{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.dry-io .dio-col .dio-label{font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px;}
+.dry-io .dio-row{display:flex;justify-content:space-between;font-size:12.5px;padding:2px 0;}
+.dry-io .dio-row .q{font-family:var(--mono);}
+.dry-det-stat{display:inline-block;font-size:12px;color:var(--sub);margin-right:14px;}
+.dry-det-stat b{color:var(--text,#fff);font-family:var(--mono);}
 .row-group .add-row-btn{margin-bottom:0;}
 .add-row-btn.orange-btn{border-color:rgba(251,146,60,.3);color:var(--orange);}
 .add-row-btn.orange-btn:hover{background:rgba(251,146,60,.08);}
@@ -914,6 +930,8 @@ td.name{color:var(--text);font-weight:600;}
         <div class="modal-title">Add Next Stage</div>
         <div class="modal-sub" id="drying-next-sub">Close the current stage (record its outputs) and open a new one with fresh inputs.</div>
 
+        <div id="drying-next-current" class="dry-current-panel"></div>
+
         <div class="section-label" style="color:var(--green)">Outputs of the CURRENT stage</div>
         <div class="modal-sub" style="margin-top:0">What did the current stage produce? Stock will be credited.</div>
         <div id="drying-next-prev-outputs"></div>
@@ -941,6 +959,7 @@ td.name{color:var(--text);font-weight:600;}
     <div class="modal">
         <div class="modal-title">Finalize Drying Batch</div>
         <div class="modal-sub" id="drying-finalize-sub">Record the final outputs of the current stage. The batch will be marked completed and cannot be reopened.</div>
+        <div id="drying-finalize-current" class="dry-current-panel"></div>
         <div class="section-label" style="color:var(--green)">Final outputs</div>
         <div id="drying-finalize-outputs"></div>
         <button class="add-row-btn green-btn" onclick="addItemRow('drying-finalize-outputs',null)">+ Add Output</button>
@@ -974,6 +993,20 @@ td.name{color:var(--text);font-weight:600;}
             <button class="btn-cancel" onclick="closeDryingSpoilageModal()">Cancel</button>
             <button class="btn btn-danger" onclick="submitDryingSpoilage()">Log Spoilage</button>
         </div>
+    </div>
+</div>
+
+<!-- DRYING DETAILS MODAL (read-only) -->
+<div class="modal-bg" id="drying-details-modal">
+    <div class="modal" style="width:680px;max-width:94vw">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+            <div>
+                <div class="modal-title" id="dry-det-title">Drying Batch</div>
+                <div class="modal-sub" id="dry-det-sub"></div>
+            </div>
+            <button class="btn-cancel" onclick="closeDryingDetailsModal()" style="flex-shrink:0">Close</button>
+        </div>
+        <div id="dry-det-body" style="margin-top:8px;max-height:64vh;overflow-y:auto"></div>
     </div>
 </div>
 
@@ -1948,6 +1981,120 @@ function dryingShortDate(s){
     try { return new Date(s).toLocaleDateString(); } catch(e){ return s; }
 }
 
+/* ── DRYING CURRENT-CONTENTS PANEL (shown inside stage / finalize modals) ── */
+function dryFmtItem(it){
+    const name = (it.product_name || "Item");
+    const qty  = (Number(it.qty)||0).toFixed(2);
+    const unit = it.unit || "";
+    return `<div class="dcp-row"><span>${escapeHtml(name)}</span><span class="q">${qty} ${escapeHtml(unit)}</span></div>`;
+}
+function renderDryingCurrentPanel(containerId, batch){
+    const el = document.getElementById(containerId);
+    if(!el) return;
+    const stages = batch.stages || [];
+    // The current stage is the open one (no outputs yet); fall back to last.
+    const open = stages.filter(s => s.is_open);
+    const cur  = open.length ? open[0] : (stages.length ? stages[stages.length-1] : null);
+    if(!cur){ el.innerHTML = ""; return; }
+    const inputs = cur.inputs || [];
+    const label  = cur.label || `Stage ${cur.stage_number || stages.length}`;
+    const totalIn = (cur.total_input_qty != null) ? Number(cur.total_input_qty).toFixed(2) : null;
+    el.innerHTML = `
+        <div class="dcp-head">Currently in the drier — ${escapeHtml(label)}${totalIn ? ` · ${totalIn} total in` : ""}</div>
+        ${inputs.length ? inputs.map(dryFmtItem).join("") : '<div class="dcp-empty">No inputs recorded for this stage.</div>'}`;
+}
+
+/* ── DRYING DETAILS (read-only, any status) ── */
+function openDryingDetailsModal(batchId){
+    const b = dryingBatches.find(x => x.id === batchId);
+    if(!b){ alert("Batch not found — try refreshing."); return; }
+    document.getElementById("dry-det-title").innerText = b.batch_number;
+    const sub = [];
+    sub.push(dryingStatusBadgeText(b.status));
+    if(b.started_at)   sub.push("Started " + dryingShortDate(b.started_at) + (b.started_by ? " by " + b.started_by : ""));
+    if(b.completed_at) sub.push("Completed " + dryingShortDate(b.completed_at) + (b.completed_by ? " by " + b.completed_by : ""));
+    if(b.cancelled_at) sub.push("Cancelled " + dryingShortDate(b.cancelled_at));
+    document.getElementById("dry-det-sub").innerHTML = sub.map(escapeHtml).join(" &nbsp;·&nbsp; ");
+
+    const stages = b.stages || [];
+    let body = "";
+
+    // Summary stats
+    const finalYield = b.final_yield_pct;
+    body += `<div style="margin:4px 0 16px">`;
+    body += `<span class="dry-det-stat">Stages: <b>${stages.length}</b></span>`;
+    if(finalYield != null) body += `<span class="dry-det-stat">Final yield: <b>${Number(finalYield).toFixed(1)}%</b></span>`;
+    if(b.spoilage_count)   body += `<span class="dry-det-stat">Spoilage events: <b>${b.spoilage_count}</b></span>`;
+    body += `</div>`;
+
+    // Per-stage cards
+    if(!stages.length){
+        body += `<div class="dcp-empty">No stages recorded.</div>`;
+    } else {
+        stages.forEach(s => {
+            const label = s.label || `Stage ${s.stage_number}`;
+            const inputs = s.inputs || [];
+            const outputs = s.outputs || [];
+            const meta = [];
+            if(s.is_open) meta.push("OPEN");
+            if(s.logged_at) meta.push(dryingShortDate(s.logged_at));
+            if(s.logged_by) meta.push(s.logged_by);
+            const stageStats = [];
+            if(s.total_input_qty  != null) stageStats.push(`in ${Number(s.total_input_qty).toFixed(2)}`);
+            if(s.total_output_qty != null) stageStats.push(`out ${Number(s.total_output_qty).toFixed(2)}`);
+            if(s.stage_loss_pct   != null) stageStats.push(`loss ${Number(s.stage_loss_pct).toFixed(1)}%`);
+            if(s.cumulative_yield_pct != null) stageStats.push(`cum. yield ${Number(s.cumulative_yield_pct).toFixed(1)}%`);
+
+            body += `<div class="dry-stage-card">
+                <div class="dsc-head">
+                    <span class="dsc-title">${escapeHtml(label)}</span>
+                    <span class="dsc-meta">${escapeHtml(meta.join(" · "))}</span>
+                </div>
+                ${stageStats.length ? `<div class="dsc-meta" style="margin-bottom:8px">${escapeHtml(stageStats.join("  ·  "))}</div>` : ""}
+                <div class="dry-io">
+                    <div class="dio-col">
+                        <div class="dio-label" style="color:var(--orange)">Inputs</div>
+                        ${inputs.length ? inputs.map(i => `<div class="dio-row"><span>${escapeHtml(i.product_name||"Item")}</span><span class="q">${(Number(i.qty)||0).toFixed(2)} ${escapeHtml(i.unit||"")}</span></div>`).join("") : '<div class="dcp-empty">—</div>'}
+                    </div>
+                    <div class="dio-col">
+                        <div class="dio-label" style="color:var(--green)">Outputs</div>
+                        ${outputs.length ? outputs.map(o => `<div class="dio-row"><span>${escapeHtml(o.product_name||"Item")}</span><span class="q">${(Number(o.qty)||0).toFixed(2)} ${escapeHtml(o.unit||"")}</span></div>`).join("") : (s.is_open ? '<div class="dcp-empty">Stage still open</div>' : '<div class="dcp-empty">—</div>')}
+                    </div>
+                </div>
+                ${s.notes ? `<div class="dsc-meta" style="margin-top:8px">📝 ${escapeHtml(s.notes)}</div>` : ""}
+            </div>`;
+        });
+    }
+
+    // Spoilage list
+    const spoilage = b.spoilage || [];
+    if(spoilage.length){
+        body += `<div class="section-label" style="color:var(--danger);margin-top:6px">Spoilage</div>`;
+        spoilage.forEach(sp => {
+            body += `<div class="dio-row" style="font-size:12.5px;padding:3px 0">
+                <span>${escapeHtml(sp.product_name||"Item")} <span style="color:var(--muted)">(${escapeHtml(sp.reason||"")}${sp.detail ? " — "+escapeHtml(sp.detail) : ""})</span></span>
+                <span class="q" style="font-family:var(--mono);color:var(--danger)">${(Number(sp.qty)||0).toFixed(2)}</span>
+            </div>`;
+        });
+    }
+
+    if(b.notes){
+        body += `<div class="dsc-meta" style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border,rgba(255,255,255,.1))">Batch notes: ${escapeHtml(b.notes)}</div>`;
+    }
+
+    document.getElementById("dry-det-body").innerHTML = body;
+    document.getElementById("drying-details-modal").classList.add("open");
+}
+function closeDryingDetailsModal(){
+    document.getElementById("drying-details-modal").classList.remove("open");
+}
+function dryingStatusBadgeText(status){
+    if(status === "in_progress") return "In progress";
+    if(status === "completed")   return "Completed";
+    if(status === "cancelled")   return "Cancelled";
+    return status || "";
+}
+
 function renderDryingTable(){
     if(!dryingBatches.length){
         document.getElementById("drying-body").innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:60px">No drying batches yet.</td></tr>`;
@@ -1980,9 +2127,11 @@ function renderDryingTable(){
         if(isInProgress && hasPermission("action_drying_cancel_batch")){
             actions.push(`<button class="action-btn danger" onclick="cancelDrying(${b.id}, '${escapeHtml(b.batch_number)}')">Cancel</button>`);
         }
+        // Details is available for every batch, in any status.
+        actions.push(`<button class="action-btn" onclick="openDryingDetailsModal(${b.id})">Details</button>`);
 
         html += `<tr>
-            <td style="font-family:var(--mono);font-size:12px;color:var(--orange)">${escapeHtml(b.batch_number)}</td>
+            <td style="font-family:var(--mono);font-size:12px;color:var(--orange)"><a href="#" onclick="openDryingDetailsModal(${b.id});return false;" style="color:var(--orange);text-decoration:underline;cursor:pointer">${escapeHtml(b.batch_number)}</a></td>
             <td>${dryingStatusBadge(b.status)}</td>
             <td style="text-align:center;font-family:var(--mono)">${b.stage_count || stages.length || 0}</td>
             <td style="font-size:12px;color:var(--muted)">${dryingShortDate(b.started_at)}</td>
@@ -2035,6 +2184,7 @@ function openDryingNextStageModal(batchId){
     const batch = dryingBatches.find(b => b.id === batchId);
     if(!batch) return;
     document.getElementById("drying-next-sub").innerText = `Closing current stage of ${batch.batch_number}, opening the next one.`;
+    renderDryingCurrentPanel("drying-next-current", batch);
     document.getElementById("drying-next-prev-outputs").innerHTML = "";
     document.getElementById("drying-next-new-inputs").innerHTML = "";
     addItemRow("drying-next-prev-outputs", null);
@@ -2079,6 +2229,7 @@ function openDryingFinalizeModal(batchId){
     const batch = dryingBatches.find(b => b.id === batchId);
     if(!batch) return;
     document.getElementById("drying-finalize-sub").innerText = `Finalize ${batch.batch_number}. The current stage will be closed with these outputs and the batch marked completed.`;
+    renderDryingCurrentPanel("drying-finalize-current", batch);
     document.getElementById("drying-finalize-outputs").innerHTML = "";
     addItemRow("drying-finalize-outputs", null);
     document.getElementById("dry-finalize-notes").value = "";
