@@ -1454,7 +1454,7 @@ async function loadMoves(){
 
     document.getElementById("moves-body").innerHTML = data.moves.map(m => {
         let typeClass = m.type==="in"?"move-in":m.type==="out"?"move-out":"move-adjust";
-        let typeLabel = m.type==="in"?"▲ IN":m.type==="out"?"▼ OUT":"⟳ ADJ";
+        let typeLabel = m.type==="in"?"▼ IN":m.type==="out"?"▲ OUT":"⟳ ADJ";
         let qtySign   = m.qty >= 0 ? "+" : "";
         return `
         <tr>
