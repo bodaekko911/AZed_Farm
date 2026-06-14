@@ -1390,6 +1390,30 @@ async def _pending_deductions_for_period(
     return deductions, day_deduction_days, day_deductions, manual_deductions
 
 
+async def _open_allowance_advances(
+    db: AsyncSession,
+    employee_id: int,
+) -> tuple[list[EmployeeAllowanceAdvance], Decimal]:
+    """Open (not-yet-settled) allowance advances for an employee, and their total.
+
+    Advances are paid out early against the monthly food/transport allowance, so
+    the next payroll run subtracts them from the allowance payout and marks them
+    'deducted'. They are not tied to a period — any open advance is settled by the
+    next run that processes this employee.
+    """
+    result = await db.execute(
+        select(EmployeeAllowanceAdvance)
+        .where(
+            EmployeeAllowanceAdvance.employee_id == employee_id,
+            EmployeeAllowanceAdvance.status == "open",
+        )
+        .order_by(EmployeeAllowanceAdvance.advance_date, EmployeeAllowanceAdvance.id)
+    )
+    advances = result.scalars().all()
+    total = _money(sum((_dec(a.amount) for a in advances), Decimal("0")))
+    return advances, total
+
+
 async def _payroll_preview_for_employee(
     db: AsyncSession,
     employee: Employee,
@@ -1424,6 +1448,12 @@ async def _payroll_preview_for_employee(
     earned_food  = _money(food_daily * _dec(days_present))
     # Transport: full monthly (not prorated)
     earned_allowance = _money(earned_food + trans_all)
+    # Open allowance advances (paid early) are recovered from this month's
+    # allowance payout, capped so the allowance line can't go negative. Any
+    # remainder beyond the allowance is carried by the still-open advances.
+    _, open_advance_total = await _open_allowance_advances(db, employee.id)
+    allowance_advance_applied = _money(min(open_advance_total, earned_allowance)) if include_deductions else Decimal("0")
+    earned_allowance = _money(earned_allowance - allowance_advance_applied)
     total_allowance  = earned_allowance
     vacation     = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
     paid_days, daily_rate = _paid_days_and_rate(employee, working_days)
@@ -1472,6 +1502,7 @@ async def _payroll_preview_for_employee(
         "pending_day_deductions": _as_float(pending_day_amount),
         "pending_manual_deductions": _as_float(pending_manual_amount),
         "pending_total_deductions": _as_float(total_pending),
+        "allowance_advance_applied": _as_float(allowance_advance_applied),
         "net_before_loan": _as_float(net_before_loan),
     }
 
@@ -1880,6 +1911,7 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
 
             if payroll:
                 skipped += 1
+                is_new_payroll = False
                 existing_loan_deductions = _money(getattr(payroll, "loan_deductions", 0))
                 existing_day_days = _days(getattr(payroll, "day_deduction_days", 0))
                 existing_day_deductions = _money(getattr(payroll, "day_deductions", 0))
@@ -1894,6 +1926,7 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
                 )
                 db.add(payroll)
                 created += 1
+                is_new_payroll = True
                 existing_loan_deductions = Decimal("0")
                 existing_day_days = Decimal("0")
                 existing_day_deductions = Decimal("0")
@@ -1914,6 +1947,26 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
             earned_food      = _money(food_daily * _dec(days_present))
             earned_allowance = _money(earned_food + trans_all)  # transport always in full
 
+            # Recover open allowance advances from this month's allowance payout,
+            # capped so the allowance can't go negative.
+            open_advances, open_advance_total = await _open_allowance_advances(db, emp.id)
+            if is_new_payroll:
+                allowance_advance_applied = _money(min(open_advance_total, earned_allowance))
+            else:
+                # Re-run of an existing period: advances were already settled on
+                # the first run and are no longer 'open'. Re-apply the amount that
+                # was settled against THIS payroll so the recomputed net matches.
+                _settled_q = await db.execute(
+                    select(func.coalesce(func.sum(EmployeeAllowanceAdvance.amount), 0))
+                    .where(
+                        EmployeeAllowanceAdvance.employee_id == emp.id,
+                        EmployeeAllowanceAdvance.status == "deducted",
+                        EmployeeAllowanceAdvance.payroll_id == payroll.id,
+                    )
+                )
+                allowance_advance_applied = _money(_settled_q.scalar() or 0)
+            earned_allowance = _money(earned_allowance - allowance_advance_applied)
+
             payroll.base_salary = earned_base     # attendance-based salary only
             # Bonus = whatever the user entered in the run form (no auto-allowance injection)
             payroll.bonuses = bonus_amount
@@ -1933,6 +1986,34 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
 
             for deduction in pending_deductions:
                 deduction.payroll_id = payroll.id
+
+            # Settle allowance advances we actually recovered this run, oldest
+            # first. An advance is only marked 'deducted' once fully covered;
+            # a partially-covered advance is split so the remainder stays open
+            # for the next run (rare — only when the allowance can't cover it).
+            remaining_to_settle = allowance_advance_applied
+            for adv in open_advances:
+                if remaining_to_settle <= 0:
+                    break
+                adv_amount = _money(adv.amount)
+                if adv_amount <= remaining_to_settle:
+                    adv.status = "deducted"
+                    adv.payroll_id = payroll.id
+                    remaining_to_settle = _money(remaining_to_settle - adv_amount)
+                else:
+                    # Partial recovery: settle the covered portion, leave the rest open.
+                    covered = remaining_to_settle
+                    adv.amount = _money(adv_amount - covered)  # remaining still owed
+                    db.add(EmployeeAllowanceAdvance(
+                        employee_id=emp.id,
+                        advance_date=adv.advance_date,
+                        amount=covered,
+                        note=(adv.note or "") + " (partial settlement)",
+                        status="deducted",
+                        payroll_id=payroll.id,
+                        created_by_user_id=getattr(current_user, "id", None),
+                    ))
+                    remaining_to_settle = Decimal("0")
 
             if requested_loan_repayment > 0:
                 applied = await _apply_loan_repayment_to_oldest_loans(
