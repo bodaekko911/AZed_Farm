@@ -2027,7 +2027,12 @@ async function deleteExpense(id, ref) {
 async function loadFarmsDropdown() {
     console.log("Loading expenses page data: farms");
     try {
-        const response = await fetch("/farm/api/farms");
+        // Use the expenses-gated proxy at /expenses/api/farms (defined in
+        // expenses_refactored.py), not the farm router's listing. The farm
+        // router requires page_farm on every endpoint, so users who can record
+        // expenses but lack page_farm were denied and the dropdown silently
+        // fell back to "General expense" + "Animals" only.
+        const response = await fetch("/expenses/api/farms");
         const farms = await readJsonResponse(response, "farms");
         if (!Array.isArray(farms)) throw new Error(`farms returned ${describeDataShape(farms)}`);
         const sel = document.getElementById("m-farm");
