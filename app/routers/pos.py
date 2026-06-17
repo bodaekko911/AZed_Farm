@@ -1085,6 +1085,21 @@ body.light .toast{background:var(--card);}
 </div>
 
 <script>
+  // Up to 3 decimals for unit prices (e.g. 0.065), trailing zeros trimmed but
+  // at least 2 kept so it reads as money: 5→"5.00", 0.065→"0.065".
+  function fmtPrice(value){
+      const n = Number(value) || 0;
+      let s = n.toFixed(3);
+      while (s.endsWith("0")) s = s.slice(0, -1);
+      const dot = s.indexOf(".");
+      if (dot === -1) { s += ".00"; }
+      else {
+          const decimals = s.length - dot - 1;
+          if (decimals === 0) s += "00";
+          else if (decimals === 1) s += "0";
+      }
+      return s;
+  }
   function setModeButton(isLight){
       const btn = document.getElementById("mode-btn");
       if(btn) btn.innerText = isLight ? "☀️" : "🌙";
@@ -1517,7 +1532,7 @@ function renderProducts(list, emptyMessage="No products found"){
              onclick="addWithRipple(event,'${p.sku}','${p.name.replace(/'/g,"\\'")}',${p.price})">
             <div class="p-name">${p.name}</div>
             <div class="p-sku">${p.sku}</div>
-            <div class="p-price">${parseFloat(p.price).toFixed(2)}</div>
+            <div class="p-price">${fmtPrice(p.price)}</div>
             <div class="p-stock" style="color:${stockColor}">${stockText}</div>
         </div>`;
     }).join("");
@@ -1619,7 +1634,7 @@ function updatePrice(sku, val){
         return;
     }
     if(item.original_price && newPrice > item.original_price * 10){
-        if(!confirm(`New price ${newPrice.toFixed(2)} is over 10× the catalog price (${item.original_price.toFixed(2)}). Continue?`)){
+        if(!confirm(`New price ${fmtPrice(newPrice)} is over 10× the catalog price (${fmtPrice(item.original_price)}). Continue?`)){
             drawCart();
             return;
         }
@@ -1642,8 +1657,8 @@ function drawCart(){
     cartEl.innerHTML=cart.map(c=>{ let t=c.qty*c.price; total+=t;
         const edited = c.original_price !== undefined && c.price !== c.original_price;
         const unitEl = canEditPrice()
-            ? `<span class="ci-unit ci-unit-editable${edited?' ci-unit-edited':''}">× <input class="ci-price-input" type="number" step="0.01" min="0.01" value="${c.price.toFixed(2)}" data-sku="${c.sku}" onchange="updatePrice('${c.sku}',this.value)" onfocus="this.select()"/>${edited?`<span class="ci-was">was ${c.original_price.toFixed(2)}</span><button class="ci-reset-price" onclick="resetPrice('${c.sku}')" title="Reset to catalog price">↺</button>`:''}</span>`
-            : `<span class="ci-unit">× ${c.price.toFixed(2)}</span>`;
+            ? `<span class="ci-unit ci-unit-editable${edited?' ci-unit-edited':''}">× <input class="ci-price-input" type="number" step="0.001" min="0.001" value="${fmtPrice(c.price)}" data-sku="${c.sku}" onchange="updatePrice('${c.sku}',this.value)" onfocus="this.select()"/>${edited?`<span class="ci-was">was ${fmtPrice(c.original_price)}</span><button class="ci-reset-price" onclick="resetPrice('${c.sku}')" title="Reset to catalog price">↺</button>`:''}</span>`
+            : `<span class="ci-unit">× ${fmtPrice(c.price)}</span>`;
         return `
         <div class="cart-item">
             <div class="ci-name">${c.name}</div>
@@ -1955,7 +1970,7 @@ function openInvModal(inv){
         <div class="inv-item-row">
             <div>
                 <div class="inv-item-name">${item.name}</div>
-                <div class="inv-item-meta">${item.qty.toFixed(0)} × ${item.unit_price.toFixed(2)}</div>
+                <div class="inv-item-meta">${item.qty.toFixed(0)} × ${fmtPrice(item.unit_price)}</div>
             </div>
             <div class="inv-item-total">${item.total.toFixed(2)}</div>
         </div>`).join("");
