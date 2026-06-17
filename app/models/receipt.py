@@ -14,7 +14,7 @@ class ProductReceipt(Base):
     user_id      = Column(Integer, ForeignKey("users.id"), nullable=True)
     receive_date = Column(Date, nullable=False)
     qty          = Column(Numeric(12, 3), nullable=False)
-    unit_cost    = Column(Numeric(12, 2), nullable=True)
+    unit_cost    = Column(Numeric(12, 3), nullable=True)
     total_cost   = Column(Numeric(12, 2), nullable=True)
     supplier_ref = Column(String(150), nullable=True)
     supplier_id  = Column(Integer, ForeignKey("suppliers.id", ondelete="SET NULL"),

@@ -62,6 +62,52 @@ async def ensure_payroll_columns() -> None:
         logger.exception("ensure_payroll_columns: failed (could not open DB session)")
 
 
+async def ensure_price_precision() -> None:
+    """Self-healing guard: widen per-UNIT price/cost columns to NUMERIC(12,3).
+
+    Lets unit prices carry 3 decimals (e.g. 0.065 EGP per gram). Only per-unit
+    columns are widened — line totals and cash amounts stay at 2 decimals.
+    Idempotent: ALTER ... TYPE NUMERIC(12,3) is a no-op if already (12,3).
+    Each statement runs in its own transaction so one failure can't poison
+    the rest (mirrors the other guards).
+    """
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal
+
+    targets = [
+        ("products", "price"),
+        ("products", "cost"),
+        ("invoice_items", "unit_price"),
+        ("retail_refund_items", "unit_price"),
+        ("product_receipts", "unit_cost"),
+        ("purchase_items", "unit_cost"),
+    ]
+    try:
+        async with AsyncSessionLocal() as db:
+            ok = 0
+            for table, column in targets:
+                try:
+                    # to_regclass is NULL when the table doesn't exist → skip.
+                    reg = (await db.execute(
+                        text("SELECT to_regclass(:t)"), {"t": table}
+                    )).scalar()
+                    if reg is None:
+                        continue
+                    await db.execute(text(
+                        f'ALTER TABLE {table} ALTER COLUMN {column} TYPE NUMERIC(12,3)'
+                    ))
+                    await db.commit()
+                    ok += 1
+                except Exception:
+                    await db.rollback()
+                    logger.exception(
+                        "ensure_price_precision: failed for %s.%s", table, column)
+            logger.info("ensure_price_precision: %d/%d unit-price columns at (12,3)",
+                        ok, len(targets))
+    except Exception:
+        logger.exception("ensure_price_precision: failed (could not open DB session)")
+
+
 async def ensure_delivery_transport_columns() -> None:
     """Self-healing guard: transport columns on farm_deliveries used by the
     carbon module to auto-log Scope 1 delivery transport emissions. Idempotent
@@ -381,6 +427,7 @@ async def lifespan(_: FastAPI):
     configure_monitoring()
     await verify_migration_status()
     await ensure_payroll_columns()
+    await ensure_price_precision()
     await ensure_delivery_transport_columns()
     await ensure_carbon_methodology()
     await seed_chart_of_accounts()

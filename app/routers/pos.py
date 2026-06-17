@@ -22,6 +22,18 @@ from app.services.barcode_service import find_product_by_barcode, normalize_barc
 from app.services.location_inventory_service import sync_product_stock_to_default_location
 from app.services.pos_service import create_invoice, post_journal
 
+
+def _fmt_unit_price(value: float) -> str:
+    """Up to 3 decimals for unit prices (e.g. 0.065), trailing zeros trimmed
+    but at least 2 kept so it reads as money: 5→'5.00', 0.065→'0.065'."""
+    s = f"{value:.3f}".rstrip("0")
+    if s.endswith("."):
+        s += "00"
+    elif len(s.split(".")[1]) == 1:
+        s += "0"
+    return s
+
+
 router = APIRouter(
     tags=["POS"],
     dependencies=[Depends(require_permission("page_pos"))],
@@ -482,7 +494,7 @@ async def view_invoice(invoice_id: int, db: AsyncSession = Depends(get_async_ses
         rows += f"""
         <div class="row">
             <span>{i.name}</span>
-            <span>{float(i.qty):.0f} x {float(i.unit_price):.2f}</span>
+            <span>{float(i.qty):.0f} x {_fmt_unit_price(float(i.unit_price))}</span>
             <span>{float(i.total):.2f}</span>
         </div>"""
 

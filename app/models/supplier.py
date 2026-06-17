@@ -47,7 +47,7 @@ class PurchaseItem(Base):
     purchase_id = Column(Integer, ForeignKey("purchases.id"), nullable=False)
     product_id  = Column(Integer, ForeignKey("products.id"), nullable=False)
     qty         = Column(Numeric(12, 3), nullable=False)
-    unit_cost   = Column(Numeric(12, 2), nullable=False)
+    unit_cost   = Column(Numeric(12, 3), nullable=False)
     total       = Column(Numeric(12, 2), nullable=False)
 
     purchase = relationship("Purchase", back_populates="items")

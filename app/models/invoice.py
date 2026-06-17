@@ -35,7 +35,7 @@ class InvoiceItem(Base):
     sku        = Column(String(80))
     name       = Column(String(200))
     qty        = Column(Numeric(12, 3), nullable=False)
-    unit_price = Column(Numeric(12, 2), nullable=False)
+    unit_price = Column(Numeric(12, 3), nullable=False)
     total      = Column(Numeric(12, 2), nullable=False)
 
     invoice = relationship("Invoice", back_populates="items")

@@ -32,7 +32,7 @@ class RetailRefundItem(Base):
     refund_id  = Column(Integer, ForeignKey("retail_refunds.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     qty        = Column(Numeric(12, 3), nullable=False)
-    unit_price = Column(Numeric(12, 2), nullable=False)
+    unit_price = Column(Numeric(12, 3), nullable=False)
     total      = Column(Numeric(12, 2), nullable=False)
 
     refund  = relationship("RetailRefund", back_populates="items")

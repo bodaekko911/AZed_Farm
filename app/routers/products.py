@@ -514,11 +514,11 @@ tr:hover td{background:rgba(255,255,255,.02);}
             <!-- Prices -->
             <div class="fld">
                 <label>Sale Price *</label>
-                <input id="f-price" type="number" placeholder="0.00" step="0.01">
+                <input id="f-price" type="number" placeholder="0.00" step="0.001">
             </div>
             <div class="fld">
                 <label>Cost Price</label>
-                <input id="f-cost" type="number" placeholder="0.00" step="0.01">
+                <input id="f-cost" type="number" placeholder="0.00" step="0.001">
             </div>
 
             <!-- Stock -->
@@ -652,6 +652,23 @@ function escapeJsString(value){
         .split(newline).join(backslash + "n");
 }
 
+// Show up to 3 decimals (for unit prices like 0.065) but trim trailing zeros,
+// always keeping at least 2 so prices read as money: 5→"5.00", 3.5→"3.50",
+// 0.065→"0.065", 0.07→"0.07".
+function fmtPrice(value){
+    const n = Number(value) || 0;
+    let s = n.toFixed(3);
+    while (s.endsWith("0")) s = s.slice(0, -1);   // drop trailing zeros
+    const dot = s.indexOf(".");
+    if (dot === -1) { s += ".00"; }
+    else {
+        const decimals = s.length - dot - 1;
+        if (decimals === 0) s += "00";
+        else if (decimals === 1) s += "0";
+    }
+    return s;
+}
+
 async function init(){
     await loadCategories();
     await loadProducts();
@@ -777,8 +794,8 @@ async function loadProducts(){
         <td class="name">${p.name}</td>
         <td style="font-size:12px;color:var(--sub)">${p.category}</td>
         <td><span class="badge badge-${p.item_type}">${getItemTypeLabel(p.item_type)}</span></td>
-        <td class="mono">${p.price.toFixed(2)}</td>
-        <td class="mono" style="color:var(--muted)">${p.cost>0?p.cost.toFixed(2):"—"}</td>
+        <td class="mono">${fmtPrice(p.price)}</td>
+        <td class="mono" style="color:var(--muted)">${p.cost>0?fmtPrice(p.cost):"—"}</td>
         <td class="mono" style="color:${stockColor};font-weight:700">${stockText}</td>
         <td style="font-size:12px;color:var(--muted)">${p.unit}</td>
         <td style="display:flex;gap:6px">
