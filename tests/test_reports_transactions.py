@@ -125,6 +125,7 @@ def test_transactions_all_sources_counts_receipt_linked_expense_once_as_receive(
             [receipt],
             [(expense.id,)],
             [expense],
+            [],  # Production/processing stock moves
         ]
     )
 
@@ -146,6 +147,62 @@ def test_transactions_all_sources_counts_receipt_linked_expense_once_as_receive(
     assert data["rows"][0]["money_effect"] == -123.45
     assert [row["source"] for row in data["rows"]] == ["Receive"]
     assert "_sort_date" not in data["rows"][0]
+
+
+def test_transactions_production_source_includes_production_and_processing_moves():
+    user = SimpleNamespace(id=1, name="Production Lead")
+    product = SimpleNamespace(id=3, sku="DRY-MINT", name="Dried Mint", category="Herbs")
+    moves = [
+        SimpleNamespace(
+            id=51,
+            product=product,
+            user=user,
+            created_at=datetime(2026, 5, 8, 9, 15, tzinfo=timezone.utc),
+            ref_type="production",
+            ref_id=12,
+            type="in",
+            qty=Decimal("4.5"),
+            note="Produced in BATCH-0012",
+        ),
+        SimpleNamespace(
+            id=52,
+            product=product,
+            user=user,
+            created_at=datetime(2026, 5, 8, 10, 30, tzinfo=timezone.utc),
+            ref_type="drying_batch",
+            ref_id=7,
+            type="out",
+            qty=Decimal("-2"),
+            note="Input to DRY-0007 stage 1",
+        ),
+    ]
+    db = FakeSession(
+        [
+            [],  # B2B payment lookup
+            moves,
+        ]
+    )
+
+    data = run(
+        reports._build_transactions_report(
+            db,
+            d_from=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            d_to=datetime(2026, 5, 31, 23, 59, 59, tzinfo=timezone.utc),
+            source="production",
+        )
+    )
+
+    assert data["total_rows"] == 2
+    assert data["money_in"] == 0
+    assert data["money_out"] == 0
+    assert data["stock_in"] == 4.5
+    assert data["stock_out"] == 2
+    assert [row["source"] for row in data["rows"]] == ["Processing", "Production"]
+    assert data["rows"][0]["transaction_type"] == "Processing Stock Move"
+    assert data["rows"][0]["reference"] == "DRY-0007"
+    assert data["rows"][1]["transaction_type"] == "Production Stock Move"
+    assert data["rows"][1]["reference"] == "BATCH-0012"
+    assert all("_sort_date" not in row for row in data["rows"])
 
 
 def test_transactions_expense_source_displays_expense_date_not_import_time():

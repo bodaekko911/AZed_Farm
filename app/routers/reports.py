@@ -337,6 +337,47 @@ def _transaction_sort_value(value) -> datetime:
     return datetime.min
 
 
+PRODUCTION_STOCK_MOVE_REF_TYPES = {
+    "production",
+    "production_reversal",
+    "drying_batch",
+    "drying_batch_spoilage",
+    "spoilage",
+    "spoilage_reversal",
+}
+
+
+def _production_move_label(move: StockMove) -> tuple[str, str, str]:
+    ref_type = (move.ref_type or "").lower()
+    note = move.note or ""
+    if ref_type == "drying_batch":
+        return "Processing Stock Move", "Processing", "processed"
+    if ref_type == "drying_batch_spoilage":
+        return "Processing Spoilage", "Processing", "spoilage"
+    if ref_type in {"spoilage", "spoilage_reversal"}:
+        return "Production Spoilage", "Production", "spoilage" if ref_type == "spoilage" else "reversed"
+    if ref_type == "production_reversal" or "reversal" in note.lower() or "deleted batch" in note.lower():
+        return "Production Reversal", "Production", "reversed"
+    return "Production Stock Move", "Production", "completed"
+
+
+def _production_move_reference(move: StockMove) -> str:
+    note_match = re.search(r"\b(?:BATCH|PKG|DRY|SPL)-\d{4,}\b", move.note or "")
+    if note_match:
+        return note_match.group(0)
+    if move.ref_id:
+        prefix = {
+            "production": "BATCH",
+            "production_reversal": "BATCH",
+            "drying_batch": "DRY",
+            "drying_batch_spoilage": "DRY-SPL",
+            "spoilage": "SPL",
+            "spoilage_reversal": "SPL",
+        }.get((move.ref_type or "").lower(), "MOVE")
+        return f"{prefix}-{int(move.ref_id):04d}"
+    return f"MOVE-{int(move.id):04d}" if move.id else "MOVE"
+
+
 def _paginate_rows(rows, skip, limit, include_all=False):
     if include_all:
         return rows
@@ -2652,6 +2693,42 @@ async def _build_transactions_report(
                 "notes": exp.description or "",
             })
 
+    if not source or source == "production":
+        move_res = await db.execute(
+            select(StockMove)
+            .where(
+                StockMove.created_at >= d_from,
+                StockMove.created_at <= d_to,
+                StockMove.ref_type.in_(PRODUCTION_STOCK_MOVE_REF_TYPES),
+            )
+            .options(selectinload(StockMove.product), selectinload(StockMove.user))
+        )
+        for move in move_res.scalars().all():
+            product = getattr(move, "product", None)
+            tx_type, source_name, status = _production_move_label(move)
+            stock_effect = _num(move.qty)
+            rows.append({
+                "date": move.created_at.strftime("%Y-%m-%d %H:%M") if move.created_at else "â€”",
+                "_sort_date": _transaction_sort_value(move.created_at),
+                "reference": _production_move_reference(move),
+                "transaction_type": tx_type,
+                "source": source_name,
+                "counterparty_type": "Internal",
+                "counterparty_name": "Production",
+                "sku": product.sku if product else "â€”",
+                "product": product.name if product else "â€”",
+                "product_category": _product_category(product),
+                "qty": abs(stock_effect),
+                "unit_price": 0.0,
+                "money_effect": 0.0,
+                "stock_effect": stock_effect,
+                "direction": "in" if stock_effect >= 0 else "out",
+                "payment_method": "stock",
+                "status": status,
+                "user_name": move.user.name if move.user else "â€”",
+                "notes": move.note or "",
+            })
+
     rows.sort(key=lambda x: x["_sort_date"], reverse=True)
     for row in rows:
         row.pop("_sort_date", None)
@@ -3780,6 +3857,7 @@ td.mono{font-family:var(--mono);}
                 <option value="b2b">B2B Only</option>
                 <option value="refund">Refunds Only</option>
                 <option value="receive">Receive Only</option>
+                <option value="production">Production / Processing Only</option>
                 <option value="expense">Expenses Only</option>
             </select>
             <button class="btn btn-lime" onclick="loadTransactions()">Apply</button>
