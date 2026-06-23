@@ -132,6 +132,87 @@ def test_sales_report_counts_b2b_revenue_on_collection_date_not_invoice_date():
     assert data["b2b_payment_records"][0]["cash_amount"] == 0.0
     assert data["b2b_payment_records"][0]["full_payment_amount"] == 1000.0
     assert data["b2b_payment_records"][0]["consignment_amount"] == 0.0
+    assert data["sold_item_count"] == 1
+    assert data["sold_item_records"][0]["source"] == "B2B Collection"
+    assert data["sold_item_records"][0]["reference"] == "HB2B-00001"
+    assert data["sold_item_records"][0]["product"] == "Dates"
+    assert data["sold_item_records"][0]["sku"] == "SKU-1"
+    assert data["sold_item_records"][0]["qty"] == 10.0
+    assert data["sold_item_records"][0]["line_total"] == 1000.0
+
+
+def test_sales_report_exposes_pos_and_refund_item_detail_rows():
+    sold_at = datetime(2026, 5, 16, 9, 0, tzinfo=timezone.utc)
+    refunded_at = datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc)
+
+    with make_session() as session:
+        customer = Customer(id=1, name="Walkup Customer")
+        product = Product(
+            id=1,
+            sku="SKU-DATE",
+            name="Date Box",
+            category="Produce",
+            price=Decimal("50.00"),
+            unit="box",
+            stock=100,
+        )
+        invoice = Invoice(
+            id=1,
+            customer_id=1,
+            invoice_number="POS-00001",
+            status="paid",
+            payment_method="cash",
+            total=Decimal("100.00"),
+            created_at=sold_at,
+        )
+        invoice_item = InvoiceItem(
+            invoice_id=1,
+            product_id=1,
+            sku="SKU-DATE",
+            name="Date Box",
+            qty=Decimal("2.000"),
+            unit_price=Decimal("50.000"),
+            total=Decimal("100.00"),
+        )
+        refund = RetailRefund(
+            id=1,
+            refund_number="REF-00001",
+            invoice_id=1,
+            customer_id=1,
+            refund_method="cash",
+            total=Decimal("50.00"),
+            created_at=refunded_at,
+        )
+        refund_item = RetailRefundItem(
+            refund_id=1,
+            product_id=1,
+            qty=Decimal("1.000"),
+            unit_price=Decimal("50.000"),
+            total=Decimal("50.00"),
+        )
+        session.add_all([customer, product, invoice, invoice_item, refund, refund_item])
+        session.commit()
+
+        data = run(
+            _build_sales_report(
+                AsyncSessionAdapter(session),
+                d_from=datetime(2026, 5, 16, 0, 0, tzinfo=timezone.utc),
+                d_to=datetime(2026, 5, 16, 23, 59, tzinfo=timezone.utc),
+                include_all=True,
+            )
+        )
+
+    assert data["sold_item_count"] == 2
+    assert data["sold_item_records"][0]["source"] == "POS"
+    assert data["sold_item_records"][0]["reference"] == "POS-00001"
+    assert data["sold_item_records"][0]["counterparty"] == "Walkup Customer"
+    assert data["sold_item_records"][0]["category"] == "Produce"
+    assert data["sold_item_records"][0]["qty"] == 2.0
+    assert data["sold_item_records"][0]["line_total"] == 100.0
+    assert data["sold_item_records"][1]["source"] == "Retail Refund"
+    assert data["sold_item_records"][1]["reference"] == "REF-00001"
+    assert data["sold_item_records"][1]["qty"] == -1.0
+    assert data["sold_item_records"][1]["line_total"] == -50.0
 
 
 def test_sales_report_excludes_b2b_invoice_when_collection_is_outside_range():

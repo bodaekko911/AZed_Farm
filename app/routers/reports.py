@@ -579,7 +579,11 @@ async def _build_sales_report(
             Invoice.created_at <= d_to,
             Invoice.status == "paid",
         )
-        .options(selectinload(Invoice.items), selectinload(Invoice.user), selectinload(Invoice.customer))
+        .options(
+            selectinload(Invoice.items).selectinload(InvoiceItem.product),
+            selectinload(Invoice.user),
+            selectinload(Invoice.customer),
+        )
     )
     pos_invoices = pos_result.scalars().all()
 
@@ -626,6 +630,7 @@ async def _build_sales_report(
     channels = {"pos": _channel_totals(), "b2b": _channel_totals()}
     daily = defaultdict(lambda: {"gross_sales": 0.0, "refunds": 0.0, "cash_collected": 0.0})
     product_sales: dict[str, dict[str, Any]] = {}
+    sold_item_records: list[dict[str, Any]] = []
 
     def product_key(product_id: Any, name: str) -> str:
         return f"product:{product_id}" if product_id is not None else f"name:{name}"
@@ -645,6 +650,41 @@ async def _build_sales_report(
             product_sales[key]["name"] = product_name
         product_sales[key]["qty"] += _num(qty) * multiplier
         product_sales[key]["revenue"] += _num(revenue) * multiplier
+
+    def add_sold_item_record(
+        *,
+        source: str,
+        reference: str | None,
+        datetime_value: str,
+        counterparty: str,
+        user_name: str,
+        product: Any,
+        product_name: str | None,
+        qty: Any,
+        unit_price: Any,
+        line_total: Any,
+        payment_method: str = "-",
+        status: str = "-",
+        line_type: str = "sale",
+    ) -> None:
+        sold_item_records.append(
+            {
+                "source": source,
+                "reference": reference or "-",
+                "datetime": datetime_value,
+                "counterparty": counterparty,
+                "user_name": user_name,
+                "sku": getattr(product, "sku", None) or "-",
+                "product": product_name or getattr(product, "name", None) or "-",
+                "category": _product_category(product) if product else "-",
+                "qty": round(_num(qty), 3),
+                "unit_price": round(_num(unit_price), 3),
+                "line_total": round(_num(line_total), 2),
+                "payment_method": payment_method or "-",
+                "status": status or "-",
+                "line_type": line_type,
+            }
+        )
 
     pos_records = []
     for inv in sorted(
@@ -666,6 +706,20 @@ async def _build_sales_report(
 
         for item in inv.items:
             add_product(item.product_id, item.name or "-", item.qty, item.total, 1)
+            add_sold_item_record(
+                source="POS",
+                reference=inv.invoice_number or f"POS-{inv.id}",
+                datetime_value=inv.created_at.strftime("%Y-%m-%d %H:%M") if inv.created_at else "-",
+                counterparty=inv.customer.name if inv.customer else "Walk-in",
+                user_name=inv.user.name if inv.user else "-",
+                product=item.product,
+                product_name=item.name,
+                qty=item.qty,
+                unit_price=item.unit_price,
+                line_total=item.total,
+                payment_method=inv.payment_method or "-",
+                status=inv.status or "-",
+            )
 
         pos_records.append(
             {
@@ -710,12 +764,28 @@ async def _build_sales_report(
         allocation_ratio = (amount / invoice_total) if invoice_total > 0 else 0.0
         for item in invoice.items:
             product_name = item.product.name if item.product else "-"
+            allocated_qty = _num(item.qty) * allocation_ratio
+            allocated_total = _num(item.total) * allocation_ratio
             add_product(
                 item.product_id,
                 product_name,
-                _num(item.qty) * allocation_ratio,
-                _num(item.total) * allocation_ratio,
+                allocated_qty,
+                allocated_total,
                 1,
+            )
+            add_sold_item_record(
+                source="B2B Collection",
+                reference=payment.get("reference") or invoice.invoice_number,
+                datetime_value=payment["datetime"],
+                counterparty=invoice.client.name if invoice.client else payment.get("client", "-"),
+                user_name=payment.get("user_name") or "-",
+                product=item.product,
+                product_name=product_name,
+                qty=allocated_qty,
+                unit_price=item.unit_price,
+                line_total=allocated_total,
+                payment_method=payment.get("payment_method") or "-",
+                status=payment.get("status") or "-",
             )
 
     b2b_records = []
@@ -782,6 +852,21 @@ async def _build_sales_report(
         for item in refund.items:
             product_name = item.product.name if item.product else "-"
             add_product(item.product_id, product_name, item.qty, item.total, -1)
+            add_sold_item_record(
+                source="Retail Refund",
+                reference=refund.refund_number,
+                datetime_value=refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "-",
+                counterparty=refund.customer.name if refund.customer else "-",
+                user_name=refund.user.name if refund.user else "-",
+                product=item.product,
+                product_name=product_name,
+                qty=-_num(item.qty),
+                unit_price=item.unit_price,
+                line_total=-_num(item.total),
+                payment_method=refund.refund_method or "-",
+                status="refunded",
+                line_type="refund",
+            )
 
         refund_records.append(
             {
@@ -810,6 +895,21 @@ async def _build_sales_report(
         for item in refund.items:
             product_name = item.product.name if item.product else "-"
             add_product(item.product_id, product_name, item.qty, item.total, -1)
+            add_sold_item_record(
+                source="B2B Refund",
+                reference=refund.refund_number,
+                datetime_value=refund.created_at.strftime("%Y-%m-%d %H:%M") if refund.created_at else "-",
+                counterparty=refund.client.name if refund.client else "-",
+                user_name=refund.user.name if refund.user else "-",
+                product=item.product,
+                product_name=product_name,
+                qty=-_num(item.qty),
+                unit_price=item.unit_price,
+                line_total=-_num(item.total),
+                payment_method="cash",
+                status="refunded",
+                line_type="refund",
+            )
 
         refund_records.append(
             {
@@ -893,11 +993,13 @@ async def _build_sales_report(
         "b2b_issued_invoice_records": _paginate_rows(b2b_issued_invoice_records, skip, limit, include_all=include_all),
         "b2b_payment_records": _paginate_rows(b2b_payment_records, skip, limit, include_all=include_all),
         "refund_records": _paginate_rows(refund_records, skip, limit, include_all=include_all),
+        "sold_item_records": _paginate_rows(sold_item_records, skip, limit, include_all=include_all),
         "pos_count": len(pos_invoices),
         "b2b_count": len(b2b_invoices),
         "b2b_issued_invoice_count": len(b2b_issued_invoice_records),
         "b2b_payment_count": len(b2b_payment_records),
         "refund_count": len(refund_records),
+        "sold_item_count": len(sold_item_records),
         "date_from": d_from.strftime("%Y-%m-%d"),
         "date_to": d_to.strftime("%Y-%m-%d"),
     }
@@ -1098,6 +1200,15 @@ async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSess
             "column_formats": {"Date / Time": "datetime", "Amount": "money"},
             "wrap_columns": {"Reason"},
             "tab_color": "C00000",
+        },
+        {
+            "sheet_name": "Items Sold",
+            "report_title": "Items Sold Detail",
+            "headers": ["Date / Time", "Source", "Reference", "Counterparty", "User", "SKU", "Product", "Category", "Qty", "Unit Price", "Line Total", "Payment", "Status"],
+            "rows": [[row["datetime"], row["source"], row["reference"], row["counterparty"], row["user_name"], row["sku"], row["product"], row["category"], row["qty"], row["unit_price"], row["line_total"], row["payment_method"], row["status"]] for row in data["sold_item_records"]],
+            "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Records", len(data["sold_item_records"]))],
+            "column_formats": {"Date / Time": "datetime", "Qty": "qty", "Unit Price": "money", "Line Total": "money"},
+            "tab_color": "70AD47",
         },
         {
             "sheet_name": "Top Products",
@@ -4704,6 +4815,35 @@ async function loadSales(){
           </div>`).join("")
         : `<div style="color:var(--muted);font-size:13px">No data</div>`;
 
+    let itemHtml = `
+        <div class="table-title" style="margin-top:28px">Items Sold Detail - ${data.sold_item_records.length} lines</div>
+        <div class="table-wrap">
+        <div style="overflow-x:auto">
+        <table><thead><tr><th>Date / Time</th><th>Source</th><th>Reference</th><th>Customer / Client</th><th>By</th><th>SKU</th><th>Product</th><th>Category</th><th style="text-align:right">Qty</th><th style="text-align:right">Unit Price</th><th style="text-align:right">Line Total</th><th>Payment</th><th>Status</th></tr></thead><tbody>`;
+    if(data.sold_item_records.length){
+        itemHtml += data.sold_item_records.map(row=>{
+            const isRefund = row.line_type === "refund" || row.line_total < 0 || row.qty < 0;
+            return `<tr style="${isRefund ? "background:rgba(255,77,109,.04)" : ""}">
+                <td class="mono" style="font-size:11px;white-space:nowrap;color:var(--muted)">${row.datetime}</td>
+                <td style="font-size:12px;color:${isRefund ? "#ff4d6d" : "var(--sub)"};font-weight:${isRefund ? 700 : 500}">${row.source}</td>
+                <td class="mono" style="font-size:11px;color:${isRefund ? "#ff4d6d" : "var(--blue)"}">${row.reference}</td>
+                <td class="name" style="font-size:12px;white-space:nowrap">${row.counterparty}</td>
+                <td style="font-size:12px;color:var(--muted);white-space:nowrap">${row.user_name}</td>
+                <td class="mono" style="font-size:11px;color:var(--muted)">${row.sku}</td>
+                <td style="font-weight:600;white-space:nowrap">${row.product}</td>
+                <td style="font-size:12px;color:var(--muted)">${row.category}</td>
+                <td class="mono" style="text-align:right;color:${isRefund ? "#ff4d6d" : "var(--blue)"};font-weight:700">${row.qty.toFixed(2)}</td>
+                <td class="mono" style="text-align:right">${row.unit_price.toFixed(2)}</td>
+                <td class="mono" style="text-align:right;color:${isRefund ? "#ff4d6d" : "var(--green)"};font-weight:700">${row.line_total.toFixed(2)}</td>
+                <td style="font-size:12px">${row.payment_method}</td>
+                <td style="font-size:12px">${row.status}</td>
+            </tr>`;
+        }).join("");
+    } else {
+        itemHtml += `<tr><td colspan="13" style="text-align:center;color:var(--muted);padding:24px">No sold items in this period</td></tr>`;
+    }
+    itemHtml += `</tbody></table></div></div>`;
+
     let posHtml = `
         <div class="table-title" style="margin-top:28px">POS Invoices — ${data.pos_records.length} transactions</div>
         <div class="table-wrap">
@@ -4796,7 +4936,7 @@ async function loadSales(){
             </tr>`).join("")}
         </tbody></table></div>`;
     }
-    document.getElementById("sales-records").innerHTML = posHtml + b2bHtml + b2bCollectionsHtml + refHtml;
+    document.getElementById("sales-records").innerHTML = itemHtml + posHtml + b2bHtml + b2bCollectionsHtml + refHtml;
     return;
 }
 
