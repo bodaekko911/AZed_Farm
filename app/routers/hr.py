@@ -2696,7 +2696,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <tbody id="daysoff-body"></tbody>
         </table>
         <div style="max-width:1100px;margin:10px auto 0;font-size:11px;color:var(--muted);line-height:1.5">
-            Credit = monthly allowance accrued from hire (carried over) + days off earned by paying salary partially &minus; days taken (attendance marked "Day Off"). A negative balance means more days off were taken than available.
+            Credit = monthly allowance accrued from hire (carried over) + days off earned by paying salary partially &minus; days taken (attendance marked "Day Off"). The balance never goes below zero: if more days off are taken than available, payroll only pays what the balance covers and the rest is unpaid.
         </div>
     </div>
 </div>
