@@ -336,40 +336,57 @@ def _employee_payload(employee: Employee) -> dict:
 def _paid_days_and_rate(employee: Employee, working_days: int = 30) -> tuple[Decimal, Decimal]:
     """Return (paid_days, daily_rate) for an employee in a month.
 
-    paid_days  = working_days - vacation_days   (the days the employee is
-                 expected to work to earn the full base salary)
-    daily_rate = base_salary / paid_days
-    earned     = daily_rate * days_present   (NO cap)
+    paid_days  = working_days   (the whole month is paid: the monthly paid-leave
+                 allowance counts as paid time, so a complete month always earns
+                 the exact base salary — whether the leave is taken or not)
+    daily_rate = base_salary / working_days
+    earned     = base_salary * min(days_present + vacation_allowance,
+                                   working_days) / working_days
 
     `working_days` is the actual number of days in the payroll month (28-31).
-    Because there is no cap, working more than `paid_days` days (e.g. working
-    through allotted vacation days) earns more than the base salary, and each
-    day short of `paid_days` reduces pay by one day's share.
+    The salary is computed on the FULL month, so unused vacation days are still
+    paid (the employee is present those days) and the total is capped at the
+    base salary. Only absences BEYOND the monthly vacation allowance reduce pay,
+    by one day's share (base_salary / working_days) each. See `_earned_base`.
     """
     safe_working_days = max(1, int(working_days or 0))
-    vacation  = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
-    paid_days = _days(max(1, safe_working_days - vacation))   # required attendance days
+    paid_days = _days(safe_working_days)   # the full month is paid
     base_salary = _money(employee.base_salary)
     daily_rate  = _money(base_salary / paid_days) if paid_days > 0 else Decimal("0")
     return paid_days, daily_rate
 
 
-def _earned_base(employee: Employee, days_present, working_days: int = 30) -> Decimal:
-    """Earned base salary for `days_present` days, computed WITHOUT pre-rounding
-    the daily rate.
+def _earned_base(employee: Employee, days_present, working_days: int = 30,
+                 paid_leave_days=0) -> Decimal:
+    """Earned base salary for `days_present` days plus `paid_leave_days` days of
+    PAID leave, computed WITHOUT pre-rounding the daily rate.
 
-    Using a 2-decimal daily rate and then multiplying by the day count loses
-    precision, so a full month would not reconstruct the exact base salary
-    (e.g. 8000 / 26 -> 307.69, x 26 -> 7999.94, shown as 7999). Computing
-    `base_salary * days_present / paid_days` and rounding only the final result
-    makes full attendance (days_present == paid_days) land on the exact base
-    salary (8000), while still applying NO cap for overtime days.
+    Paid days are the days the employee was present plus the days of leave that
+    their accrued balance covers this month, capped at the length of the month:
+
+        paid   = min(days_present + paid_leave_days, working_days)
+        earned = base_salary * paid / working_days
+
+    `paid_leave_days` is supplied by the caller as
+    min(leave taken this month, accrued balance as of this month) — see
+    `_paid_leave_days_for_period`. So:
+      * Paid days off come out of the employee's accrued balance, which carries
+        over month to month: bank enough leave and a whole month off is still
+        paid in full.
+      * Leave taken beyond the available balance is unpaid.
+      * A complete month lands on the exact base salary (the total is capped at
+        `working_days`, so it never exceeds the base salary).
+
+    Computing `base_salary * paid / working_days` and rounding only the final
+    result keeps a full month exact (e.g. 8000, not 7999.94 from a pre-rounded
+    daily rate).
     """
-    paid_days, _rate = _paid_days_and_rate(employee, working_days)
-    if paid_days <= 0:
-        return Decimal("0")
+    safe_working_days = max(1, int(working_days or 0))
     base_salary = _money(employee.base_salary)
-    return _money(base_salary * _dec(days_present) / paid_days)
+    paid = min(_dec(days_present) + _dec(paid_leave_days), _dec(safe_working_days))
+    if paid < 0:
+        paid = Decimal("0")
+    return _money(base_salary * paid / _dec(safe_working_days))
 
 
 async def _loan_repaid_amounts(db: AsyncSession, loan_ids: list[int]) -> dict[int, Decimal]:
@@ -433,6 +450,81 @@ async def _employee_vacation_summary(db: AsyncSession, employee: Employee) -> di
         "taken": _as_day_float(taken),
         "days_left": _as_day_float(left),
     }
+
+
+async def _vacation_available_as_of(
+    db: AsyncSession, employee: Employee, year: int, month: int
+) -> Decimal:
+    """Paid-leave balance available to cover leave taken IN the given payroll
+    month — i.e. the balance as it stood entering that month, including that
+    month's own accrual:
+
+        accrued (hire → this month, inclusive)
+        + days off credited by partial payments in PRIOR months
+        − leave taken in PRIOR months
+
+    Floored at zero. This is an *as-of-month* figure: a payroll run (or re-run)
+    for a past month only spends the leave that had actually been banked by
+    then, so historical runs stay correct and stable across re-runs.
+    """
+    per_month = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
+    if per_month <= 0:
+        return Decimal("0")
+
+    from calendar import monthrange
+    as_of = date(year, month, monthrange(year, month)[1])
+    months = _vacation_months_accrued(employee, as_of)
+    accrued = _days(per_month * months)
+
+    period = f"{year:04d}-{month:02d}"
+    month_start = date(year, month, 1)
+
+    _credited = await db.execute(
+        select(func.coalesce(func.sum(Payroll.days_off_credited), 0)).where(
+            Payroll.employee_id == employee.id,
+            Payroll.period < period,            # credited by PRIOR months' payrolls
+        )
+    )
+    credited_before = _days(_credited.scalar() or 0)
+
+    _taken_before = await db.execute(
+        select(func.count(Attendance.id)).where(
+            Attendance.employee_id == employee.id,
+            Attendance.status == "absent",      # the "Day Off" option is stored as 'absent'
+            Attendance.date < month_start,      # leave taken in PRIOR months
+        )
+    )
+    taken_before = _days(_taken_before.scalar() or 0)
+
+    available = _days(accrued + credited_before - taken_before)
+    return available if available > 0 else Decimal("0")
+
+
+async def _paid_leave_days_for_period(
+    db: AsyncSession, employee: Employee, year: int, month: int
+) -> tuple[Decimal, Decimal, Decimal]:
+    """Return (paid_leave_days, taken_in_month, available_balance).
+
+    `paid_leave_days` is the number of days off TAKEN this month that the
+    employee's accrued balance can actually cover — i.e.
+    min(taken_in_month, available_balance). These days are paid as if present;
+    any leave taken beyond the available balance is unpaid. Days off are stored
+    as attendance status 'absent' (the "Day Off" option).
+    """
+    available = await _vacation_available_as_of(db, employee, year, month)
+
+    _taken = await db.execute(
+        select(func.count(Attendance.id)).where(
+            Attendance.employee_id == employee.id,
+            Attendance.status == "absent",
+            func.extract("year",  Attendance.date) == year,
+            func.extract("month", Attendance.date) == month,
+        )
+    )
+    taken_in_month = _days(_taken.scalar() or 0)
+
+    paid_leave = taken_in_month if taken_in_month <= available else available
+    return _days(paid_leave), taken_in_month, available
 
 
 async def _employee_loan_balance(db: AsyncSession, employee_id: int) -> Decimal:
@@ -1458,11 +1550,20 @@ async def _payroll_preview_for_employee(
     vacation     = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
     paid_days, daily_rate = _paid_days_and_rate(employee, working_days)
 
-    # Earned salary = base_salary × days_present / paid_days, with NO cap —
-    # working beyond the required (paid) days earns more than base, and absences
-    # reduce pay. Computed without pre-rounding the daily rate so a full month
-    # equals the exact base salary. Allowance is prorated by attendance separately.
-    earned_base  = _earned_base(employee, days_present, working_days)
+    # Paid leave = days off taken this month that the employee's accrued balance
+    # (carried over month to month, as of this month) can cover. These count as
+    # present for pay; leave beyond the balance is unpaid.
+    paid_leave_days, taken_leave_month, vacation_available = await _paid_leave_days_for_period(
+        db, employee, year, month
+    )
+
+    # Earned salary = base_salary × min(days_present + paid_leave_days,
+    # working_days) / working_days. The month is paid up to the base salary:
+    # leave drawn from the accrued balance is paid (so a fully-banked month off
+    # is still full pay) and only leave beyond the balance reduces pay. Computed
+    # without pre-rounding the daily rate so a full month equals the exact base
+    # salary. Allowance (food) is prorated by attendance separately.
+    earned_base  = _earned_base(employee, days_present, working_days, paid_leave_days)
     earned_total = _money(earned_base + earned_allowance)
 
     pending_day_days = Decimal("0")
@@ -1486,6 +1587,9 @@ async def _payroll_preview_for_employee(
         "transportation_allowance": _as_float(trans_all),
         "vacation_days": vacation,
         "paid_days": _as_day_float(paid_days),
+        "vacation_paid_days": _as_day_float(paid_leave_days),
+        "vacation_taken_month": _as_day_float(taken_leave_month),
+        "vacation_available": _as_day_float(vacation_available),
         "working_days": working_days,
         "days_elapsed": days_elapsed,
         "days_present": days_present,
@@ -1933,10 +2037,19 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
                 existing_manual_deductions = Decimal("0")
 
             paid_days_val, daily_rate_val = _paid_days_and_rate(emp, working_days)
-            # Earned = base_salary × days_present / paid_days, NO cap. Computed
-            # without pre-rounding the daily rate so a full month equals the
-            # exact base salary. Mirrors preview.
-            earned_base = _earned_base(emp, days_present, working_days)
+            # Paid leave = days off taken this month that the accrued balance
+            # (carried over, as of this month) can cover. Counts as present for
+            # pay; leave beyond the balance is unpaid. Mirrors preview.
+            paid_leave_days, _taken_leave_month, _vac_available = await _paid_leave_days_for_period(
+                db, emp, year, month
+            )
+            # Earned = base_salary × min(days_present + paid_leave_days,
+            # working_days) / working_days. Month is paid up to base salary;
+            # leave drawn from the balance is paid (a fully-banked month off is
+            # still full pay) and only leave beyond the balance reduces pay.
+            # Computed without pre-rounding the daily rate so a full month equals
+            # the exact base salary. Mirrors preview.
+            earned_base = _earned_base(emp, days_present, working_days, paid_leave_days)
 
             # Allowances — mirror the preview logic exactly:
             #   Food allowance      → prorated by attendance (daily rate x days present)
@@ -3174,11 +3287,11 @@ function updateEmpDailyRatePreview(){
     const preview   = document.getElementById("emp-rate-preview");
     if(!preview) return;
     if(!salary && !food && !transport){ preview.innerText = ""; return; }
-    const paidDays  = Math.max(1, 30 - (vacation || 0));
+    const paidDays  = 30;
     const dailyRate = salary / paidDays;
     const totalMonthly = salary + food + transport;
     preview.innerHTML =
-        `Daily rate: <b>${money(dailyRate)} EGP</b> &nbsp;(approx — ${money(salary)} ÷ ${paidDays} days, based on a 30-day month minus ${vacation||0} vacation; actual payroll uses each month's real day count)<br>` +
+        `Daily rate: <b>${money(dailyRate)} EGP</b> &nbsp;(approx — ${money(salary)} ÷ ${paidDays} days; the full month is paid. ${vacation||0} leave day(s)/month accrue and carry over — days off are paid from that balance, so a fully-banked month off is still full pay; only days off beyond the balance are deducted. Actual payroll uses each month's real day count)<br>` +
         `Total monthly: <b>${money(totalMonthly)} EGP</b> &nbsp;(salary ${money(salary)} + food ${money(food)} + transport ${money(transport)})`;
 }
 
@@ -3867,7 +3980,12 @@ async function loadPayrollPreview(){
         const manDed  = numberValue(e.pending_manual_deductions);
         const base    = numberValue(e.base_salary);
         const net     = base - dayDed - manDed - loanBal;
-        const vacInfo   = e.vacation_days > 0 ? ` · ${e.vacation_days}d vacation` : "";
+        const paidLeave = numberValue(e.vacation_paid_days)||0;
+        const takenLeave= numberValue(e.vacation_taken_month)||0;
+        const leaveBal  = (e.vacation_available!==null&&e.vacation_available!==undefined) ? numberValue(e.vacation_available) : null;
+        const vacInfo   = e.vacation_days > 0
+            ? ` · ${paidLeave} paid leave${takenLeave > paidLeave ? ` of ${takenLeave} taken` : ""}${leaveBal!==null ? ` · ${leaveBal}d balance` : ""}`
+            : "";
         const allowances = (numberValue(e.food_allowance)||0) + (numberValue(e.transportation_allowance)||0);
         return `
         <tr>
