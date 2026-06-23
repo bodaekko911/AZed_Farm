@@ -441,7 +441,12 @@ async def _employee_vacation_summary(db: AsyncSession, employee: Employee) -> di
     )
     taken = _days(_taken.scalar() or 0)
 
+    # Floor at zero: an employee can overdraw leave (take more than accrued),
+    # but payroll only pays what the balance covers and the remaining balance
+    # is never negative — it simply hits zero.
     left = _days(accrued + credited - taken)
+    if left < 0:
+        left = Decimal("0")
     return {
         "per_month": per_month,
         "months_accrued": months,
