@@ -1353,7 +1353,7 @@ th.sortable.active.desc .sort-arrow { transform: rotate(180deg); }
 """ + ("""
         <button class="btn btn-export" id="export-btn" onclick="exportXLSX()" title="Export current filtered list as Excel">
             <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Export XLSX
+            Export Excel
         </button>
 """ if can_export_excel else "") + """
         <button class="btn btn-green" onclick="openAddModal()">+ Add Customer</button>
@@ -1674,7 +1674,7 @@ async function exportCSV(){
     }
 }
 
-function exportXLSX(){
+async function exportXLSX(){
     const btn = document.getElementById("export-btn");
     if (!btn) return;
     btn.disabled = true;
@@ -1703,7 +1703,7 @@ function exportXLSX(){
         showToast("Customers XLSX exported");
     } finally {
         btn.disabled = false;
-        btn.innerHTML = `<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export XLSX`;
+        btn.innerHTML = `<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export Excel`;
     }
 }
 

@@ -47,7 +47,7 @@ def test_customers_page_exports_xlsx_button_for_excel_permission() -> None:
     html = customers_ui(user)
 
     assert "exportXLSX()" in html
-    assert "Export XLSX" in html
+    assert "Export Excel" in html
 
 
 def test_customer_export_workbook_uses_clean_typed_data() -> None:
