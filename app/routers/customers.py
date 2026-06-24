@@ -1,13 +1,16 @@
 from collections import defaultdict
+from datetime import date, datetime
+import io
+import re
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy import func, select, asc, desc
 
 from app.database import get_async_session
-from app.core.permissions import get_current_user, require_permission
+from app.core.permissions import get_current_user, has_permission, require_permission
 from app.models.customer import Customer
 from app.models.user import User
 from app.models.invoice import Invoice
@@ -24,6 +27,170 @@ router = APIRouter(
 
 
 # ── API ────────────────────────────────────────────────
+def _customer_sort_expression(sort_by: str):
+    inv_count_sq = (
+        select(func.count(Invoice.id))
+        .where(Invoice.customer_id == Customer.id)
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    inv_total_sq = (
+        select(func.coalesce(func.sum(Invoice.total), 0))
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid")
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    ref_total_sq = (
+        select(func.coalesce(func.sum(RetailRefund.total), 0))
+        .where(RetailRefund.customer_id == Customer.id)
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    net_spent_expr = func.greatest(inv_total_sq - ref_total_sq, 0)
+
+    return {
+        "name": Customer.name,
+        "discount_pct": Customer.discount_pct,
+        "invoices": inv_count_sq,
+        "total_spent": net_spent_expr,
+    }.get(sort_by, Customer.name)
+
+
+def _customer_search_conditions(q: str):
+    if not q:
+        return []
+    return [
+        Customer.name.ilike(f"%{q}%")
+        | Customer.phone.ilike(f"%{q}%")
+        | Customer.email.ilike(f"%{q}%")
+    ]
+
+
+def _clean_customer_text(value):
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def _customer_export_buffer(rows, *, title: str, filter_label: str) -> io.BytesIO:
+    try:
+        import openpyxl
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise Exception("Run: pip install openpyxl --break-system-packages")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Customers"
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A6"
+
+    headers = [
+        "ID",
+        "Customer Name",
+        "Phone",
+        "Email",
+        "Address",
+        "Discount %",
+        "Invoices",
+        "Paid Sales",
+        "Refunds",
+        "Net Spent",
+        "Created",
+    ]
+
+    title_fill = PatternFill("solid", fgColor="1F4E78")
+    meta_fill = PatternFill("solid", fgColor="EAF1FB")
+    header_fill = PatternFill("solid", fgColor="2F6F4F")
+    alt_fill = PatternFill("solid", fgColor="F7FAFC")
+    thin = Side(style="thin", color="D9E2EC")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+    title_cell = ws.cell(row=1, column=1, value=title)
+    title_cell.fill = title_fill
+    title_cell.font = Font(bold=True, color="FFFFFF", size=15)
+    title_cell.alignment = Alignment(horizontal="center")
+
+    metadata = [
+        ("Generated", datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("Filter", filter_label),
+        ("Customer count", len(rows)),
+    ]
+    for row_no, (label, value) in enumerate(metadata, start=2):
+        label_cell = ws.cell(row=row_no, column=1, value=label)
+        value_cell = ws.cell(row=row_no, column=2, value=value)
+        label_cell.font = Font(bold=True, color="334E68")
+        label_cell.fill = meta_fill
+        value_cell.fill = meta_fill
+        label_cell.border = border
+        value_cell.border = border
+
+    header_row = 5
+    for col_no, header in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=col_no, value=header)
+        cell.fill = header_fill
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    for row_idx, row in enumerate(rows, start=header_row + 1):
+        created_at = row.created_at
+        if created_at is not None and hasattr(created_at, "date"):
+            created_at = created_at.date()
+        paid_sales = float(row.inv_total or 0)
+        refunds = float(row.ref_total or 0)
+        values = [
+            row.id,
+            _clean_customer_text(row.name),
+            _clean_customer_text(row.phone),
+            _clean_customer_text(row.email),
+            _clean_customer_text(row.address),
+            float(row.discount_pct or 0),
+            int(row.inv_count or 0),
+            paid_sales,
+            refunds,
+            max(0.0, paid_sales - refunds),
+            created_at,
+        ]
+        for col_no, value in enumerate(values, start=1):
+            cell = ws.cell(row=row_idx, column=col_no, value=value)
+            cell.border = border
+            if row_idx % 2 == 0:
+                cell.fill = alt_fill
+            cell.alignment = Alignment(vertical="top", wrap_text=(col_no == 5))
+
+    for column in ("F",):
+        for cell in ws[column][header_row:]:
+            cell.number_format = '0.00"%"'
+    for column in ("G",):
+        for cell in ws[column][header_row:]:
+            cell.number_format = "#,##0"
+    for column in ("H", "I", "J"):
+        for cell in ws[column][header_row:]:
+            cell.number_format = "#,##0.00"
+    for column in ("K",):
+        for cell in ws[column][header_row:]:
+            cell.number_format = "yyyy-mm-dd"
+
+    ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(headers))}{max(header_row, ws.max_row)}"
+    for col_idx in range(1, ws.max_column + 1):
+        values = [
+            str(ws.cell(row=row_idx, column=col_idx).value or "")
+            for row_idx in range(1, ws.max_row + 1)
+        ]
+        ws.column_dimensions[get_column_letter(col_idx)].width = max(
+            10,
+            min(max(len(value) for value in values) + 3, 42),
+        )
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
 @router.get("/api/list")
 async def get_customers(
     q:        str = "",
@@ -52,29 +219,14 @@ async def get_customers(
         .correlate(Customer)
         .scalar_subquery()
     )
-    net_spent_expr = func.greatest(inv_total_sq - ref_total_sq, 0)
-
-    SORT_EXPRS = {
-        "name":         Customer.name,
-        "discount_pct": Customer.discount_pct,
-        "invoices":     inv_count_sq,
-        "total_spent":  net_spent_expr,
-    }
-
-    conditions = []
-    if q:
-        conditions.append(
-            Customer.name.ilike(f"%{q}%") |
-            Customer.phone.ilike(f"%{q}%") |
-            Customer.email.ilike(f"%{q}%")
-        )
+    conditions = _customer_search_conditions(q)
 
     cnt_result = await db.execute(
         select(func.count()).select_from(Customer).where(*conditions)
     )
     total = cnt_result.scalar()
 
-    sort_expr = SORT_EXPRS.get(sort_by, Customer.name)
+    sort_expr = _customer_sort_expression(sort_by)
     order_clause = desc(sort_expr) if sort_dir == "desc" else asc(sort_expr)
 
     rows = await db.execute(
@@ -107,6 +259,67 @@ async def get_customers(
         })
 
     return {"total": total, "items": result}
+
+
+@router.get("/api/export.xlsx", dependencies=[Depends(require_permission("action_export_excel"))])
+async def export_customers_excel(
+    q: str = "",
+    sort_by: str = "name",
+    sort_dir: str = "asc",
+    db: AsyncSession = Depends(get_async_session),
+):
+    inv_count_sq = (
+        select(func.count(Invoice.id))
+        .where(Invoice.customer_id == Customer.id)
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    inv_total_sq = (
+        select(func.coalesce(func.sum(Invoice.total), 0))
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid")
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    ref_total_sq = (
+        select(func.coalesce(func.sum(RetailRefund.total), 0))
+        .where(RetailRefund.customer_id == Customer.id)
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    conditions = _customer_search_conditions(q)
+    sort_expr = _customer_sort_expression(sort_by)
+    order_clause = desc(sort_expr) if sort_dir == "desc" else asc(sort_expr)
+
+    result = await db.execute(
+        select(
+            Customer.id,
+            Customer.name,
+            Customer.phone,
+            Customer.email,
+            Customer.address,
+            Customer.discount_pct,
+            Customer.created_at,
+            inv_count_sq.label("inv_count"),
+            inv_total_sq.label("inv_total"),
+            ref_total_sq.label("ref_total"),
+        )
+        .where(*conditions)
+        .order_by(order_clause, asc(Customer.name))
+    )
+    rows = result.all()
+    buf = _customer_export_buffer(
+        rows,
+        title="Customers Export",
+        filter_label=q.strip() or "All customers",
+    )
+    label = re.sub(r"[^A-Za-z0-9]+", "_", q.strip()).strip("_").lower()
+    suffix = f"_{label}" if label else ""
+    filename = f"customers{suffix}_{date.today().isoformat()}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @router.get("/api/invoices/{customer_id}")
@@ -805,6 +1018,7 @@ function drawSpendChart(orders) {{
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
 def customers_ui(current_user: User = Depends(require_permission("page_customers"))):
+    can_export_excel = has_permission(current_user, "action_export_excel")
     return """
 <!DOCTYPE html>
 <html>
@@ -1136,10 +1350,12 @@ th.sortable.active.desc .sort-arrow { transform: rotate(180deg); }
             <input id="search" placeholder="Search by name, phone or email…" oninput="onSearch()">
         </div>
         <span class="count-badge" id="count-badge">— customers</span>
-        <button class="btn btn-export" id="export-btn" onclick="exportCSV()" title="Export current filtered list as CSV">
+""" + ("""
+        <button class="btn btn-export" id="export-btn" onclick="exportXLSX()" title="Export current filtered list as Excel">
             <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Export CSV
+            Export XLSX
         </button>
+""" if can_export_excel else "") + """
         <button class="btn btn-green" onclick="openAddModal()">+ Add Customer</button>
     </div>
 
@@ -1455,6 +1671,39 @@ async function exportCSV(){
     } finally {
         btn.disabled = false;
         btn.innerHTML = `<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export CSV`;
+    }
+}
+
+function exportXLSX(){
+    const btn = document.getElementById("export-btn");
+    if (!btn) return;
+    btn.disabled = true;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="animation:spin .8s linear infinite;flex-shrink:0"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Exporting...`;
+
+    try {
+        const q   = document.getElementById("search").value.trim();
+        let url   = `/customers-mgmt/api/export.xlsx?sort_by=${sortBy}&sort_dir=${sortDir}`;
+        if (q) url += `&q=${encodeURIComponent(q)}`;
+
+        const response = await fetch(url);
+        if (!response.ok) {
+            showToast(response.status === 403 ? "Excel export permission required" : "Excel export failed");
+            return;
+        }
+
+        const blob = await response.blob();
+        const link = document.createElement("a");
+        link.href  = URL.createObjectURL(blob);
+        const disposition = response.headers.get("Content-Disposition") || "";
+        const match = disposition.match(/filename="?([^"]+)"?/i);
+        link.download = match ? match[1] : `customers_${new Date().toISOString().slice(0,10)}.xlsx`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+
+        showToast("Customers XLSX exported");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export XLSX`;
     }
 }
 

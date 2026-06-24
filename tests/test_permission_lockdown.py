@@ -95,6 +95,12 @@ def test_customer_delete_requires_explicit_permission() -> None:
 
 
 # ── Products ──────────────────────────────────────────────────────────────────
+def test_customer_export_requires_excel_permission() -> None:
+    client, db = _make_client(_viewer_with("page_customers"))
+    r = client.get("/customers-mgmt/api/export.xlsx")
+    _denied(r, "action_export_excel", db)
+
+
 def test_product_create_requires_explicit_permission() -> None:
     client, db = _make_client(_viewer_with("page_products"))
     r = client.post("/products/api/add", json={
