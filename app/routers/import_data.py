@@ -1049,7 +1049,7 @@ def import_ui(current_user: User = Depends(require_permission("page_import"))):
 <meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Import Data — AZed ERP</title>
+<title>Import Data — AZed Farm</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root{--bg:#060810;--card:#0f1424;--card2:#151c30;--border:rgba(255,255,255,0.06);--border2:rgba(255,255,255,0.11);--green:#00ff9d;--blue:#4d9fff;--orange:#fb923c;--teal:#2dd4bf;--danger:#ff4d6d;--warn:#ffb547;--lime:#84cc16;--purple:#a855f7;--text:#f0f4ff;--sub:#8899bb;--muted:#445066;--sans:'Outfit',sans-serif;--mono:'JetBrains Mono',monospace;--r:12px;}

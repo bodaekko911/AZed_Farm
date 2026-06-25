@@ -14,7 +14,7 @@ def home_ui(_=Depends(get_current_user)):
 <meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AZed ERP</title>
+<title>AZed Farm</title>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -355,7 +355,7 @@ body {
 
     <header class="topbar">
         <a href="/home" class="logo navbar-brand">
-            <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
+            <img src="/static/ERP_logo.png" alt="AZed Farm" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
         </a>
         <div class="topbar-right">
             <button class="mode-btn" id="mode-btn" onclick="toggleMode()" title="Toggle light/dark mode">&#127769;</button>
@@ -666,7 +666,7 @@ body {
     </main>
 
     <footer class="footer">
-        <span class="footer-brand">AZed ERP</span>
+        <span class="footer-brand">AZed Farm</span>
         <span id="footer-time"></span>
     </footer>
 

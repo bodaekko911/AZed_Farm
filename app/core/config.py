@@ -36,7 +36,7 @@ class EnvironmentSelector(BaseSettings):
 
 
 class BaseAppSettings(BaseSettings):
-    APP_NAME: str = "ERP System"
+    APP_NAME: str = "AZed Farm"
     APP_ENV: Literal["development", "production"]
     DEBUG: bool = False
 

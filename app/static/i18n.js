@@ -1,5 +1,5 @@
 /**
- * i18n.js — runtime English ⇄ Arabic translation layer for AZed ERP.
+ * i18n.js — runtime English ⇄ Arabic translation layer for AZed Farm.
  *
  * Loaded automatically by theme-init.js on every page (no router changes
  * needed). How it works:
@@ -39,7 +39,7 @@
    * ────────────────────────────────────────────────────────────────── */
   var DICT = {
     /* ── Brand / chrome ── */
-    "AZed ERP": "AZed ERP",
+    "AZed Farm": "AZed Farm",
     "Habiba Organic Farm": "مزرعة حبيبة العضوية",
     "Signed in as": "مسجل الدخول باسم",
     "Sign out": "تسجيل الخروج",
@@ -270,7 +270,7 @@
     "Log Feeding": "تسجيل تغذية",
     "Log Death": "تسجيل نفوق",
     "Log Emission": "تسجيل انبعاث",
-    "Log Emission | Carbon | AZed ERP": "تسجيل انبعاث | الكربون | AZed ERP",
+    "Log Emission | Carbon | AZed Farm": "تسجيل انبعاث | الكربون | AZed Farm",
     "Receive Animals": "استلام حيوانات",
     "Create a new group…": "إنشاء مجموعة جديدة…",
     "Reset Password": "إعادة تعيين كلمة المرور",
@@ -572,7 +572,7 @@
     "e.g. Diesel for irrigation pump, Field 3": "مثال: ديزل لمضخة الري، حقل 3",
 
     /* ── Production page (batches / packaging / recipes / drying / spoilage) ── */
-    "Production — AZed ERP": "الإنتاج — AZed ERP",
+    "Production — AZed Farm": "الإنتاج — AZed Farm",
     "Production & Processing": "الإنتاج والتصنيع",
     "Process raw materials, package products, track spoilage": "معالجة الخامات وتعبئة المنتجات وتتبع التالف",
     "Recipes": "الوصفات",
@@ -679,11 +679,11 @@
     "e.g. Rain damaged third tray": "مثال: المطر أتلف الصينية الثالثة",
 
     /* ── Misc ── */
-    "Users — AZed ERP": "المستخدمون — AZed ERP",
-    "Change Password — AZed ERP": "تغيير كلمة المرور — AZed ERP",
-    "Carbon Footprint | AZed ERP": "البصمة الكربونية | AZed ERP",
-    "Emission Factors | Carbon | AZed ERP": "معاملات الانبعاث | الكربون | AZed ERP",
-    "Animals — AZed ERP": "الحيوانات — AZed ERP"
+    "Users — AZed Farm": "المستخدمون — AZed Farm",
+    "Change Password — AZed Farm": "تغيير كلمة المرور — AZed Farm",
+    "Carbon Footprint | AZed Farm": "البصمة الكربونية | AZed Farm",
+    "Emission Factors | Carbon | AZed Farm": "معاملات الانبعاث | الكربون | AZed Farm",
+    "Animals — AZed Farm": "الحيوانات — AZed Farm"
   };
 
   /* Regex rules for dynamic strings (applied when exact lookup fails). */

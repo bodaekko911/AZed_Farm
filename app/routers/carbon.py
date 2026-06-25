@@ -421,7 +421,7 @@ async def carbon_dashboard(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Carbon Footprint | AZed ERP</title>
+  <title>Carbon Footprint | AZed Farm</title>
   <script src="/static/theme-init.js"></script>
   <link rel="stylesheet" href="/static/dashboard.css">
   <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
@@ -737,7 +737,7 @@ async def log_emission_page(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Log Emission | Carbon | AZed ERP</title>
+  <title>Log Emission | Carbon | AZed Farm</title>
   <script src="/static/theme-init.js"></script>
   <link rel="stylesheet" href="/static/dashboard.css">
   <style>
@@ -885,7 +885,7 @@ async def factors_page(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Emission Factors | Carbon | AZed ERP</title>
+  <title>Emission Factors | Carbon | AZed Farm</title>
   <script src="/static/theme-init.js"></script>
   <link rel="stylesheet" href="/static/dashboard.css">
   <style>
@@ -1191,7 +1191,7 @@ async def sustainability_report(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Farm Sustainability Report | AZed ERP</title>
+  <title>Farm Sustainability Report | AZed Farm</title>
   <style>
     *{{box-sizing:border-box;margin:0;padding:0}}
     body{{font-family:'Segoe UI',Arial,sans-serif;background:#f4f4f2;color:#1c1c1c;font-size:13px;line-height:1.5}}
@@ -1247,7 +1247,7 @@ async def sustainability_report(
       <div>
         <div class="rpt-title">Farm Sustainability Report</div>
         <div class="rpt-meta">Period: {period_label}</div>
-        <div class="rpt-meta">Generated: {generated} · AZed ERP Carbon Module</div>
+        <div class="rpt-meta">Generated: {generated} · AZed Farm Carbon Module</div>
       </div>
     </div>
 

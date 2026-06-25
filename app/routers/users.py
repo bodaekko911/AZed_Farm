@@ -315,7 +315,7 @@ def password_ui(_=Depends(get_current_user)):
 <meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Change Password — AZed ERP</title>
+<title>Change Password — AZed Farm</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -376,7 +376,7 @@ body.light nav{background:rgba(244,245,239,.92)}
 <body>
 <nav>
     <a href="/home" class="logo navbar-brand">
-        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
+        <img src="/static/ERP_logo.png" alt="AZed Farm" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
     </a>
     <span class="nav-spacer"></span>
     <div class="topbar-right">
@@ -549,7 +549,7 @@ def users_ui(current_user: User = Depends(core_require_admin)):
 <meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Users — AZed ERP</title>
+<title>Users — AZed Farm</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root{

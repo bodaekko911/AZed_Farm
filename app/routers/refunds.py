@@ -390,7 +390,7 @@ def refunds_ui(current_user: User = Depends(get_current_user)):
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script src="/static/theme.js"></script>
-<title>Retail Refunds — AZed ERP</title>
+<title>Retail Refunds — AZed Farm</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root {

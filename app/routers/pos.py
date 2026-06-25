@@ -652,7 +652,7 @@ def _pos_html_body(current_user: User) -> str:
 <meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>POS — AZed ERP</title>
+<title>POS — AZed Farm</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -897,7 +897,7 @@ body.light .toast{background:var(--card);}
 <!-- TOPBAR -->
 <div id="topbar">
     <a href="/home" class="logo navbar-brand">
-        <img src="/static/ERP_logo.png" alt="AZed ERP" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
+        <img src="/static/ERP_logo.png" alt="AZed Farm" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
     </a>
 
     <div class="tb-field" id="barcode_wrap">

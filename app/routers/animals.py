@@ -1093,7 +1093,7 @@ async def animals_page(current_user: User = Depends(require_permission("page_ani
 <meta charset="UTF-8">
 <script src="/static/theme-init.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Animals — AZed ERP</title>
+<title>Animals — AZed Farm</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root {{
