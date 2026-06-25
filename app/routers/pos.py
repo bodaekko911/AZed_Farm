@@ -897,7 +897,7 @@ body.light .toast{background:var(--card);}
 <!-- TOPBAR -->
 <div id="topbar">
     <a href="/home" class="logo navbar-brand">
-        <img src="/static/ERP_logo.png" alt="AZed Farm" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;">
+        <img src="/static/ERP_logo.png" alt="AZed Farm" style="height: 100%; max-height: 48px; width: auto; object-fit: contain; margin: 0; padding: 0;"><span class="logo-text" style="font-family:'Outfit',sans-serif;font-weight:900;font-size:17px;background:linear-gradient(135deg,var(--green,#0f8a43),var(--blue,#6a9fd4));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;white-space:nowrap;margin-left:2px;">Farm Operations</span>
     </a>
 
     <div class="tb-field" id="barcode_wrap">
