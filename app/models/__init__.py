@@ -27,7 +27,7 @@ from app.models.hr import (
 )
 from app.models.inventory import LocationStock, StockLocation, StockMove, StockTransfer
 from app.models.invoice import Invoice, InvoiceItem
-from app.models.product import Product
+from app.models.product import Product, ProductCategory
 from app.models.production import (
     BatchInput,
     BatchOutput,
@@ -80,6 +80,7 @@ __all__ = [
     "MortalityLog",
     "Payroll",
     "Product",
+    "ProductCategory",
     "ProductReceipt",
     "ProductionBatch",
     "Purchase",

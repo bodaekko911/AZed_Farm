@@ -34,3 +34,7 @@ class ProductUpdate(BaseModel):
     category:  Optional[str] = Field(None, max_length=100)
     item_type: Optional[str] = Field(None, max_length=50)
     is_active: Optional[bool] = None
+
+
+class ProductCategoryCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)

@@ -31,3 +31,11 @@ class Product(Base):
     purchase_items = relationship("PurchaseItem", back_populates="product")
     stock_moves    = relationship("StockMove", back_populates="product")
     preferred_supplier = relationship("Supplier", foreign_keys=[preferred_supplier_id])
+
+
+class ProductCategory(Base):
+    __tablename__ = "product_categories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

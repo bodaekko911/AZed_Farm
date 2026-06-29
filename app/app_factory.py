@@ -144,6 +144,36 @@ async def ensure_delivery_transport_columns() -> None:
         logger.exception("ensure_delivery_transport_columns: failed (could not open DB session)")
 
 
+async def ensure_product_categories_table() -> None:
+    """Self-healing guard for standalone product categories."""
+    from app.db.session import AsyncSessionLocal
+
+    statement = """
+        CREATE TABLE IF NOT EXISTS product_categories (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(100) NOT NULL UNIQUE,
+            created_at TIMESTAMPTZ DEFAULT now()
+        )
+    """
+    indexes = [
+        "CREATE INDEX IF NOT EXISTS ix_product_categories_id ON product_categories (id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_product_categories_name ON product_categories (name)",
+    ]
+    try:
+        async with AsyncSessionLocal() as db:
+            try:
+                await db.execute(text(statement))
+                for index_statement in indexes:
+                    await db.execute(text(index_statement))
+                await db.commit()
+                logger.info("ensure_product_categories_table: product_categories ready")
+            except Exception:
+                await db.rollback()
+                logger.exception("ensure_product_categories_table: failed")
+    except Exception:
+        logger.exception("ensure_product_categories_table: failed (could not open DB session)")
+
+
 async def ensure_carbon_methodology() -> None:
     """Self-healing guard for the carbon module's methodology upgrade.
 
@@ -429,6 +459,7 @@ async def lifespan(_: FastAPI):
     await ensure_payroll_columns()
     await ensure_price_precision()
     await ensure_delivery_transport_columns()
+    await ensure_product_categories_table()
     await ensure_carbon_methodology()
     await seed_chart_of_accounts()
     from app.core.cache import init_redis_pool, close_redis_pool

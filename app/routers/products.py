@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, or_, select
@@ -8,7 +8,7 @@ from sqlalchemy import func, or_, select
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.models.inventory import StockMove
-from app.models.product import Product
+from app.models.product import Product, ProductCategory
 from app.models.supplier import Supplier
 from app.models.user import User
 from app.core.log import record
@@ -18,7 +18,7 @@ from app.core.product_types import (
     normalize_item_type,
     stock_tracked_product_condition,
 )
-from app.schemas.product import ProductCreate, ProductUpdate
+from app.schemas.product import ProductCategoryCreate, ProductCreate, ProductUpdate
 from app.services.location_inventory_service import (
     ensure_default_stock_location,
     get_or_create_location_stock,
@@ -50,8 +50,9 @@ async def next_sku(db: AsyncSession = Depends(get_async_session)):
 
 @router.get("/api/categories")
 async def get_categories(db: AsyncSession = Depends(get_async_session)):
-    """Return all distinct categories from products."""
-    result = await db.execute(
+    """Return saved categories plus categories already assigned to products."""
+    saved_result = await db.execute(select(ProductCategory.name).order_by(ProductCategory.name))
+    product_result = await db.execute(
         select(Product.category)
         .where(
             Product.category != None,
@@ -61,8 +62,97 @@ async def get_categories(db: AsyncSession = Depends(get_async_session)):
         .distinct()
         .order_by(Product.category)
     )
-    rows = result.all()
-    return [r[0] for r in rows if r[0]]
+    names = {
+        str(row[0]).strip()
+        for row in [*saved_result.all(), *product_result.all()]
+        if row[0] and str(row[0]).strip()
+    }
+    return sorted(names, key=str.casefold)
+
+
+@router.post("/api/categories", dependencies=[Depends(require_permission("action_products_create"))])
+async def add_category(
+    data: ProductCategoryCreate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Category name is required")
+
+    existing_saved = await db.execute(
+        select(ProductCategory).where(func.lower(ProductCategory.name) == name.lower())
+    )
+    if existing_saved.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Category already exists")
+
+    existing_product = await db.execute(
+        select(Product.category)
+        .where(
+            func.lower(Product.category) == name.lower(),
+            or_(Product.is_active.is_(True), Product.is_active.is_(None)),
+        )
+        .limit(1)
+    )
+    product_category = existing_product.scalar_one_or_none()
+    if product_category:
+        return {"name": product_category, "created": False}
+
+    category = ProductCategory(name=name)
+    db.add(category)
+    await db.flush()
+    record(
+        db,
+        "Products",
+        "add_category",
+        f"Added product category: {category.name}",
+        ref_type="product_category",
+        ref_id=category.id,
+    )
+    await db.commit()
+    await db.refresh(category)
+    return {"id": category.id, "name": category.name, "created": True}
+
+
+@router.delete("/api/categories", dependencies=[Depends(require_permission("action_products_delete"))])
+async def delete_category(
+    name: str = Query(..., min_length=1, max_length=100),
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    category_name = name.strip()
+    if not category_name:
+        raise HTTPException(status_code=400, detail="Category name is required")
+
+    saved_result = await db.execute(
+        select(ProductCategory).where(func.lower(ProductCategory.name) == category_name.lower())
+    )
+    category = saved_result.scalar_one_or_none()
+    product_count_result = await db.execute(
+        select(func.count())
+        .select_from(Product)
+        .where(
+            func.lower(Product.category) == category_name.lower(),
+            or_(Product.is_active.is_(True), Product.is_active.is_(None)),
+        )
+    )
+    product_count = int(product_count_result.scalar() or 0)
+
+    if not category and product_count == 0:
+        raise HTTPException(status_code=404, detail="Category not found")
+    if category:
+        await db.delete(category)
+        record(
+            db,
+            "Products",
+            "delete_category",
+            f"Deleted saved product category: {category.name}",
+            ref_type="product_category",
+            ref_id=category.id,
+        )
+        await db.commit()
+
+    return {"ok": True, "product_count": product_count}
 
 
 @router.get("/api/list")
@@ -652,6 +742,15 @@ function escapeJsString(value){
         .split(newline).join(backslash + "n");
 }
 
+function escapeHtml(value){
+    return String(value == null ? "" : value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
 // Show up to 3 decimals (for unit prices like 0.065) but trim trailing zeros,
 // always keeping at least 2 so prices read as money: 5→"5.00", 3.5→"3.50",
 // 0.065→"0.065", 0.07→"0.07".
@@ -691,11 +790,11 @@ async function loadCategories(){
     // Fill category filter dropdown
     let sel = document.getElementById("cat-filter");
     sel.innerHTML = '<option value="">All Categories</option>' +
-        categories.map(c=>`<option value="${c}">${c}</option>`).join("");
+        categories.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
     // Fill modal category dropdown
     let fcat = document.getElementById("f-category");
     fcat.innerHTML = '<option value="">— No Category —</option>' +
-        categories.map(c=>`<option value="${c}">${c}</option>`).join("");
+        categories.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
 }
 
 async function renderCategories(){
@@ -715,12 +814,12 @@ async function renderCategories(){
     document.getElementById("cat-grid").innerHTML = cats.map(c=>`
         <div class="cat-card">
             <div>
-                <div class="cat-name">${c}</div>
+                <div class="cat-name">${escapeHtml(c)}</div>
                 <div class="cat-count">${counts[c]||0} products</div>
             </div>
             <div style="display:flex;gap:6px">
-                <button class="action-btn" onclick="filterByCategory('${c.replace(/'/g,"\\'")}')">View</button>
-                <button class="action-btn danger" onclick="deleteCategory('${c.replace(/'/g,"\\'")}')">Remove</button>
+                <button class="action-btn" onclick="filterByCategory('${escapeJsString(c)}')">View</button>
+                <button class="action-btn danger" onclick="deleteCategory('${escapeJsString(c)}')">Remove</button>
             </div>
         </div>`).join("");
 }
@@ -741,22 +840,30 @@ async function saveCategory(){
     let name = document.getElementById("cat-name-input").value.trim();
     if(!name){ showToast("Enter a category name"); return; }
     if(categories.includes(name)){ showToast("Category already exists"); return; }
-    // Category is created implicitly by assigning to a product
-    // Just add to local list and dropdowns for now
-    categories.push(name);
-    categories.sort();
+    let res = await fetch("/products/api/categories", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({name}),
+    });
+    let data = await res.json();
+    if(data.detail){ showToast("Error: " + data.detail); return; }
     await loadCategories();
     document.getElementById("cat-modal").classList.remove("open");
-    showToast(`Category "${name}" added ✓`);
+    showToast(`Category "${data.name || name}" added`);
     renderCategories();
 }
 
 async function deleteCategory(cat){
     if(!confirm(`Remove category "${cat}"? Products will keep the category name but it will be removed from the dropdown.`)) return;
-    // Remove from local list
-    categories = categories.filter(c=>c!==cat);
+    let res = await fetch(`/products/api/categories?name=${encodeURIComponent(cat)}`, {method: "DELETE"});
+    let data = await res.json();
+    if(data.detail){ showToast("Error: " + data.detail); return; }
     await loadCategories();
-    showToast(`Category "${cat}" removed`);
+    if(data.product_count){
+        showToast(`Saved category removed; ${data.product_count} product${data.product_count === 1 ? "" : "s"} still use "${cat}"`);
+    } else {
+        showToast(`Category "${cat}" removed`);
+    }
     renderCategories();
 }
 
