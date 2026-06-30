@@ -57,6 +57,22 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
             "OR attendance_auto_status NOT IN ('present', 'absent')"
         ),
     },
+    # Retire the legacy "late"/"leave" attendance statuses (no payroll/vacation
+    # calculation ever read them). A late day was worked → 'present'; a leave
+    # day was time off → 'absent' (Day Off). Idempotent: re-running matches
+    # nothing once converted. ('status' already exists, so no column is added.)
+    {
+        "table": "attendance",
+        "column": "status",
+        "definition": "VARCHAR(20)",
+        "backfill": (
+            "UPDATE attendance SET status = CASE "
+            "WHEN status = 'late' THEN 'present' "
+            "WHEN status = 'leave' THEN 'absent' "
+            "ELSE status END "
+            "WHERE status IN ('late', 'leave')"
+        ),
+    },
     {
         "table": "employees",
         "column": "farm_id",

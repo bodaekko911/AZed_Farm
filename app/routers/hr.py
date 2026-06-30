@@ -36,7 +36,18 @@ from app.services.expense_service import (
 ATTENDANCE_STATUS_PRESENT = "present"
 ATTENDANCE_STATUS_ABSENT = "absent"
 ATTENDANCE_AUTO_STATUSES = {ATTENDANCE_STATUS_PRESENT, ATTENDANCE_STATUS_ABSENT}
-ATTENDANCE_STATUSES = ATTENDANCE_AUTO_STATUSES | {"late", "leave"}
+# Only two statuses are supported: Present (paid working day) and Day Off
+# (stored as 'absent' — paid leave drawn from the balance). "Late" and "Leave"
+# were removed because no payroll/vacation calculation ever read them, so they
+# silently docked pay without touching the leave balance.
+ATTENDANCE_STATUSES = ATTENDANCE_AUTO_STATUSES
+# Any legacy value still arriving from an old client/record is coerced onto a
+# real status: a late day was worked (→ present); a leave day was time off
+# (→ Day Off / absent).
+ATTENDANCE_LEGACY_STATUS_MAP = {
+    "late":  ATTENDANCE_STATUS_PRESENT,
+    "leave": ATTENDANCE_STATUS_ABSENT,
+}
 
 router = APIRouter(
     prefix="/hr",
@@ -143,6 +154,7 @@ DAY_QUANT = Decimal("0.01")
 
 def _normalize_attendance_status(status: str) -> str:
     normalized = (status or ATTENDANCE_STATUS_PRESENT).strip().lower()
+    normalized = ATTENDANCE_LEGACY_STATUS_MAP.get(normalized, normalized)
     if normalized not in ATTENDANCE_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid attendance status")
     return normalized
@@ -2745,8 +2757,6 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <select id="a-status">
                 <option value="present">Present</option>
                 <option value="absent">Day Off</option>
-                <option value="late">Late</option>
-                <option value="leave">Leave</option>
             </select>
         </div>
         <div class="fld"><label>Note</label><input id="a-note" placeholder="Optional note"></div>
@@ -3821,8 +3831,6 @@ function renderAttendanceRows(records){
                     ? `<select onchange="editAttendanceStatus(${r.id}, this.value)" style="background:var(--card2);border:1px solid var(--border2);border-radius:6px;padding:4px 8px;font-size:12px;color:var(--text);cursor:pointer">
                         <option value="present" ${status==="present"?"selected":""}>Present</option>
                         <option value="absent" ${status==="absent"?"selected":""}>Day Off</option>
-                        <option value="late" ${status==="late"?"selected":""}>Late</option>
-                        <option value="leave" ${status==="leave"?"selected":""}>Leave</option>
                     </select>`
                     : `<span class="${cls}">${displayText(labels[status] || status)}</span>`
                 }
