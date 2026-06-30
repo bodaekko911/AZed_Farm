@@ -1241,6 +1241,10 @@ async def b2b_statement(
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
     skip, limit = _resolve_pagination(skip, limit)
+    return await _build_b2b_statement(db, d_from=d_from, d_to=d_to, skip=skip, limit=limit)
+
+
+async def _build_b2b_statement(db, *, d_from, d_to, skip=0, limit=100, include_all=False):
     res = await db.execute(select(B2BClient).where(B2BClient.is_active == True).order_by(B2BClient.name))
     clients = res.scalars().all()
     result = []
@@ -1273,13 +1277,15 @@ async def b2b_statement(
                 "invoice_count": int(invoice_count or 0),
             }
         )
+    if include_all:
+        return result
     return result[skip : skip + limit]
 
 
 @router.get("/export/b2b-statement", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_b2b"))])
 async def export_b2b(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
-    data = await b2b_statement(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
+    data = await _build_b2b_statement(db, d_from=d_from, d_to=d_to, include_all=True)
     rows = [[d["name"],d["phone"],d["payment_terms"],d["total_invoiced"],d["total_paid"],d["outstanding"],d["invoice_count"]] for d in data]
     buf = to_xlsx(
         ["Client","Phone","Payment Terms","Total Invoiced","Total Paid","Outstanding","Invoices"],
@@ -1695,12 +1701,7 @@ async def export_farm(date_from: str = None, date_to: str = None, db: AsyncSessi
 
 
 # ── SPOILAGE ───────────────────────────────────────────
-@router.get("/api/spoilage")
-async def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_spoilage"))):
-    d_from, d_to = parse_dates(date_from, date_to)
-    if (d_to - d_from).days > 366:
-        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
-    skip, limit = _resolve_pagination(skip, limit)
+async def _build_spoilage_report(db, *, d_from, d_to, skip=0, limit=100, include_all=False):
     sp_res = await db.execute(
         select(SpoilageRecord)
         .where(SpoilageRecord.spoilage_date>=d_from.date(), SpoilageRecord.spoilage_date<=d_to.date())
@@ -1716,15 +1717,25 @@ async def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str
         rows.append({"ref":r.ref_number,"product":name,"qty":float(r.qty),"unit":unit,"reason":reason,"farm":r.farm.name if r.farm else "—","date":str(r.spoilage_date),"user_name":r.user.name if r.user else "—","notes":r.notes or ""})
     total_qty   = round(sum(float(r.qty) for r in records), 2)
     total_count = len(records)
-    rows = rows[skip : skip + limit]
+    if not include_all:
+        rows = rows[skip : skip + limit]
     return {"records":rows,"total_qty":total_qty,"total_count":total_count,
             "by_product":[{"name":k,"qty":round(v,2)} for k,v in sorted(by_product.items(),key=lambda x:x[1],reverse=True)[:8]],
             "by_reason": [{"reason":k,"qty":round(v,2)} for k,v in sorted(by_reason.items(), key=lambda x:x[1],reverse=True)]}
 
+
+@router.get("/api/spoilage")
+async def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str] = None, skip: int = 0, limit: int = Query(default=100, le=500), db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_spoilage"))):
+    d_from, d_to = parse_dates(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    skip, limit = _resolve_pagination(skip, limit)
+    return await _build_spoilage_report(db, d_from=d_from, d_to=d_to, skip=skip, limit=limit)
+
 @router.get("/export/spoilage", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_spoilage"))])
 async def export_spoilage(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
-    data = await spoilage_report(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
+    data = await _build_spoilage_report(db, d_from=d_from, d_to=d_to, include_all=True)
     rows = [[r["ref"],r["product"],r["qty"],r["unit"],r["reason"],r["farm"],r["date"],r["user_name"],r["notes"]] for r in data["records"]]
     buf = to_xlsx(
         ["Ref #","Product","Qty","Unit","Reason","Farm","Date","Performed By","Notes"],
@@ -1746,6 +1757,10 @@ async def production_report(date_from: Optional[str] = None, date_to: Optional[s
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
     skip, limit = _resolve_pagination(skip, limit)
+    return await _build_production_report(db, d_from=d_from, d_to=d_to, skip=skip, limit=limit)
+
+
+async def _build_production_report(db, *, d_from, d_to, skip=0, limit=100, include_all=False):
     batch_res = await db.execute(
         select(ProductionBatch)
         .where(ProductionBatch.created_at>=d_from, ProductionBatch.created_at<=d_to)
@@ -1814,14 +1829,15 @@ async def production_report(date_from: Optional[str] = None, date_to: Optional[s
     # Re-sort all rows by date desc
     rows.sort(key=lambda r: r["date"], reverse=True)
     total_batches = len(rows)
-    rows = rows[skip : skip + limit]
+    if not include_all:
+        rows = rows[skip : skip + limit]
     return {"batches":rows,"total_processing":total_proc,"total_packaging":total_pkg,"total_drying":total_drying,
             "avg_loss_pct":round(sum(losses)/len(losses),2) if losses else 0,"total_batches":total_batches}
 
 @router.get("/export/production", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_production"))])
 async def export_production(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
-    data = await production_report(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
+    data = await _build_production_report(db, d_from=d_from, d_to=d_to, include_all=True)
     rows = [[b["batch_number"],b["type"],b["recipe"],b["inputs_str"],b["outputs_str"],b["waste_pct"],b["date"],b["user_name"],b["notes"]] for b in data["batches"]]
     buf = to_xlsx(
         ["Batch #","Type","Recipe","Inputs","Outputs","Loss %","Date","Performed By","Notes"],
@@ -1863,6 +1879,10 @@ async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = No
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    return await _build_pl_report(db, d_from=d_from, d_to=d_to)
+
+
+async def _build_pl_report(db, *, d_from, d_to):
 
     # ── Revenue ──────────────────────────────────────────
     pos_result = await db.execute(
@@ -2096,6 +2116,13 @@ async def utilities_report(
       • per-farm breakdown
       • carbon kg CO₂e if the category has an emission factor mapped
     """
+    d_from, d_to = parse_dates(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    return await _build_utilities_report(db, d_from=d_from, d_to=d_to)
+
+
+async def _build_utilities_report(db, *, d_from, d_to):
     from app.core.time_utils import app_tz
     from app.models.carbon import CarbonEmissionFactor, CarbonLog
 
@@ -2103,10 +2130,6 @@ async def utilities_report(
     # meaningful data, so we floor every query (range, trend, per-farm) at
     # that date to avoid showing misleading zero-or-partial months.
     UTILITIES_DATA_START = date(2026, 5, 15)
-
-    d_from, d_to = parse_dates(date_from, date_to)
-    if (d_to - d_from).days > 366:
-        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
 
     tz = app_tz()
     local_from = d_from.astimezone(tz).date()
@@ -2342,7 +2365,10 @@ async def export_utilities(
     date_to:   Optional[str] = None,
     db: AsyncSession = Depends(get_async_session),
 ):
-    data = await utilities_report(date_from=date_from, date_to=date_to, db=db)
+    d_from, d_to = parse_dates(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    data = await _build_utilities_report(db, d_from=d_from, d_to=d_to)
     openpyxl, Font, PatternFill, Alignment, Border, Side, get_column_letter = _excel_dependencies()
     wb = openpyxl.Workbook()
 
@@ -2453,7 +2479,10 @@ async def export_utilities(
 
 @router.get("/export/pl", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_pl"))])
 async def export_pl(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
-    data = await pl_report(date_from=date_from, date_to=date_to, db=db)
+    d_from, d_to = parse_dates(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    data = await _build_pl_report(db, d_from=d_from, d_to=d_to)
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -3528,6 +3557,36 @@ async def export_hr(
         headers={"Content-Disposition": f"attachment; filename=hr_report_{date.today()}.xlsx"})
 
 
+def _animal_age(bd) -> Optional[str]:
+    """Compact age from a birth date: '2y 3m', '5 mo', '12 days'.
+    Returns None when the date is missing or in the future. Accepts a
+    date object or an ISO date string."""
+    if not bd:
+        return None
+    if isinstance(bd, str):
+        try:
+            bd = date.fromisoformat(bd[:10])
+        except ValueError:
+            return None
+    today = date.today()
+    if bd > today:
+        return None
+    years = today.year - bd.year
+    months = today.month - bd.month
+    days = today.day - bd.day
+    if days < 0:
+        months -= 1
+    if months < 0:
+        years -= 1
+        months += 12
+    if years >= 1:
+        return f"{years}y {months}m" if months else f"{years}y"
+    if months >= 1:
+        return f"{months} mo"
+    total_days = (today - bd).days
+    return f"{total_days} day{'s' if total_days != 1 else ''}"
+
+
 async def _build_animals_report(db, *, d_from, d_to, include_all=False):
     """Per-group animal activity over a date range: headcount, intakes
     (purchase/birth/transfer), deaths, purchase cost, feeding cost, cost/head."""
@@ -3607,6 +3666,10 @@ async def _build_animals_report(db, *, d_from, d_to, include_all=False):
             "farm_name": g.farm.name if g.farm else None,
             "status": g.status,
             "headcount": head,
+            "male_count": int(g.male_count) if g.male_count is not None else None,
+            "female_count": int(g.female_count) if g.female_count is not None else None,
+            "birth_date": g.birth_date.isoformat() if g.birth_date else None,
+            "age": _animal_age(g.birth_date),
             "received": received,
             "born": born,
             "transferred": transferred,
@@ -3623,6 +3686,8 @@ async def _build_animals_report(db, *, d_from, d_to, include_all=False):
     summary = {
         "active_groups":   sum(1 for g in groups if g.status == "active"),
         "total_headcount": sum(int(g.headcount or 0) for g in groups if g.status == "active"),
+        "male_count":   sum(int(g.male_count or 0) for g in groups if g.status == "active"),
+        "female_count": sum(int(g.female_count or 0) for g in groups if g.status == "active"),
         "received":     sum(r["received"] for r in group_rows),
         "born":         sum(r["born"] for r in group_rows),
         "transferred":  sum(r["transferred"] for r in group_rows),
@@ -3638,6 +3703,8 @@ async def _build_animals_report(db, *, d_from, d_to, include_all=False):
         "group":  i.group.name if i.group else None,
         "type":   getattr(i, "intake_type", None) or "purchase",
         "count":  int(i.count or 0),
+        "male_count":   int(i.male_count) if getattr(i, "male_count", None) is not None else None,
+        "female_count": int(i.female_count) if getattr(i, "female_count", None) is not None else None,
         "source": i.source,
         "cost":   float(i.total_cost) if i.total_cost is not None else None,
     } for i in intakes]
@@ -3693,6 +3760,8 @@ async def export_animals(
             "rows": [
                 ["Active Groups", s["active_groups"]],
                 ["Total Headcount", s["total_headcount"]],
+                ["Males (active groups)", s["male_count"]],
+                ["Females (active groups)", s["female_count"]],
                 ["Received (purchased)", s["received"]],
                 ["Born", s["born"]],
                 ["Transferred In", s["transferred"]],
@@ -3708,19 +3777,19 @@ async def export_animals(
         {
             "sheet_name": "By Group",
             "report_title": "Animals by Group",
-            "headers": ["Group ID", "Group", "Type", "Farm", "Status", "Headcount", "Received", "Born", "Transferred", "Died", "Net Change", "Purchase Cost", "Feeding Cost", "Total Cost", "Cost / Head"],
-            "rows": [[r["group_id"], r["name"], r["animal_type"], r["farm_name"], r["status"], r["headcount"], r["received"], r["born"], r["transferred"], r["died"], r["net_change"], r["purchase_cost"], r["feeding_cost"], r["total_cost"], r["cost_per_head"]] for r in data["groups"]],
+            "headers": ["Group ID", "Group", "Type", "Farm", "Status", "Headcount", "Males", "Females", "Birth Date", "Age", "Received", "Born", "Transferred", "Died", "Net Change", "Purchase Cost", "Feeding Cost", "Total Cost", "Cost / Head"],
+            "rows": [[r["group_id"], r["name"], r["animal_type"], r["farm_name"], r["status"], r["headcount"], r["male_count"], r["female_count"], r["birth_date"], r["age"], r["received"], r["born"], r["transferred"], r["died"], r["net_change"], r["purchase_cost"], r["feeding_cost"], r["total_cost"], r["cost_per_head"]] for r in data["groups"]],
             "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Rows", len(data["groups"]))],
-            "column_formats": {"Group ID": "int", "Headcount": "int", "Received": "int", "Born": "int", "Transferred": "int", "Died": "int", "Net Change": "int", "Purchase Cost": "money", "Feeding Cost": "money", "Total Cost": "money", "Cost / Head": "money"},
+            "column_formats": {"Group ID": "int", "Headcount": "int", "Males": "int", "Females": "int", "Birth Date": "date", "Received": "int", "Born": "int", "Transferred": "int", "Died": "int", "Net Change": "int", "Purchase Cost": "money", "Feeding Cost": "money", "Total Cost": "money", "Cost / Head": "money"},
             "tab_color": "2F6F4F",
         },
         {
             "sheet_name": "Intake Log",
             "report_title": "Animal Intake (Receive) Log",
-            "headers": ["Date", "Group", "Type", "Count", "Source", "Cost"],
-            "rows": [[r["date"], r["group"], r["type"], r["count"], r["source"], r["cost"]] for r in data["intakes"]],
+            "headers": ["Date", "Group", "Type", "Count", "Males", "Females", "Source", "Cost"],
+            "rows": [[r["date"], r["group"], r["type"], r["count"], r["male_count"], r["female_count"], r["source"], r["cost"]] for r in data["intakes"]],
             "metadata": [("Date Range", f"{data['date_from']} to {data['date_to']}"), ("Rows", len(data["intakes"]))],
-            "column_formats": {"Count": "int", "Cost": "money"},
+            "column_formats": {"Count": "int", "Males": "int", "Females": "int", "Cost": "money"},
             "tab_color": "7C3AED",
         },
         {
@@ -4595,6 +4664,8 @@ async function loadAnimals(){
             <td>${row.animal_type||""}</td>
             <td>${row.farm_name||"—"}</td>
             <td class="mono">${row.headcount}</td>
+            <td class="mono">${(row.male_count!=null||row.female_count!=null)?`${row.male_count!=null?row.male_count:"–"} / ${row.female_count!=null?row.female_count:"–"}`:"—"}</td>
+            <td>${row.age||"—"}</td>
             <td class="mono" style="color:var(--green)">${row.received}</td>
             <td class="mono" style="color:var(--green)">${row.born}</td>
             <td class="mono">${row.transferred}</td>
@@ -4605,17 +4676,18 @@ async function loadAnimals(){
             <td class="mono" style="color:var(--orange)">${money(row.total_cost)}</td>
             <td class="mono">${money(row.cost_per_head)}</td>
           </tr>`).join("")
-        : `<tr><td colspan="13" style="text-align:center;color:var(--muted);padding:24px">No animal groups or activity in this period</td></tr>`;
+        : `<tr><td colspan="15" style="text-align:center;color:var(--muted);padding:24px">No animal groups or activity in this period</td></tr>`;
     const intakeRows = data.intakes.length
         ? data.intakes.map(row=>`<tr>
             <td class="mono">${row.date||""}</td>
             <td class="name">${row.group||""}</td>
             <td>${row.type||""}</td>
             <td class="mono">${row.count}</td>
+            <td class="mono">${(row.male_count!=null||row.female_count!=null)?`${row.male_count!=null?row.male_count:"–"} / ${row.female_count!=null?row.female_count:"–"}`:"—"}</td>
             <td>${row.source||"—"}</td>
             <td class="mono">${row.cost!=null?money(row.cost):"—"}</td>
           </tr>`).join("")
-        : `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">No intakes in this period</td></tr>`;
+        : `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">No intakes in this period</td></tr>`;
     const mortRows = data.mortality.length
         ? data.mortality.map(row=>`<tr>
             <td class="mono">${row.date||""}</td>
@@ -4635,11 +4707,11 @@ async function loadAnimals(){
         </div>
         <div class="table-wrap" style="margin-bottom:18px">
             <div class="table-title">By Group</div>
-            <table><thead><tr><th>Group</th><th>Type</th><th>Farm</th><th>Headcount</th><th>Received</th><th>Born</th><th>Transferred</th><th>Died</th><th>Net</th><th>Purchase Cost</th><th>Feeding Cost</th><th>Total Cost</th><th>Cost/Head</th></tr></thead><tbody>${groupRows}</tbody></table>
+            <table><thead><tr><th>Group</th><th>Type</th><th>Farm</th><th>Headcount</th><th>Sex (M/F)</th><th>Age</th><th>Received</th><th>Born</th><th>Transferred</th><th>Died</th><th>Net</th><th>Purchase Cost</th><th>Feeding Cost</th><th>Total Cost</th><th>Cost/Head</th></tr></thead><tbody>${groupRows}</tbody></table>
         </div>
         <div class="table-wrap" style="margin-bottom:18px">
             <div class="table-title">Intake (Receive) Log</div>
-            <table><thead><tr><th>Date</th><th>Group</th><th>Type</th><th>Count</th><th>Source</th><th>Cost</th></tr></thead><tbody>${intakeRows}</tbody></table>
+            <table><thead><tr><th>Date</th><th>Group</th><th>Type</th><th>Count</th><th>Sex (M/F)</th><th>Source</th><th>Cost</th></tr></thead><tbody>${intakeRows}</tbody></table>
         </div>
         <div class="table-wrap">
             <div class="table-title">Mortality Log</div>
