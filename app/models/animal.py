@@ -122,6 +122,8 @@ class AnimalIntakeLog(Base):
     intake_type     = Column(String(20), nullable=False, default="purchase")  # purchase|birth|transfer|other
     intake_date     = Column(Date, nullable=False, index=True)
     count           = Column(Integer, nullable=False, default=1)
+    male_count      = Column(Integer, nullable=True)   # optional sex split of this batch; rolls into the group's male_count
+    female_count    = Column(Integer, nullable=True)   # optional sex split of this batch; rolls into the group's female_count
     source          = Column(String(150), nullable=True)   # supplier / origin
     unit_cost       = Column(Numeric(14, 2), nullable=True) # per-head price (EGP)
     total_cost      = Column(Numeric(14, 2), nullable=True) # total purchase cost (EGP)

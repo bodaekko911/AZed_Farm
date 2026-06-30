@@ -98,6 +98,19 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
         "definition": "DATE",
         "backfill": "SELECT 1",
     },
+    # ── Sex split captured on intake (added 2026-06-30) ──────────────
+    {
+        "table": "animal_intake_logs",
+        "column": "male_count",
+        "definition": "INTEGER",
+        "backfill": "SELECT 1",
+    },
+    {
+        "table": "animal_intake_logs",
+        "column": "female_count",
+        "definition": "INTEGER",
+        "backfill": "SELECT 1",
+    },
     {
         "table": "expenses",
         "column": "animal_group_id",

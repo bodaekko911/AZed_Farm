@@ -111,6 +111,8 @@ class IntakeCreate(BaseModel):
     intake_type:     str           = Field("purchase", max_length=20)  # purchase|birth|transfer|other
     intake_date:     date_type
     count:           int           = Field(1, ge=1)
+    male_count:      Optional[int] = Field(None, ge=0)   # optional sex split of this batch
+    female_count:    Optional[int] = Field(None, ge=0)   # optional sex split of this batch
     source:          Optional[str] = None           # supplier / origin (or dam, for births)
     unit_cost:       Optional[float] = None          # per-head price (EGP)
     total_cost:      Optional[float] = None          # total cost (EGP) — wins over unit_cost
@@ -218,6 +220,8 @@ def _serialize_intake(i: AnimalIntakeLog) -> dict:
         "intake_type":     getattr(i, "intake_type", None) or "purchase",
         "intake_date":     i.intake_date.isoformat() if i.intake_date else None,
         "count":           int(i.count or 0),
+        "male_count":      int(i.male_count) if getattr(i, "male_count", None) is not None else None,
+        "female_count":    int(i.female_count) if getattr(i, "female_count", None) is not None else None,
         "source":          i.source,
         "unit_cost":       float(i.unit_cost) if i.unit_cost is not None else None,
         "total_cost":      float(i.total_cost) if i.total_cost is not None else None,
@@ -749,6 +753,13 @@ async def create_intake(
     # Increment headcount by the received count.
     group.headcount = int(group.headcount or 0) + data.count
 
+    # Roll the optional sex split into the group's running male/female totals
+    # (mirrors how count feeds headcount). Reversed when the intake is undone.
+    if data.male_count is not None:
+        group.male_count = int(group.male_count or 0) + data.male_count
+    if data.female_count is not None:
+        group.female_count = int(group.female_count or 0) + data.female_count
+
     # Optionally book the purchase as a Livestock Purchase expense.
     expense = None
     if total and total > 0:
@@ -767,6 +778,8 @@ async def create_intake(
         intake_type=intake_type,
         intake_date=data.intake_date,
         count=data.count,
+        male_count=data.male_count,
+        female_count=data.female_count,
         source=(data.source or "").strip() or None,
         unit_cost=(Decimal(str(data.unit_cost)) if data.unit_cost is not None else None),
         total_cost=(Decimal(str(total)) if total is not None else None),
@@ -812,6 +825,11 @@ async def delete_intake(
     group_name = intake.group.name if intake.group else "(unknown group)"
     if intake.group is not None:
         intake.group.headcount = max(0, int(intake.group.headcount or 0) - count)
+        # Reverse the sex split that was rolled into the group at intake time.
+        if intake.male_count:
+            intake.group.male_count = max(0, int(intake.group.male_count or 0) - int(intake.male_count))
+        if intake.female_count:
+            intake.group.female_count = max(0, int(intake.group.female_count or 0) - int(intake.female_count))
 
     if intake.expense_id:
         await reverse_animal_intake_expense(db, intake.expense_id, current_user)
@@ -1348,11 +1366,11 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
         <div class="table-wrap">
             <table>
                 <thead><tr>
-                    <th>Date</th><th>Group</th><th>Type</th><th>Count</th><th>Supplier</th>
+                    <th>Date</th><th>Group</th><th>Type</th><th>Count</th><th>Sex (M/F)</th><th>Supplier</th>
                     <th>Cost</th><th>Note</th><th>By</th><th></th>
                 </tr></thead>
                 <tbody id="receive-body">
-                    <tr><td colspan="9" class="empty">Loading…</td></tr>
+                    <tr><td colspan="10" class="empty">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -1578,7 +1596,15 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
         </div>
         <div class="fld">
             <label>Count (how many received)</label>
-            <input type="number" id="rm-count" min="1" step="1" value="1" oninput="updateReceiveCostHint()">
+            <input type="number" id="rm-count" min="1" step="1" value="1" oninput="updateReceiveCostHint();updateReceiveSexHint()">
+        </div>
+        <div class="fld">
+            <label>Sex split <span style="color:var(--muted)">(optional)</span></label>
+            <div style="display:flex;gap:10px">
+                <input type="number" id="rm-male" min="0" step="1" placeholder="Males" style="flex:1" oninput="updateReceiveSexHint()">
+                <input type="number" id="rm-female" min="0" step="1" placeholder="Females" style="flex:1" oninput="updateReceiveSexHint()">
+            </div>
+            <div id="rm-sex-hint" class="stock-hint">Adds to the group's running male / female totals.</div>
         </div>
         <div class="fld">
             <label>Supplier / Source <span id="rm-source-label" style="color:var(--muted)">(optional)</span></label>
@@ -1883,7 +1909,7 @@ function renderIntakes(){{
                             || (i.note||"").toLowerCase().includes(q))
         : _intakes;
     if (!filtered.length) {{
-        tbody.innerHTML = `<tr><td colspan="9" class="empty">No animals received yet. Click "+ Receive Animals" to add a batch.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="10" class="empty">No animals received yet. Click "+ Receive Animals" to add a batch.</td></tr>`;
         return;
     }}
     tbody.innerHTML = filtered.map(i => `
@@ -1892,6 +1918,7 @@ function renderIntakes(){{
             <td><b>${{esc(i.group_name||"")}}</b></td>
             <td style="color:var(--sub)">${{esc(INTAKE_TYPE_LABELS[i.intake_type] || i.intake_type || "—")}}</td>
             <td style="font-family:var(--mono)">${{i.count||0}}</td>
+            <td style="font-family:var(--mono);color:var(--sub)">${{(i.male_count!=null||i.female_count!=null) ? `${{i.male_count!=null?i.male_count:"–"}} / ${{i.female_count!=null?i.female_count:"–"}}` : "—"}}</td>
             <td style="color:var(--sub)">${{esc(i.source||"—")}}</td>
             <td style="font-family:var(--mono);color:var(--sub)">${{i.total_cost!=null ? Number(i.total_cost).toLocaleString(undefined,{{minimumFractionDigits:2}})+" EGP" : "—"}}</td>
             <td style="color:var(--sub);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${{esc(i.note||"")}}">${{esc(i.note||"—")}}</td>
@@ -1923,6 +1950,31 @@ function updateReceiveCostHint(){{
         : "No cost will be recorded (headcount only)";
 }}
 
+/* Soft, non-blocking check that the sex split matches the received count. */
+function updateReceiveSexHint(){{
+    const hint = document.getElementById("rm-sex-hint");
+    const maleRaw   = document.getElementById("rm-male").value;
+    const femaleRaw = document.getElementById("rm-female").value;
+    const count     = parseInt(document.getElementById("rm-count").value,10) || 0;
+    if (maleRaw === "" && femaleRaw === "") {{
+        hint.textContent = "Adds to the group's running male / female totals.";
+        hint.style.color = "";
+        return;
+    }}
+    const male   = parseInt(maleRaw, 10)   || 0;
+    const female = parseInt(femaleRaw, 10) || 0;
+    const sum = male + female;
+    if (sum === count) {{
+        hint.textContent = `${{sum}} of ${{count}} sexed — adds ${{male}}♂ / ${{female}}♀ to the group.`;
+        hint.style.color = "var(--green, #2e7d32)";
+    }} else {{
+        const diff = sum - count;
+        const word = diff > 0 ? `${{diff}} more than` : `${{-diff}} fewer than`;
+        hint.textContent = `${{male}} + ${{female}} = ${{sum}}, ${{word}} the count (${{count}}). Saved as-is.`;
+        hint.style.color = "var(--amber, #b26a00)";
+    }}
+}}
+
 function openReceiveModal(){{
     document.getElementById("rm-date").value = new Date().toISOString().slice(0,10);
     const sel = document.getElementById("rm-group");
@@ -1939,6 +1991,8 @@ function openReceiveModal(){{
     document.getElementById("rm-new-name").value = "";
     document.getElementById("rm-new-type").value = "other";
     document.getElementById("rm-count").value = "1";
+    document.getElementById("rm-male").value = "";
+    document.getElementById("rm-female").value = "";
     document.getElementById("rm-source").value = "";
     document.getElementById("rm-unit").value = "";
     document.getElementById("rm-total").value = "";
@@ -1947,6 +2001,7 @@ function openReceiveModal(){{
     document.getElementById("rm-type").value = "purchase";
     onReceiveTypeChange();
     updateReceiveCostHint();
+    updateReceiveSexHint();
     document.getElementById("receive-modal").classList.add("open");
 }}
 
@@ -1984,7 +2039,12 @@ async function saveReceive(){{
     if (!intake_date) {{ showToast("Pick a date"); return; }}
     if (count < 1) {{ showToast("Count must be at least 1"); return; }}
 
-    const payload = {{intake_type, intake_date, count, source, unit_cost, total_cost, note}};
+    const maleRaw   = document.getElementById("rm-male").value;
+    const femaleRaw = document.getElementById("rm-female").value;
+    const male_count   = maleRaw   === "" ? null : (parseInt(maleRaw, 10)   || 0);
+    const female_count = femaleRaw === "" ? null : (parseInt(femaleRaw, 10) || 0);
+
+    const payload = {{intake_type, intake_date, count, male_count, female_count, source, unit_cost, total_cost, note}};
     if (sel.value === "__new__") {{
         const name = document.getElementById("rm-new-name").value.trim();
         if (!name) {{ showToast("Enter a name for the new group"); return; }}
