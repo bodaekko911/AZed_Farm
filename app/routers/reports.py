@@ -1117,7 +1117,7 @@ async def sales_report(date_from: Optional[str] = None, date_to: Optional[str] =
             "pos_records": pos_records, "b2b_records": b2b_records, "refund_records": refund_records,
             "date_from": d_from.strftime("%Y-%m-%d"), "date_to": d_to.strftime("%Y-%m-%d")}
 
-@router.get("/export/sales", dependencies=[Depends(require_permission("action_export_excel"))])
+@router.get("/export/sales", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_sales"))])
 async def export_sales(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     data = await _build_sales_report(db, d_from=d_from, d_to=d_to, include_all=True)
@@ -1276,7 +1276,7 @@ async def b2b_statement(
     return result[skip : skip + limit]
 
 
-@router.get("/export/b2b-statement", dependencies=[Depends(require_permission("action_export_excel"))])
+@router.get("/export/b2b-statement", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_b2b"))])
 async def export_b2b(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     data = await b2b_statement(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
@@ -1452,7 +1452,7 @@ async def inventory_report(mode: str = "snapshot", date_from: Optional[str] = No
     rows = rows[skip : skip + limit]
     return {"products":rows,"total_value":total_value,"low_count":low_count,"total_products":total_products}
 
-@router.get("/export/inventory", dependencies=[Depends(require_permission("action_export_excel"))])
+@router.get("/export/inventory", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_inventory"))])
 async def export_inventory(mode: str = "snapshot", date_from: Optional[str] = None, date_to: Optional[str] = None, db: AsyncSession = Depends(get_async_session)):
     if mode == "movement":
         d_from, d_to = parse_dates(date_from, date_to)
@@ -1657,7 +1657,7 @@ async def farm_intake_report(date_from: Optional[str] = None, date_to: Optional[
     delivery_rows = delivery_rows[skip : skip + limit]
     return {"farms": result, "deliveries": delivery_rows}
 
-@router.get("/export/farm-intake", dependencies=[Depends(require_permission("action_export_excel"))])
+@router.get("/export/farm-intake", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_farm"))])
 async def export_farm(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     data = await _build_farm_intake_report(db, d_from=d_from, d_to=d_to, include_all=True)
@@ -1721,7 +1721,7 @@ async def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str
             "by_product":[{"name":k,"qty":round(v,2)} for k,v in sorted(by_product.items(),key=lambda x:x[1],reverse=True)[:8]],
             "by_reason": [{"reason":k,"qty":round(v,2)} for k,v in sorted(by_reason.items(), key=lambda x:x[1],reverse=True)]}
 
-@router.get("/export/spoilage", dependencies=[Depends(require_permission("action_export_excel"))])
+@router.get("/export/spoilage", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_spoilage"))])
 async def export_spoilage(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     data = await spoilage_report(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
@@ -1818,7 +1818,7 @@ async def production_report(date_from: Optional[str] = None, date_to: Optional[s
     return {"batches":rows,"total_processing":total_proc,"total_packaging":total_pkg,"total_drying":total_drying,
             "avg_loss_pct":round(sum(losses)/len(losses),2) if losses else 0,"total_batches":total_batches}
 
-@router.get("/export/production", dependencies=[Depends(require_permission("action_export_excel"))])
+@router.get("/export/production", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_production"))])
 async def export_production(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     data = await production_report(date_from=date_from, date_to=date_to, skip=0, limit=100000, db=db)
@@ -2336,7 +2336,7 @@ async def utilities_report(
     }
 
 
-@router.get("/export/utilities", dependencies=[Depends(require_permission("action_export_excel"))])
+@router.get("/export/utilities", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_utilities"))])
 async def export_utilities(
     date_from: Optional[str] = None,
     date_to:   Optional[str] = None,
@@ -2451,7 +2451,7 @@ async def export_utilities(
     )
 
 
-@router.get("/export/pl", dependencies=[Depends(require_permission("action_export_excel"))])
+@router.get("/export/pl", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_pl"))])
 async def export_pl(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     data = await pl_report(date_from=date_from, date_to=date_to, db=db)
     try:
@@ -2865,7 +2865,7 @@ async def transactions_report(
     d_from, d_to = parse_dates(date_from, date_to)
     return await _build_transactions_report(db, d_from=d_from, d_to=d_to, source=source)
 
-@router.get("/export/transactions", dependencies=[Depends(require_permission("action_export_excel"))])
+@router.get("/export/transactions", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_transactions"))])
 async def export_transactions(date_from: str = None, date_to: str = None, source: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     data = await _build_transactions_report(db, d_from=d_from, d_to=d_to, source=source)
@@ -4500,6 +4500,33 @@ function setSectionStatus(tab, kind, message){
     status.textContent = message;
 }
 
+// ── XSS protection ──────────────────────────────────────────────
+// Report rows are rendered into innerHTML from DB-derived strings
+// (product/group/employee/customer names, notes, sources, reasons…).
+// Escape every string value once, here at the data-ingress choke point,
+// so no individual render site can forget to. Numbers, booleans, dates
+// and structure pass through untouched; Excel exports are built server-
+// side from raw data and are unaffected.
+const _HTML_ESCAPES = {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
+function escapeHtml(value){
+    if(value == null) return "";
+    return String(value).replace(/[&<>"']/g, c => _HTML_ESCAPES[c]);
+}
+function deepEscapeStrings(value){
+    if(typeof value === "string") return escapeHtml(value);
+    if(Array.isArray(value)) return value.map(deepEscapeStrings);
+    if(value && typeof value === "object"){
+        const out = {};
+        for(const key in value){
+            if(Object.prototype.hasOwnProperty.call(value, key)){
+                out[key] = deepEscapeStrings(value[key]);
+            }
+        }
+        return out;
+    }
+    return value;
+}
+
 async function fetchReportJson(url){
     const response = await fetch(url, { credentials: "same-origin" });
     const contentType = response.headers.get("content-type") || "";
@@ -4517,7 +4544,7 @@ async function fetchReportJson(url){
         const detail = payload && (payload.detail || payload.message || payload.error);
         throw new Error(detail || `Request failed (${response.status})`);
     }
-    return payload;
+    return deepEscapeStrings(payload);
 }
 
 async function runReportLoader(tab, loader){
