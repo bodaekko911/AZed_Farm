@@ -1397,13 +1397,13 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
         </div>
         <div class="fld">
             <label>Headcount</label>
-            <input type="number" id="gm-head" min="0" step="1" placeholder="0">
+            <input type="number" id="gm-head" min="0" step="1" placeholder="0" oninput="checkSexBalance()">
         </div>
         <div class="fld">
             <label>Sex breakdown (optional)</label>
             <div style="display:flex;gap:10px">
-                <input type="number" id="gm-male" min="0" step="1" placeholder="Males" style="flex:1">
-                <input type="number" id="gm-female" min="0" step="1" placeholder="Females" style="flex:1">
+                <input type="number" id="gm-male" min="0" step="1" placeholder="Males" style="flex:1" oninput="checkSexBalance()">
+                <input type="number" id="gm-female" min="0" step="1" placeholder="Females" style="flex:1" oninput="checkSexBalance()">
             </div>
             <div class="stock-hint" id="gm-sex-hint">For reference only — does not change headcount.</div>
         </div>
@@ -2144,6 +2144,7 @@ function openGroupModal(id){{
         statusWrap.style.display = "none";
     }}
     updateAgePreview();
+    checkSexBalance();
     document.getElementById("group-modal").classList.add("open");
 }}
 
@@ -2169,6 +2170,32 @@ function updateAgePreview(){{
         txt = `${{d}} day${{d !== 1 ? "s" : ""}}`;
     }}
     hint.textContent = "Age: " + txt;
+}}
+
+/* Soft validation: warn (non-blocking) when male + female counts don't add
+   up to headcount. Only nags once at least one sex count is entered. */
+function checkSexBalance(){{
+    const hint = document.getElementById("gm-sex-hint");
+    const maleRaw   = document.getElementById("gm-male").value;
+    const femaleRaw = document.getElementById("gm-female").value;
+    const head      = parseInt(document.getElementById("gm-head").value, 10) || 0;
+    if (maleRaw === "" && femaleRaw === "") {{
+        hint.textContent = "For reference only — does not change headcount.";
+        hint.style.color = "";
+        return;
+    }}
+    const male   = parseInt(maleRaw, 10)   || 0;
+    const female = parseInt(femaleRaw, 10) || 0;
+    const sum = male + female;
+    if (sum === head) {{
+        hint.textContent = `${{sum}} total — matches headcount.`;
+        hint.style.color = "var(--green, #2e7d32)";
+    }} else {{
+        const diff = sum - head;
+        const word = diff > 0 ? `${{diff}} more than` : `${{-diff}} fewer than`;
+        hint.textContent = `${{male}} + ${{female}} = ${{sum}}, ${{word}} headcount (${{head}}). Saved as-is — headcount is unchanged.`;
+        hint.style.color = "var(--amber, #b26a00)";
+    }}
 }}
 
 function closeGroupModal(){{
