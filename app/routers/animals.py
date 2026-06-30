@@ -58,6 +58,9 @@ class AnimalGroupIn(BaseModel):
     name:           str           = Field(..., min_length=1, max_length=150)
     animal_type:    str           = Field("other", max_length=30)
     headcount:      int           = Field(0, ge=0)
+    male_count:     Optional[int] = Field(None, ge=0)
+    female_count:   Optional[int] = Field(None, ge=0)
+    birth_date:     Optional[date_type] = None
     farm_id:        Optional[int] = None
     notes:          Optional[str] = None
     purchase_cost:  Optional[float] = Field(None, ge=0)
@@ -68,6 +71,9 @@ class AnimalGroupUpdate(BaseModel):
     name:           Optional[str] = Field(None, min_length=1, max_length=150)
     animal_type:    Optional[str] = Field(None, max_length=30)
     headcount:      Optional[int] = Field(None, ge=0)
+    male_count:     Optional[int] = Field(None, ge=0)
+    female_count:   Optional[int] = Field(None, ge=0)
+    birth_date:     Optional[date_type] = None
     farm_id:        Optional[int] = None
     status:         Optional[str] = Field(None, max_length=20)
     notes:          Optional[str] = None
@@ -113,6 +119,30 @@ class IntakeCreate(BaseModel):
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+def _human_age(bd) -> Optional[str]:
+    """Compact human age string from a birth date, e.g. '2y 3m', '5 mo',
+    '12 days'. Returns None when birth date is missing or in the future."""
+    if not bd:
+        return None
+    today = date_type.today()
+    if bd > today:
+        return None
+    years = today.year - bd.year
+    months = today.month - bd.month
+    days = today.day - bd.day
+    if days < 0:
+        months -= 1
+    if months < 0:
+        years -= 1
+        months += 12
+    if years >= 1:
+        return f"{years}y {months}m" if months else f"{years}y"
+    if months >= 1:
+        return f"{months} mo"
+    total_days = (today - bd).days
+    return f"{total_days} day{'s' if total_days != 1 else ''}"
+
+
 def _serialize_group(g: AnimalGroup) -> dict:
     purchase_cost = float(g.purchase_cost) if g.purchase_cost is not None else None
     cost_per_head = float(g.cost_per_head) if g.cost_per_head is not None else None
@@ -130,6 +160,10 @@ def _serialize_group(g: AnimalGroup) -> dict:
         "name":         g.name,
         "animal_type":  g.animal_type or "other",
         "headcount":    head,
+        "male_count":   int(g.male_count) if g.male_count is not None else None,
+        "female_count": int(g.female_count) if g.female_count is not None else None,
+        "birth_date":   g.birth_date.isoformat() if g.birth_date else None,
+        "age":          _human_age(g.birth_date),
         "farm_id":      g.farm_id,
         "farm_name":    g.farm.name if g.farm else None,
         "status":       g.status or "active",
@@ -229,6 +263,9 @@ async def create_group(
         name=data.name.strip(),
         animal_type=data.animal_type or "other",
         headcount=data.headcount,
+        male_count=data.male_count,
+        female_count=data.female_count,
+        birth_date=data.birth_date,
         farm_id=data.farm_id,
         notes=(data.notes or "").strip() or None,
         purchase_cost=(Decimal(str(data.purchase_cost)) if data.purchase_cost is not None else None),
@@ -270,6 +307,12 @@ async def update_group(
         group.animal_type = data.animal_type
     if data.headcount is not None:
         group.headcount = data.headcount
+    if data.male_count is not None:
+        group.male_count = data.male_count
+    if data.female_count is not None:
+        group.female_count = data.female_count
+    if data.birth_date is not None:
+        group.birth_date = data.birth_date
     if data.farm_id is not None:
         if data.farm_id == 0:
             group.farm_id = None
@@ -1233,11 +1276,11 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
         <div class="table-wrap">
             <table>
                 <thead><tr>
-                    <th>Name</th><th>Type</th><th>Headcount</th><th>Farm</th>
+                    <th>Name</th><th>Type</th><th>Headcount</th><th>Sex (M/F)</th><th>Age</th><th>Farm</th>
                     <th>Status</th><th>Notes</th><th></th>
                 </tr></thead>
                 <tbody id="groups-body">
-                    <tr><td colspan="7" class="empty">Loading…</td></tr>
+                    <tr><td colspan="9" class="empty">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -1355,6 +1398,19 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
         <div class="fld">
             <label>Headcount</label>
             <input type="number" id="gm-head" min="0" step="1" placeholder="0">
+        </div>
+        <div class="fld">
+            <label>Sex breakdown (optional)</label>
+            <div style="display:flex;gap:10px">
+                <input type="number" id="gm-male" min="0" step="1" placeholder="Males" style="flex:1">
+                <input type="number" id="gm-female" min="0" step="1" placeholder="Females" style="flex:1">
+            </div>
+            <div class="stock-hint" id="gm-sex-hint">For reference only — does not change headcount.</div>
+        </div>
+        <div class="fld">
+            <label>Birth / Hatch Date (optional)</label>
+            <input type="date" id="gm-birth" oninput="updateAgePreview()">
+            <div class="stock-hint" id="gm-age-hint">Age is calculated automatically.</div>
         </div>
         <div class="fld">
             <label>Purchase Cost — Total (EGP, optional)</label>
@@ -1999,7 +2055,7 @@ function renderGroups(){{
         ? _groups.filter(g => (g.name||"").toLowerCase().includes(q) || (g.animal_type||"").toLowerCase().includes(q) || (g.farm_name||"").toLowerCase().includes(q))
         : _groups;
     if (!filtered.length) {{
-        tbody.innerHTML = `<tr><td colspan="7" class="empty">No groups. Click "+ Add Group" to create one.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" class="empty">No groups. Click "+ Add Group" to create one.</td></tr>`;
         return;
     }}
     tbody.innerHTML = filtered.map(g => `
@@ -2007,6 +2063,8 @@ function renderGroups(){{
             <td><b>${{esc(g.name)}}</b></td>
             <td style="color:var(--sub)">${{esc(g.animal_type)}}</td>
             <td style="font-family:var(--mono)">${{g.headcount||0}}</td>
+            <td style="font-family:var(--mono);color:var(--sub)">${{(g.male_count!=null||g.female_count!=null) ? `${{g.male_count!=null?g.male_count:"–"}} / ${{g.female_count!=null?g.female_count:"–"}}` : "—"}}</td>
+            <td style="color:var(--sub)">${{esc(g.age||"—")}}</td>
             <td style="color:var(--sub)">${{esc(g.farm_name||"—")}}</td>
             <td><span class="badge ${{g.status}}">${{esc(g.status)}}</span></td>
             <td style="color:var(--sub);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${{esc(g.notes||"")}}">${{esc(g.notes||"—")}}</td>
@@ -2062,6 +2120,9 @@ function openGroupModal(id){{
             document.getElementById("gm-name").value = g.name || "";
             document.getElementById("gm-type").value = g.animal_type || "other";
             document.getElementById("gm-head").value = g.headcount || 0;
+            document.getElementById("gm-male").value = g.male_count != null ? g.male_count : "";
+            document.getElementById("gm-female").value = g.female_count != null ? g.female_count : "";
+            document.getElementById("gm-birth").value = g.birth_date || "";
             document.getElementById("gm-purchase-cost").value = g.purchase_cost != null ? g.purchase_cost : "";
             document.getElementById("gm-cost-per-head").value = g.cost_per_head != null ? g.cost_per_head : "";
             document.getElementById("gm-farm").value = g.farm_id || "";
@@ -2073,13 +2134,41 @@ function openGroupModal(id){{
         document.getElementById("gm-name").value = "";
         document.getElementById("gm-type").value = "other";
         document.getElementById("gm-head").value = "";
+        document.getElementById("gm-male").value = "";
+        document.getElementById("gm-female").value = "";
+        document.getElementById("gm-birth").value = "";
         document.getElementById("gm-purchase-cost").value = "";
         document.getElementById("gm-cost-per-head").value = "";
         document.getElementById("gm-farm").value = "";
         document.getElementById("gm-notes").value = "";
         statusWrap.style.display = "none";
     }}
+    updateAgePreview();
     document.getElementById("group-modal").classList.add("open");
+}}
+
+/* Live age readout under the birth-date field. Mirrors the server's
+   _human_age() formatting closely enough for an at-a-glance preview. */
+function updateAgePreview(){{
+    const hint = document.getElementById("gm-age-hint");
+    const v = document.getElementById("gm-birth").value;
+    if (!v) {{ hint.textContent = "Age is calculated automatically."; return; }}
+    const bd = new Date(v + "T00:00:00");
+    const today = new Date();
+    if (isNaN(bd.getTime()) || bd > today) {{ hint.textContent = "Age is calculated automatically."; return; }}
+    let years = today.getFullYear() - bd.getFullYear();
+    let months = today.getMonth() - bd.getMonth();
+    let days = today.getDate() - bd.getDate();
+    if (days < 0) months -= 1;
+    if (months < 0) {{ years -= 1; months += 12; }}
+    let txt;
+    if (years >= 1) txt = months ? `${{years}}y ${{months}}m` : `${{years}}y`;
+    else if (months >= 1) txt = `${{months}} mo`;
+    else {{
+        const d = Math.floor((today - bd) / 86400000);
+        txt = `${{d}} day${{d !== 1 ? "s" : ""}}`;
+    }}
+    hint.textContent = "Age: " + txt;
 }}
 
 function closeGroupModal(){{
@@ -2094,10 +2183,16 @@ async function saveGroup(){{
     const perHeadRaw  = document.getElementById("gm-cost-per-head").value;
     const purchaseCost = purchaseRaw === "" ? null : (parseFloat(purchaseRaw) || 0);
     const perHeadCost  = perHeadRaw  === "" ? null : (parseFloat(perHeadRaw)  || 0);
+    const maleRaw   = document.getElementById("gm-male").value;
+    const femaleRaw = document.getElementById("gm-female").value;
+    const birthRaw  = document.getElementById("gm-birth").value;
     const payload = {{
         name: name,
         animal_type: document.getElementById("gm-type").value,
         headcount: parseInt(document.getElementById("gm-head").value, 10) || 0,
+        male_count:   maleRaw   === "" ? null : (parseInt(maleRaw, 10)   || 0),
+        female_count: femaleRaw === "" ? null : (parseInt(femaleRaw, 10) || 0),
+        birth_date:   birthRaw  === "" ? null : birthRaw,
         farm_id: parseInt(document.getElementById("gm-farm").value, 10) || null,
         notes: document.getElementById("gm-notes").value.trim() || null,
         purchase_cost: purchaseCost,

@@ -79,6 +79,25 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
         "definition": "NUMERIC(14, 2)",
         "backfill": "SELECT 1",
     },
+    # ── Animal sex breakdown + birth date (added 2026-06-30) ─────────
+    {
+        "table": "animal_groups",
+        "column": "male_count",
+        "definition": "INTEGER",
+        "backfill": "SELECT 1",
+    },
+    {
+        "table": "animal_groups",
+        "column": "female_count",
+        "definition": "INTEGER",
+        "backfill": "SELECT 1",
+    },
+    {
+        "table": "animal_groups",
+        "column": "birth_date",
+        "definition": "DATE",
+        "backfill": "SELECT 1",
+    },
     {
         "table": "expenses",
         "column": "animal_group_id",

@@ -34,6 +34,9 @@ class AnimalGroup(Base):
     name           = Column(String(150), nullable=False, index=True)
     animal_type    = Column(String(30), nullable=False, default="other")  # cattle|poultry|sheep|goats|other
     headcount      = Column(Integer, nullable=False, default=0)
+    male_count     = Column(Integer, nullable=True)    # optional sex breakdown (does not drive headcount)
+    female_count   = Column(Integer, nullable=True)    # optional sex breakdown (does not drive headcount)
+    birth_date     = Column(Date, nullable=True)       # birth / hatch date of the cohort; drives auto age display
     farm_id        = Column(Integer, ForeignKey("farms.id"), nullable=True, index=True)
     status         = Column(String(20), nullable=False, default="active")  # active|sold|deceased|archived
     notes          = Column(Text, nullable=True)
