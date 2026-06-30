@@ -2863,11 +2863,15 @@ async def transactions_report(
     _=Depends(require_permission("tab_reports_transactions")),
 ):
     d_from, d_to = parse_dates(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
     return await _build_transactions_report(db, d_from=d_from, d_to=d_to, source=source)
 
 @router.get("/export/transactions", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_transactions"))])
 async def export_transactions(date_from: str = None, date_to: str = None, source: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
     data = await _build_transactions_report(db, d_from=d_from, d_to=d_to, source=source)
     wb = build_report_workbook([
         {
@@ -3400,6 +3404,8 @@ async def hr_report(
     _=Depends(require_permission("tab_reports_hr")),
 ):
     d_from, d_to = parse_dates(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
     skip, limit = _resolve_pagination(skip, limit)
     return await _build_hr_report(
         db,
@@ -3424,6 +3430,8 @@ async def export_hr(
     _=Depends(require_permission("tab_reports_hr")),
 ):
     d_from, d_to = parse_dates(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
     data = await _build_hr_report(
         db,
         d_from=d_from,
@@ -3660,6 +3668,8 @@ async def animals_report(
     _=Depends(require_permission("tab_reports_animals")),
 ):
     d_from, d_to = _plain_date_range(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
     return await _build_animals_report(db, d_from=d_from, d_to=d_to)
 
 
@@ -3671,6 +3681,8 @@ async def export_animals(
     _=Depends(require_permission("tab_reports_animals")),
 ):
     d_from, d_to = _plain_date_range(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
     data = await _build_animals_report(db, d_from=d_from, d_to=d_to, include_all=True)
     s = data["summary"]
     wb = build_report_workbook([
