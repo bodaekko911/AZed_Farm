@@ -403,18 +403,23 @@ def _earned_base(employee: Employee, days_present, working_days: int = 30,
         earned = base_salary * paid / working_days
 
     'fixed_30' (deduction-based monthly deal):
-        The full monthly salary is owed; each elapsed day NOT covered by
-        presence or balance-covered leave deducts base_salary / 30:
+        Daily rate is a flat base_salary / 30.
 
-            uncovered = max(0, min(days_elapsed, working_days) - covered)
+        While the month is still in progress, pay ACCRUES per covered day
+        (min(covered × salary/30, salary)) — so a few days worked shows a
+        few days' pay, never the full month prematurely.
+
+        Once the month is COMPLETE (days_elapsed ≥ working_days, which is
+        always true for past months), the deal's deduction rule applies:
+        the full monthly salary is owed and each uncovered day of the month
+        docks salary/30:
+
+            uncovered = working_days - covered
             earned    = max(0, base_salary - uncovered * base_salary / 30)
 
-        So full attendance in February (28 days) still pays the full salary,
-        and one absence always costs exactly salary/30 whether the month has
-        28 or 31 days. `days_elapsed` bounds the deduction to days that have
-        actually passed, so a mid-month preview shows "on track" pay instead
-        of docking the whole remaining month; when omitted it defaults to the
-        full month (correct for completed-month runs).
+        Full attendance in February (28 days) therefore still pays the full
+        salary, and one absence always costs exactly salary/30 whether the
+        month has 28 or 31 days.
 
     `paid_leave_days` is supplied by the caller as
     min(leave taken this month, accrued balance as of this month) — see
@@ -437,8 +442,18 @@ def _earned_base(employee: Employee, days_present, working_days: int = 30,
     if _salary_basis(employee) == SALARY_BASIS_FIXED_30:
         elapsed = safe_working_days if days_elapsed is None else max(0, int(days_elapsed))
         elapsed = min(elapsed, safe_working_days)
-        uncovered = _dec(elapsed) - min(covered, _dec(elapsed))
-        earned = base_salary - (base_salary * uncovered / Decimal("30"))
+        rate30 = base_salary / Decimal("30")
+        if elapsed >= safe_working_days:
+            # Month complete → deduction rule: full salary is owed, each
+            # uncovered day of the month docks salary/30. Full attendance in
+            # February (28 days) therefore still pays the full salary.
+            uncovered = _dec(safe_working_days) - min(covered, _dec(safe_working_days))
+            earned = base_salary - (rate30 * uncovered)
+        else:
+            # Month still in progress → accrue what's covered so far at the
+            # flat /30 rate, so a few days worked shows a few days' pay
+            # (never the full month prematurely).
+            earned = min(rate30 * covered, base_salary)
         if earned < 0:
             earned = Decimal("0")
         return _money(earned)
@@ -2040,7 +2055,7 @@ class PayrollResetPeriod(BaseModel):
     confirm: str
 
 
-@router.post("/api/payroll/reset-period", dependencies=[Depends(require_permission("action_hr_run_payroll"))])
+@router.post("/api/payroll/reset-period", dependencies=[Depends(require_permission("action_hr_reset_payroll"))])
 async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     """Delete ALL payroll runs for one period (paid and unpaid) and unwind
     every side effect they created, so the month can be re-run cleanly:
@@ -2068,72 +2083,95 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
                 "unlinked_deductions": 0}
     run_ids = [r.id for r in runs]
 
-    # 1) Paid runs → delete their salary expenses (journal + carbon unwound).
-    from app.routers.expenses import _reverse_expense_journal
-    from app.models.expense import Expense
-    from app.models.carbon import CarbonLog
-    _e = await db.execute(
-        select(Expense).options(selectinload(Expense.category)).where(Expense.payroll_id.in_(run_ids))
-    )
-    expenses = _e.scalars().all()
-    for exp in expenses:
-        await _reverse_expense_journal(db, exp)
-        _cl = await db.execute(
-            select(CarbonLog).where(CarbonLog.ref_type == "expense", CarbonLog.ref_id == exp.id)
+    # Step-tagged so a production failure names the exact stage in the error
+    # and the server log carries the full traceback.
+    import logging
+    _log = logging.getLogger("hr.reset_payroll")
+    step = "start"
+    try:
+        # 1) Paid runs → delete their salary expenses (journal + carbon unwound).
+        step = "unwinding paid salary expenses"
+        from app.routers.expenses import _reverse_expense_journal
+        from app.models.expense import Expense
+        from app.models.carbon import CarbonLog
+        _e = await db.execute(
+            select(Expense).options(selectinload(Expense.category)).where(Expense.payroll_id.in_(run_ids))
         )
-        for cl in _cl.scalars().all():
-            await db.delete(cl)
-        await db.delete(exp)
+        expenses = _e.scalars().all()
+        for exp in expenses:
+            await _reverse_expense_journal(db, exp)
+            _cl = await db.execute(
+                select(CarbonLog).where(CarbonLog.ref_type == "expense", CarbonLog.ref_id == exp.id)
+            )
+            for cl in _cl.scalars().all():
+                await db.delete(cl)
+            await db.delete(exp)
 
-    # 2) Loan repayments taken by these runs → delete, then reopen any loan
-    #    that no longer has a zero balance.
-    _r = await db.execute(
-        select(EmployeeLoanRepayment).where(EmployeeLoanRepayment.payroll_id.in_(run_ids))
-    )
-    repayments = _r.scalars().all()
-    loan_ids = {r.loan_id for r in repayments}
-    for rep in repayments:
-        await db.delete(rep)
-    await db.flush()
-    reopened_loans = 0
-    if loan_ids:
-        _l = await db.execute(select(EmployeeLoan).where(EmployeeLoan.id.in_(loan_ids)))
-        for loan in _l.scalars().all():
-            if loan.status == "paid" and (await _loan_balance(db, loan)) > 0:
-                loan.status = "active"
-                reopened_loans += 1
-
-    # 3) Allowance advances settled by these runs → back to open.
-    _a = await db.execute(
-        select(EmployeeAllowanceAdvance).where(
-            EmployeeAllowanceAdvance.status == "deducted",
-            EmployeeAllowanceAdvance.payroll_id.in_(run_ids),
+        # 2) Loan repayments taken by these runs → delete, then reopen any loan
+        #    that no longer has a zero balance.
+        step = "removing loan repayments"
+        _r = await db.execute(
+            select(EmployeeLoanRepayment).where(EmployeeLoanRepayment.payroll_id.in_(run_ids))
         )
-    )
-    advances = _a.scalars().all()
-    for adv in advances:
-        adv.status = "open"
-        adv.payroll_id = None
+        repayments = _r.scalars().all()
+        loan_ids = {r.loan_id for r in repayments}
+        for rep in repayments:
+            await db.delete(rep)
+        await db.flush()
+        step = "reopening settled loans"
+        reopened_loans = 0
+        if loan_ids:
+            _l = await db.execute(select(EmployeeLoan).where(EmployeeLoan.id.in_(loan_ids)))
+            for loan in _l.scalars().all():
+                if loan.status == "paid" and (await _loan_balance(db, loan)) > 0:
+                    loan.status = "active"
+                    reopened_loans += 1
 
-    # 4) Deductions applied by these runs → pending again.
-    _d = await db.execute(
-        select(EmployeePayrollDeduction).where(EmployeePayrollDeduction.payroll_id.in_(run_ids))
-    )
-    deductions = _d.scalars().all()
-    for ded in deductions:
-        ded.payroll_id = None
+        # 3) Allowance advances settled by these runs → back to open.
+        step = "reopening allowance advances"
+        _a = await db.execute(
+            select(EmployeeAllowanceAdvance).where(
+                EmployeeAllowanceAdvance.status == "deducted",
+                EmployeeAllowanceAdvance.payroll_id.in_(run_ids),
+            )
+        )
+        advances = _a.scalars().all()
+        for adv in advances:
+            adv.status = "open"
+            adv.payroll_id = None
 
-    # 5) The runs themselves.
-    for run in runs:
-        await db.delete(run)
+        # 4) Deductions applied by these runs → pending again.
+        step = "unlinking applied deductions"
+        _d = await db.execute(
+            select(EmployeePayrollDeduction).where(EmployeePayrollDeduction.payroll_id.in_(run_ids))
+        )
+        deductions = _d.scalars().all()
+        for ded in deductions:
+            ded.payroll_id = None
 
-    record(db, "HR", "reset_payroll_period",
-           f"Reset payroll period {period}: {len(runs)} runs deleted "
-           f"({len(expenses)} expenses unwound, {len(repayments)} loan repayments removed, "
-           f"{reopened_loans} loans reopened, {len(advances)} advances reopened, "
-           f"{len(deductions)} deductions unlinked)",
-           user=current_user, ref_type="payroll_period", ref_id=None)
-    await db.commit()
+        # 5) The runs themselves.
+        step = "deleting payroll runs"
+        for run in runs:
+            await db.delete(run)
+
+        step = "writing audit log"
+        record(db, "HR", "reset_payroll_period",
+               f"Reset payroll period {period}: {len(runs)} runs deleted "
+               f"({len(expenses)} expenses unwound, {len(repayments)} loan repayments removed, "
+               f"{reopened_loans} loans reopened, {len(advances)} advances reopened, "
+               f"{len(deductions)} deductions unlinked)",
+               user=current_user, ref_type="payroll_period", ref_id=None)
+        step = "committing"
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        _log.exception("reset_payroll_period failed while %s (period=%s)", step, period)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Reset failed while {step}: {type(exc).__name__}. Nothing was changed — see server logs.",
+        )
     return {"ok": True, "period": period, "deleted_runs": len(runs),
             "deleted_expenses": len(expenses), "deleted_repayments": len(repayments),
             "reopened_loans": reopened_loans, "reopened_advances": len(advances),
@@ -2837,7 +2875,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
                 </table>
             </div>
             <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px;">
-                <button class="btn" style="border:1px solid var(--danger);color:var(--danger);background:transparent" onclick="resetPayrollMonth()">Reset Month</button>
+                <button class="btn" id="btn-reset-payroll-month" style="border:1px solid var(--danger);color:var(--danger);background:transparent;display:none" onclick="resetPayrollMonth()">Reset Month</button>
                 <button class="btn btn-purple" onclick="confirmRunPayroll()">Confirm & Run Payroll</button>
             </div>
         </div>
@@ -3156,6 +3194,8 @@ async function logout(){
       if(firstAllowed) setTimeout(() => switchTab(firstAllowed), 0);
       const clearBtn = document.getElementById("btn-clear-hr-data");
       if(clearBtn) clearBtn.style.display = hasPermission("action_hr_clear_data", u) ? "" : "none";
+      const resetBtn = document.getElementById("btn-reset-payroll-month");
+      if(resetBtn) resetBtn.style.display = hasPermission("action_hr_reset_payroll", u) ? "" : "none";
   }
   initializeColorMode();
   initUser().then(u => { if(u) configureHRPermissions(u); });
@@ -3483,7 +3523,7 @@ function updateEmpDailyRatePreview(){
     const dailyRate = salary / paidDays;
     const totalMonthly = salary + food + transport;
     const basisNote = fixed30
-        ? `${money(salary)} ÷ 30 flat — the full monthly salary is owed and each uncovered day deducts exactly ${money(dailyRate)}, whether the month has 28 or 31 days`
+        ? `${money(salary)} ÷ 30 flat — during the month pay accrues per covered day (${money(dailyRate)} each); once the month completes, the full salary is owed and each uncovered day deducts exactly ${money(dailyRate)}, whether the month has 28 or 31 days`
         : `approx — ${money(salary)} ÷ ${paidDays} days; actual payroll divides by each month's real day count (28–31)`;
     preview.innerHTML =
         `Daily rate: <b>${money(dailyRate)} EGP</b> &nbsp;(${basisNote}. ${vacation||0} leave day(s)/month accrue and carry over — days off are paid from that balance, so a fully-banked month off is still full pay; only days off beyond the balance are deducted)<br>` +
@@ -4243,7 +4283,7 @@ function closeRunPayModal(){
 }
 
 async function resetPayrollMonth(){
-    if(!hasPermission("action_hr_run_payroll")) return;
+    if(!hasPermission("action_hr_reset_payroll")) return;
     const period = document.getElementById("pay-period").value;
     if(!period){ showToast("Pick a period first"); return; }
     const typed = prompt(

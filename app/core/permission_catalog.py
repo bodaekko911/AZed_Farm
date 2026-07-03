@@ -212,6 +212,7 @@ PERMISSION_MATRIX = [
             {"action": "manage_attendance", "key": "action_hr_log_attendance", "label": "Log / auto-mark attendance"},
             {"action": "manage_allowances", "key": "action_hr_manage_allowances", "label": "Manage allowance advances"},
             {"action": "approve", "key": "action_hr_run_payroll", "label": "Run payroll"},
+            {"action": "reset_payroll", "key": "action_hr_reset_payroll", "label": "Reset a payroll month (deletes runs incl. paid; destructive)"},
             {"action": "mark_paid", "key": "action_hr_mark_paid", "label": "Mark payroll paid"},
             {"action": "view_loans", "key": "action_hr_view_loans", "label": "View employee loans"},
             {"action": "manage_loans", "key": "action_hr_manage_loans", "label": "Manage employee loans"},
