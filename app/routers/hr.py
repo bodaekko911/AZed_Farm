@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 import re
 from decimal import Decimal, ROUND_HALF_UP
@@ -2124,7 +2124,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
             _l = await db.execute(select(EmployeeLoan).where(EmployeeLoan.id.in_(loan_ids)))
             for loan in _l.scalars().all():
                 if loan.status == "paid" and (await _loan_balance(db, loan)) > 0:
-                    loan.status = "active"
+                    loan.status = "open"
                     reopened_loans += 1
 
         # 3) Allowance advances settled by these runs → back to open.
@@ -4287,10 +4287,15 @@ async function resetPayrollMonth(){
     const period = document.getElementById("pay-period").value;
     if(!period){ showToast("Pick a period first"); return; }
     const typed = prompt(
-        `This deletes ALL payroll runs for ${period} — paid and unpaid.\n` +
-        `Paid runs: their salary expenses are deleted and journals reversed.\n` +
-        `Loan repayments are removed (loans reopen), settled advances reopen,\n` +
-        `and applied deductions become pending again. Attendance is NOT touched.\n\n` +
+        `This deletes ALL payroll runs for ${period} — paid and unpaid.
+` +
+        `Paid runs: their salary expenses are deleted and journals reversed.
+` +
+        `Loan repayments are removed (loans reopen), settled advances reopen,
+` +
+        `and applied deductions become pending again. Attendance is NOT touched.
+
+` +
         `Type the period (${period}) to confirm:`
     );
     if(typed === null) return;
