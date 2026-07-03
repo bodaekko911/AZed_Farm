@@ -2035,6 +2035,111 @@ async def preview_payroll(
         "can_view_deductions": include_deductions,
     }
 
+class PayrollResetPeriod(BaseModel):
+    period: str
+    confirm: str
+
+
+@router.post("/api/payroll/reset-period", dependencies=[Depends(require_permission("action_hr_run_payroll"))])
+async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    """Delete ALL payroll runs for one period (paid and unpaid) and unwind
+    every side effect they created, so the month can be re-run cleanly:
+
+      • paid runs: the linked salary expense is deleted, its journal reversed
+        and its carbon log removed;
+      • loan repayments taken by these runs are deleted and any loan they
+        fully settled is reopened;
+      • allowance advances settled by these runs go back to 'open';
+      • day/manual deductions applied by these runs are unlinked so they
+        become pending again and apply on the next run;
+      • days-off credits from partial payments disappear with the rows, so
+        vacation balances correct themselves automatically.
+
+    Attendance is NOT touched. Requires typing the period to confirm.
+    """
+    period = _validate_period(data.period)
+    if (data.confirm or "").strip() != period:
+        raise HTTPException(status_code=400, detail=f"Type the period exactly ({period}) to confirm the reset")
+
+    runs = (await db.execute(select(Payroll).where(Payroll.period == period))).scalars().all()
+    if not runs:
+        return {"ok": True, "period": period, "deleted_runs": 0, "deleted_expenses": 0,
+                "deleted_repayments": 0, "reopened_loans": 0, "reopened_advances": 0,
+                "unlinked_deductions": 0}
+    run_ids = [r.id for r in runs]
+
+    # 1) Paid runs → delete their salary expenses (journal + carbon unwound).
+    from app.routers.expenses import _reverse_expense_journal
+    from app.models.expense import Expense
+    from app.models.carbon import CarbonLog
+    _e = await db.execute(
+        select(Expense).options(selectinload(Expense.category)).where(Expense.payroll_id.in_(run_ids))
+    )
+    expenses = _e.scalars().all()
+    for exp in expenses:
+        await _reverse_expense_journal(db, exp)
+        _cl = await db.execute(
+            select(CarbonLog).where(CarbonLog.ref_type == "expense", CarbonLog.ref_id == exp.id)
+        )
+        for cl in _cl.scalars().all():
+            await db.delete(cl)
+        await db.delete(exp)
+
+    # 2) Loan repayments taken by these runs → delete, then reopen any loan
+    #    that no longer has a zero balance.
+    _r = await db.execute(
+        select(EmployeeLoanRepayment).where(EmployeeLoanRepayment.payroll_id.in_(run_ids))
+    )
+    repayments = _r.scalars().all()
+    loan_ids = {r.loan_id for r in repayments}
+    for rep in repayments:
+        await db.delete(rep)
+    await db.flush()
+    reopened_loans = 0
+    if loan_ids:
+        _l = await db.execute(select(EmployeeLoan).where(EmployeeLoan.id.in_(loan_ids)))
+        for loan in _l.scalars().all():
+            if loan.status == "paid" and (await _loan_balance(db, loan)) > 0:
+                loan.status = "active"
+                reopened_loans += 1
+
+    # 3) Allowance advances settled by these runs → back to open.
+    _a = await db.execute(
+        select(EmployeeAllowanceAdvance).where(
+            EmployeeAllowanceAdvance.status == "deducted",
+            EmployeeAllowanceAdvance.payroll_id.in_(run_ids),
+        )
+    )
+    advances = _a.scalars().all()
+    for adv in advances:
+        adv.status = "open"
+        adv.payroll_id = None
+
+    # 4) Deductions applied by these runs → pending again.
+    _d = await db.execute(
+        select(EmployeePayrollDeduction).where(EmployeePayrollDeduction.payroll_id.in_(run_ids))
+    )
+    deductions = _d.scalars().all()
+    for ded in deductions:
+        ded.payroll_id = None
+
+    # 5) The runs themselves.
+    for run in runs:
+        await db.delete(run)
+
+    record(db, "HR", "reset_payroll_period",
+           f"Reset payroll period {period}: {len(runs)} runs deleted "
+           f"({len(expenses)} expenses unwound, {len(repayments)} loan repayments removed, "
+           f"{reopened_loans} loans reopened, {len(advances)} advances reopened, "
+           f"{len(deductions)} deductions unlinked)",
+           user=current_user, ref_type="payroll_period", ref_id=None)
+    await db.commit()
+    return {"ok": True, "period": period, "deleted_runs": len(runs),
+            "deleted_expenses": len(expenses), "deleted_repayments": len(repayments),
+            "reopened_loans": reopened_loans, "reopened_advances": len(advances),
+            "unlinked_deductions": len(deductions)}
+
+
 @router.post("/api/payroll/run", dependencies=[Depends(require_permission("action_hr_run_payroll"))])
 async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     from calendar import monthrange
@@ -2731,7 +2836,8 @@ td.mono { font-family: var(--mono); color: var(--green); }
                     <tbody id="preview-body"></tbody>
                 </table>
             </div>
-            <div style="display:flex;justify-content:flex-end;margin-top:12px;">
+            <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px;">
+                <button class="btn" style="border:1px solid var(--danger);color:var(--danger);background:transparent" onclick="resetPayrollMonth()">Reset Month</button>
                 <button class="btn btn-purple" onclick="confirmRunPayroll()">Confirm & Run Payroll</button>
             </div>
         </div>
@@ -4134,6 +4240,32 @@ async function confirmRunPayroll(){
 
 function closeRunPayModal(){
     document.getElementById("pay-run-modal").classList.remove("open");
+}
+
+async function resetPayrollMonth(){
+    if(!hasPermission("action_hr_run_payroll")) return;
+    const period = document.getElementById("pay-period").value;
+    if(!period){ showToast("Pick a period first"); return; }
+    const typed = prompt(
+        `This deletes ALL payroll runs for ${period} — paid and unpaid.\n` +
+        `Paid runs: their salary expenses are deleted and journals reversed.\n` +
+        `Loan repayments are removed (loans reopen), settled advances reopen,\n` +
+        `and applied deductions become pending again. Attendance is NOT touched.\n\n` +
+        `Type the period (${period}) to confirm:`
+    );
+    if(typed === null) return;
+    try{
+        const res = await fetch("/hr/api/payroll/reset-period",{
+            method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({period, confirm:(typed||"").trim()}),
+        });
+        const data = await readApiResponse(res);
+        showToast(data.deleted_runs
+            ? `${period} reset — ${data.deleted_runs} runs deleted, ${data.deleted_expenses} expenses unwound`
+            : `No payroll runs found for ${period}`);
+        await loadPayrollPreview();
+        if(typeof loadPayrollRecords === "function") await loadPayrollRecords();
+    }catch(err){ showToast("Error: "+(err.message||"Could not reset period")); }
 }
 
 async function runPayroll(){
