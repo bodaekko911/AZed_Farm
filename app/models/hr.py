@@ -14,6 +14,11 @@ class Employee(Base):
     department  = Column(String(100))
     hire_date   = Column(Date)
     base_salary = Column(Numeric(12, 2), default=0)
+    # How the daily rate is derived from the monthly salary:
+    #   calendar — salary ÷ actual days in the month (28–31); pay accrues per covered day.
+    #   fixed_30 — salary ÷ 30 flat; full salary is owed for the month and each
+    #              uncovered day deducts salary/30 (deduction-based deal).
+    salary_days_basis = Column(String(12), nullable=False, default="calendar", server_default="calendar")
     farm_id     = Column(Integer, ForeignKey("farms.id"), nullable=True, index=True)
     # When True, the employee is assigned to the "Animals" bucket (no specific
     # farm). Payroll auto-creates a salary expense with is_animal_expense=True,

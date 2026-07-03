@@ -266,6 +266,19 @@ async def ensure_carbon_methodology() -> None:
          "DEFRA GHG Conversion Factors 2024 — open-loop composting", 2024, "Global default"),
         ("production", "processing_kwh", "Processing energy (per kWh)", 0.46, "kWh", 2,
          "Grid electricity factor — Egypt (IFI Harmonised Grid Emission Factors)", 2023, "Egypt"),
+        # ── Livestock (IPCC 2006 Tier 1 enteric CH₄, Africa defaults; ────
+        # kg CH₄/head/yr × GWP₁₀₀ 28 (AR5) ÷ 365 → kg CO₂e per head-day.
+        # cattle 31 kg CH₄/yr → 2.38 · sheep/goats 5 kg CH₄/yr → 0.38.
+        # Poultry have no enteric factor; their small manure-management
+        # CH₄ (0.02 kg/yr) is included so poultry groups aren't silently 0.
+        ("livestock", "enteric_cattle_head_day", "Cattle — enteric methane (per head-day)", 2.38, "head-day", 1,
+         "IPCC 2006 GL Vol.4 Tab.10.11 — other cattle, Africa; CH4 GWP100=28 (AR5)", 2006, "Africa default"),
+        ("livestock", "enteric_sheep_head_day", "Sheep — enteric methane (per head-day)", 0.38, "head-day", 1,
+         "IPCC 2006 GL Vol.4 Tab.10.10 — sheep, developing regions; CH4 GWP100=28 (AR5)", 2006, "Africa default"),
+        ("livestock", "enteric_goat_head_day", "Goats — enteric methane (per head-day)", 0.38, "head-day", 1,
+         "IPCC 2006 GL Vol.4 Tab.10.10 — goats, developing regions; CH4 GWP100=28 (AR5)", 2006, "Africa default"),
+        ("livestock", "poultry_manure_head_day", "Poultry — manure methane (per head-day)", 0.0015, "head-day", 1,
+         "IPCC 2006 GL Vol.4 Tab.10.14 — poultry manure CH4, warm climate; GWP100=28 (AR5)", 2006, "Africa default"),
     ]
 
     # ── Phase 0: do the carbon tables even exist? ─────────────────────────
@@ -372,6 +385,22 @@ async def ensure_carbon_methodology() -> None:
         logger.exception("ensure_carbon_methodology: factor seed failed")
 
 
+async def sync_livestock_emissions_on_boot() -> None:
+    """Generate any missing monthly livestock (enteric methane) carbon logs.
+    One log per animal group per complete month; idempotent; never blocks
+    startup — a failure is logged and the next boot (or the carbon backfill
+    endpoint) catches up."""
+    try:
+        from app.db.session import AsyncSessionLocal
+        from app.services.livestock_carbon_service import sync_livestock_carbon_logs
+        async with AsyncSessionLocal() as db:
+            created = await sync_livestock_carbon_logs(db)
+            if created:
+                logger.info("sync_livestock_emissions_on_boot: created %d monthly livestock logs", created)
+    except Exception:
+        logger.exception("sync_livestock_emissions_on_boot: failed")
+
+
 async def seed_chart_of_accounts() -> None:
     """Ensure core accounting accounts exist. Safe to run on every startup."""
     from decimal import Decimal
@@ -461,6 +490,7 @@ async def lifespan(_: FastAPI):
     await ensure_delivery_transport_columns()
     await ensure_product_categories_table()
     await ensure_carbon_methodology()
+    await sync_livestock_emissions_on_boot()
     await seed_chart_of_accounts()
     from app.core.cache import init_redis_pool, close_redis_pool
     await init_redis_pool()

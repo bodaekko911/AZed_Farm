@@ -107,15 +107,17 @@ SOURCE_LABELS = {
     "energy": "Energy",
     "waste": "Waste / Spoilage",
     "production": "Production",
+    "livestock": "Livestock",
 }
 
-SOURCE_ORDER = ["transport", "energy", "waste", "production"]
+SOURCE_ORDER = ["transport", "energy", "waste", "production", "livestock"]
 
 SOURCE_ICONS = {
     "transport": "🚚",
     "energy": "⚡",
     "waste": "♻️",
     "production": "🏭",
+    "livestock": "🐐",
 }
 
 
@@ -1013,7 +1015,7 @@ async def sustainability_report(
     )
     scope_totals = {row[0]: float(row[1] or 0) for row in scope_q.all()}
     SCOPE_DESCRIPTIONS = {
-        1: "Direct emissions — fuel burned in owned equipment and vehicles",
+        1: "Direct emissions — fuel burned in owned equipment/vehicles and livestock methane",
         2: "Indirect emissions — purchased electricity",
         3: "Value-chain emissions — waste disposal and other indirect sources",
     }
@@ -1389,12 +1391,19 @@ async def backfill_auto_logs(
     spoilage_logged = sum(1 for c in created if c.ref_type == "spoilage")
     deliveries_logged = sum(1 for c in created if c.ref_type == "farm_delivery")
 
+    # ── Monthly livestock (enteric methane) logs per animal group ──
+    livestock_logged = 0
+    if not dry_run:
+        from app.services.livestock_carbon_service import sync_livestock_carbon_logs
+        livestock_logged = await sync_livestock_carbon_logs(db, user_id=current_user.id)
+
     if dry_run:
         await db.rollback()
     else:
         record(db, "Carbon", "backfill_auto_logs",
                f"Backfilled carbon logs — {expenses_logged} from expenses, "
-               f"{spoilage_logged} from spoilage, {deliveries_logged} from deliveries",
+               f"{spoilage_logged} from spoilage, {deliveries_logged} from deliveries, "
+               f"{livestock_logged} livestock months",
                user=current_user)
         await db.commit()
 
@@ -1406,6 +1415,7 @@ async def backfill_auto_logs(
         "spoilage_logged": spoilage_logged,
         "deliveries_scanned": len(delivery_rows),
         "deliveries_logged": deliveries_logged,
+        "livestock_logged": livestock_logged,
         "skipped": (len(expense_rows) - expenses_logged)
                  + (len(spoilage_rows) - spoilage_logged)
                  + (len(delivery_rows) - deliveries_logged),

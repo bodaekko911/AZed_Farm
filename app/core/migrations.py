@@ -73,6 +73,18 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
             "WHERE status IN ('late', 'leave')"
         ),
     },
+    # Per-employee salary basis: 'calendar' (rate = salary / days in month) or
+    # 'fixed_30' (rate = salary / 30; deduction-based monthly deal).
+    {
+        "table": "employees",
+        "column": "salary_days_basis",
+        "definition": "VARCHAR(12) NOT NULL DEFAULT 'calendar'",
+        "backfill": (
+            "UPDATE employees SET salary_days_basis = 'calendar' "
+            "WHERE salary_days_basis IS NULL "
+            "OR salary_days_basis NOT IN ('calendar', 'fixed_30')"
+        ),
+    },
     {
         "table": "employees",
         "column": "farm_id",

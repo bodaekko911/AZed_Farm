@@ -69,6 +69,7 @@ class EmployeeCreate(BaseModel):
     transportation_allowance: float         = 0
     farm_id:                 Optional[int]  = None
     works_with_animals:      bool           = False
+    salary_days_basis:       str            = "calendar"   # calendar | fixed_30
 
 class EmployeeUpdate(BaseModel):
     name:                    Optional[str]   = None
@@ -82,6 +83,7 @@ class EmployeeUpdate(BaseModel):
     farm_id:                 Optional[int]   = None
     works_with_animals:      Optional[bool]  = None
     is_active:               Optional[bool]  = None
+    salary_days_basis:       Optional[str]   = None        # calendar | fixed_30
 
 class AttendanceCreate(BaseModel):
     employee_id: int
@@ -337,6 +339,7 @@ def _employee_payload(employee: Employee) -> dict:
         "farm_name":  farm_name,
         "works_with_animals":         bool(getattr(employee, "works_with_animals", False) or False),
         "vacation_days_per_month":    int(getattr(employee, "vacation_days_per_month", 0) or 0),
+        "salary_days_basis":          _salary_basis(employee),
         "food_allowance":             float(getattr(employee, "food_allowance", 0) or 0),
         "transportation_allowance":   float(getattr(employee, "transportation_allowance", 0) or 0),
         "attendance_auto_status":     _normalize_auto_attendance_status(
@@ -345,39 +348,73 @@ def _employee_payload(employee: Employee) -> dict:
     }
 
 
+SALARY_BASIS_CALENDAR = "calendar"
+SALARY_BASIS_FIXED_30 = "fixed_30"
+SALARY_BASES = {SALARY_BASIS_CALENDAR, SALARY_BASIS_FIXED_30}
+
+
+def _salary_basis(employee: Employee) -> str:
+    basis = (getattr(employee, "salary_days_basis", None) or SALARY_BASIS_CALENDAR).strip().lower()
+    return basis if basis in SALARY_BASES else SALARY_BASIS_CALENDAR
+
+
+def _rate_divisor(employee: Employee, working_days: int) -> int:
+    """Days the monthly salary is divided by to get the daily rate:
+    the real month length for 'calendar' deals, a flat 30 for 'fixed_30'."""
+    if _salary_basis(employee) == SALARY_BASIS_FIXED_30:
+        return 30
+    return max(1, int(working_days or 0))
+
+
 def _paid_days_and_rate(employee: Employee, working_days: int = 30) -> tuple[Decimal, Decimal]:
     """Return (paid_days, daily_rate) for an employee in a month.
 
     paid_days  = working_days   (the whole month is paid: the monthly paid-leave
                  allowance counts as paid time, so a complete month always earns
                  the exact base salary — whether the leave is taken or not)
-    daily_rate = base_salary / working_days
-    earned     = base_salary * min(days_present + vacation_allowance,
-                                   working_days) / working_days
+    daily_rate = base_salary / rate divisor
+                 ('calendar' deals divide by the real month length 28–31;
+                  'fixed_30' deals divide by a flat 30, so one docked day is
+                  always exactly salary/30 regardless of the month)
 
     `working_days` is the actual number of days in the payroll month (28-31).
     The salary is computed on the FULL month, so unused vacation days are still
     paid (the employee is present those days) and the total is capped at the
     base salary. Only absences BEYOND the monthly vacation allowance reduce pay,
-    by one day's share (base_salary / working_days) each. See `_earned_base`.
+    by one day's share each. See `_earned_base`.
     """
     safe_working_days = max(1, int(working_days or 0))
     paid_days = _days(safe_working_days)   # the full month is paid
     base_salary = _money(employee.base_salary)
-    daily_rate  = _money(base_salary / paid_days) if paid_days > 0 else Decimal("0")
+    divisor = _dec(_rate_divisor(employee, safe_working_days))
+    daily_rate  = _money(base_salary / divisor) if divisor > 0 else Decimal("0")
     return paid_days, daily_rate
 
 
 def _earned_base(employee: Employee, days_present, working_days: int = 30,
-                 paid_leave_days=0) -> Decimal:
+                 paid_leave_days=0, days_elapsed: int | None = None) -> Decimal:
     """Earned base salary for `days_present` days plus `paid_leave_days` days of
     PAID leave, computed WITHOUT pre-rounding the daily rate.
 
-    Paid days are the days the employee was present plus the days of leave that
-    their accrued balance covers this month, capped at the length of the month:
+    Two per-employee deals (``employee.salary_days_basis``):
 
+    'calendar' (default — accrual):
         paid   = min(days_present + paid_leave_days, working_days)
         earned = base_salary * paid / working_days
+
+    'fixed_30' (deduction-based monthly deal):
+        The full monthly salary is owed; each elapsed day NOT covered by
+        presence or balance-covered leave deducts base_salary / 30:
+
+            uncovered = max(0, min(days_elapsed, working_days) - covered)
+            earned    = max(0, base_salary - uncovered * base_salary / 30)
+
+        So full attendance in February (28 days) still pays the full salary,
+        and one absence always costs exactly salary/30 whether the month has
+        28 or 31 days. `days_elapsed` bounds the deduction to days that have
+        actually passed, so a mid-month preview shows "on track" pay instead
+        of docking the whole remaining month; when omitted it defaults to the
+        full month (correct for completed-month runs).
 
     `paid_leave_days` is supplied by the caller as
     min(leave taken this month, accrued balance as of this month) — see
@@ -386,18 +423,27 @@ def _earned_base(employee: Employee, days_present, working_days: int = 30,
         over month to month: bank enough leave and a whole month off is still
         paid in full.
       * Leave taken beyond the available balance is unpaid.
-      * A complete month lands on the exact base salary (the total is capped at
-        `working_days`, so it never exceeds the base salary).
+      * A complete month lands on the exact base salary.
 
-    Computing `base_salary * paid / working_days` and rounding only the final
-    result keeps a full month exact (e.g. 8000, not 7999.94 from a pre-rounded
-    daily rate).
+    Rounding only the final result keeps a full month exact (e.g. 8000, not
+    7999.94 from a pre-rounded daily rate).
     """
     safe_working_days = max(1, int(working_days or 0))
     base_salary = _money(employee.base_salary)
-    paid = min(_dec(days_present) + _dec(paid_leave_days), _dec(safe_working_days))
-    if paid < 0:
-        paid = Decimal("0")
+    covered = _dec(days_present) + _dec(paid_leave_days)
+    if covered < 0:
+        covered = Decimal("0")
+
+    if _salary_basis(employee) == SALARY_BASIS_FIXED_30:
+        elapsed = safe_working_days if days_elapsed is None else max(0, int(days_elapsed))
+        elapsed = min(elapsed, safe_working_days)
+        uncovered = _dec(elapsed) - min(covered, _dec(elapsed))
+        earned = base_salary - (base_salary * uncovered / Decimal("30"))
+        if earned < 0:
+            earned = Decimal("0")
+        return _money(earned)
+
+    paid = min(covered, _dec(safe_working_days))
     return _money(base_salary * paid / _dec(safe_working_days))
 
 
@@ -918,6 +964,7 @@ async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_asyn
         position=data.position, department=data.department,
         hire_date=hire, base_salary=data.base_salary,
         vacation_days_per_month=max(0, int(data.vacation_days_per_month or 0)),
+        salary_days_basis=(data.salary_days_basis if data.salary_days_basis in SALARY_BASES else SALARY_BASIS_CALENDAR),
         food_allowance=max(0, float(data.food_allowance or 0)),
         transportation_allowance=max(0, float(data.transportation_allowance or 0)),
         farm_id=farm.id if farm else None,
@@ -954,6 +1001,11 @@ async def edit_employee(emp_id: int, data: EmployeeUpdate, db: AsyncSession = De
         e.farm = farm
     if "works_with_animals" in payload:
         payload["works_with_animals"] = bool(payload["works_with_animals"])
+    if "salary_days_basis" in payload:
+        basis = (payload["salary_days_basis"] or "").strip().lower()
+        if basis not in SALARY_BASES:
+            raise HTTPException(status_code=400, detail="salary_days_basis must be 'calendar' or 'fixed_30'")
+        payload["salary_days_basis"] = basis
     for k, v in payload.items():
         setattr(e, k, v)
     record(db, "HR", "edit_employee",
@@ -1580,7 +1632,7 @@ async def _payroll_preview_for_employee(
     # is still full pay) and only leave beyond the balance reduces pay. Computed
     # without pre-rounding the daily rate so a full month equals the exact base
     # salary. Allowance (food) is prorated by attendance separately.
-    earned_base  = _earned_base(employee, days_present, working_days, paid_leave_days)
+    earned_base  = _earned_base(employee, days_present, working_days, paid_leave_days, days_elapsed=days_elapsed)
     earned_total = _money(earned_base + earned_allowance)
 
     pending_day_days = Decimal("0")
@@ -1990,6 +2042,16 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
     year, month = int(period.split("-")[0]), int(period.split("-")[1])
     total_days   = monthrange(year, month)[1]
     working_days = total_days   # all days in month
+    # Days of the payroll month that have actually passed — bounds the
+    # fixed-30 deduction so running payroll mid-month never docks days that
+    # haven't happened yet. Past months: the whole month has elapsed.
+    _today = date.today()
+    if (_today.year, _today.month) == (year, month):
+        days_elapsed = _today.day
+    elif (_today.year, _today.month) > (year, month):
+        days_elapsed = working_days
+    else:
+        days_elapsed = 0
     # Date used to stamp payroll-driven repayments/deductions. Use the last day
     # of the *selected* payroll month so loan repayments land in the correct
     # accounting month, regardless of which day payroll is actually run on.
@@ -2066,7 +2128,7 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
             # still full pay) and only leave beyond the balance reduces pay.
             # Computed without pre-rounding the daily rate so a full month equals
             # the exact base salary. Mirrors preview.
-            earned_base = _earned_base(emp, days_present, working_days, paid_leave_days)
+            earned_base = _earned_base(emp, days_present, working_days, paid_leave_days, days_elapsed=days_elapsed)
 
             # Allowances — mirror the preview logic exactly:
             #   Food allowance      → prorated by attendance (daily rate x days present)
@@ -2725,6 +2787,10 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="fld"><label>Phone</label><input id="e-phone" placeholder="+20 100 000 0000"></div>
             <div class="fld"><label>Hire Date <span id="e-hire-lock" style="font-size:10px;color:var(--muted)">🔒 locked</span></label><input id="e-hire" type="date"></div>
             <div class="fld"><label>Base Salary (EGP)</label><input id="e-salary" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
+            <div class="fld"><label>Salary Basis</label><select id="e-salary-basis" onchange="updateEmpDailyRatePreview()">
+                <option value="calendar">Calendar month (÷ 28–31 days)</option>
+                <option value="fixed_30">Fixed 30 days (÷ 30, absences deduct)</option>
+            </select></div>
             <div class="fld"><label>Vacation Days / Month</label><input id="e-vacation" type="number" placeholder="0" min="0" max="20" step="1" oninput="updateEmpDailyRatePreview()"></div>
             <div class="fld"><label>Food Allowance (EGP)</label><input id="e-food" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
             <div class="fld"><label>Transportation Allowance (EGP)</label><input id="e-transport" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
@@ -3151,7 +3217,7 @@ async function loadEmployees(){
             <td style="font-size:12px;color:var(--muted)">${displayText(e.hire_date)}</td>
             <td class="mono">${money(salary)}</td>
             <td style="display:flex;gap:6px">
-                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}" data-works-animals="${e.works_with_animals ? "1" : ""}" data-vacation="${numberValue(e.vacation_days_per_month)||0}" data-food="${numberValue(e.food_allowance)||0}" data-transport="${numberValue(e.transportation_allowance)||0}" data-hire-date="${escapeHtml(e.hire_date||'')}" data-active="${e.is_active === false ? "0" : "1"}">Edit</button>
+                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}" data-works-animals="${e.works_with_animals ? "1" : ""}" data-vacation="${numberValue(e.vacation_days_per_month)||0}" data-salary-basis="${e.salary_days_basis||'calendar'}" data-food="${numberValue(e.food_allowance)||0}" data-transport="${numberValue(e.transportation_allowance)||0}" data-hire-date="${escapeHtml(e.hire_date||'')}" data-active="${e.is_active === false ? "0" : "1"}">Edit</button>
                 ${(hasPermission("action_hr_view_loans") || hasPermission("action_hr_view_deductions"))?`<button class="action-btn purple" onclick="openLoanDeductionModalFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-salary="${salary}">Loans &amp; Deductions</button>`:""}
                 ${hasPermission("action_hr_run_payroll") ? (e.is_active === false
                     ? `<button class="action-btn green" onclick="reactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Reactivate</button>`
@@ -3175,6 +3241,7 @@ function openEditEmpFromButton(btn){
         numberValue(btn.dataset.salary),
         btn.dataset.farmId || "",
         numberValue(btn.dataset.vacation) || 0,
+        btn.dataset.salaryBasis || "calendar",
         numberValue(btn.dataset.food) || 0,
         numberValue(btn.dataset.transport) || 0,
         btn.dataset.hireDate || "",
@@ -3197,6 +3264,7 @@ function openAddEmpModal(){
     const activeRow = document.getElementById("emp-active-row");
     if(activeRow) activeRow.style.display = "none";
     ["e-name","e-position","e-department","e-phone","e-salary","e-vacation","e-food","e-transport","e-hire"].forEach(id=>document.getElementById(id).value="");
+    document.getElementById("e-salary-basis").value = "calendar";
     applyHireDateLock(false);
     updateEmpDailyRatePreview();
     document.getElementById("e-hire").value = "";
@@ -3206,7 +3274,7 @@ function openAddEmpModal(){
     document.getElementById("emp-modal").classList.add("open");
 }
 
-function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacationDays,food,transport,hireDate,worksWithAnimals,isActive){
+function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacationDays,salaryBasis,food,transport,hireDate,worksWithAnimals,isActive){
     editingEmpId = id;
     document.getElementById("emp-modal-title").innerText = "Edit Employee";
     document.getElementById("e-name").value       = name;
@@ -3215,6 +3283,7 @@ function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacati
     document.getElementById("e-phone").value      = normalizeDashFallback(phone);
     document.getElementById("e-salary").value     = salary;
     document.getElementById("e-vacation").value   = vacationDays || 0;
+    document.getElementById("e-salary-basis").value = (salaryBasis === "fixed_30") ? "fixed_30" : "calendar";
     document.getElementById("e-food").value       = food || 0;
     document.getElementById("e-transport").value  = transport || 0;
     document.getElementById("e-hire").value       = (hireDate && hireDate !== "—") ? hireDate : "";
@@ -3299,14 +3368,19 @@ function updateEmpDailyRatePreview(){
     const vacation  = parseInt(document.getElementById("e-vacation")?.value || 0);
     const food      = parseFloat(document.getElementById("e-food")?.value || 0);
     const transport = parseFloat(document.getElementById("e-transport")?.value || 0);
+    const basis     = document.getElementById("e-salary-basis")?.value || "calendar";
     const preview   = document.getElementById("emp-rate-preview");
     if(!preview) return;
     if(!salary && !food && !transport){ preview.innerText = ""; return; }
+    const fixed30   = basis === "fixed_30";
     const paidDays  = 30;
     const dailyRate = salary / paidDays;
     const totalMonthly = salary + food + transport;
+    const basisNote = fixed30
+        ? `${money(salary)} ÷ 30 flat — the full monthly salary is owed and each uncovered day deducts exactly ${money(dailyRate)}, whether the month has 28 or 31 days`
+        : `approx — ${money(salary)} ÷ ${paidDays} days; actual payroll divides by each month's real day count (28–31)`;
     preview.innerHTML =
-        `Daily rate: <b>${money(dailyRate)} EGP</b> &nbsp;(approx — ${money(salary)} ÷ ${paidDays} days; the full month is paid. ${vacation||0} leave day(s)/month accrue and carry over — days off are paid from that balance, so a fully-banked month off is still full pay; only days off beyond the balance are deducted. Actual payroll uses each month's real day count)<br>` +
+        `Daily rate: <b>${money(dailyRate)} EGP</b> &nbsp;(${basisNote}. ${vacation||0} leave day(s)/month accrue and carry over — days off are paid from that balance, so a fully-banked month off is still full pay; only days off beyond the balance are deducted)<br>` +
         `Total monthly: <b>${money(totalMonthly)} EGP</b> &nbsp;(salary ${money(salary)} + food ${money(food)} + transport ${money(transport)})`;
 }
 
@@ -3324,6 +3398,7 @@ async function saveEmployee(){
         hire_date:               document.getElementById("e-hire").value||null,
         base_salary:             parseFloat(document.getElementById("e-salary").value)||0,
         vacation_days_per_month: parseInt(document.getElementById("e-vacation").value)||0,
+        salary_days_basis:       document.getElementById("e-salary-basis").value || "calendar",
         food_allowance:          parseFloat(document.getElementById("e-food").value)||0,
         transportation_allowance: parseFloat(document.getElementById("e-transport").value)||0,
         farm_id:                 farmIdVal,
