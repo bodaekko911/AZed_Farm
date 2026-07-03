@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal
 from typing import Optional, List
 from datetime import date as date_type
@@ -14,10 +15,11 @@ from app.core.permissions import get_current_user, require_permission
 from app.database import get_async_session
 from app.core.navigation import render_app_header
 from app.models.accounting import Account, Journal, JournalEntry
-from app.models.animal import AnimalGroup
+from app.models.animal import AnimalGroup, AnimalIntakeLog
 from app.models.expense import Expense, ExpenseCategory
 from app.models.carbon import CarbonEmissionFactor, CarbonLog
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
+from app.models.hr import EmployeeLoan, Payroll
 from app.models.product import Product
 from app.models.user import User
 
@@ -659,6 +661,73 @@ async def delete_expense(
         raise HTTPException(status_code=404, detail="Expense not found")
 
     ref = expense.ref_number
+    source_note = ""
+
+    # ── Keep source modules in sync ──────────────────────────────────
+    # Auto-generated expenses represent an action taken elsewhere (a salary
+    # payment, an animal purchase, a loan disbursement). Deleting the expense
+    # must undo — or protect — the originating record, otherwise the two
+    # modules silently disagree.
+
+    # 1) Salary payment (expense.payroll_id → payroll run). Deleting the
+    #    expense reverts the run to UNPAID (it can be re-paid later). Any days
+    #    off credited from a partial payment are removed, which the vacation
+    #    balance picks up automatically since it sums payroll rows live.
+    if expense.payroll_id:
+        _p = await db.execute(select(Payroll).where(Payroll.id == expense.payroll_id))
+        payroll = _p.scalar_one_or_none()
+        if payroll is not None:
+            payroll.paid = False
+            payroll.paid_at = None
+            payroll.paid_amount = None
+            payroll.days_off_credited = Decimal("0")
+            source_note = f"; payroll #{payroll.id} reverted to unpaid"
+
+    # 2) Loan disbursement (linked by the "[loan:N]" marker). Loan deletion
+    #    has its own careful flow in HR (it reverses per-payroll deductions
+    #    and deletes this expense with it), so deleting the expense alone
+    #    would orphan the loan and keep deducting salary for money that no
+    #    longer shows as spent. Redirect to the proper flow.
+    loan_marker = re.search(r"\[loan:(\d+)\]", expense.description or "")
+    if loan_marker:
+        _l = await db.execute(
+            select(EmployeeLoan.id).where(EmployeeLoan.id == int(loan_marker.group(1)))
+        )
+        if _l.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This expense is the disbursement of an active loan. "
+                    "Delete the loan from HR → Loans instead — that reverses "
+                    "its payroll deductions and removes this expense with it."
+                ),
+            )
+
+    # 3) Livestock purchase (intake stores expense_id). Deleting the expense
+    #    undoes the intake exactly like the Animals page would: headcount and
+    #    any sex split are subtracted from the group and the intake row is
+    #    removed.
+    _i = await db.execute(
+        select(AnimalIntakeLog)
+        .options(selectinload(AnimalIntakeLog.group))
+        .where(AnimalIntakeLog.expense_id == expense.id)
+    )
+    intake = _i.scalars().first()
+    if intake is not None:
+        group = intake.group
+        if group is not None:
+            group.headcount = max(0, int(group.headcount or 0) - int(intake.count or 0))
+            if intake.male_count:
+                group.male_count = max(0, int(group.male_count or 0) - int(intake.male_count))
+            if intake.female_count:
+                group.female_count = max(0, int(group.female_count or 0) - int(intake.female_count))
+        group_label = group.name if group is not None else f"group #{intake.animal_group_id}"
+        source_note = (
+            f"; intake #{intake.id} undone — {int(intake.count or 0)} head "
+            f"removed from {group_label}"
+        )
+        await db.delete(intake)
+
     await _reverse_expense_journal(db, expense)
     # Remove the auto-created carbon log (if any) so emissions stay consistent
     _old_logs = await db.execute(
@@ -668,10 +737,10 @@ async def delete_expense(
         await db.delete(_cl)
     await db.delete(expense)
     record(db, "Expenses", "delete_expense",
-           f"Deleted {ref} — journal reversed",
+           f"Deleted {ref} — journal reversed{source_note}",
            user=current_user, ref_type="expense", ref_id=expense_id)
     await db.commit()
-    return {"ok": True}
+    return {"ok": True, "source_sync": source_note.lstrip("; ") or None}
 
 
 # ── Cost Allocation API ──────────────────────────────────────────────────────
@@ -2016,7 +2085,7 @@ async function deleteExpense(id, ref) {
         });
         const data = await res.json();
         if (data.detail) { showToast(data.detail, "err"); return; }
-        showToast(`${ref} deleted`, "ok");
+        showToast(data.source_sync ? `${ref} deleted — ${data.source_sync}` : `${ref} deleted`, "ok");
         await Promise.all([loadExpenses(), loadSummary(), loadCategories(), loadCarbonFactors()]);
     } catch(e) {
         showToast("Failed to delete", "err");
