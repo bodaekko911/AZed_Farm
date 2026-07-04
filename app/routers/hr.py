@@ -2127,17 +2127,22 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
                     loan.status = "active"
                     reopened_loans += 1
 
-        # 3) Allowance advances settled by these runs → back to open.
+        # 3) Advances referencing these runs → unlink them ALL (any status —
+        #    e.g. a cancelled advance keeps its payroll_id and would violate
+        #    the FK when the run is deleted). Only the ones the runs actually
+        #    settled ('deducted') go back to open; cancelled stays cancelled.
         step = "reopening allowance advances"
         _a = await db.execute(
             select(EmployeeAllowanceAdvance).where(
-                EmployeeAllowanceAdvance.status == "deducted",
-                EmployeeAllowanceAdvance.payroll_id.in_(run_ids),
+                EmployeeAllowanceAdvance.payroll_id.in_(run_ids)
             )
         )
-        advances = _a.scalars().all()
-        for adv in advances:
-            adv.status = "open"
+        advances_all = _a.scalars().all()
+        reopened_advances = 0
+        for adv in advances_all:
+            if adv.status == "deducted":
+                adv.status = "open"
+                reopened_advances += 1
             adv.payroll_id = None
 
         # 4) Deductions belonging to this period → deleted. This covers both
@@ -2163,7 +2168,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
         record(db, "HR", "reset_payroll_period",
                f"Reset payroll period {period}: {len(runs)} runs deleted "
                f"({len(expenses)} expenses unwound, {len(repayments)} loan repayments removed, "
-               f"{reopened_loans} loans reopened, {len(advances)} advances reopened, "
+               f"{reopened_loans} loans reopened, {reopened_advances} advances reopened, "
                f"{len(deductions)} deductions deleted)",
                user=current_user, ref_type="payroll_period", ref_id=None)
         step = "committing"
@@ -2179,7 +2184,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
         )
     return {"ok": True, "period": period, "deleted_runs": len(runs),
             "deleted_expenses": len(expenses), "deleted_repayments": len(repayments),
-            "reopened_loans": reopened_loans, "reopened_advances": len(advances),
+            "reopened_loans": reopened_loans, "reopened_advances": reopened_advances,
             "deleted_deductions": len(deductions)}
 
 
