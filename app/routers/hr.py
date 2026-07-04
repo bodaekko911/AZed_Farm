@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+﻿from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 import re
 from decimal import Decimal, ROUND_HALF_UP
@@ -2065,8 +2065,8 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
       • loan repayments taken by these runs are deleted and any loan they
         fully settled is reopened;
       • allowance advances settled by these runs go back to 'open';
-      • day/manual deductions applied by these runs are unlinked so they
-        become pending again and apply on the next run;
+      • day/manual deductions for this period are DELETED — both ones the
+        runs applied and still-pending ones — so a re-run starts clean;
       • days-off credits from partial payments disappear with the rows, so
         vacation balances correct themselves automatically.
 
@@ -2080,7 +2080,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
     if not runs:
         return {"ok": True, "period": period, "deleted_runs": 0, "deleted_expenses": 0,
                 "deleted_repayments": 0, "reopened_loans": 0, "reopened_advances": 0,
-                "unlinked_deductions": 0}
+                "deleted_deductions": 0}
     run_ids = [r.id for r in runs]
 
     # Step-tagged so a production failure names the exact stage in the error
@@ -2124,7 +2124,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
             _l = await db.execute(select(EmployeeLoan).where(EmployeeLoan.id.in_(loan_ids)))
             for loan in _l.scalars().all():
                 if loan.status == "paid" and (await _loan_balance(db, loan)) > 0:
-                    loan.status = "open"
+                    loan.status = "active"
                     reopened_loans += 1
 
         # 3) Allowance advances settled by these runs → back to open.
@@ -2140,14 +2140,19 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
             adv.status = "open"
             adv.payroll_id = None
 
-        # 4) Deductions applied by these runs → pending again.
-        step = "unlinking applied deductions"
+        # 4) Deductions belonging to this period → deleted. This covers both
+        #    deductions the deleted runs had applied AND still-pending ones
+        #    added for this month, so a re-run starts with a clean slate.
+        step = "deleting period deductions"
         _d = await db.execute(
-            select(EmployeePayrollDeduction).where(EmployeePayrollDeduction.payroll_id.in_(run_ids))
+            select(EmployeePayrollDeduction).where(
+                (EmployeePayrollDeduction.payroll_id.in_(run_ids))
+                | (EmployeePayrollDeduction.period == period)
+            )
         )
         deductions = _d.scalars().all()
         for ded in deductions:
-            ded.payroll_id = None
+            await db.delete(ded)
 
         # 5) The runs themselves.
         step = "deleting payroll runs"
@@ -2159,7 +2164,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
                f"Reset payroll period {period}: {len(runs)} runs deleted "
                f"({len(expenses)} expenses unwound, {len(repayments)} loan repayments removed, "
                f"{reopened_loans} loans reopened, {len(advances)} advances reopened, "
-               f"{len(deductions)} deductions unlinked)",
+               f"{len(deductions)} deductions deleted)",
                user=current_user, ref_type="payroll_period", ref_id=None)
         step = "committing"
         await db.commit()
@@ -2175,7 +2180,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
     return {"ok": True, "period": period, "deleted_runs": len(runs),
             "deleted_expenses": len(expenses), "deleted_repayments": len(repayments),
             "reopened_loans": reopened_loans, "reopened_advances": len(advances),
-            "unlinked_deductions": len(deductions)}
+            "deleted_deductions": len(deductions)}
 
 
 @router.post("/api/payroll/run", dependencies=[Depends(require_permission("action_hr_run_payroll"))])
@@ -4287,15 +4292,10 @@ async function resetPayrollMonth(){
     const period = document.getElementById("pay-period").value;
     if(!period){ showToast("Pick a period first"); return; }
     const typed = prompt(
-        `This deletes ALL payroll runs for ${period} — paid and unpaid.
-` +
-        `Paid runs: their salary expenses are deleted and journals reversed.
-` +
-        `Loan repayments are removed (loans reopen), settled advances reopen,
-` +
-        `and applied deductions become pending again. Attendance is NOT touched.
-
-` +
+        `This deletes ALL payroll runs for ${period} — paid and unpaid.\n` +
+        `Paid runs: their salary expenses are deleted and journals reversed.\n` +
+        `Loan repayments are removed (loans reopen), settled advances reopen,\n` +
+        `and this month's deductions are deleted. Attendance is NOT touched.\n\n` +
         `Type the period (${period}) to confirm:`
     );
     if(typed === null) return;
