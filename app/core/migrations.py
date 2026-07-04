@@ -85,6 +85,16 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
             "OR salary_days_basis NOT IN ('calendar', 'fixed_30')"
         ),
     },
+    # An earlier build wrote loan status 'active', which the check constraint
+    # ck_employee_loans_status (open/paid/cancelled) rejects — leaving such
+    # rows unusable (repayment logic looks for 'open') and blocking any later
+    # UPDATE that touches them. Normalize to the canonical 'open'. Idempotent.
+    {
+        "table": "employee_loans",
+        "column": "status",
+        "definition": "VARCHAR(20)",
+        "backfill": "UPDATE employee_loans SET status = 'open' WHERE status = 'active'",
+    },
     {
         "table": "employees",
         "column": "farm_id",

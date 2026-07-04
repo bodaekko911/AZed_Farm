@@ -2140,8 +2140,12 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
         if loan_ids:
             _l = await db.execute(select(EmployeeLoan).where(EmployeeLoan.id.in_(loan_ids)))
             for loan in _l.scalars().all():
+                # A loan that these runs had fully repaid ('paid') and that now
+                # has an outstanding balance again is reopened. The status CHECK
+                # constraint (ck_employee_loans_status) only permits
+                # 'open' / 'paid' / 'cancelled' — 'open' is the active state.
                 if loan.status == "paid" and (await _loan_balance(db, loan)) > 0:
-                    loan.status = "active"
+                    loan.status = "open"
                     reopened_loans += 1
 
         # 3) Advances referencing these runs → unlink them ALL (any status —
