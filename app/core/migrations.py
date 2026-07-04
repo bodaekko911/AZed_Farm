@@ -294,6 +294,22 @@ async def ensure_runtime_schema_compatibility() -> None:
         def patch_schema(sync_conn):
             db_inspector = inspect(sync_conn)
             applied: list[str] = []
+
+            # The alembic_version.version_num column was originally VARCHAR(32),
+            # but our revision ids are longer (e.g. '20260630_0040_animal_sex_and_birth'
+            # is 34 chars), which made `alembic upgrade head` fail with
+            # StringDataRightTruncationError and freeze the whole migration
+            # chain. Widen it once, defensively, so migrations can advance.
+            if db_inspector.has_table("alembic_version"):
+                try:
+                    sync_conn.execute(text(
+                        "ALTER TABLE alembic_version "
+                        "ALTER COLUMN version_num TYPE VARCHAR(255)"
+                    ))
+                    applied.append("alembic_version.version_num→VARCHAR(255)")
+                except Exception:
+                    pass
+
             for patch in _RUNTIME_SCHEMA_PATCHES:
                 table_name = patch["table"]
                 if not db_inspector.has_table(table_name):
