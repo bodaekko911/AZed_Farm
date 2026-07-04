@@ -2159,7 +2159,39 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
         for ded in deductions:
             await db.delete(ded)
 
-        # 5) The runs themselves.
+        # 5) Defensive sweep: NULL every remaining payroll_id reference at the
+        #    SQL level before deleting the runs. The ORM steps above handle the
+        #    business logic (reopening loans/advances, deleting deductions), but
+        #    a bulk UPDATE guarantees no stray FK — from a row not loaded into
+        #    the session, an unexpected status, or identity-map staleness —
+        #    survives to block the delete. Idempotent and cheap.
+        step = "clearing payroll references"
+        from sqlalchemy import update as _sql_update
+        from app.models.expense import Expense as _Exp
+        await db.execute(
+            _sql_update(EmployeeLoanRepayment)
+            .where(EmployeeLoanRepayment.payroll_id.in_(run_ids))
+            .values(payroll_id=None)
+        )
+        await db.execute(
+            _sql_update(EmployeeAllowanceAdvance)
+            .where(EmployeeAllowanceAdvance.payroll_id.in_(run_ids))
+            .values(payroll_id=None)
+        )
+        await db.execute(
+            _sql_update(EmployeePayrollDeduction)
+            .where(EmployeePayrollDeduction.payroll_id.in_(run_ids))
+            .values(payroll_id=None)
+        )
+        # Any expense still linked (e.g. one whose journal reversal we skipped
+        # for some reason) — clear the link so the run can be deleted rather
+        # than 500. Belt-and-suspenders alongside the deletions in step 1.
+        await db.execute(
+            _sql_update(_Exp).where(_Exp.payroll_id.in_(run_ids)).values(payroll_id=None)
+        )
+        await db.flush()
+
+        # 6) The runs themselves.
         step = "deleting payroll runs"
         for run in runs:
             await db.delete(run)
@@ -2178,9 +2210,14 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
     except Exception as exc:
         await db.rollback()
         _log.exception("reset_payroll_period failed while %s (period=%s)", step, period)
+        # Surface the underlying DB detail (constraint/table) so the exact
+        # blocker is visible in the toast, not just "IntegrityError".
+        root = getattr(exc, "orig", None) or exc
+        detail_msg = str(getattr(root, "args", [root])[0] if getattr(root, "args", None) else root)
+        detail_msg = " ".join(detail_msg.split())[:300]
         raise HTTPException(
             status_code=500,
-            detail=f"Reset failed while {step}: {type(exc).__name__}. Nothing was changed — see server logs.",
+            detail=f"Reset failed while {step}: {type(exc).__name__} — {detail_msg}. Nothing was changed.",
         )
     return {"ok": True, "period": period, "deleted_runs": len(runs),
             "deleted_expenses": len(expenses), "deleted_repayments": len(repayments),
