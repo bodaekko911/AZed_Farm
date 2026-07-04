@@ -2086,6 +2086,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
     # Step-tagged so a production failure names the exact stage in the error
     # and the server log carries the full traceback.
     import logging
+    from sqlalchemy import update as _sql_update, delete as _sql_delete
     _log = logging.getLogger("hr.reset_payroll")
     step = "start"
     try:
@@ -2094,18 +2095,34 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
         from app.routers.expenses import _reverse_expense_journal
         from app.models.expense import Expense
         from app.models.carbon import CarbonLog
+        from app.models.accounting import Journal, JournalEntry
         _e = await db.execute(
             select(Expense).options(selectinload(Expense.category)).where(Expense.payroll_id.in_(run_ids))
         )
         expenses = _e.scalars().all()
+        orig_journal_ids = []
         for exp in expenses:
+            # Post the accounting reversal (restores account balances)...
             await _reverse_expense_journal(db, exp)
+            if exp.journal_id:
+                orig_journal_ids.append(exp.journal_id)
             _cl = await db.execute(
                 select(CarbonLog).where(CarbonLog.ref_type == "expense", CarbonLog.ref_id == exp.id)
             )
             for cl in _cl.scalars().all():
                 await db.delete(cl)
             await db.delete(exp)
+        # Flush the expense deletes FIRST so nothing references the original
+        # journals, THEN delete those journals and their entries.
+        await db.flush()
+        if orig_journal_ids:
+            await db.execute(
+                _sql_delete(JournalEntry).where(JournalEntry.journal_id.in_(orig_journal_ids))
+            )
+            await db.execute(
+                _sql_delete(Journal).where(Journal.id.in_(orig_journal_ids))
+            )
+            await db.flush()
 
         # 2) Loan repayments taken by these runs → delete, then reopen any loan
         #    that no longer has a zero balance.
@@ -2166,7 +2183,6 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
         #    the session, an unexpected status, or identity-map staleness —
         #    survives to block the delete. Idempotent and cheap.
         step = "clearing payroll references"
-        from sqlalchemy import update as _sql_update
         from app.models.expense import Expense as _Exp
         await db.execute(
             _sql_update(EmployeeLoanRepayment)
