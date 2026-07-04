@@ -2079,7 +2079,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
     runs = (await db.execute(select(Payroll).where(Payroll.period == period))).scalars().all()
     if not runs:
         return {"ok": True, "period": period, "deleted_runs": 0, "deleted_expenses": 0,
-                "deleted_repayments": 0, "reopened_loans": 0, "reopened_advances": 0,
+                "deleted_repayments": 0, "deleted_loans": 0, "reopened_loans": 0, "reopened_advances": 0,
                 "deleted_deductions": 0}
     run_ids = [r.id for r in runs]
 
@@ -2147,6 +2147,46 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
                 if loan.status == "paid" and (await _loan_balance(db, loan)) > 0:
                     loan.status = "open"
                     reopened_loans += 1
+
+        # 2b) Full wipe: delete loans DATED in this period entirely, so their
+        #     deductions don't reappear when the month is re-previewed. A loan
+        #     dated in July is a July artifact; resetting July removes it and
+        #     the "Salaries & Wages" expense booked when it was created. Loans
+        #     dated in other months are left alone (they only reopened above).
+        step = "deleting period-dated loans"
+        from app.routers.expenses import _reverse_expense_journal as _rev_journal
+        from app.models.expense import Expense as _ExpLoan
+        from app.models.accounting import Journal as _Jrnl, JournalEntry as _JrnlE
+        _pl = await db.execute(
+            select(EmployeeLoan).where(
+                func.extract("year", EmployeeLoan.loan_date) == int(period.split("-")[0]),
+                func.extract("month", EmployeeLoan.loan_date) == int(period.split("-")[1]),
+            )
+        )
+        period_loans = _pl.scalars().all()
+        deleted_loans = 0
+        for loan in period_loans:
+            # Delete any remaining repayments for this loan first (FK).
+            await db.execute(
+                _sql_delete(EmployeeLoanRepayment).where(EmployeeLoanRepayment.loan_id == loan.id)
+            )
+            # Reverse + delete the loan's advance expense and its original journal.
+            marker = f"[loan:{loan.id}]"
+            _le = await db.execute(
+                select(_ExpLoan).options(selectinload(_ExpLoan.category))
+                .where(_ExpLoan.description.like(f"%{marker}%"))
+            )
+            for lexp in _le.scalars().all():
+                await _rev_journal(db, lexp)
+                loan_jid = lexp.journal_id
+                await db.delete(lexp)
+                await db.flush()
+                if loan_jid:
+                    await db.execute(_sql_delete(_JrnlE).where(_JrnlE.journal_id == loan_jid))
+                    await db.execute(_sql_delete(_Jrnl).where(_Jrnl.id == loan_jid))
+            await db.flush()
+            await db.delete(loan)
+            deleted_loans += 1
 
         # 3) Advances referencing these runs → unlink them ALL (any status —
         #    e.g. a cancelled advance keeps its payroll_id and would violate
@@ -2220,7 +2260,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
         record(db, "HR", "reset_payroll_period",
                f"Reset payroll period {period}: {len(runs)} runs deleted "
                f"({len(expenses)} expenses unwound, {len(repayments)} loan repayments removed, "
-               f"{reopened_loans} loans reopened, {reopened_advances} advances reopened, "
+               f"{deleted_loans} loans deleted, {reopened_loans} loans reopened, {reopened_advances} advances reopened, "
                f"{len(deductions)} deductions deleted)",
                user=current_user, ref_type="payroll_period", ref_id=None)
         step = "committing"
@@ -2241,7 +2281,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
         )
     return {"ok": True, "period": period, "deleted_runs": len(runs),
             "deleted_expenses": len(expenses), "deleted_repayments": len(repayments),
-            "reopened_loans": reopened_loans, "reopened_advances": reopened_advances,
+            "deleted_loans": deleted_loans, "reopened_loans": reopened_loans, "reopened_advances": reopened_advances,
             "deleted_deductions": len(deductions)}
 
 
@@ -4356,8 +4396,9 @@ async function resetPayrollMonth(){
     const typed = prompt(
         `This deletes ALL payroll runs for ${period} — paid and unpaid.\n` +
         `Paid runs: their salary expenses are deleted and journals reversed.\n` +
-        `Loan repayments are removed (loans reopen), settled advances reopen,\n` +
-        `and this month's deductions are deleted. Attendance is NOT touched.\n\n` +
+        `Loans DATED this month are deleted (debt erased), settled advances\n` +
+        `reopen, and this month's deductions are deleted. Attendance is NOT\n` +
+        `touched.\n\n` +
         `Type the period (${period}) to confirm:`
     );
     if(typed === null) return;
@@ -4367,9 +4408,9 @@ async function resetPayrollMonth(){
             body:JSON.stringify({period, confirm:(typed||"").trim()}),
         });
         const data = await readApiResponse(res);
-        showToast(data.deleted_runs
-            ? `${period} reset — ${data.deleted_runs} runs deleted, ${data.deleted_expenses} expenses unwound`
-            : `No payroll runs found for ${period}`);
+        showToast((data.deleted_runs || data.deleted_loans)
+            ? `${period} reset — ${data.deleted_runs} runs, ${data.deleted_loans||0} loans, ${data.deleted_deductions||0} deductions deleted`
+            : `Nothing found to reset for ${period}`);
         await loadPayrollPreview();
         if(typeof loadPayrollRecords === "function") await loadPayrollRecords();
     }catch(err){ showToast("Error: "+(err.message||"Could not reset period")); }
