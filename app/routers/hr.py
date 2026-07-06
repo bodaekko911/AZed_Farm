@@ -1590,6 +1590,26 @@ async def _open_allowance_advances(
     return advances, total
 
 
+async def _earned_allowance_for_payroll(db: AsyncSession, payroll) -> Decimal:
+    """Allowance earned for a stored payroll run: food prorated by the days
+    worked that were recorded on the run + full transport, minus any open
+    allowance advance (capped so it can't push the allowance negative).
+    Used when re-computing net on payroll edit so the allowance is preserved."""
+    emp = payroll.employee
+    if emp is None:
+        return Decimal("0")
+    working_days = int(payroll.working_days or 30) or 30
+    days_present = int(payroll.days_worked or 0)
+    food_all  = _money(getattr(emp, "food_allowance", 0) or 0)
+    trans_all = _money(getattr(emp, "transportation_allowance", 0) or 0)
+    food_daily = _money(food_all / Decimal(str(working_days))) if working_days > 0 else Decimal("0")
+    earned_food = _money(food_daily * _dec(days_present))
+    earned_allowance = _money(earned_food + trans_all)
+    _, open_advance_total = await _open_allowance_advances(db, emp.id)
+    applied = _money(min(open_advance_total, earned_allowance))
+    return _money(earned_allowance - applied)
+
+
 async def _payroll_preview_for_employee(
     db: AsyncSession,
     employee: Employee,
@@ -2497,7 +2517,9 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
 
 @router.put("/api/payroll/{payroll_id}", dependencies=[Depends(require_permission("action_hr_run_payroll"))])
 async def update_payroll(payroll_id: int, data: PayrollUpdate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
-    _r = await db.execute(select(Payroll).where(Payroll.id == payroll_id))
+    _r = await db.execute(
+        select(Payroll).options(selectinload(Payroll.employee)).where(Payroll.id == payroll_id)
+    )
     p = _r.scalar_one_or_none()
     if not p:
         raise HTTPException(status_code=404, detail="Payroll record not found")
@@ -2508,7 +2530,11 @@ async def update_payroll(payroll_id: int, data: PayrollUpdate, db: AsyncSession 
         + _dec(getattr(p, "day_deductions", 0))
         + p.manual_deductions
     )
-    p.net_salary = _money(_dec(p.base_salary) + p.bonuses - p.deductions)
+    # Recompute the allowance that was earned for this run (food prorated by
+    # attendance + full transport, net of any settled advance) so editing a
+    # payroll never drops the allowance from net salary. Mirrors run_payroll.
+    earned_allowance = await _earned_allowance_for_payroll(db, p)
+    p.net_salary = _money(_dec(p.base_salary) + p.bonuses + earned_allowance - p.deductions)
     if data.notes and p.manual_deductions > 0:
         db.add(
             EmployeePayrollDeduction(
