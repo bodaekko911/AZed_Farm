@@ -2031,6 +2031,19 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
     out = []
     for r in records:
         allowance = await _earned_allowance_for_payroll(db, r) if r.employee else Decimal("0")
+        # Recompute net from its parts so records written by an older build
+        # (which omitted the allowance) display correctly without a re-run.
+        # For a PAID row we trust the stored net (it's what was actually paid).
+        stored_net = _money(r.net_salary) if r.net_salary is not None else Decimal("0")
+        if r.paid:
+            net = stored_net
+        else:
+            net = _money(
+                _dec(r.base_salary or 0)
+                + _dec(r.bonuses or 0)
+                + allowance
+                - _dec(r.deductions or 0)
+            )
         out.append({
             "id":          r.id,
             "employee_id": r.employee_id,
@@ -2048,7 +2061,7 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
             "day_deduction_days": float(r.day_deduction_days) if getattr(r, "day_deduction_days", None) else 0,
             "day_deductions": float(r.day_deductions) if getattr(r, "day_deductions", None) else 0,
             "manual_deductions": float(r.manual_deductions) if getattr(r, "manual_deductions", None) else 0,
-            "net_salary":  float(r.net_salary)  if r.net_salary  else 0,
+            "net_salary":  _as_float(net),
             "paid":        r.paid,
             "paid_at":     str(r.paid_at) if r.paid_at else None,
             "paid_amount": float(r.paid_amount) if getattr(r, "paid_amount", None) is not None else None,
