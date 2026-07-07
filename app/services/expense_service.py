@@ -812,6 +812,99 @@ async def create_loan_advance_expense(
     return expense
 
 
+async def create_allowance_advance_expense(
+    db: AsyncSession,
+    advance,
+    employee,
+    current_user: User,
+    *,
+    payment_method: str = "cash",
+) -> Optional[Expense]:
+    """Book an allowance advance (early cash payout) as a Salaries & Wages
+    expense, dated to the advance date and tagged to the employee's farm.
+
+    Like a loan advance, this does NOT double-count: the advance is recovered
+    from the employee's earned allowance on the next payroll, and payroll
+    expense is booked at NET, so overall labour cost is unchanged.
+    Idempotent via the [alw_adv:N] marker.
+    """
+    amount = round(float(advance.amount or 0), 2)
+    if amount <= 0:
+        return None
+
+    marker = f"[alw_adv:{advance.id}]"
+    existing_result = await db.execute(
+        select(Expense).options(selectinload(Expense.category))
+        .where(Expense.description.like(f"%{marker}%"))
+    )
+    existing = existing_result.scalar_one_or_none()
+    if existing:
+        return existing
+
+    category = await _get_or_create_salary_category(db)
+    employee_name = getattr(employee, "name", None) or f"Employee #{advance.employee_id}"
+    farm_id = getattr(employee, "farm_id", None) or None
+    is_animal = bool(getattr(employee, "works_with_animals", False))
+    expense_date = getattr(advance, "advance_date", None) or date_type.today()
+    reference_number = await _next_expense_reference(db)
+    description = f"Allowance advance {marker} - {employee_name}"
+
+    journal = await _post_expense_journal(
+        db,
+        description=f"Allowance advance - {reference_number} - {employee_name}",
+        amount=amount,
+        expense_account_code=category.account_code,
+        payment_method=payment_method,
+        user_id=current_user.id,
+    )
+    expense = Expense(
+        ref_number=reference_number,
+        category_id=category.id,
+        category=category,
+        user_id=current_user.id,
+        expense_date=expense_date,
+        amount=amount,
+        payment_method=payment_method,
+        vendor=employee_name,
+        description=description,
+        journal_id=journal.id,
+        farm_id=farm_id,
+        is_animal_expense=is_animal,
+    )
+    db.add(expense)
+    await db.flush()
+    record(db, "Expenses", "add_allowance_advance_expense",
+           f"{SALARY_CATEGORY_NAME} - {reference_number} - {amount:.2f} - allowance advance #{advance.id}",
+           user=current_user, ref_type="expense", ref_id=expense.id or 0)
+    return expense
+
+
+async def reverse_allowance_advance_expense(db: AsyncSession, advance, current_user: User) -> bool:
+    """Remove the Salaries & Wages expense (and its original journal) created
+    for an allowance advance — used when the advance is deleted/cancelled."""
+    marker = f"[alw_adv:{advance.id}]"
+    result = await db.execute(
+        select(Expense).options(selectinload(Expense.category))
+        .where(Expense.description.like(f"%{marker}%"))
+    )
+    expense = result.scalar_one_or_none()
+    if not expense:
+        return False
+    ref = expense.ref_number
+    orig_journal_id = expense.journal_id
+    await _reverse_expense_journal(db, expense)
+    await db.delete(expense)
+    await db.flush()
+    if orig_journal_id:
+        from app.models.accounting import Journal, JournalEntry
+        await db.execute(JournalEntry.__table__.delete().where(JournalEntry.journal_id == orig_journal_id))
+        await db.execute(Journal.__table__.delete().where(Journal.id == orig_journal_id))
+    record(db, "Expenses", "reverse_allowance_advance_expense",
+           f"Reversed allowance advance expense {ref} - advance #{advance.id}",
+           user=current_user, ref_type="expense", ref_id=0)
+    return True
+
+
 async def reverse_loan_advance_expense(db: AsyncSession, loan, current_user: User) -> bool:
     """Remove the Salaries & Wages expense created for a loan (and its journal),
     used when a loan is deleted/cancelled so labour cost isn't overstated.

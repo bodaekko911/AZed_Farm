@@ -1400,6 +1400,11 @@ async def create_allowance_advance(
     )
     db.add(advance)
     await db.flush()
+    # An allowance advance is real cash paid out now → book it as a
+    # Salaries & Wages expense (recovered from the next payroll's allowance,
+    # so labour cost isn't double-counted).
+    from app.services.expense_service import create_allowance_advance_expense
+    await create_allowance_advance_expense(db, advance, employee, current_user)
     record(db, "HR", "create_allowance_advance",
            f"Allowance advance for {employee.name}: {amount:.2f}",
            user=current_user, ref_type="allowance_advance", ref_id=advance.id)
@@ -1421,6 +1426,40 @@ async def cancel_allowance_advance(
     if advance.status == "deducted":
         raise HTTPException(status_code=400, detail="Cannot cancel an already deducted advance")
     advance.status = "cancelled"
+    # Reverse the expense booked when the advance was paid out.
+    from app.services.expense_service import reverse_allowance_advance_expense
+    await reverse_allowance_advance_expense(db, advance, current_user)
+    record(db, "HR", "cancel_allowance_advance",
+           f"Cancelled allowance advance #{advance.id}",
+           user=current_user, ref_type="allowance_advance", ref_id=advance.id)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.delete("/api/allowance-advances/{advance_id}", dependencies=[Depends(require_permission("action_hr_delete_allowance"))])
+async def delete_allowance_advance(
+    advance_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete an allowance advance entirely (for mistaken data entry) and
+    reverse the expense it booked. A DEDUCTED advance can't be deleted — it's
+    already tied to a payroll run; reset that month first."""
+    result = await db.execute(select(EmployeeAllowanceAdvance).where(EmployeeAllowanceAdvance.id == advance_id))
+    advance = result.scalar_one_or_none()
+    if not advance:
+        raise HTTPException(status_code=404, detail="Advance not found")
+    if advance.status == "deducted":
+        raise HTTPException(
+            status_code=400,
+            detail="This advance was already deducted on a payroll run. Reset that month first, then delete it.",
+        )
+    from app.services.expense_service import reverse_allowance_advance_expense
+    await reverse_allowance_advance_expense(db, advance, current_user)
+    await db.delete(advance)
+    record(db, "HR", "delete_allowance_advance",
+           f"Deleted allowance advance #{advance_id} ({advance.amount:.2f})",
+           user=current_user, ref_type="allowance_advance", ref_id=advance_id)
     await db.commit()
     return {"ok": True}
 
@@ -1989,8 +2028,10 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
     stmt = stmt.order_by(Payroll.period.desc(), Payroll.id)
     _r = await db.execute(stmt)
     records = _r.scalars().all()
-    return [
-        {
+    out = []
+    for r in records:
+        allowance = await _earned_allowance_for_payroll(db, r) if r.employee else Decimal("0")
+        out.append({
             "id":          r.id,
             "employee_id": r.employee_id,
             "employee":    r.employee.name if r.employee else "—",
@@ -2001,6 +2042,7 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
             "days_worked": r.days_worked or 0,
             "working_days":r.working_days or 0,
             "bonuses":     float(r.bonuses)     if r.bonuses     else 0,
+            "allowance":   _as_float(allowance),
             "deductions":  float(r.deductions)  if r.deductions  else 0,
             "loan_deductions": float(r.loan_deductions) if getattr(r, "loan_deductions", None) else 0,
             "day_deduction_days": float(r.day_deduction_days) if getattr(r, "day_deduction_days", None) else 0,
@@ -2012,9 +2054,8 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
             "paid_amount": float(r.paid_amount) if getattr(r, "paid_amount", None) is not None else None,
             "days_off_credited": float(r.days_off_credited) if getattr(r, "days_off_credited", None) else 0,
             "daily_rate":  _as_float(_paid_days_and_rate(r.employee, int(r.working_days or 30) or 30)[1]) if r.employee else 0,
-        }
-        for r in records
-    ]
+        })
+    return out
 
 @router.get("/api/payroll/preview")
 async def preview_payroll(
@@ -3016,7 +3057,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
         <!-- PAYROLL RECORDS -->
         <div class="table-wrap" id="payroll-records-wrap" style="display:none">
             <table>
-                <thead><tr><th>Employee</th><th>Period</th><th>Base Salary</th><th>Days</th><th>Bonuses</th><th>Loan</th><th>Day Ded.</th><th>Manual</th><th>Total Ded.</th><th>Net Salary</th><th>Status</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Employee</th><th>Period</th><th>Base Salary</th><th>Days</th><th>Bonuses</th><th>Allowance</th><th>Loan</th><th>Day Ded.</th><th>Manual</th><th>Total Ded.</th><th>Net Salary</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody id="pay-body"></tbody>
             </table>
         </div>
@@ -4094,7 +4135,7 @@ async function loadAllowanceAdvances(){
             <td class="mono" style="font-weight:700">${money(a.amount)}</td>
             <td><span class="status-${a.status==="open"?"pending":a.status==="deducted"?"success":"danger"}">${a.status}</span></td>
             <td style="color:var(--muted);font-size:12px">${escapeHtml(a.note||"—")}</td>
-            <td>${a.status==="open"?`<button class="action-btn danger" onclick="cancelAllowanceAdvance(${a.id})">Cancel</button>`:""}</td>
+            <td style="display:flex;gap:6px">${a.status==="open"?`<button class="action-btn danger" onclick="cancelAllowanceAdvance(${a.id})">Cancel</button>`:""}${a.status!=="deducted" && hasPermission("action_hr_delete_allowance")?`<button class="action-btn danger" onclick="deleteAllowanceAdvance(${a.id})">Delete</button>`:""}</td>
         </tr>`).join("") || `<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:14px">No advances yet</td></tr>`;
     } catch(err) {
         body.innerHTML = `<tr><td colspan="5" style="color:var(--danger)">Could not load advances</td></tr>`;
@@ -4130,6 +4171,18 @@ async function cancelAllowanceAdvance(advId){
         await loadAllowanceAdvances();
         loadAllowanceBoard();
     } catch(err){ showToast("Error: "+(err.message||"Could not cancel")); }
+}
+
+async function deleteAllowanceAdvance(advId){
+    if(!hasPermission("action_hr_delete_allowance")) return;
+    if(!confirm("Delete this advance entirely? This also reverses the expense it booked. Use this for mistaken entries.")) return;
+    try {
+        const res = await fetch(`/hr/api/allowance-advances/${advId}`, {method:"DELETE"});
+        await readApiResponse(res);
+        showToast("Advance deleted");
+        await loadAllowanceAdvances();
+        loadAllowanceBoard();
+    } catch(err){ showToast("Error: "+(err.message||"Could not delete")); }
 }
 
 /* ── ATTENDANCE ── */
@@ -4470,6 +4523,7 @@ async function loadPayrollRecords(){
             <td style="font-family:var(--mono)">${money(r.base_salary)}</td>
             <td style="font-family:var(--mono);color:var(--sub)">${r.days_worked ? numberValue(r.days_worked) : "-"} / ${r.working_days ? numberValue(r.working_days) : "-"}</td>
             <td style="font-family:var(--mono);color:var(--green)">+${money(r.bonuses)}</td>
+            <td style="font-family:var(--mono);color:var(--green)">+${money(r.allowance)}</td>
             <td style="font-family:var(--mono);color:var(--danger)">-${money(r.loan_deductions)}</td>
             <td style="font-family:var(--mono);color:var(--danger)">${numberValue(r.day_deduction_days)}d / -${money(r.day_deductions)}</td>
             <td style="font-family:var(--mono);color:var(--danger)">-${money(r.manual_deductions)}</td>
@@ -4482,7 +4536,7 @@ async function loadPayrollRecords(){
             </td>
         </tr>`).join("") +
         `<tr style="background:var(--card2)">
-            <td colspan="9" style="font-weight:700;color:var(--sub)">Remaining to Pay${totalPaid>0?` <span style="font-weight:400;color:var(--muted);font-size:12px">(already paid ${money(totalPaid)})</span>`:""}</td>
+            <td colspan="10" style="font-weight:700;color:var(--sub)">Remaining to Pay${totalPaid>0?` <span style="font-weight:400;color:var(--muted);font-size:12px">(already paid ${money(totalPaid)})</span>`:""}</td>
             <td style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green)">${money(totalNet)}</td>
             <td colspan="2"></td>
         </tr>`;
