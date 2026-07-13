@@ -29,6 +29,21 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
         "definition": "VARCHAR(64)",
         "backfill": "SELECT 1",
     },
+    # Data backfill (not a schema change): B2B invoices that net to zero — i.e. a
+    # client with a 100% discount — used to be written with status='unpaid' before
+    # auto-paid handling existed. There is nothing to collect on them, so mark them
+    # paid. This targets the already-existing "status" column, so no ALTER runs;
+    # only the idempotent UPDATE below executes on each boot (rows already 'paid'
+    # are skipped by the WHERE clause).
+    {
+        "table": "b2b_invoices",
+        "column": "status",
+        "definition": "VARCHAR(20) DEFAULT 'unpaid'",
+        "backfill": (
+            "UPDATE b2b_invoices SET status = 'paid', amount_paid = total "
+            "WHERE total <= 0 AND (status IS NULL OR status <> 'paid')"
+        ),
+    },
     {
         "table": "consignments",
         "column": "import_batch_id",
