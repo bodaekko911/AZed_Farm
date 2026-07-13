@@ -456,7 +456,12 @@ async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_asy
     discount_amount = round(subtotal * (discount_pct / 100), 2)
     total           = round(subtotal - discount_amount, 2)
     invoice_number  = await _next_b2b_number(db)
-    status = "unpaid"
+
+    # 100% discount (or any invoice that nets to zero) has nothing to collect,
+    # so it is booked as fully paid on creation with no AR / outstanding impact.
+    fully_discounted = discount_pct >= 100 or total <= 0.005
+    status      = "paid" if fully_discounted else "unpaid"
+    amount_paid = total if fully_discounted else 0
 
     invoice = B2BInvoice(
         invoice_number=invoice_number, client_id=data.client_id,
@@ -466,7 +471,7 @@ async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_asy
         payment_method=invoice_type,
         subtotal=round(subtotal, 2), discount=discount_amount,
         total=total,
-        amount_paid=0,
+        amount_paid=amount_paid,
         notes=data.notes,
     )
     db.add(invoice); await db.flush()
@@ -494,25 +499,28 @@ async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_asy
     # Cash invoices: journal is posted when payment is collected (not at creation)
     # AR is always tracked for all types so outstanding balance works
     if invoice_type == "cash":
-        await _post_journal(db, f"B2B Cash Invoice - {invoice_number}", "b2b", [
-            ("1100", total, 0),
-            ("4000", 0, total),
-        ], user_id=current_user.id)
-        client.outstanding = Decimal(str(float(client.outstanding) + total))
+        if not fully_discounted:
+            await _post_journal(db, f"B2B Cash Invoice - {invoice_number}", "b2b", [
+                ("1100", total, 0),
+                ("4000", 0, total),
+            ], user_id=current_user.id)
+            client.outstanding = Decimal(str(float(client.outstanding) + total))
 
     elif invoice_type == "full_payment":
-        await _post_journal(db, f"B2B Full Payment Invoice - {invoice_number}", "b2b", [
-            ("1100", total, 0),
-            ("2200", 0, total),
-        ], user_id=current_user.id)
-        client.outstanding = Decimal(str(float(client.outstanding) + total))
+        if not fully_discounted:
+            await _post_journal(db, f"B2B Full Payment Invoice - {invoice_number}", "b2b", [
+                ("1100", total, 0),
+                ("2200", 0, total),
+            ], user_id=current_user.id)
+            client.outstanding = Decimal(str(float(client.outstanding) + total))
 
     elif invoice_type == "consignment":
-        await _post_journal(db, f"B2B Consignment Invoice - {invoice_number}", "b2b", [
-            ("1100", total, 0),
-            ("2200", 0, total),
-        ], user_id=current_user.id)
-        client.outstanding = Decimal(str(float(client.outstanding) + total))
+        if not fully_discounted:
+            await _post_journal(db, f"B2B Consignment Invoice - {invoice_number}", "b2b", [
+                ("1100", total, 0),
+                ("2200", 0, total),
+            ], user_id=current_user.id)
+            client.outstanding = Decimal(str(float(client.outstanding) + total))
 
         cons_ref = await _next_cons_number(db)
         consignment = Consignment(
@@ -593,6 +601,10 @@ async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = 
     discount_amount = round(subtotal * (discount_pct / 100), 2)
     total           = round(subtotal - discount_amount, 2)
 
+    # 100% discount (or any invoice that nets to zero) has nothing to collect,
+    # so it is booked as fully paid with no AR / outstanding impact.
+    fully_discounted = discount_pct >= 100 or total <= 0.005
+
     invoice.client_id      = data.client_id
     invoice.user_id        = current_user.id
     invoice.invoice_type   = invoice_type
@@ -600,8 +612,8 @@ async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = 
     invoice.subtotal       = round(subtotal, 2)
     invoice.discount       = discount_amount
     invoice.total          = total
-    invoice.amount_paid    = 0
-    invoice.status         = "unpaid"
+    invoice.amount_paid    = total if fully_discounted else 0
+    invoice.status         = "paid" if fully_discounted else "unpaid"
     invoice.notes          = data.notes
 
     for item in data.items:
@@ -624,19 +636,21 @@ async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = 
             ))
 
     if invoice_type == "cash":
-        await _post_journal(db, f"B2B Cash Invoice (edited) - {invoice.invoice_number}", "b2b", [
-            ("1100", total, 0),
-            ("4000", 0, total),
-        ], user_id=current_user.id)
-        if client:
-            client.outstanding = Decimal(str(float(client.outstanding) + total))
+        if not fully_discounted:
+            await _post_journal(db, f"B2B Cash Invoice (edited) - {invoice.invoice_number}", "b2b", [
+                ("1100", total, 0),
+                ("4000", 0, total),
+            ], user_id=current_user.id)
+            if client:
+                client.outstanding = Decimal(str(float(client.outstanding) + total))
     elif invoice_type in ("full_payment", "consignment"):
-        await _post_journal(db, f"B2B {invoice_type} Invoice (edited) - {invoice.invoice_number}", "b2b", [
-            ("1100", total, 0),
-            ("2200", 0, total),
-        ], user_id=current_user.id)
-        if client:
-            client.outstanding = Decimal(str(float(client.outstanding) + total))
+        if not fully_discounted:
+            await _post_journal(db, f"B2B {invoice_type} Invoice (edited) - {invoice.invoice_number}", "b2b", [
+                ("1100", total, 0),
+                ("2200", 0, total),
+            ], user_id=current_user.id)
+            if client:
+                client.outstanding = Decimal(str(float(client.outstanding) + total))
         if invoice_type == "consignment":
             cons_ref = await _next_cons_number(db)
             consignment = Consignment(
