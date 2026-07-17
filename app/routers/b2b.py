@@ -117,6 +117,35 @@ def _b2b_num(value) -> float:
         return 0.0
 
 
+async def _validate_b2b_invoice_stock(
+    db: AsyncSession,
+    items: List[InvoiceItemIn],
+) -> dict[int, Product]:
+    products_by_id: dict[int, Product] = {}
+    requested_by_product: dict[int, float] = {}
+
+    for item in items:
+        product = products_by_id.get(item.product_id)
+        if product is None:
+            _r = await db.execute(select(Product).where(Product.id == item.product_id))
+            product = _r.scalar_one_or_none()
+            if not product:
+                raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
+            products_by_id[item.product_id] = product
+
+        requested_by_product[item.product_id] = requested_by_product.get(item.product_id, 0.0) + float(item.qty)
+
+    for product_id, requested_qty in requested_by_product.items():
+        product = products_by_id[product_id]
+        if is_stock_tracked_product(product) and float(product.stock) < requested_qty:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not enough stock for '{product.name}'. Available: {float(product.stock)}",
+            )
+
+    return products_by_id
+
+
 def _date_key(value) -> datetime:
     if isinstance(value, datetime):
         if value.tzinfo is not None:
@@ -441,14 +470,7 @@ async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_asy
     if not data.items:
         raise HTTPException(status_code=400, detail="Invoice must have at least one item")
 
-    for item in data.items:
-        _r = await db.execute(select(Product).where(Product.id == item.product_id))
-        product = _r.scalar_one_or_none()
-        if not product:
-            raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
-        if is_stock_tracked_product(product) and float(product.stock) < item.qty:
-            raise HTTPException(status_code=400,
-                detail=f"Not enough stock for '{product.name}'. Available: {float(product.stock)}")
+    products_by_id = await _validate_b2b_invoice_stock(db, data.items)
 
     invoice_type    = _normalized_client_terms(client)
     discount_pct    = _client_discount_pct(client)
@@ -477,8 +499,7 @@ async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_asy
     db.add(invoice); await db.flush()
 
     for item in data.items:
-        _r = await db.execute(select(Product).where(Product.id == item.product_id))
-        product = _r.scalar_one_or_none()
+        product = products_by_id[item.product_id]
         db.add(B2BInvoiceItem(
             invoice_id=invoice.id, product_id=product.id,
             qty=item.qty, unit_price=item.unit_price,
@@ -581,14 +602,7 @@ async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = 
             await db.delete(ci)
         await db.delete(old_cons)
 
-    for item in data.items:
-        _r = await db.execute(select(Product).where(Product.id == item.product_id))
-        product = _r.scalar_one_or_none()
-        if not product:
-            raise HTTPException(status_code=404, detail=f"Product not found: {item.product_id}")
-        if is_stock_tracked_product(product) and float(product.stock) < item.qty:
-            raise HTTPException(status_code=400,
-                detail=f"Not enough stock for '{product.name}'. Available: {float(product.stock)}")
+    products_by_id = await _validate_b2b_invoice_stock(db, data.items)
 
     _r = await db.execute(select(B2BClient).where(B2BClient.id == data.client_id))
     client = _r.scalar_one_or_none()
@@ -617,8 +631,7 @@ async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = 
     invoice.notes          = data.notes
 
     for item in data.items:
-        _r = await db.execute(select(Product).where(Product.id == item.product_id))
-        product = _r.scalar_one_or_none()
+        product = products_by_id[item.product_id]
         db.add(B2BInvoiceItem(
             invoice_id=invoice.id, product_id=product.id,
             qty=item.qty, unit_price=item.unit_price,

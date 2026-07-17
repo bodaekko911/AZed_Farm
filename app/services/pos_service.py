@@ -66,8 +66,7 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int, us
         subtotal = 0
         line_items = []  # (product, qty, line_total, sell_price, catalog_price)
         price_edits = []
-        raw_skus = [item.sku for item in data.items]
-        normalized_skus = [normalize_barcode_value(s) for s in raw_skus]
+        requested_qty_by_product = {}
         _r = await db.execute(
             select(Product).where(
                 or_(Product.is_active.is_(True), Product.is_active.is_(None))
@@ -83,11 +82,6 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int, us
             product = product_map.get(normalize_barcode_value(item.sku))
             if not product:
                 raise HTTPException(status_code=404, detail=f"Product not found: {item.sku}")
-            if is_stock_tracked_product(product) and product.stock < item.qty:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Not enough stock for {product.name}. Available: {float(product.stock)}",
-                )
 
             catalog_price = float(product.price)
             sell_price = item.unit_price if item.unit_price is not None else catalog_price
@@ -110,6 +104,7 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int, us
             line_total = sell_price * item.qty
             subtotal += line_total
             line_items.append((product, item.qty, line_total, sell_price, catalog_price))
+            requested_qty_by_product[product.id] = requested_qty_by_product.get(product.id, 0.0) + float(item.qty)
 
             if sell_price != catalog_price:
                 price_edits.append({
@@ -118,6 +113,25 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int, us
                     "sold_at": sell_price,
                     "qty": item.qty,
                 })
+
+        products_by_id = {product.id: product for product, *_ in line_items}
+        for product_id, requested_qty in requested_qty_by_product.items():
+            product = products_by_id[product_id]
+            if not is_stock_tracked_product(product):
+                continue
+            available_stock = float(product.stock)
+            if available_stock < requested_qty:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Not enough stock for {product.name}. Available: {available_stock}",
+                )
+            _, location_stock = await sync_product_stock_to_default_location(db, product=product)
+            available_at_location = float(location_stock.qty)
+            if available_at_location < requested_qty:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Not enough stock for {product.name}. Available: {available_at_location}",
+                )
 
         discount_amount = subtotal * (data.discount_percent / 100)
         total = subtotal - discount_amount

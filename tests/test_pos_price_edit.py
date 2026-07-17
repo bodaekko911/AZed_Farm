@@ -197,6 +197,32 @@ def test_service_product_sells_without_stock_move() -> None:
     assert not any(isinstance(obj, StockMove) for obj in fake_db.added)
 
 
+def test_duplicate_stock_tracked_lines_cannot_exceed_available_stock() -> None:
+    product = _make_product(price=10.00, stock=1)
+    data = InvoiceCreate(
+        customer_id=None,
+        items=[
+            InvoiceItemCreate(sku="OLV-500", qty=1),
+            InvoiceItemCreate(sku="OLV-500", qty=1),
+        ],
+        discount_percent=0,
+        payment_method="cash",
+    )
+    fake_db = FakeSession([[product]])
+    orig_sync = pos_service.sync_product_stock_to_default_location
+    pos_service.sync_product_stock_to_default_location = _fake_sync
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            _run(pos_service.create_invoice(db=fake_db, data=data, user_id=1, user=_make_user("cashier")))
+    finally:
+        pos_service.sync_product_stock_to_default_location = orig_sync
+
+    assert exc_info.value.status_code == 400
+    assert "Not enough stock" in exc_info.value.detail
+    from app.models.invoice import Invoice
+    assert not any(isinstance(obj, Invoice) for obj in fake_db.added)
+
+
 # ---------------------------------------------------------------------------
 # Test 4: InvoiceItem stored with edited unit_price and correct line total.
 # ---------------------------------------------------------------------------
