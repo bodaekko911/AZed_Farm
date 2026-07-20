@@ -3393,6 +3393,7 @@ let editingPayId = null;
 let empSearchTimer = null;
 let loanDeductionEmployeeId = null;
 let loanDeductionEmployeeSalary = 0;
+let loanDeductionEmployeeSalaryBasis = "calendar";
 let currentEmployeeLoans = [];
 
 function escapeHtml(value) {
@@ -3551,7 +3552,7 @@ async function loadEmployees(){
             <td class="mono">${money(salary)}</td>
             <td style="display:flex;gap:6px">
                 <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}" data-works-animals="${e.works_with_animals ? "1" : ""}" data-vacation="${numberValue(e.vacation_days_per_month)||0}" data-salary-basis="${e.salary_days_basis||'calendar'}" data-food="${numberValue(e.food_allowance)||0}" data-transport="${numberValue(e.transportation_allowance)||0}" data-hire-date="${escapeHtml(e.hire_date||'')}" data-active="${e.is_active === false ? "0" : "1"}">Edit</button>
-                ${(hasPermission("action_hr_view_loans") || hasPermission("action_hr_view_deductions"))?`<button class="action-btn purple" onclick="openLoanDeductionModalFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-salary="${salary}">Loans &amp; Deductions</button>`:""}
+                ${(hasPermission("action_hr_view_loans") || hasPermission("action_hr_view_deductions"))?`<button class="action-btn purple" onclick="openLoanDeductionModalFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-salary="${salary}" data-salary-basis="${e.salary_days_basis||'calendar'}">Loans &amp; Deductions</button>`:""}
                 ${hasPermission("action_hr_run_payroll") ? (e.is_active === false
                     ? `<button class="action-btn green" onclick="reactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Reactivate</button>`
                     : `<button class="action-btn danger" onclick="deactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Remove</button>`) : ""}
@@ -3817,7 +3818,8 @@ function openLoanDeductionModalFromButton(btn){
     openLoanDeductionModal(
         numberValue(btn.dataset.id),
         btn.dataset.name || "",
-        numberValue(btn.dataset.salary)
+        numberValue(btn.dataset.salary),
+        btn.dataset.salaryBasis || "calendar"
     );
 }
 
@@ -3853,9 +3855,10 @@ function switchLDTab(tab){
     document.getElementById("ld-tab-deductions").classList.toggle("active", tab==="deductions");
 }
 
-async function openLoanDeductionModal(employeeId, name, salary){
+async function openLoanDeductionModal(employeeId, name, salary, salaryBasis){
     loanDeductionEmployeeId = employeeId;
     loanDeductionEmployeeSalary = salary;
+    loanDeductionEmployeeSalaryBasis = salaryBasis || "calendar";
     document.getElementById("loan-deduction-emp").innerText = `${name}  ·  Base salary: ${money(salary)} EGP`;
     setDefaultLoanDeductionDates();
     updateDayDeductionPreview();
@@ -3986,12 +3989,15 @@ function setDeductDays(d){
 function updateDayDeductionPreview(){
     const days = numberValue(document.getElementById("deduct-days")?.value);
     const period = document.getElementById("deduct-period")?.value;
-    let workingDays = 22;
-    if(period){
+    // Mirror the backend's _rate_divisor exactly: 'fixed_30' deals always divide
+    // by a flat 30; 'calendar' deals divide by the real length of the deduction's
+    // month (28-31). No weekend skipping either way — see _paid_days_and_rate.
+    let workingDays = 30;
+    if(loanDeductionEmployeeSalaryBasis === "fixed_30"){
+        workingDays = 30;
+    } else if(period){
         const [yr,mo] = period.split("-").map(Number);
-        const daysInMonth = new Date(yr,mo,0).getDate();
-        let wd=0; for(let d=1;d<=daysInMonth;d++){ if(new Date(yr,mo-1,d).getDay()%6!==0) wd++; }
-        workingDays = wd;
+        workingDays = new Date(yr,mo,0).getDate();
     }
     const dailyRate = loanDeductionEmployeeSalary / workingDays;
     const amount = dailyRate * days;
