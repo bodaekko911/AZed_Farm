@@ -14,12 +14,16 @@ from app.core.permissions import get_current_user, require_admin, require_permis
 from app.core.log import record
 from app.core.navigation import render_app_header
 from app.models.accounting import Account, Journal, JournalEntry
-from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund
+from app.models.b2b import (
+    B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund,
+    Consignment, ConsignmentItem, ConsignmentSale, ConsignmentSaleItem,
+)
+from app.models.product import Product
 from app.models.expense import Expense, ExpenseCategory
 from app.models.user import User
 from app.models.invoice import Invoice
 from app.models.refund import RetailRefund
-from app.schemas.invoice import B2BPaymentRequest
+from app.schemas.invoice import B2BPaymentRequest, ConsignmentSaleItemIn
 from decimal import Decimal
 
 router = APIRouter(
@@ -750,7 +754,32 @@ async def _record_consignment_client_payment(
     amount: float,
     month_label: str,
     current_user: User,
+    sold_items: Optional[List["ConsignmentSaleItemIn"]] = None,
 ):
+    # When sold items are supplied, the amount is the reconciled total of the
+    # items the client reported sold — it must equal the sum of the line totals.
+    sale_lines: list[dict] = []
+    if sold_items:
+        for line in sold_items:
+            qty        = round(float(line.qty), 3)
+            unit_price = round(float(line.unit_price), 2)
+            if qty <= 0:
+                continue
+            sale_lines.append({
+                "product_id": int(line.product_id),
+                "qty": qty,
+                "unit_price": unit_price,
+                "total": round(qty * unit_price, 2),
+            })
+        if not sale_lines:
+            raise HTTPException(status_code=400, detail="No valid sold items were provided")
+        items_total = round(sum(l["total"] for l in sale_lines), 2)
+        if abs(items_total - round(amount, 2)) > 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Amount ({amount:.2f}) does not match the sold items total ({items_total:.2f})",
+            )
+
     open_result = await db.execute(
         select(B2BInvoice)
         .where(
@@ -829,6 +858,29 @@ async def _record_consignment_client_payment(
             db.add(JournalEntry(journal_id=journal.id, account_id=acc.id, debit=debit, credit=credit))
             acc.balance += Decimal(str(debit)) - Decimal(str(credit))
 
+    # Persist the reconciled sale record (sold items + month) alongside the
+    # payment. Bookkeeping only — consignment quantities/stock are untouched.
+    sale_id = None
+    if sale_lines:
+        sale = ConsignmentSale(
+            client_id=client.id,
+            user_id=current_user.id,
+            journal_id=journal.id,
+            month_label=month_label or None,
+            amount=Decimal(str(round(amount, 2))),
+        )
+        db.add(sale)
+        await db.flush()
+        for l in sale_lines:
+            db.add(ConsignmentSaleItem(
+                sale_id=sale.id,
+                product_id=l["product_id"],
+                qty=Decimal(str(l["qty"])),
+                unit_price=Decimal(str(l["unit_price"])),
+                total=Decimal(str(l["total"])),
+            ))
+        sale_id = sale.id
+
     record(
         db,
         "Accounting",
@@ -846,6 +898,7 @@ async def _record_consignment_client_payment(
         "amount": round(amount, 2),
         "allocations": allocations,
         "journal_id": journal.id,
+        "sale_id": sale_id,
     }
 
 
@@ -869,6 +922,7 @@ async def accounting_client_consignment_payment(
         amount=amount,
         month_label=month_label,
         current_user=current_user,
+        sold_items=data.items,
     )
     await db.commit()
     return payload
@@ -901,9 +955,85 @@ async def accounting_consignment_payment(
         amount=round(float(data.amount), 2),
         month_label=(data.month_label or "").strip(),
         current_user=current_user,
+        sold_items=data.items,
     )
     await db.commit()
     return payload
+
+
+@router.get("/api/b2b-clients/{client_id}/consignment-items")
+async def get_client_consignment_items(client_id: int, db: AsyncSession = Depends(get_async_session)):
+    """
+    Sellable items for a consignment client — the products this client was sent
+    on consignment, with their consignment unit prices. Used to populate the
+    sold-items picker on the Record Consignment Payment screen. Aggregated
+    across the client's non-closed consignments and grouped by product + price.
+    """
+    result = await db.execute(
+        select(ConsignmentItem)
+        .join(Consignment, ConsignmentItem.consignment_id == Consignment.id)
+        .where(Consignment.client_id == client_id, Consignment.status != "closed")
+        .options(selectinload(ConsignmentItem.product))
+    )
+    items = result.scalars().all()
+
+    grouped: dict[tuple, dict] = {}
+    for ci in items:
+        price = round(float(ci.unit_price), 2)
+        key = (ci.product_id, price)
+        remaining = float(ci.qty_sent) - float(ci.qty_sold) - float(ci.qty_returned)
+        row = grouped.get(key)
+        if not row:
+            row = grouped[key] = {
+                "product_id": ci.product_id,
+                "name": ci.product.name if ci.product else f"#{ci.product_id}",
+                "sku": ci.product.sku if ci.product else "",
+                "unit": (ci.product.unit if ci.product else "") or "pcs",
+                "unit_price": price,
+                "qty_sent": 0.0,
+                "qty_remaining": 0.0,
+            }
+        row["qty_sent"] += float(ci.qty_sent)
+        row["qty_remaining"] += max(0.0, remaining)
+
+    out = sorted(grouped.values(), key=lambda r: r["name"].lower())
+    for r in out:
+        r["qty_sent"] = round(r["qty_sent"], 3)
+        r["qty_remaining"] = round(r["qty_remaining"], 3)
+    return out
+
+
+@router.get("/api/b2b-clients/{client_id}/consignment-sales")
+async def get_client_consignment_sales(client_id: int, db: AsyncSession = Depends(get_async_session)):
+    """Recorded consignment payments for a client, each with the items the
+    client reported sold and the month — newest first."""
+    result = await db.execute(
+        select(ConsignmentSale)
+        .where(ConsignmentSale.client_id == client_id)
+        .options(selectinload(ConsignmentSale.items).selectinload(ConsignmentSaleItem.product))
+        .order_by(ConsignmentSale.created_at.desc(), ConsignmentSale.id.desc())
+    )
+    sales = result.scalars().all()
+    return [
+        {
+            "id": s.id,
+            "month_label": s.month_label,
+            "amount": round(float(s.amount or 0), 2),
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+            "items": [
+                {
+                    "product_id": it.product_id,
+                    "name": it.product.name if it.product else f"#{it.product_id}",
+                    "unit": (it.product.unit if it.product else "") or "pcs",
+                    "qty": round(float(it.qty), 3),
+                    "unit_price": round(float(it.unit_price), 2),
+                    "total": round(float(it.total), 2),
+                }
+                for it in s.items
+            ],
+        }
+        for s in sales
+    ]
 
 
 @router.post("/api/b2b-clients/{client_id}/refund", dependencies=[Depends(require_permission("action_b2b_refund"))])
@@ -1351,22 +1481,38 @@ td.cr { font-family:var(--mono); color:var(--blue); }
 
 <!-- CONSIGNMENT PAYMENT MODAL -->
 <div class="modal-bg" id="cons-modal">
-    <div class="modal" style="width:440px">
+    <div class="modal" style="width:640px;max-width:94vw">
         <div class="modal-title">💰 Record Consignment Payment</div>
-        <div class="modal-sub" id="cons-modal-sub" style="color:var(--muted);font-size:13px;margin-bottom:16px"></div>
+        <div class="modal-sub" id="cons-modal-sub" style="color:var(--muted);font-size:13px;margin-bottom:14px"></div>
         <div style="background:rgba(45,212,191,.06);border:1px solid rgba(45,212,191,.15);border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--teal)">
-            Record this on the client account. The payment is allocated behind the scenes to that client's open consignment invoices.
-        </div>
-        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">
-            <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Amount Paid *</label>
-            <input id="cons-amount" type="number" placeholder="0.00" min="0.01" step="any"
-                style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--mono);font-size:16px;outline:none;width:100%">
+            Record the items this client reported sold for the month. The amount is the total of those items and is matched to them automatically.
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px">
-            <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">For which month's sales?</label>
+            <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">For which month's sales? *</label>
             <select id="cons-month" style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%">
                 <option value="">General payment (no specific month)</option>
             </select>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px">
+            <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Items sold — enter quantity for each</label>
+        </div>
+        <div style="border:1px solid var(--border2);border-radius:10px;overflow-y:auto;max-height:280px;margin-bottom:14px">
+            <table style="width:100%;border-collapse:collapse">
+                <thead>
+                    <tr style="background:var(--card2);position:sticky;top:0;z-index:1">
+                        <th style="text-align:left;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:8px 10px">Product</th>
+                        <th style="text-align:right;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:8px 10px">Unit Price</th>
+                        <th style="text-align:center;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:8px 10px;width:110px">Qty Sold</th>
+                        <th style="text-align:right;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:8px 10px">Line Total</th>
+                    </tr>
+                </thead>
+                <tbody id="cons-items-body"></tbody>
+            </table>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:12px 16px;margin-bottom:16px">
+            <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Amount Paid (matched to items)</div>
+            <div id="cons-amount-display" class="mono" style="font-size:22px;font-weight:900;color:var(--teal)">0.00 EGP</div>
+            <input id="cons-amount" type="hidden" value="0">
         </div>
         <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">
             <button onclick="document.getElementById('cons-modal').classList.remove('open')"
@@ -2153,6 +2299,7 @@ let allB2BClients   = [];
 let collectInvoiceId = null;
 let consClientId     = null;
 let consClientName   = null;
+let consItems        = [];
 let currentInvDetail = null;
 let refundInvoiceId  = null;
 let refundInvoiceNum = null;
@@ -2296,7 +2443,9 @@ async function loadB2BInvoices(){
     renderB2BInvoices(allB2BInvoices);
 
     // Show consignment payment history section if filtering consignment
-    document.getElementById("cons-payment-section").style.display = type==="consignment"?"":"none";
+    let showCons = type==="consignment";
+    document.getElementById("cons-payment-section").style.display = showCons?"":"none";
+    if(showCons){ loadConsPaymentHistory(); }
 }
 
 function resetB2BFilters(){
@@ -2477,12 +2626,13 @@ async function saveCollect(){
 }
 
 /* ── CONSIGNMENT PAYMENT ── */
-function openConsModal(clientId, clientName, outstanding){
+async function openConsModal(clientId, clientName, outstanding){
     consClientId = clientId;
     consClientName = clientName;
+    consItems = [];
     document.getElementById("cons-modal-sub").innerText = `${clientName} — Client outstanding balance: ${outstanding.toFixed(2)} EGP`;
-    document.getElementById("cons-amount").value = "";
-    document.getElementById("cons-amount").placeholder = "0.00";
+    document.getElementById("cons-amount").value = "0";
+    document.getElementById("cons-amount-display").innerText = "0.00 EGP";
     // Fill month selector
     let sel = document.getElementById("cons-month");
     sel.innerHTML = '<option value="">General payment (no specific month)</option>';
@@ -2492,8 +2642,60 @@ function openConsModal(clientId, clientName, outstanding){
         sel.innerHTML += `<option value="${label}">${label}</option>`;
         d.setMonth(d.getMonth()-1);
     }
+    // Load the items this client was sent on consignment
+    let body = document.getElementById("cons-items-body");
+    body.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px">Loading items…</td></tr>`;
     document.getElementById("cons-modal").classList.add("open");
-    setTimeout(()=>document.getElementById("cons-amount").focus(), 100);
+    try {
+        let res = await fetch(`/accounting/api/b2b-clients/${clientId}/consignment-items`);
+        consItems = await res.json();
+        if(!res.ok){ throw new Error((consItems && consItems.detail) || "Unable to load items"); }
+    } catch(e){
+        consItems = [];
+        body.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--danger);padding:24px">${e.message}</td></tr>`;
+        return;
+    }
+    renderConsItemRows();
+}
+
+function renderConsItemRows(){
+    let body = document.getElementById("cons-items-body");
+    if(!consItems.length){
+        body.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px">No consignment items on record for this client.</td></tr>`;
+        recalcConsTotal();
+        return;
+    }
+    body.innerHTML = consItems.map((it, idx) => `
+        <tr style="border-top:1px solid var(--border2)">
+            <td style="padding:8px 10px;color:var(--text);font-weight:600">
+                ${it.name}
+                <div style="font-size:10px;color:var(--muted)">Remaining sent: ${it.qty_remaining} ${it.unit}</div>
+            </td>
+            <td class="mono" style="padding:8px 10px;text-align:right;color:var(--sub)">${it.unit_price.toFixed(2)}</td>
+            <td style="padding:8px 10px;text-align:center">
+                <input type="number" min="0" step="any" value="" placeholder="0"
+                    data-idx="${idx}" oninput="recalcConsTotal()"
+                    style="width:90px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:6px 8px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;text-align:center">
+            </td>
+            <td class="mono cons-line-total" data-idx="${idx}" style="padding:8px 10px;text-align:right;color:var(--text);font-weight:700">0.00</td>
+        </tr>`).join("");
+    recalcConsTotal();
+}
+
+function recalcConsTotal(){
+    let total = 0;
+    document.querySelectorAll("#cons-items-body input[data-idx]").forEach(inp => {
+        let idx = parseInt(inp.dataset.idx);
+        let qty = parseFloat(inp.value) || 0;
+        if(qty < 0){ qty = 0; }
+        let line = qty * (consItems[idx] ? consItems[idx].unit_price : 0);
+        let cell = document.querySelector(`.cons-line-total[data-idx="${idx}"]`);
+        if(cell){ cell.innerText = line.toFixed(2); }
+        total += line;
+    });
+    total = Math.round(total * 100) / 100;
+    document.getElementById("cons-amount").value = total;
+    document.getElementById("cons-amount-display").innerText = `${total.toFixed(2)} EGP`;
 }
 
 function openRefundModal(clientId, clientName, outstanding){
@@ -2531,18 +2733,78 @@ async function saveRefund(){
 }
 
 async function saveConsPayment(){
-    let amount = parseFloat(document.getElementById("cons-amount").value)||0;
-    if(amount<=0){ showToast("Enter a valid amount"); return; }
     let month  = document.getElementById("cons-month").value;
+    // Gather sold items with a positive qty
+    let items = [];
+    document.querySelectorAll("#cons-items-body input[data-idx]").forEach(inp => {
+        let idx = parseInt(inp.dataset.idx);
+        let qty = parseFloat(inp.value) || 0;
+        if(qty > 0 && consItems[idx]){
+            items.push({product_id: consItems[idx].product_id, qty, unit_price: consItems[idx].unit_price});
+        }
+    });
+    if(!items.length){ showToast("Enter the quantity sold for at least one item"); return; }
+    let amount = parseFloat(document.getElementById("cons-amount").value)||0;
+    if(amount<=0){ showToast("Amount must be greater than 0"); return; }
     let res    = await fetch(`/accounting/api/b2b-clients/${consClientId}/consignment-payment`,{
         method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({amount, month_label:month||null}),
+        body:JSON.stringify({amount, month_label:month||null, items}),
     });
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
     document.getElementById("cons-modal").classList.remove("open");
     showToast(`✓ ${amount.toFixed(2)} EGP recorded for ${data.client || consClientName}${month?" ("+month+")":""}`);
     loadB2BInvoices();
+    if(document.getElementById("b2b-type-filter").value === "consignment"){ loadConsPaymentHistory(); }
+}
+
+/* ── CONSIGNMENT PAYMENT HISTORY ── */
+async function loadConsPaymentHistory(){
+    let list = document.getElementById("cons-payment-list");
+    if(!list) return;
+    // Make sure we have the client list (may not be loaded yet on this tab)
+    if(!allB2BClients || !allB2BClients.length){
+        try {
+            let cr = await fetch(`/accounting/api/b2b-clients`);
+            let cd = await cr.json();
+            if(cr.ok && Array.isArray(cd)) allB2BClients = cd;
+        } catch(e){}
+    }
+    // Gather the consignment clients currently shown, pull each one's sales
+    let clients = (allB2BClients || []).filter(c => c.is_consignment);
+    if(!clients.length){
+        list.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:12px">No consignment clients.</div>`;
+        return;
+    }
+    let results = await Promise.all(clients.map(async c => {
+        try {
+            let r = await fetch(`/accounting/api/b2b-clients/${c.id}/consignment-sales`);
+            let sales = await r.json();
+            return {client:c, sales: Array.isArray(sales)?sales:[]};
+        } catch(e){ return {client:c, sales:[]}; }
+    }));
+    let rows = [];
+    results.forEach(({client, sales}) => {
+        sales.forEach(s => {
+            let itemsHtml = s.items.map(it =>
+                `<span style="display:inline-block;background:var(--card2);border:1px solid var(--border2);border-radius:6px;padding:2px 8px;margin:2px 4px 2px 0;font-size:11px">${it.name} × ${it.qty} ${it.unit} @ ${it.unit_price.toFixed(2)} = <b>${it.total.toFixed(2)}</b></span>`
+            ).join("");
+            let when = s.created_at ? new Date(s.created_at).toLocaleDateString("en-GB") : "";
+            rows.push(`
+                <div style="border:1px solid var(--border2);border-radius:10px;padding:12px 14px;margin-bottom:10px">
+                    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+                        <div style="font-weight:700;color:var(--text)">${client.name}
+                            ${s.month_label?`<span style="font-size:11px;color:var(--teal);font-weight:700;margin-left:8px">${s.month_label}</span>`:``}
+                        </div>
+                        <div class="mono" style="font-weight:900;color:var(--teal)">${s.amount.toFixed(2)} EGP</div>
+                    </div>
+                    <div style="font-size:11px;color:var(--muted);margin-bottom:6px">${when}</div>
+                    <div>${itemsHtml || '<span style="color:var(--muted);font-size:11px">No item detail</span>'}</div>
+                </div>`);
+        });
+    });
+    list.innerHTML = rows.length ? rows.join("")
+        : `<div style="color:var(--muted);font-size:13px;padding:12px">No consignment payments recorded yet.</div>`;
 }
 
 ["inv-detail-modal","collect-modal","cons-modal","refund-modal"].forEach(id=>{

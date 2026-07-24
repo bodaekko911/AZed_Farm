@@ -25,6 +25,15 @@ class InvoiceCollectionRequest(BaseModel):
     payment_method: str = Field("cash", min_length=1, max_length=50)
 
 
+class ConsignmentSaleItemIn(BaseModel):
+    product_id: int
+    qty:        float = Field(..., gt=0)
+    unit_price: float = Field(..., ge=0)
+
+
 class B2BPaymentRequest(BaseModel):
     amount: float = Field(..., gt=0)
     month_label: Optional[str] = Field(None, max_length=100)
+    # Consignment client payments carry the items the client reported sold.
+    # When present, the payment amount must equal the sum of (qty × unit_price).
+    items: Optional[List[ConsignmentSaleItemIn]] = None

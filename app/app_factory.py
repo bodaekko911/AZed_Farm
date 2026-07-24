@@ -174,6 +174,53 @@ async def ensure_product_categories_table() -> None:
         logger.exception("ensure_product_categories_table: failed (could not open DB session)")
 
 
+async def ensure_consignment_sales_tables() -> None:
+    """Self-healing guard for consignment sale records (sold items captured
+    with each consignment payment). Mirrors migration 20260724_0043 so the
+    tables exist even if alembic is blocked (e.g. by a multi-head conflict).
+    Idempotent — CREATE ... IF NOT EXISTS is safe on every startup."""
+    from app.db.session import AsyncSessionLocal
+
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS consignment_sales (
+            id SERIAL PRIMARY KEY,
+            client_id INTEGER NOT NULL REFERENCES b2b_clients(id),
+            user_id INTEGER REFERENCES users(id),
+            journal_id INTEGER REFERENCES journals(id),
+            month_label VARCHAR(100),
+            amount NUMERIC(14, 2) DEFAULT 0,
+            notes TEXT,
+            created_at TIMESTAMPTZ DEFAULT now()
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS consignment_sale_items (
+            id SERIAL PRIMARY KEY,
+            sale_id INTEGER NOT NULL REFERENCES consignment_sales(id),
+            product_id INTEGER NOT NULL REFERENCES products(id),
+            qty NUMERIC(12, 3) NOT NULL,
+            unit_price NUMERIC(14, 2) NOT NULL,
+            total NUMERIC(14, 2) NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_consignment_sales_client_id ON consignment_sales (client_id)",
+        "CREATE INDEX IF NOT EXISTS ix_consignment_sale_items_sale_id ON consignment_sale_items (sale_id)",
+    ]
+    try:
+        async with AsyncSessionLocal() as db:
+            for stmt in statements:
+                try:
+                    await db.execute(text(stmt))
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("ensure_consignment_sales_tables: statement failed: %s", stmt.split("(")[0].strip())
+            logger.info("ensure_consignment_sales_tables: consignment sale tables ready")
+    except Exception:
+        logger.exception("ensure_consignment_sales_tables: failed (could not open DB session)")
+
+
 async def ensure_carbon_methodology() -> None:
     """Self-healing guard for the carbon module's methodology upgrade.
 
@@ -489,6 +536,7 @@ async def lifespan(_: FastAPI):
     await ensure_price_precision()
     await ensure_delivery_transport_columns()
     await ensure_product_categories_table()
+    await ensure_consignment_sales_tables()
     await ensure_carbon_methodology()
     await sync_livestock_emissions_on_boot()
     await seed_chart_of_accounts()

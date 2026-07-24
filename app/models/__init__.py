@@ -11,6 +11,8 @@ from app.models.b2b import (
     B2BRefundItem,
     Consignment,
     ConsignmentItem,
+    ConsignmentSale,
+    ConsignmentSaleItem,
 )
 from app.models.customer import Customer
 from app.models.expense import Expense, ExpenseCategory
@@ -57,6 +59,8 @@ __all__ = [
     "BatchOutput",
     "Consignment",
     "ConsignmentItem",
+    "ConsignmentSale",
+    "ConsignmentSaleItem",
     "CarbonEmissionFactor",
     "CarbonLog",
     "CarbonTarget",

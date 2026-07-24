@@ -98,6 +98,45 @@ class ConsignmentItem(Base):
     product             = relationship("Product")
 
 
+class ConsignmentSale(Base):
+    """
+    A recorded consignment-client payment together with the items the client
+    reported sold for a given month. The payment amount equals the sum of the
+    line items (qty × unit_price). This is a bookkeeping record only — it does
+    NOT modify consignment quantities or stock (that stays with the separate
+    Settle flow). It exists so each payment can be reconciled against the
+    specific items sold and the month they were sold in.
+    """
+    __tablename__ = "consignment_sales"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    client_id   = Column(Integer, ForeignKey("b2b_clients.id"), nullable=False, index=True)
+    user_id     = Column(Integer, ForeignKey("users.id"), nullable=True)
+    journal_id  = Column(Integer, ForeignKey("journals.id"), nullable=True)
+    month_label = Column(String(100))                 # e.g. "July 2026"
+    amount      = Column(Numeric(14, 2), default=0)    # = sum of item totals
+    notes       = Column(Text)
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+
+    client      = relationship("B2BClient")
+    user        = relationship("User")
+    items       = relationship("ConsignmentSaleItem", back_populates="sale", cascade="all, delete-orphan")
+
+
+class ConsignmentSaleItem(Base):
+    __tablename__ = "consignment_sale_items"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    sale_id     = Column(Integer, ForeignKey("consignment_sales.id"), nullable=False, index=True)
+    product_id  = Column(Integer, ForeignKey("products.id"), nullable=False)
+    qty         = Column(Numeric(12, 3), nullable=False)
+    unit_price  = Column(Numeric(14, 2), nullable=False)
+    total       = Column(Numeric(14, 2), nullable=False)
+
+    sale        = relationship("ConsignmentSale", back_populates="items")
+    product     = relationship("Product")
+
+
 class B2BRefund(Base):
     __tablename__ = "b2b_refunds"
 
