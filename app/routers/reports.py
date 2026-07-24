@@ -16,7 +16,10 @@ from app.core.navigation import render_app_header
 from app.core.product_types import is_stock_tracked_product
 from app.models.product import Product
 from app.models.invoice import Invoice, InvoiceItem
-from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund, B2BRefundItem
+from app.models.b2b import (
+    B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund, B2BRefundItem,
+    ConsignmentSale, ConsignmentSaleItem,
+)
 from app.models.inventory import StockMove
 from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.animal import AnimalGroup, FeedingLog, MortalityLog, AnimalIntakeLog
@@ -449,6 +452,32 @@ async def _load_b2b_client_payment_records(
         client_result = await db.execute(select(B2BClient).where(B2BClient.id.in_(client_ids)))
         client_map = {client.id: client for client in client_result.scalars().all()}
 
+    # Recorded sold items for consignment client payments — keyed by the
+    # payment's journal id. Each consignment payment can carry the exact items
+    # the client reported sold (see ConsignmentSale), which we surface as the
+    # sold-item detail for that B2B Collection instead of a proportional guess.
+    consignment_payment_journal_ids = {
+        journal.id for journal in journals if journal.ref_type == "consignment_client_payment"
+    }
+    sale_items_by_journal: dict[int, list[dict[str, Any]]] = {}
+    if consignment_payment_journal_ids:
+        sale_result = await db.execute(
+            select(ConsignmentSale)
+            .where(ConsignmentSale.journal_id.in_(consignment_payment_journal_ids))
+            .options(selectinload(ConsignmentSale.items).selectinload(ConsignmentSaleItem.product))
+        )
+        for sale in sale_result.scalars().all():
+            sale_items_by_journal.setdefault(sale.journal_id, []).extend(
+                {
+                    "product": it.product,
+                    "product_name": it.product.name if it.product else "-",
+                    "qty": _num(it.qty),
+                    "unit_price": _num(it.unit_price),
+                    "total": _num(it.total),
+                }
+                for it in sale.items
+            )
+
     payment_records = []
     for journal in journals:
         invoice = None
@@ -497,6 +526,7 @@ async def _load_b2b_client_payment_records(
             "payment_method": "cash",
             "status": "posted",
             "journal_ref_type": journal.ref_type or "—",
+            "sale_items": sale_items_by_journal.get(journal.id, []),
         })
     return payment_records
 
@@ -754,6 +784,36 @@ async def _build_sales_report(
         if payment["date"]:
             daily[payment["date"]]["gross_sales"] += amount
             daily[payment["date"]]["cash_collected"] += amount
+
+        # Consignment client payments carry the exact items the client reported
+        # sold — surface those as the B2B Collection sold-item detail. These
+        # payments are not tied to a single invoice, so they are handled here
+        # rather than via the proportional invoice-item allocation below.
+        sale_items = payment.get("sale_items") or []
+        if sale_items:
+            for line in sale_items:
+                add_product(
+                    getattr(line.get("product"), "id", None),
+                    line.get("product_name") or "-",
+                    line.get("qty"),
+                    line.get("total"),
+                    1,
+                )
+                add_sold_item_record(
+                    source="B2B Collection",
+                    reference=payment.get("reference"),
+                    datetime_value=payment["datetime"],
+                    counterparty=payment.get("client", "-"),
+                    user_name=payment.get("user_name") or "-",
+                    product=line.get("product"),
+                    product_name=line.get("product_name"),
+                    qty=line.get("qty"),
+                    unit_price=line.get("unit_price"),
+                    line_total=line.get("total"),
+                    payment_method=payment.get("payment_method") or "-",
+                    status=payment.get("status") or "-",
+                )
+            continue
 
         invoice = b2b_invoices_by_id.get(payment.get("invoice_id"))
         if not invoice:

@@ -11,7 +11,10 @@ apply_test_environment_defaults()
 
 from app.database import Base
 from app.models.accounting import Account, Journal, JournalEntry
-from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund, B2BRefundItem
+from app.models.b2b import (
+    B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund, B2BRefundItem,
+    ConsignmentSale, ConsignmentSaleItem,
+)
 from app.models.customer import Customer
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
@@ -60,6 +63,8 @@ def make_session():
             B2BInvoiceItem.__table__,
             B2BRefund.__table__,
             B2BRefundItem.__table__,
+            ConsignmentSale.__table__,
+            ConsignmentSaleItem.__table__,
             Account.__table__,
             Journal.__table__,
             JournalEntry.__table__,
@@ -258,6 +263,50 @@ def test_sales_report_excludes_b2b_invoice_when_collection_is_outside_range():
     assert data["b2b_records"] == []
     assert data["b2b_issued_invoice_count"] == 1
     assert data["b2b_issued_invoice_records"][0]["invoice_number"] == "HB2B-00001"
+
+
+def test_sales_report_surfaces_consignment_sold_items_in_b2b_collection():
+    collected_at = datetime(2026, 5, 16, 10, 0, tzinfo=timezone.utc)
+
+    with make_session() as session:
+        cash = Account(id=1, code="1000", name="Cash", type="asset", balance=0)
+        client = B2BClient(id=1, name="Cons Client", payment_terms="consignment", outstanding=0)
+        product = Product(id=1, sku="SKU-D", name="Dates", category="Produce",
+                          price=Decimal("100.00"), unit="kg", stock=100)
+        journal = Journal(
+            id=1,
+            ref_type="consignment_client_payment",
+            ref_id=1,
+            description="Consignment client payment - Cons Client (May 2026)",
+            created_at=collected_at,
+        )
+        entry = JournalEntry(journal_id=1, account_id=1, debit=Decimal("300.00"), credit=0)
+        sale = ConsignmentSale(id=1, client_id=1, journal_id=1, month_label="May 2026",
+                               amount=Decimal("300.00"), created_at=collected_at)
+        sale_item = ConsignmentSaleItem(sale_id=1, product_id=1, qty=Decimal("3.000"),
+                                        unit_price=Decimal("100.00"), total=Decimal("300.00"))
+        session.add_all([cash, client, product, journal, entry, sale, sale_item])
+        session.commit()
+
+        data = run(
+            _build_sales_report(
+                AsyncSessionAdapter(session),
+                d_from=datetime(2026, 5, 16, 0, 0, tzinfo=timezone.utc),
+                d_to=datetime(2026, 5, 16, 23, 59, tzinfo=timezone.utc),
+                include_all=True,
+            )
+        )
+
+    cons_rows = [r for r in data["sold_item_records"] if r["source"] == "B2B Collection"]
+    assert len(cons_rows) == 1
+    row = cons_rows[0]
+    assert row["product"] == "Dates"
+    assert row["sku"] == "SKU-D"
+    assert row["category"] == "Produce"
+    assert row["qty"] == 3.0
+    assert row["unit_price"] == 100.0
+    assert row["line_total"] == 300.0
+    assert data["channels"]["b2b"]["gross_sales"] == 300.0
 
 
 def test_sales_report_splits_b2b_collection_amounts_by_invoice_type():
