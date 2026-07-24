@@ -2379,7 +2379,7 @@ async function loadClients(){
                 <td style="font-size:12px">${c.contact_person}</td>
             <td style="font-family:var(--mono);font-size:12px">${c.phone}</td>
             <td><span class="badge badge-${c.payment_terms}">${termsLabel[c.payment_terms]||c.payment_terms}</span></td>
-            <td style="font-family:var(--mono);color:var(--blue)">${c.credit_limit>0?c.credit_limit.toFixed(1)+"%":"—"}</td>
+            <td style="font-family:var(--mono);color:var(--blue)">${c.discount_pct>0?c.discount_pct.toFixed(1)+"%":"—"}</td>
             <td style="font-family:var(--mono);color:${c.outstanding>0?"var(--warn)":"var(--muted)"}">
                 ${c.outstanding>0?c.outstanding.toFixed(2):"—"}
             </td>
@@ -2415,8 +2415,8 @@ function openEditClient(id){
     document.getElementById("c-email").value   = c.email==="—"?"":c.email;
     document.getElementById("c-address").value = c.address==="—"?"":c.address;
     document.getElementById("c-terms").value   = c.payment_terms;
-    document.getElementById("c-discount").value= c.credit_limit;
-    document.getElementById("c-notes").value   = c.notes;
+    document.getElementById("c-discount").value= c.discount_pct;
+    document.getElementById("c-notes").value   = c.notes==="—"?"":c.notes;
     document.getElementById("client-modal").classList.add("open");
 }
 
