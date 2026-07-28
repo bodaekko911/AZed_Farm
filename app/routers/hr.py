@@ -392,7 +392,8 @@ def _paid_days_and_rate(employee: Employee, working_days: int = 30) -> tuple[Dec
 
 
 def _earned_base(employee: Employee, days_present, working_days: int = 30,
-                 paid_leave_days=0, days_elapsed: int | None = None) -> Decimal:
+                 paid_leave_days=0, days_elapsed: int | None = None,
+                 month_start: date | None = None) -> Decimal:
     """Earned base salary for `days_present` days plus `paid_leave_days` days of
     PAID leave, computed WITHOUT pre-rounding the daily rate.
 
@@ -403,23 +404,32 @@ def _earned_base(employee: Employee, days_present, working_days: int = 30,
         earned = base_salary * paid / working_days
 
     'fixed_30' (deduction-based monthly deal):
-        Daily rate is a flat base_salary / 30.
+        Daily rate is a flat base_salary / 30. The full monthly salary is
+        OWED, and each uncovered day docks salary/30:
 
-        While the month is still in progress, pay ACCRUES per covered day
-        (min(covered × salary/30, salary)) — so a few days worked shows a
-        few days' pay, never the full month prematurely.
-
-        Once the month is COMPLETE (days_elapsed ≥ working_days, which is
-        always true for past months), the deal's deduction rule applies:
-        the full monthly salary is owed and each uncovered day of the month
-        docks salary/30:
-
-            uncovered = working_days - covered
+            uncovered = days_elapsed - covered
             earned    = max(0, base_salary - uncovered * base_salary / 30)
 
-        Full attendance in February (28 days) therefore still pays the full
-        salary, and one absence always costs exactly salary/30 whether the
-        month has 28 or 31 days.
+        Absences are measured against the days that have actually ELAPSED,
+        not against the whole month. A day still in the future has not been
+        missed, so it cannot dock pay: an employee with a clean record is
+        owed the full monthly salary whether payroll runs on the 28th or
+        after the month closes. Previously an in-progress month accrued
+        instead (covered × salary/30), so 28 worked days out of 28 elapsed
+        paid 28/30 of the salary and the figure jumped again once the month
+        closed — the same attendance produced two different nets depending
+        on the run date.
+
+        Full attendance in February (28 days) still pays the full salary,
+        and one absence always costs exactly salary/30 whether the month has
+        28 or 31 days.
+
+        A partial employment month (hired after `month_start`) falls back to
+        accrual — covered × salary/30, capped at the salary. The deduction
+        rule assumes a full month of employment, so applying it to a new
+        hire would either dock them for days before they were hired or, once
+        their few worked days are all covered, pay a full month's salary for
+        a fraction of one.
 
     `paid_leave_days` is supplied by the caller as
     min(leave taken this month, accrued balance as of this month) — see
@@ -442,17 +452,25 @@ def _earned_base(employee: Employee, days_present, working_days: int = 30,
     if _salary_basis(employee) == SALARY_BASIS_FIXED_30:
         elapsed = safe_working_days if days_elapsed is None else max(0, int(days_elapsed))
         elapsed = min(elapsed, safe_working_days)
+        if elapsed <= 0:
+            # None of the month has happened yet (payroll run for a future
+            # month) — nothing is owed. Without this guard the deduction rule
+            # below would see zero uncovered days and pay the full salary.
+            return Decimal("0")
         rate30 = base_salary / Decimal("30")
-        if elapsed >= safe_working_days:
-            # Month complete → deduction rule: full salary is owed, each
-            # uncovered day of the month docks salary/30. Full attendance in
-            # February (28 days) therefore still pays the full salary.
-            uncovered = _dec(safe_working_days) - min(covered, _dec(safe_working_days))
+
+        hire = getattr(employee, "hire_date", None)
+        employed_all_month = not (month_start is not None and hire is not None and hire > month_start)
+
+        if employed_all_month:
+            # Deduction rule against ELAPSED days: days that have not happened
+            # yet are not absences, so a clean record pays the full salary
+            # regardless of when payroll is run.
+            uncovered = _dec(elapsed) - min(covered, _dec(elapsed))
             earned = base_salary - (rate30 * uncovered)
         else:
-            # Month still in progress → accrue what's covered so far at the
-            # flat /30 rate, so a few days worked shows a few days' pay
-            # (never the full month prematurely).
+            # Hired mid-month → accrue the days actually worked. The deduction
+            # rule can't apply to a partial month (see docstring).
             earned = min(rate30 * covered, base_salary)
         if earned < 0:
             earned = Decimal("0")
@@ -578,16 +596,74 @@ async def _vacation_available_as_of(
     return available if available > 0 else Decimal("0")
 
 
+async def _unlogged_dates_in_period(
+    db: AsyncSession, employee: Employee, year: int, month: int, days_elapsed: int
+) -> list[date]:
+    """Elapsed days of the payroll month that carry NO attendance record.
+
+    Attendance only has two options — Present and Day Off — so a day with no
+    record is not a third kind of day, it is a Day Off nobody got around to
+    logging. Payroll used to dock such a day outright while an explicitly
+    logged Day Off was paid from the accrued balance, so identical time off
+    was paid differently depending only on whether someone clicked. These days
+    are now treated as Day Offs like any other.
+
+    Bounded by the days that have actually ELAPSED (a future day cannot be
+    missing) and by the hire date (days before employment are not the
+    employee's to cover).
+    """
+    from calendar import monthrange
+    from datetime import timedelta
+
+    total_days = monthrange(year, month)[1]
+    elapsed = max(0, min(int(days_elapsed or 0), total_days))
+    if elapsed <= 0:
+        return []
+
+    start = date(year, month, 1)
+    end = date(year, month, elapsed)
+    hire = getattr(employee, "hire_date", None)
+    if hire and hire > start:
+        start = hire
+    if start > end:
+        return []
+
+    _rows = await db.execute(
+        select(Attendance.date).where(
+            Attendance.employee_id == employee.id,
+            Attendance.date >= start,
+            Attendance.date <= end,
+        )
+    )
+    logged = {row[0] for row in _rows.all()}
+
+    missing = []
+    current = start
+    while current <= end:
+        if current not in logged:
+            missing.append(current)
+        current += timedelta(days=1)
+    return missing
+
+
 async def _paid_leave_days_for_period(
-    db: AsyncSession, employee: Employee, year: int, month: int
+    db: AsyncSession, employee: Employee, year: int, month: int,
+    days_elapsed: int | None = None,
 ) -> tuple[Decimal, Decimal, Decimal]:
-    """Return (paid_leave_days, taken_in_month, available_balance).
+    """Return (paid_leave_days, days_off_in_month, available_balance).
 
     `paid_leave_days` is the number of days off TAKEN this month that the
     employee's accrued balance can actually cover — i.e.
-    min(taken_in_month, available_balance). These days are paid as if present;
-    any leave taken beyond the available balance is unpaid. Days off are stored
-    as attendance status 'absent' (the "Day Off" option).
+    min(days_off_in_month, available_balance). These days are paid as if
+    present; any leave taken beyond the available balance is unpaid. Days off
+    are stored as attendance status 'absent' (the "Day Off" option).
+
+    When `days_elapsed` is supplied, elapsed days with no attendance record at
+    all count as days off too — see `_unlogged_dates_in_period`. `run_payroll`
+    materialises those as real Day Off rows before calling this, so the leave
+    balance (which is derived from Day Off rows) stays consistent with what
+    payroll actually paid; the read-only preview counts them here instead so it
+    shows the same figure without writing.
     """
     available = await _vacation_available_as_of(db, employee, year, month)
 
@@ -600,6 +676,10 @@ async def _paid_leave_days_for_period(
         )
     )
     taken_in_month = _days(_taken.scalar() or 0)
+
+    if days_elapsed is not None:
+        unlogged = await _unlogged_dates_in_period(db, employee, year, month, days_elapsed)
+        taken_in_month = _days(taken_in_month + _dec(len(unlogged)))
 
     paid_leave = taken_in_month if taken_in_month <= available else available
     return _days(paid_leave), taken_in_month, available
@@ -1697,7 +1777,7 @@ async def _payroll_preview_for_employee(
     # (carried over month to month, as of this month) can cover. These count as
     # present for pay; leave beyond the balance is unpaid.
     paid_leave_days, taken_leave_month, vacation_available = await _paid_leave_days_for_period(
-        db, employee, year, month
+        db, employee, year, month, days_elapsed=days_elapsed
     )
 
     # Earned salary = base_salary × min(days_present + paid_leave_days,
@@ -1706,7 +1786,8 @@ async def _payroll_preview_for_employee(
     # is still full pay) and only leave beyond the balance reduces pay. Computed
     # without pre-rounding the daily rate so a full month equals the exact base
     # salary. Allowance (food) is prorated by attendance separately.
-    earned_base  = _earned_base(employee, days_present, working_days, paid_leave_days, days_elapsed=days_elapsed)
+    earned_base  = _earned_base(employee, days_present, working_days, paid_leave_days,
+                                days_elapsed=days_elapsed, month_start=date(year, month, 1))
     earned_total = _money(earned_base + earned_allowance)
 
     pending_day_days = Decimal("0")
@@ -2400,6 +2481,21 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
             ))
             payroll = _ex.scalar_one_or_none()
 
+            # Attendance only has Present and Day Off, so any elapsed day of
+            # the month with no record at all is a Day Off that never got
+            # logged. Write those rows now, before anything is counted, so the
+            # leave balance — which is derived from Day Off rows — is reduced
+            # by exactly the days payroll is about to pay from it. Days before
+            # the hire date and days still in the future are left alone.
+            for missing_date in await _unlogged_dates_in_period(db, emp, year, month, days_elapsed):
+                db.add(Attendance(
+                    employee_id=emp.id,
+                    date=missing_date,
+                    status=ATTENDANCE_STATUS_ABSENT,
+                    note=f"Day Off — no attendance logged (auto-filled by {period} payroll run)",
+                ))
+            await db.flush()
+
             _dp = await db.execute(select(func.count(Attendance.id)).where(
                 Attendance.employee_id == emp.id,
                 Attendance.status == "present",
@@ -2444,7 +2540,7 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
             # (carried over, as of this month) can cover. Counts as present for
             # pay; leave beyond the balance is unpaid. Mirrors preview.
             paid_leave_days, _taken_leave_month, _vac_available = await _paid_leave_days_for_period(
-                db, emp, year, month
+                db, emp, year, month, days_elapsed=days_elapsed
             )
             # Earned = base_salary × min(days_present + paid_leave_days,
             # working_days) / working_days. Month is paid up to base salary;
@@ -2452,7 +2548,8 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
             # still full pay) and only leave beyond the balance reduces pay.
             # Computed without pre-rounding the daily rate so a full month equals
             # the exact base salary. Mirrors preview.
-            earned_base = _earned_base(emp, days_present, working_days, paid_leave_days, days_elapsed=days_elapsed)
+            earned_base = _earned_base(emp, days_present, working_days, paid_leave_days,
+                                       days_elapsed=days_elapsed, month_start=date(year, month, 1))
 
             # Allowances — mirror the preview logic exactly:
             #   Food allowance      → prorated by attendance (daily rate x days present)
