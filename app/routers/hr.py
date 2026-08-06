@@ -404,32 +404,36 @@ def _earned_base(employee: Employee, days_present, working_days: int = 30,
         earned = base_salary * paid / working_days
 
     'fixed_30' (deduction-based monthly deal):
-        Daily rate is a flat base_salary / 30. The full monthly salary is
-        OWED, and each uncovered day docks salary/30:
+        Daily rate is a flat base_salary / 30.
 
-            uncovered = days_elapsed - covered
+        While the month is still IN PROGRESS, pay accrues per covered day
+        (min(covered × salary/30, salary)). A salary is earned over a whole
+        month, so it cannot be fully owed part-way through one: on the 6th
+        of the month six clean days must show six days' pay, not a full
+        month's. Absences are deliberately NOT measured against elapsed days
+        here — "nothing missed yet" is not the same as "the month is done".
+
+        Once the month is COMPLETE (days_elapsed ≥ working_days, always true
+        for a past month), the deal's deduction rule applies: the full
+        monthly salary is owed and each uncovered day docks salary/30:
+
+            uncovered = working_days - covered
             earned    = max(0, base_salary - uncovered * base_salary / 30)
 
-        Absences are measured against the days that have actually ELAPSED,
-        not against the whole month. A day still in the future has not been
-        missed, so it cannot dock pay: an employee with a clean record is
-        owed the full monthly salary whether payroll runs on the 28th or
-        after the month closes. Previously an in-progress month accrued
-        instead (covered × salary/30), so 28 worked days out of 28 elapsed
-        paid 28/30 of the salary and the figure jumped again once the month
-        closed — the same attendance produced two different nets depending
-        on the run date.
+        Full attendance in February (28 days) therefore still pays the full
+        salary, and one absence always costs exactly salary/30 whether the
+        month has 28 or 31 days.
 
-        Full attendance in February (28 days) still pays the full salary,
-        and one absence always costs exactly salary/30 whether the month has
-        28 or 31 days.
+        Days nobody logged are Day Offs (see `_unlogged_dates_in_period`), so
+        they are covered by the accrued leave balance like any other day off.
+        That is what lets a month with a clean record reach the exact base
+        salary at close even when the last few days were never logged —
+        rather than treating an in-progress month as already complete.
 
-        A partial employment month (hired after `month_start`) falls back to
-        accrual — covered × salary/30, capped at the salary. The deduction
-        rule assumes a full month of employment, so applying it to a new
-        hire would either dock them for days before they were hired or, once
-        their few worked days are all covered, pay a full month's salary for
-        a fraction of one.
+        A partial employment month (hired after `month_start`) always uses
+        accrual, even once the month is complete. The deduction rule assumes
+        a full month of employment, so applying it to a mid-month hire would
+        dock him for every day before he was hired.
 
     `paid_leave_days` is supplied by the caller as
     min(leave taken this month, accrued balance as of this month) — see
@@ -452,25 +456,22 @@ def _earned_base(employee: Employee, days_present, working_days: int = 30,
     if _salary_basis(employee) == SALARY_BASIS_FIXED_30:
         elapsed = safe_working_days if days_elapsed is None else max(0, int(days_elapsed))
         elapsed = min(elapsed, safe_working_days)
-        if elapsed <= 0:
-            # None of the month has happened yet (payroll run for a future
-            # month) — nothing is owed. Without this guard the deduction rule
-            # below would see zero uncovered days and pay the full salary.
-            return Decimal("0")
         rate30 = base_salary / Decimal("30")
 
         hire = getattr(employee, "hire_date", None)
         employed_all_month = not (month_start is not None and hire is not None and hire > month_start)
 
-        if employed_all_month:
-            # Deduction rule against ELAPSED days: days that have not happened
-            # yet are not absences, so a clean record pays the full salary
-            # regardless of when payroll is run.
-            uncovered = _dec(elapsed) - min(covered, _dec(elapsed))
+        if elapsed >= safe_working_days and employed_all_month:
+            # Month complete → deduction rule: the full salary is owed and each
+            # uncovered day of the month docks salary/30. Unlogged days already
+            # count as Day Offs by this point, so they are covered by the leave
+            # balance rather than silently docked.
+            uncovered = _dec(safe_working_days) - min(covered, _dec(safe_working_days))
             earned = base_salary - (rate30 * uncovered)
         else:
-            # Hired mid-month → accrue the days actually worked. The deduction
-            # rule can't apply to a partial month (see docstring).
+            # Month still in progress, or a partial employment month → accrue
+            # what is covered so far at the flat /30 rate. A few days worked
+            # shows a few days' pay, never the full month prematurely.
             earned = min(rate30 * covered, base_salary)
         if earned < 0:
             earned = Decimal("0")
