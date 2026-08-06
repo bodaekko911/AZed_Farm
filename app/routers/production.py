@@ -151,7 +151,49 @@ async def create_recipe(data: RecipeCreate, db: AsyncSession = Depends(get_async
     await db.commit(); await db.refresh(recipe)
     return {"id": recipe.id, "name": recipe.name}
 
-@router.delete("/api/recipes/{recipe_id}")
+@router.put("/api/recipes/{recipe_id}", dependencies=[Depends(require_permission("action_production_manage_recipes"))])
+async def update_recipe(recipe_id: int, data: RecipeCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    """Edit a saved recipe — rename it, or change which products it consumes
+    and produces.
+
+    Only the reusable formula changes. Batches that already ran keep their own
+    BatchInput/BatchOutput rows, so production history and the stock moves
+    derived from it are untouched; the new formula applies the next time the
+    recipe is loaded into a batch.
+    """
+    name = (data.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Recipe name is required")
+    if not data.inputs or not data.outputs:
+        raise HTTPException(status_code=400, detail="Recipe must have at least one input and one output")
+
+    result = await db.execute(
+        select(Recipe)
+        .where(Recipe.id == recipe_id, Recipe.is_active == True)
+        .options(selectinload(Recipe.inputs), selectinload(Recipe.outputs))
+    )
+    recipe = result.scalar_one_or_none()
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+
+    recipe.name = name
+    recipe.description = data.description
+    # Replace the lines wholesale rather than diffing them: they carry no
+    # history of their own, and a recipe is small enough that rewriting it is
+    # simpler than reconciling adds/removes/reorders.
+    for item in list(recipe.inputs):
+        await db.delete(item)
+    for item in list(recipe.outputs):
+        await db.delete(item)
+    await db.flush()
+    for item in data.inputs:
+        db.add(RecipeInput(recipe_id=recipe.id, product_id=item.product_id, qty=item.qty))
+    for item in data.outputs:
+        db.add(RecipeOutput(recipe_id=recipe.id, product_id=item.product_id, qty=item.qty))
+    await db.commit()
+    return {"id": recipe.id, "name": recipe.name}
+
+@router.delete("/api/recipes/{recipe_id}", dependencies=[Depends(require_permission("action_production_manage_recipes"))])
 async def delete_recipe(recipe_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     result = await db.execute(select(Recipe).where(Recipe.id == recipe_id))
     r = result.scalar_one_or_none()
@@ -842,7 +884,7 @@ td.name{color:var(--text);font-weight:600;}
         </div>
         <div class="modal-actions">
             <button class="btn-cancel" onclick="document.getElementById('recipe-modal').classList.remove('open')">Cancel</button>
-            <button class="btn btn-blue" onclick="saveRecipe()">Save Recipe</button>
+            <button class="btn btn-blue" id="recipe-save-btn" onclick="saveRecipe()">Save Recipe</button>
         </div>
     </div>
 </div>
@@ -1118,6 +1160,7 @@ let pageSize      = 20;
 let totalBatches  = 0;
 let isPackagingRecipe = false;
 let editingBatchId    = null;
+let editingRecipeId   = null;
 let isAdmin = false;
 let currentUserRole = "";
 let currentUserPermissions = new Set();
@@ -1798,35 +1841,62 @@ async function loadRecipes(){
                 ${isPkg
                     ? `<button class="action-btn teal" onclick="quickUsePkg(${r.id})">Use for Packaging</button>`
                     : `<button class="action-btn" onclick="quickUseProc(${r.id})">Use in Batch</button>`}
-                <button class="action-btn danger" onclick="deleteRecipe(${r.id},'${r.name.replace(/'/g,"\\'")}')">Delete</button>
+                ${hasPermission("action_production_manage_recipes") ? `
+                <button class="action-btn" onclick="openEditRecipe(${r.id})">Edit</button>
+                <button class="action-btn danger" onclick="deleteRecipe(${r.id},'${r.name.replace(/'/g,"\\'")}')">Delete</button>` : ""}
             </div>
         </div>`;
     }).join("");
 }
 
-function openRecipeModal(isPkg){
-    isPackagingRecipe = isPkg;
-    document.getElementById("recipe-inputs").innerHTML  = "";
-    document.getElementById("recipe-outputs").innerHTML = "";
-    document.getElementById("r-name").value = "";
-    document.getElementById("r-desc").value = "";
+/* Packaging and processing recipes share one modal — this sets the labels and
+   button colours that distinguish them, for both the new and edit paths. */
+function applyRecipeModalStyle(isPkg){
     if(isPkg){
-        document.getElementById("recipe-modal-title").innerText = "New Packaging Recipe";
         document.getElementById("recipe-modal-sub").innerText   = "Define inputs and outputs PER 1 PACK";
         document.getElementById("r-input-label").innerText  = "Inputs per 1 pack";
         document.getElementById("r-output-label").innerText = "Output per 1 pack";
         document.getElementById("r-add-input").className  = "add-row-btn teal-btn";
         document.getElementById("r-add-output").className = "add-row-btn teal-btn";
     } else {
-        document.getElementById("recipe-modal-title").innerText = "Processing Recipe";
         document.getElementById("recipe-modal-sub").innerText   = "Save a standard processing formula";
         document.getElementById("r-input-label").innerText  = "Inputs per batch";
         document.getElementById("r-output-label").innerText = "Outputs per batch";
         document.getElementById("r-add-input").className  = "add-row-btn orange-btn";
         document.getElementById("r-add-output").className = "add-row-btn green-btn";
     }
+}
+
+function openRecipeModal(isPkg){
+    editingRecipeId   = null;
+    isPackagingRecipe = isPkg;
+    document.getElementById("recipe-inputs").innerHTML  = "";
+    document.getElementById("recipe-outputs").innerHTML = "";
+    document.getElementById("r-name").value = "";
+    document.getElementById("r-desc").value = "";
+    applyRecipeModalStyle(isPkg);
+    document.getElementById("recipe-modal-title").innerText = isPkg ? "New Packaging Recipe" : "Processing Recipe";
+    document.getElementById("recipe-save-btn").innerText    = "Save Recipe";
     addItemRow("recipe-inputs", null);
     addItemRow("recipe-outputs", null);
+    document.getElementById("recipe-modal").classList.add("open");
+}
+
+function openEditRecipe(id){
+    let recipe = allRecipes.find(r => r.id === id);
+    if(!recipe){ showToast("Could not load recipe"); return; }
+    let isPkg = pkgRecipes.includes(recipe);
+    editingRecipeId   = id;
+    isPackagingRecipe = isPkg;
+    applyRecipeModalStyle(isPkg);
+    document.getElementById("recipe-modal-title").innerText = isPkg ? "Edit Packaging Recipe" : "Edit Processing Recipe";
+    document.getElementById("recipe-save-btn").innerText    = "Save Changes";
+    document.getElementById("r-name").value = recipe.name;
+    // The [PKG] marker is what flags a recipe as packaging; saveRecipe re-adds
+    // it, so keep it out of the editable description or it would stack up.
+    document.getElementById("r-desc").value = (recipe.description||"").replace("[PKG]","").trim();
+    setRow("recipe-inputs",  recipe.inputs.map(i  => ({product_id:i.product_id, qty:i.qty})));
+    setRow("recipe-outputs", recipe.outputs.map(o => ({product_id:o.product_id, qty:o.qty})));
     document.getElementById("recipe-modal").classList.add("open");
 }
 
@@ -1839,14 +1909,17 @@ async function saveRecipe(){
     if(!name)           { showToast("Recipe name is required"); return; }
     if(!inputs.length)  { showToast("Add at least one input"); return; }
     if(!outputs.length) { showToast("Add at least one output"); return; }
-    let res  = await fetch("/production/api/recipes",{
-        method:"POST", headers:{"Content-Type":"application/json"},
+    let url    = editingRecipeId ? `/production/api/recipes/${editingRecipeId}` : "/production/api/recipes";
+    let method = editingRecipeId ? "PUT" : "POST";
+    let res  = await fetch(url,{
+        method, headers:{"Content-Type":"application/json"},
         body:JSON.stringify({name, description:desc, inputs, outputs}),
     });
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
     document.getElementById("recipe-modal").classList.remove("open");
-    showToast("Recipe saved!");
+    showToast(editingRecipeId ? "Recipe updated!" : "Recipe saved!");
+    editingRecipeId = null;
     allRecipes = await (await fetch("/production/api/recipes")).json();
     splitRecipes();
     fillSel("batch-recipe-sel", procRecipes);
@@ -1859,7 +1932,11 @@ function quickUsePkg(id)  { switchTab("packaging"); openPkgModal(); setTimeout((
 
 async function deleteRecipe(id,name){
     if(!confirm(`Delete recipe "${name}"?`)) return;
-    await fetch(`/production/api/recipes/${id}`,{method:"DELETE"});
+    let res  = await fetch(`/production/api/recipes/${id}`,{method:"DELETE"});
+    let data = await res.json();
+    // Without this the toast claimed success on a 403/404 and the recipe just
+    // reappeared on reload.
+    if(data.detail){ showToast("Error: "+data.detail); return; }
     showToast("Recipe deleted");
     allRecipes = await (await fetch("/production/api/recipes")).json();
     splitRecipes();
