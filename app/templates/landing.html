@@ -334,9 +334,10 @@
   .login-overlay {
     position: fixed; inset: 0; z-index: 500; background: rgba(0,0,0,.5);
     backdrop-filter: blur(6px); display: flex; align-items: center; justify-content: center;
-    padding: 20px; opacity: 0; transition: opacity .22s ease;
+    padding: 20px; opacity: 0; transition: opacity .22s ease; pointer-events: none;
   }
-  .login-overlay.open { opacity: 1; }
+  .login-overlay[hidden] { display: none; }
+  .login-overlay.open { opacity: 1; pointer-events: auto; }
   .login-modal {
     background: #fff; border: 1px solid #ebebeb; border-radius: 18px; padding: 36px;
     width: 100%; max-width: 420px; position: relative;
