@@ -28,6 +28,7 @@ from app.models.refund import RetailRefund, RetailRefundItem
 from app.models.production import ProductionBatch, BatchInput, BatchOutput
 from app.models.drying import DryingBatch, DryingBatchStage, DryingBatchStageInput, DryingBatchStageOutput
 from app.models.accounting import Account, Journal, JournalEntry
+from app.models.carbon import CarbonEmissionFactor, CarbonLog, CarbonTarget
 from app.models.receipt import ProductReceipt
 from app.models.expense import Expense, ExpenseCategory
 from app.models.hr import (
@@ -3867,6 +3868,550 @@ async def export_animals(
         headers={"Content-Disposition": f"attachment; filename=animals_report_{date.today()}.xlsx"})
 
 
+# ── CARBON FOOTPRINT ───────────────────────────────────
+CARBON_SOURCE_LABELS = {
+    "transport":  "Transport",
+    "energy":     "Energy",
+    "waste":      "Waste / Spoilage",
+    "production": "Production",
+    "livestock":  "Livestock",
+}
+CARBON_SOURCE_ORDER = ["transport", "energy", "waste", "production", "livestock"]
+CARBON_SOURCE_ICONS = {
+    "transport": "🚚", "energy": "⚡", "waste": "♻️", "production": "🏭", "livestock": "🐐",
+}
+CARBON_SCOPE_DESCRIPTIONS = {
+    1: "Direct — fuel burned in owned equipment/vehicles and livestock methane",
+    2: "Indirect — purchased electricity",
+    3: "Value chain — waste disposal, transport by third parties, other indirect",
+}
+CARBON_ORIGIN_LABELS = {
+    "farm_delivery":    "Farm delivery (transport)",
+    "farm_intake":      "Farm intake",
+    "production_batch": "Production batch",
+    "expense":          "Expense / utility",
+    "spoilage":         "Spoilage / waste",
+    "livestock":        "Livestock herd",
+    "manual":           "Manual entry",
+}
+
+
+def _carbon_source_label(source_type) -> str:
+    if not source_type:
+        return "Other"
+    return CARBON_SOURCE_LABELS.get(source_type, str(source_type).replace("_", " ").title())
+
+
+def _carbon_origin_label(ref_type) -> str:
+    if not ref_type:
+        return "Manual entry"
+    return CARBON_ORIGIN_LABELS.get(ref_type, str(ref_type).replace("_", " ").title())
+
+
+def _carbon_pct(part: float, whole: float) -> float:
+    return round((part / whole * 100), 2) if whole else 0.0
+
+
+async def _carbon_period_total(db, d_from: date, d_to: date) -> float:
+    row = await db.execute(
+        select(func.coalesce(func.sum(CarbonLog.kg_co2e), 0))
+        .where(CarbonLog.log_date >= d_from, CarbonLog.log_date <= d_to)
+    )
+    return _num(row.scalar())
+
+
+async def _carbon_activity_mass(db, d_from: date, d_to: date) -> tuple[float, float]:
+    """(farm intake kg, completed production output kg) for the window.
+
+    Mass-aware exactly like the sustainability report: kg as-is, g ÷ 1000, and
+    piece/box units only when the product has a configured average weight, so
+    "12 bunches" is never silently added as 12 kg.
+    """
+    from app.routers.production import _MASS_UNITS_G, _MASS_UNITS_KG
+
+    def _mass_kg(rows) -> float:
+        total = 0.0
+        for qty, unit, piece_kg in rows:
+            u = (unit or "").strip().lower()
+            if u in _MASS_UNITS_KG:
+                total += _num(qty)
+            elif u in _MASS_UNITS_G:
+                total += _num(qty) / 1000.0
+            elif piece_kg and _num(piece_kg) > 0:
+                total += _num(qty) * _num(piece_kg)
+        return total
+
+    intake_rows = await db.execute(
+        select(FarmDeliveryItem.qty, func.coalesce(FarmDeliveryItem.unit, Product.unit), Product.unit_weight_kg)
+        .join(FarmDelivery, FarmDeliveryItem.delivery_id == FarmDelivery.id)
+        .join(Product, FarmDeliveryItem.product_id == Product.id)
+        .where(FarmDelivery.delivery_date >= d_from, FarmDelivery.delivery_date <= d_to)
+    )
+    output_rows = await db.execute(
+        select(BatchOutput.qty, Product.unit, Product.unit_weight_kg)
+        .join(ProductionBatch, BatchOutput.batch_id == ProductionBatch.id)
+        .join(Product, BatchOutput.product_id == Product.id)
+        .where(
+            func.date(ProductionBatch.created_at) >= d_from,
+            func.date(ProductionBatch.created_at) <= d_to,
+            ProductionBatch.status == "completed",
+        )
+    )
+    return _mass_kg(intake_rows.all()), _mass_kg(output_rows.all())
+
+
+async def _build_carbon_report(db, *, d_from: date, d_to: date, skip=0, limit=100, include_all=False):
+    """
+    Detailed carbon-footprint report for the reports page.
+
+    Every CarbonLog row in the window is joined to its emission factor and
+    sliced along five independent axes so the same total can be read from
+    whichever angle the reader needs:
+
+      • GHG Protocol scope (1 / 2 / 3)   — what auditors ask for
+      • Source category                   — transport / energy / waste / …
+      • Emission factor                   — which coefficient drove the number
+      • Origin record                     — which module generated the entry
+      • Farm                              — where it happened
+
+    Plus a monthly trend, previous-period comparison, emission intensity
+    against farm output, target progress, the entry log itself, and a
+    methodology appendix of every active factor with its provenance.
+    """
+    days = max((d_to - d_from).days + 1, 1)
+
+    factor_rows = await db.execute(select(CarbonEmissionFactor))
+    factors = {f.id: f for f in factor_rows.scalars().all()}
+
+    log_rows = await db.execute(
+        select(CarbonLog)
+        .options(selectinload(CarbonLog.farm), selectinload(CarbonLog.user))
+        .where(CarbonLog.log_date >= d_from, CarbonLog.log_date <= d_to)
+        .order_by(CarbonLog.log_date.desc(), CarbonLog.id.desc())
+    )
+    logs = log_rows.scalars().all()
+
+    total_kg = sum(_num(l.kg_co2e) for l in logs)
+
+    # ── Previous window of equal length, for the trend arrow ──
+    prev_to   = d_from - timedelta(days=1)
+    prev_from = prev_to - timedelta(days=days - 1)
+    prev_kg   = await _carbon_period_total(db, prev_from, prev_to)
+    delta_pct = round(((total_kg - prev_kg) / prev_kg) * 100, 1) if prev_kg > 0 else None
+
+    # ── Axis buckets ──
+    scope_bucket  = defaultdict(lambda: {"kg": 0.0, "entries": 0})
+    source_bucket = defaultdict(lambda: {"kg": 0.0, "entries": 0})
+    factor_bucket = defaultdict(lambda: {"kg": 0.0, "entries": 0, "qty": 0.0})
+    origin_bucket = defaultdict(lambda: {"kg": 0.0, "entries": 0})
+    farm_bucket   = defaultdict(lambda: {"kg": 0.0, "entries": 0, "name": "Unassigned"})
+    month_bucket  = defaultdict(lambda: {"kg": 0.0, "entries": 0, "scopes": defaultdict(float)})
+    day_bucket    = defaultdict(float)
+
+    entries = []
+    for l in logs:
+        f = factors.get(l.factor_id)
+        kg = _num(l.kg_co2e)
+        qty = _num(l.quantity)
+        scope = getattr(f, "scope", None) if f else None
+        stype = (getattr(f, "source_type", None) if f else None) or "other"
+        origin = l.ref_type or "manual"
+        farm_key = l.farm_id or 0
+        month_key = l.log_date.strftime("%Y-%m")
+
+        scope_bucket[scope]["kg"] += kg
+        scope_bucket[scope]["entries"] += 1
+        source_bucket[stype]["kg"] += kg
+        source_bucket[stype]["entries"] += 1
+        factor_bucket[l.factor_id]["kg"] += kg
+        factor_bucket[l.factor_id]["entries"] += 1
+        factor_bucket[l.factor_id]["qty"] += qty
+        origin_bucket[origin]["kg"] += kg
+        origin_bucket[origin]["entries"] += 1
+        farm_bucket[farm_key]["kg"] += kg
+        farm_bucket[farm_key]["entries"] += 1
+        if l.farm is not None:
+            farm_bucket[farm_key]["name"] = l.farm.name
+        month_bucket[month_key]["kg"] += kg
+        month_bucket[month_key]["entries"] += 1
+        month_bucket[month_key]["scopes"][scope] += kg
+        day_bucket[l.log_date.isoformat()] += kg
+
+        entries.append({
+            "id":            l.id,
+            "date":          l.log_date.isoformat(),
+            "factor":        getattr(f, "label", None) or f"Factor #{l.factor_id}",
+            "source_type":   stype,
+            "source_label":  _carbon_source_label(stype),
+            "scope":         scope,
+            "quantity":      round(qty, 3),
+            "unit":          getattr(f, "unit", None) or "",
+            "factor_value":  round(_num(getattr(f, "factor_kg_co2e_per_unit", 0)), 4),
+            "kg_co2e":       round(kg, 4),
+            "origin":        origin,
+            "origin_label":  _carbon_origin_label(origin),
+            "ref_id":        l.ref_id,
+            "farm_name":     l.farm.name if l.farm is not None else "—",
+            "user":          (l.user.name if l.user is not None else None) or "—",
+            "notes":         l.notes or "",
+        })
+
+    # ── Scope rows: always show 1/2/3 so the report shape is stable ──
+    by_scope = []
+    for s in (1, 2, 3):
+        b = scope_bucket.get(s, {"kg": 0.0, "entries": 0})
+        by_scope.append({
+            "scope":       s,
+            "label":       f"Scope {s}",
+            "description": CARBON_SCOPE_DESCRIPTIONS[s],
+            "kg_co2e":     round(b["kg"], 3),
+            "entries":     b["entries"],
+            "pct":         _carbon_pct(b["kg"], total_kg),
+        })
+    if scope_bucket.get(None, {}).get("kg", 0) or scope_bucket.get(None, {}).get("entries", 0):
+        b = scope_bucket[None]
+        by_scope.append({
+            "scope":       None,
+            "label":       "Unclassified",
+            "description": "Logged against factors with no GHG Protocol scope assigned",
+            "kg_co2e":     round(b["kg"], 3),
+            "entries":     b["entries"],
+            "pct":         _carbon_pct(b["kg"], total_kg),
+        })
+
+    # ── Source categories: known order first, then any custom types ──
+    ordered_sources = [s for s in CARBON_SOURCE_ORDER if s in source_bucket]
+    ordered_sources += sorted(s for s in source_bucket if s not in ordered_sources)
+    by_source = [{
+        "source_type": s,
+        "label":       _carbon_source_label(s),
+        "icon":        CARBON_SOURCE_ICONS.get(s, "•"),
+        "kg_co2e":     round(source_bucket[s]["kg"], 3),
+        "entries":     source_bucket[s]["entries"],
+        "pct":         _carbon_pct(source_bucket[s]["kg"], total_kg),
+    } for s in ordered_sources]
+
+    by_factor = []
+    for fid, b in factor_bucket.items():
+        f = factors.get(fid)
+        by_factor.append({
+            "factor_id":          fid,
+            "label":              getattr(f, "label", None) or f"Factor #{fid}",
+            "source_key":         getattr(f, "source_key", None) or "",
+            "source_type":        (getattr(f, "source_type", None) if f else None) or "other",
+            "source_label":       _carbon_source_label(getattr(f, "source_type", None) if f else None),
+            "scope":              getattr(f, "scope", None) if f else None,
+            "unit":               getattr(f, "unit", None) or "",
+            "factor_value":       round(_num(getattr(f, "factor_kg_co2e_per_unit", 0)), 4),
+            "quantity":           round(b["qty"], 3),
+            "entries":            b["entries"],
+            "kg_co2e":            round(b["kg"], 3),
+            "pct":                _carbon_pct(b["kg"], total_kg),
+            "methodology_source": getattr(f, "methodology_source", None) or "",
+            "source_year":        getattr(f, "source_year", None),
+            "region":             getattr(f, "region", None) or "",
+        })
+    by_factor.sort(key=lambda r: r["kg_co2e"], reverse=True)
+
+    by_origin = sorted(
+        ({
+            "ref_type": k,
+            "label":    _carbon_origin_label(k),
+            "kg_co2e":  round(v["kg"], 3),
+            "entries":  v["entries"],
+            "pct":      _carbon_pct(v["kg"], total_kg),
+        } for k, v in origin_bucket.items()),
+        key=lambda r: r["kg_co2e"], reverse=True,
+    )
+
+    by_farm = sorted(
+        ({
+            "farm_id":  k or None,
+            "farm_name": v["name"],
+            "kg_co2e":  round(v["kg"], 3),
+            "entries":  v["entries"],
+            "pct":      _carbon_pct(v["kg"], total_kg),
+        } for k, v in farm_bucket.items()),
+        key=lambda r: r["kg_co2e"], reverse=True,
+    )
+
+    monthly = []
+    for key in sorted(month_bucket):
+        b = month_bucket[key]
+        try:
+            label = datetime.strptime(key, "%Y-%m").strftime("%b %Y")
+        except ValueError:
+            label = key
+        monthly.append({
+            "month":   key,
+            "label":   label,
+            "kg_co2e": round(b["kg"], 3),
+            "entries": b["entries"],
+            "scope_1": round(b["scopes"].get(1, 0.0), 3),
+            "scope_2": round(b["scopes"].get(2, 0.0), 3),
+            "scope_3": round(b["scopes"].get(3, 0.0), 3),
+        })
+
+    # Daily series only when it stays readable (roughly a quarter or less)
+    daily = (
+        [{"date": k, "kg_co2e": round(v, 3)} for k, v in sorted(day_bucket.items())]
+        if days <= 92 else []
+    )
+
+    # ── Emission intensity vs. what the farm actually produced ──
+    intake_kg, output_kg = await _carbon_activity_mass(db, d_from, d_to)
+    intensity = {
+        "farm_intake_kg":        round(intake_kg, 2),
+        "production_output_kg":  round(output_kg, 2),
+        "per_kg_intake":         round(total_kg / intake_kg, 4) if intake_kg > 0 else None,
+        "per_kg_output":         round(total_kg / output_kg, 4) if output_kg > 0 else None,
+    }
+
+    # ── Targets overlapping the window (progress measured over their own period) ──
+    target_rows = await db.execute(
+        select(CarbonTarget)
+        .where(CarbonTarget.period_start <= d_to, CarbonTarget.period_end >= d_from)
+        .order_by(CarbonTarget.period_start)
+    )
+    targets = []
+    for t in target_rows.scalars().all():
+        target_kg = _num(t.target_kg_co2e)
+        actual_kg = await _carbon_period_total(db, t.period_start, t.period_end)
+        progress = _carbon_pct(actual_kg, target_kg) if target_kg > 0 else 0.0
+        targets.append({
+            "id":           t.id,
+            "label":        t.label,
+            "period_start": t.period_start.isoformat(),
+            "period_end":   t.period_end.isoformat(),
+            "target_kg":    round(target_kg, 2),
+            "actual_kg":    round(actual_kg, 2),
+            "remaining_kg": round(target_kg - actual_kg, 2),
+            "progress_pct": progress,
+            "status":       "On track" if progress < 80 else ("Approaching limit" if progress <= 100 else "Exceeded"),
+        })
+
+    methodology = [{
+        "label":              f.label,
+        "source_key":         f.source_key,
+        "source_type":        f.source_type,
+        "source_label":       _carbon_source_label(f.source_type),
+        "scope":              f.scope,
+        "factor_value":       round(_num(f.factor_kg_co2e_per_unit), 4),
+        "unit":               f.unit,
+        "methodology_source": f.methodology_source or "",
+        "source_year":        f.source_year,
+        "region":             f.region or "",
+        "is_active":          bool(f.is_active),
+    } for f in sorted(
+        (f for f in factors.values() if f.is_active),
+        key=lambda f: (f.scope or 99, f.source_type or "", f.label or ""),
+    )]
+
+    top_entries = sorted(entries, key=lambda e: e["kg_co2e"], reverse=True)[:15]
+    page_entries = _paginate_rows(entries, skip, limit, include_all=include_all)
+
+    warning = None
+    if not logs:
+        warning = ("No emissions were logged in this period. Log entries from /carbon/ or run the "
+                   "auto-log backfill so deliveries, production, spoilage and utilities are counted.")
+    elif not factors:
+        warning = "No emission factors are configured — totals cannot be calculated."
+
+    return {
+        "date_from": d_from.isoformat(),
+        "date_to":   d_to.isoformat(),
+        "days":      days,
+        "totals": {
+            "kg_co2e":        round(total_kg, 3),
+            "tonnes":         round(total_kg / 1000, 4),
+            "entries":        len(logs),
+            "daily_avg":      round(total_kg / days, 3),
+            "previous_kg":    round(prev_kg, 3),
+            "previous_from":  prev_from.isoformat(),
+            "previous_to":    prev_to.isoformat(),
+            "delta_pct":      delta_pct,
+            "factors_used":   len(factor_bucket),
+            "source_count":   len(source_bucket),
+            "largest_source": by_source[0]["label"] if by_source else "—",
+        },
+        "by_scope":    by_scope,
+        "by_source":   sorted(by_source, key=lambda r: r["kg_co2e"], reverse=True),
+        "by_factor":   by_factor,
+        "by_origin":   by_origin,
+        "by_farm":     by_farm,
+        "monthly":     monthly,
+        "daily":       daily,
+        "intensity":   intensity,
+        "targets":     targets,
+        "top_entries": top_entries,
+        "entries":     page_entries,
+        "entries_total": len(entries),
+        "methodology": methodology,
+        "warning":     warning,
+    }
+
+
+@router.get("/api/carbon")
+async def carbon_report(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    skip: int = 0,
+    limit: int = Query(default=200, le=1000),
+    db: AsyncSession = Depends(get_async_session),
+    _=Depends(require_permission("tab_reports_carbon")),
+):
+    d_from, d_to = _plain_date_range(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    skip, limit = _resolve_pagination(skip, limit, default_limit=200)
+    return await _build_carbon_report(db, d_from=d_from, d_to=d_to, skip=skip, limit=limit)
+
+
+@router.get("/export/carbon", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_carbon"))])
+async def export_carbon(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+    d_from, d_to = _plain_date_range(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    data = await _build_carbon_report(db, d_from=d_from, d_to=d_to, include_all=True)
+    period = [("Date Range", f"{data['date_from']} to {data['date_to']}")]
+    totals = data["totals"]
+    intensity = data["intensity"]
+
+    summary_rows = [
+        ["Total emissions", data["totals"]["kg_co2e"], "kg CO₂e"],
+        ["Total emissions", data["totals"]["tonnes"], "t CO₂e"],
+        ["Log entries", totals["entries"], "entries"],
+        ["Daily average", totals["daily_avg"], "kg CO₂e / day"],
+        [f"Previous period ({totals['previous_from']} to {totals['previous_to']})", totals["previous_kg"], "kg CO₂e"],
+        ["Change vs previous period", totals["delta_pct"] if totals["delta_pct"] is not None else "n/a", "%"],
+        ["Emission factors used", totals["factors_used"], "factors"],
+        ["Farm intake (mass-aware)", intensity["farm_intake_kg"], "kg"],
+        ["Production output (completed batches)", intensity["production_output_kg"], "kg"],
+        ["Intensity per kg intake", intensity["per_kg_intake"] if intensity["per_kg_intake"] is not None else "n/a", "kg CO₂e / kg"],
+        ["Intensity per kg output", intensity["per_kg_output"] if intensity["per_kg_output"] is not None else "n/a", "kg CO₂e / kg"],
+    ]
+
+    sheets = [
+        {
+            "sheet_name": "Summary",
+            "report_title": "Carbon Footprint — Summary",
+            "headers": ["Metric", "Value", "Unit"],
+            "rows": summary_rows,
+            "metadata": period,
+            "column_formats": {"Value": "qty"},
+            "tab_color": "2F6F4F",
+        },
+        {
+            "sheet_name": "By Scope",
+            "report_title": "Emissions by GHG Protocol Scope",
+            "headers": ["Scope", "Definition", "kg CO₂e", "% of Total", "Entries"],
+            "rows": [[r["label"], r["description"], r["kg_co2e"], r["pct"], r["entries"]] for r in data["by_scope"]],
+            "metadata": period,
+            "column_formats": {"kg CO₂e": "qty", "% of Total": "percent_value", "Entries": "int"},
+            "wrap_columns": {"Definition"},
+            "tab_color": "1F4E78",
+        },
+        {
+            "sheet_name": "By Source",
+            "report_title": "Emissions by Source Category",
+            "headers": ["Source", "kg CO₂e", "% of Total", "Entries"],
+            "rows": [[r["label"], r["kg_co2e"], r["pct"], r["entries"]] for r in data["by_source"]],
+            "metadata": period,
+            "column_formats": {"kg CO₂e": "qty", "% of Total": "percent_value", "Entries": "int"},
+            "tab_color": "0F766E",
+        },
+        {
+            "sheet_name": "By Factor",
+            "report_title": "Emissions by Emission Factor",
+            "headers": ["Factor", "Source", "Scope", "Activity Qty", "Unit", "Factor (kg CO₂e/unit)", "kg CO₂e", "% of Total", "Entries", "Methodology", "Year", "Region"],
+            "rows": [[
+                r["label"], r["source_label"], f"Scope {r['scope']}" if r["scope"] else "—",
+                r["quantity"], r["unit"], r["factor_value"], r["kg_co2e"], r["pct"], r["entries"],
+                r["methodology_source"] or "—", r["source_year"] or "—", r["region"] or "—",
+            ] for r in data["by_factor"]],
+            "metadata": period,
+            "column_formats": {"Activity Qty": "qty", "Factor (kg CO₂e/unit)": "qty", "kg CO₂e": "qty", "% of Total": "percent_value", "Entries": "int"},
+            "tab_color": "7C3AED",
+        },
+        {
+            "sheet_name": "By Origin",
+            "report_title": "Emissions by Originating Record",
+            "headers": ["Origin", "kg CO₂e", "% of Total", "Entries"],
+            "rows": [[r["label"], r["kg_co2e"], r["pct"], r["entries"]] for r in data["by_origin"]],
+            "metadata": period,
+            "column_formats": {"kg CO₂e": "qty", "% of Total": "percent_value", "Entries": "int"},
+            "tab_color": "B45309",
+        },
+        {
+            "sheet_name": "By Farm",
+            "report_title": "Emissions by Farm",
+            "headers": ["Farm", "kg CO₂e", "% of Total", "Entries"],
+            "rows": [[r["farm_name"], r["kg_co2e"], r["pct"], r["entries"]] for r in data["by_farm"]],
+            "metadata": period,
+            "column_formats": {"kg CO₂e": "qty", "% of Total": "percent_value", "Entries": "int"},
+            "tab_color": "166534",
+        },
+        {
+            "sheet_name": "Monthly Trend",
+            "report_title": "Monthly Emission Trend",
+            "headers": ["Month", "kg CO₂e", "Scope 1", "Scope 2", "Scope 3", "Entries"],
+            "rows": [[r["label"], r["kg_co2e"], r["scope_1"], r["scope_2"], r["scope_3"], r["entries"]] for r in data["monthly"]],
+            "metadata": period,
+            "column_formats": {"kg CO₂e": "qty", "Scope 1": "qty", "Scope 2": "qty", "Scope 3": "qty", "Entries": "int"},
+            "tab_color": "0369A1",
+        },
+        {
+            "sheet_name": "Emission Log",
+            "report_title": "Carbon Emission Log",
+            "headers": ["Date", "Factor", "Source", "Scope", "Quantity", "Unit", "Factor Rate", "kg CO₂e", "Origin", "Ref ID", "Farm", "Logged By", "Notes"],
+            "rows": [[
+                e["date"], e["factor"], e["source_label"], f"Scope {e['scope']}" if e["scope"] else "—",
+                e["quantity"], e["unit"], e["factor_value"], e["kg_co2e"], e["origin_label"],
+                e["ref_id"] if e["ref_id"] is not None else "—", e["farm_name"], e["user"], e["notes"],
+            ] for e in data["entries"]],
+            "metadata": period + [("Rows", data["entries_total"])],
+            "column_formats": {"Date": "date", "Quantity": "qty", "Factor Rate": "qty", "kg CO₂e": "qty"},
+            "wrap_columns": {"Notes"},
+            "tab_color": "334155",
+        },
+        {
+            "sheet_name": "Methodology",
+            "report_title": "Emission Factors & Provenance",
+            "headers": ["Scope", "Factor", "Key", "Source", "Value", "Unit", "Methodology", "Year", "Region"],
+            "rows": [[
+                f"Scope {m['scope']}" if m["scope"] else "—", m["label"], m["source_key"], m["source_label"],
+                m["factor_value"], f"kg CO₂e / {m['unit']}", m["methodology_source"] or "—",
+                m["source_year"] or "—", m["region"] or "—",
+            ] for m in data["methodology"]],
+            "metadata": period,
+            "column_formats": {"Value": "qty"},
+            "tab_color": "6B7280",
+        },
+    ]
+    if data["targets"]:
+        sheets.insert(1, {
+            "sheet_name": "Targets",
+            "report_title": "Reduction Target Progress",
+            "headers": ["Target", "Period Start", "Period End", "Target kg CO₂e", "Actual kg CO₂e", "Remaining", "Progress %", "Status"],
+            "rows": [[
+                t["label"], t["period_start"], t["period_end"], t["target_kg"],
+                t["actual_kg"], t["remaining_kg"], t["progress_pct"], t["status"],
+            ] for t in data["targets"]],
+            "metadata": period,
+            "column_formats": {"Period Start": "date", "Period End": "date", "Target kg CO₂e": "qty", "Actual kg CO₂e": "qty", "Remaining": "qty", "Progress %": "percent_value"},
+            "tab_color": "059669",
+        })
+
+    wb = build_report_workbook(sheets)
+    buf = workbook_to_buffer(wb)
+    fn = f"carbon_footprint_{data['date_from']}_to_{data['date_to']}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={fn}"},
+    )
+
+
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
 def reports_ui(current_user: User = Depends(require_permission("page_reports"))):
@@ -4035,6 +4580,7 @@ td.mono{font-family:var(--mono);}
         <button class="tab"        onclick="switchTab('production')">⚙️ Production</button>
         <button class="tab"        onclick="switchTab('hr')">👥 HR</button>
         <button class="tab"        onclick="switchTab('utilities')">💧 Utilities</button>
+        <button class="tab"        onclick="switchTab('carbon')">🌍 Carbon Footprint</button>
         <button class="tab"        onclick="switchTab('pl')">💰 P&amp;L</button>
         <button class="tab"        onclick="switchTab('animals')">🐄 Animals</button>
     </div>
@@ -4423,6 +4969,36 @@ td.mono{font-family:var(--mono);}
         </div>
     </div>
 
+    <!-- ──────────── CARBON FOOTPRINT ──────────── -->
+    <div id="section-carbon" class="section">
+        <div class="print-header">
+            <div style="display:flex;align-items:center;gap:14px">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
+                <div>
+                    <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
+                    <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
+                </div>
+            </div>
+            <div style="text-align:right">
+                <div style="font-size:18px;font-weight:800;color:#2a7a2a">Carbon Footprint Report</div>
+                <div style="font-size:12px;color:#666;margin-top:4px" id="ph-carbon-dates"></div>
+            </div>
+        </div>
+        <div class="filter-bar no-print">
+            <label>From</label><input type="date" id="carbon-from">
+            <label>To</label>  <input type="date" id="carbon-to">
+            <div class="filter-sep"></div>
+            <button class="btn btn-lime"  onclick="loadCarbon()">Apply</button>
+            <button class="btn btn-excel" onclick="exportSection('carbon')">⬇ Excel</button>
+            <button class="btn btn-print" onclick="window.print()">🖨 Print</button>
+            <div class="filter-sep"></div>
+            <button class="btn btn-print" onclick="carbonQuickRange('mtd')">Month to date</button>
+            <button class="btn btn-print" onclick="carbonQuickRange('qtd')">Quarter to date</button>
+            <button class="btn btn-print" onclick="carbonQuickRange('ytd')">Year to date</button>
+        </div>
+        <div id="carbon-content"></div>
+    </div>
+
     <!-- ──────────── P&L ──────────── -->
     <div id="section-animals" class="section">
         <div class="print-header">
@@ -4550,7 +5126,7 @@ function switchTab(tab){
     const section = document.getElementById("section-"+tab);
     if(!section) return;
     section.classList.add("active");
-    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, utilities:loadUtilities, pl:loadPL, animals:loadAnimals};
+    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, utilities:loadUtilities, carbon:loadCarbon, pl:loadPL, animals:loadAnimals};
     if(loaders[tab]){
         loaders[tab]();
     } else {
@@ -4570,7 +5146,7 @@ function showToast(msg){
     clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove("show"),3000);
 }
 
-const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","hr","utilities","pl","animals"];
+const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","hr","utilities","carbon","pl","animals"];
 const REPORT_TAB_PERMISSIONS = {
     sales: "tab_reports_sales",
     transactions: "tab_reports_transactions",
@@ -4581,6 +5157,7 @@ const REPORT_TAB_PERMISSIONS = {
     production: "tab_reports_production",
     hr: "tab_reports_hr",
     utilities: "tab_reports_utilities",
+    carbon: "tab_reports_carbon",
     pl: "tab_reports_pl",
     animals: "tab_reports_animals",
 };
@@ -4789,6 +5366,7 @@ async function exportSection(tab){
         production: ()=>{ let r=getRange("prod-from","prod-to");   return `/reports/export/production?date_from=${r.from}&date_to=${r.to}`; },
         hr:         ()=>{ let r=getRange("hr-from","hr-to"); let p=document.getElementById("hr-period").value; let d=document.getElementById("hr-department").value.trim(); let f=document.getElementById("hr-farm-id").value; return `/reports/export/hr?date_from=${r.from}&date_to=${r.to}${p?"&period="+encodeURIComponent(p):""}${d?"&department="+encodeURIComponent(d):""}${f?"&farm_id="+encodeURIComponent(f):""}`; },
         utilities:  ()=>{ let r=getRange("util-from","util-to"); return `/reports/export/utilities?date_from=${r.from}&date_to=${r.to}`; },
+        carbon:     ()=>{ let r=getRange("carbon-from","carbon-to"); return `/reports/export/carbon?date_from=${r.from}&date_to=${r.to}`; },
         pl:           ()=>{ let r=getRange("pl-from","pl-to");   return `/reports/export/pl?date_from=${r.from}&date_to=${r.to}`; },
         animals:      ()=>{ let r=getRange("animals-from","animals-to"); return `/reports/export/animals?date_from=${r.from}&date_to=${r.to}`; },
         transactions: ()=>{ let r=getRange("tx-from","tx-to"); let s=document.getElementById("tx-source").value; return `/reports/export/transactions?date_from=${r.from}&date_to=${r.to}${s?"&source="+s:""}`; },
@@ -5490,6 +6068,337 @@ async function loadUtilities(){
 }
 
 
+/* ── CARBON FOOTPRINT ── */
+const CARBON_SCOPE_COLORS = {1:"var(--danger)", 2:"var(--orange)", 3:"var(--blue)", 0:"var(--muted)"};
+
+function carbonKg(v){
+    let n = Number(v || 0);
+    if(Math.abs(n) >= 1000) return (n/1000).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2}) + " t";
+    if(Math.abs(n) >= 10)   return n.toLocaleString(undefined,{maximumFractionDigits:1}) + " kg";
+    return n.toLocaleString(undefined,{maximumFractionDigits:3}) + " kg";
+}
+function carbonNum(v, digits){
+    return Number(v || 0).toLocaleString(undefined,{minimumFractionDigits:digits||0, maximumFractionDigits:digits||0});
+}
+function carbonQuickRange(kind){
+    let now = new Date(), start;
+    if(kind === "qtd")      { start = new Date(now.getFullYear(), Math.floor(now.getMonth()/3)*3, 1); }
+    else if(kind === "ytd") { start = new Date(now.getFullYear(), 0, 1); }
+    else                    { start = new Date(now.getFullYear(), now.getMonth(), 1); }
+    setEl("carbon-from", start.toISOString().split("T")[0]);
+    setEl("carbon-to", today());
+    loadCarbon();
+}
+function carbonBar(label, value, total, color){
+    let pct = total > 0 ? (Number(value||0) / total * 100) : 0;
+    return `<div class="bar-row">
+        <div class="bar-label">${label}</div>
+        <div class="bar-track"><div class="bar-fill" style="width:${Math.max(pct,0).toFixed(1)}%;background:${color}"></div></div>
+        <div class="bar-val">${carbonKg(value)}</div>
+        <div class="bar-val" style="width:52px;color:var(--muted)">${pct.toFixed(1)}%</div>
+    </div>`;
+}
+function carbonEmpty(cols, msg){
+    return `<tr><td colspan="${cols}" style="text-align:center;color:var(--muted);padding:20px">${msg}</td></tr>`;
+}
+function carbonScopeTag(scope){
+    if(!scope) return `<span class="badge" style="background:rgba(136,153,187,.12);color:var(--muted)">Unscoped</span>`;
+    let c = CARBON_SCOPE_COLORS[scope] || "var(--muted)";
+    return `<span class="badge" style="background:rgba(255,255,255,.06);color:${c}">Scope ${scope}</span>`;
+}
+
+async function loadCarbon(){
+    let r = getRange("carbon-from","carbon-to");
+    let data = await fetchReportJson(`/reports/api/carbon?date_from=${r.from}&date_to=${r.to}`);
+    setPrintDates("ph-carbon-dates", data.date_from, data.date_to);
+
+    const t = data.totals, intensity = data.intensity;
+    const total = Number(t.kg_co2e || 0);
+    const deltaTxt = (t.delta_pct === null || t.delta_pct === undefined)
+        ? "no comparable data"
+        : `${t.delta_pct > 0 ? "▲" : (t.delta_pct < 0 ? "▼" : "=")} ${Math.abs(t.delta_pct).toFixed(1)}% vs previous ${data.days} days`;
+    const deltaColor = (t.delta_pct === null || t.delta_pct === undefined)
+        ? "var(--muted)" : (t.delta_pct > 0 ? "var(--danger)" : "var(--green)");
+
+    /* 1 ── Headline stats */
+    const statsHtml = `
+        <div class="stats-row">
+            <div class="stat-card sc-green">
+                <div class="stat-label">Total Footprint</div>
+                <div class="stat-value sv-green">${carbonKg(total)}</div>
+                <div style="font-size:11px;color:${deltaColor};margin-top:5px;font-weight:600">${deltaTxt}</div>
+            </div>
+            <div class="stat-card sc-blue">
+                <div class="stat-label">Daily Average</div>
+                <div class="stat-value sv-blue">${carbonKg(t.daily_avg)}</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px">over ${data.days} day${data.days===1?"":"s"}</div>
+            </div>
+            <div class="stat-card sc-orange">
+                <div class="stat-label">Intensity / kg Intake</div>
+                <div class="stat-value sv-orange">${intensity.per_kg_intake !== null ? Number(intensity.per_kg_intake).toFixed(3) : "—"}</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px">kg CO₂e per kg produce</div>
+            </div>
+            <div class="stat-card sc-teal">
+                <div class="stat-label">Logged Entries</div>
+                <div class="stat-value sv-teal">${carbonNum(t.entries)}</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px">${carbonNum(t.factors_used)} factor${t.factors_used===1?"":"s"} used</div>
+            </div>
+            <div class="stat-card sc-danger">
+                <div class="stat-label">Largest Source</div>
+                <div class="stat-value sv-danger" style="font-size:17px">${t.largest_source}</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px">${data.by_source.length ? carbonKg(data.by_source[0].kg_co2e) : "—"}</div>
+            </div>
+        </div>`;
+
+    /* 2 ── GHG Protocol scopes */
+    const scopeHtml = `
+        <div class="table-wrap">
+            <div class="table-title">GHG Protocol Scope Breakdown</div>
+            <div style="padding:14px 16px 4px">
+                ${data.by_scope.map(s => carbonBar(s.label, s.kg_co2e, total, CARBON_SCOPE_COLORS[s.scope || 0])).join("")}
+            </div>
+            <div style="overflow-x:auto">
+            <table><thead><tr>
+                <th>Scope</th><th>Definition</th><th style="text-align:right">kg CO₂e</th>
+                <th style="text-align:right">% of Total</th><th style="text-align:right">Entries</th>
+            </tr></thead><tbody>
+            ${data.by_scope.map(s => `<tr>
+                <td class="name">${s.label}</td>
+                <td style="font-size:12px">${s.description}</td>
+                <td class="mono" style="text-align:right">${carbonKg(s.kg_co2e)}</td>
+                <td class="mono" style="text-align:right">${Number(s.pct).toFixed(1)}%</td>
+                <td class="mono" style="text-align:right">${carbonNum(s.entries)}</td>
+            </tr>`).join("")}
+            </tbody></table>
+            </div>
+        </div>`;
+
+    /* 3 ── Source category + originating module */
+    const sourceHtml = `
+        <div class="two-col">
+            <div class="chart-card">
+                <div class="chart-title">By Source Category</div>
+                ${data.by_source.length
+                    ? data.by_source.map((s,i) => carbonBar(`${s.icon} ${s.label}`, s.kg_co2e, total, ["var(--green)","var(--blue)","var(--orange)","var(--purple)","var(--teal)","var(--warn)"][i%6])).join("")
+                    : `<div style="color:var(--muted);font-size:13px;padding:8px 0">No emissions recorded.</div>`}
+            </div>
+            <div class="chart-card">
+                <div class="chart-title">By Originating Record</div>
+                ${data.by_origin.length
+                    ? data.by_origin.map((o,i) => carbonBar(o.label, o.kg_co2e, total, ["var(--teal)","var(--lime)","var(--blue)","var(--orange)","var(--purple)","var(--warn)"][i%6])).join("")
+                    : `<div style="color:var(--muted);font-size:13px;padding:8px 0">No emissions recorded.</div>`}
+            </div>
+        </div>`;
+
+    /* 4 ── Monthly trend with scope split */
+    const maxMonth = data.monthly.reduce((m,x) => Math.max(m, Number(x.kg_co2e||0)), 0);
+    const trendHtml = `
+        <div class="table-wrap">
+            <div class="table-title">Monthly Trend <span style="color:var(--muted);font-weight:600;text-transform:none;letter-spacing:0">scope 1 / 2 / 3 split</span></div>
+            <div style="overflow-x:auto">
+            <table><thead><tr>
+                <th>Month</th><th style="text-align:right">Scope 1</th><th style="text-align:right">Scope 2</th>
+                <th style="text-align:right">Scope 3</th><th style="text-align:right">Total</th>
+                <th style="text-align:right">Entries</th><th style="width:220px">Share</th>
+            </tr></thead><tbody>
+            ${data.monthly.length ? data.monthly.map(m => `<tr>
+                <td class="name">${m.label}</td>
+                <td class="mono" style="text-align:right">${carbonKg(m.scope_1)}</td>
+                <td class="mono" style="text-align:right">${carbonKg(m.scope_2)}</td>
+                <td class="mono" style="text-align:right">${carbonKg(m.scope_3)}</td>
+                <td class="mono" style="text-align:right;color:var(--text);font-weight:700">${carbonKg(m.kg_co2e)}</td>
+                <td class="mono" style="text-align:right">${carbonNum(m.entries)}</td>
+                <td>
+                    <div style="display:flex;height:9px;border-radius:5px;overflow:hidden;background:var(--card2);width:${maxMonth>0?Math.max(Number(m.kg_co2e||0)/maxMonth*100,2).toFixed(1):0}%">
+                        <div style="flex:${Number(m.scope_1||0)};background:var(--danger)"></div>
+                        <div style="flex:${Number(m.scope_2||0)};background:var(--orange)"></div>
+                        <div style="flex:${Number(m.scope_3||0)};background:var(--blue)"></div>
+                    </div>
+                </td>
+            </tr>`).join("") : carbonEmpty(7, "No emissions logged in this period.")}
+            </tbody></table>
+            </div>
+        </div>`;
+
+    /* 5 ── Intensity + farm split */
+    const intensityHtml = `
+        <div class="two-col">
+            <div class="chart-card">
+                <div class="chart-title">Emission Intensity</div>
+                <table style="width:100%">
+                    <tbody>
+                    <tr><td>Farm intake (mass-aware)</td><td class="mono" style="text-align:right">${carbonNum(intensity.farm_intake_kg,2)} kg</td></tr>
+                    <tr><td>Production output (completed batches)</td><td class="mono" style="text-align:right">${carbonNum(intensity.production_output_kg,2)} kg</td></tr>
+                    <tr><td class="name">kg CO₂e per kg intake</td><td class="mono" style="text-align:right;color:var(--orange)">${intensity.per_kg_intake !== null ? Number(intensity.per_kg_intake).toFixed(4) : "—"}</td></tr>
+                    <tr><td class="name">kg CO₂e per kg output</td><td class="mono" style="text-align:right;color:var(--orange)">${intensity.per_kg_output !== null ? Number(intensity.per_kg_output).toFixed(4) : "—"}</td></tr>
+                    </tbody>
+                </table>
+                <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.5">
+                    Intake is the primary denominator — every kilogram the farm produces enters as a delivery,
+                    so it avoids the double counting you get from summing intake and processed output.
+                    Piece/bunch products only count when an average weight is configured.
+                </div>
+            </div>
+            <div class="chart-card">
+                <div class="chart-title">By Farm</div>
+                ${data.by_farm.length
+                    ? data.by_farm.map((f,i) => carbonBar(f.farm_name, f.kg_co2e, total, ["var(--lime)","var(--teal)","var(--blue)","var(--purple)","var(--orange)","var(--warn)"][i%6])).join("")
+                    : `<div style="color:var(--muted);font-size:13px;padding:8px 0">No farm-tagged emissions in this period.</div>`}
+            </div>
+        </div>`;
+
+    /* 6 ── Reduction targets */
+    const targetsHtml = data.targets.length ? `
+        <div class="table-wrap">
+            <div class="table-title">Reduction Target Progress</div>
+            <div style="overflow-x:auto">
+            <table><thead><tr>
+                <th>Target</th><th>Period</th><th style="text-align:right">Budget</th><th style="text-align:right">Actual</th>
+                <th style="text-align:right">Remaining</th><th style="width:180px">Progress</th><th>Status</th>
+            </tr></thead><tbody>
+            ${data.targets.map(tg => {
+                const pct = Number(tg.progress_pct||0);
+                const col = pct > 100 ? "var(--danger)" : (pct > 80 ? "var(--warn)" : "var(--green)");
+                return `<tr>
+                    <td class="name">${tg.label}</td>
+                    <td class="mono" style="font-size:12px">${tg.period_start} → ${tg.period_end}</td>
+                    <td class="mono" style="text-align:right">${carbonKg(tg.target_kg)}</td>
+                    <td class="mono" style="text-align:right">${carbonKg(tg.actual_kg)}</td>
+                    <td class="mono" style="text-align:right;color:${tg.remaining_kg < 0 ? "var(--danger)" : "var(--sub)"}">${carbonKg(tg.remaining_kg)}</td>
+                    <td><div class="bar-track"><div class="bar-fill" style="width:${Math.min(pct,100).toFixed(1)}%;background:${col}"></div></div>
+                        <div style="font-size:11px;color:${col};margin-top:4px;font-family:var(--mono)">${pct.toFixed(0)}%</div></td>
+                    <td><span class="badge" style="background:rgba(255,255,255,.06);color:${col}">${tg.status}</span></td>
+                </tr>`;
+            }).join("")}
+            </tbody></table>
+            </div>
+        </div>` : "";
+
+    /* 7 ── Hotspots */
+    const hotspotHtml = `
+        <div class="table-wrap">
+            <div class="table-title">Top Emission Hotspots <span style="color:var(--muted);font-weight:600;text-transform:none;letter-spacing:0">largest single entries</span></div>
+            <div style="overflow-x:auto">
+            <table><thead><tr>
+                <th>Date</th><th>Factor</th><th>Scope</th><th>Origin</th><th>Farm</th>
+                <th style="text-align:right">Activity</th><th style="text-align:right">kg CO₂e</th><th style="text-align:right">% of Total</th>
+            </tr></thead><tbody>
+            ${data.top_entries.length ? data.top_entries.map(e => `<tr>
+                <td class="mono">${e.date}</td>
+                <td class="name">${e.factor}</td>
+                <td>${carbonScopeTag(e.scope)}</td>
+                <td>${e.origin_label}${e.ref_id ? ` <span style="color:var(--muted)">#${e.ref_id}</span>` : ""}</td>
+                <td>${e.farm_name}</td>
+                <td class="mono" style="text-align:right">${carbonNum(e.quantity,2)} ${e.unit}</td>
+                <td class="mono" style="text-align:right;color:var(--orange)">${carbonKg(e.kg_co2e)}</td>
+                <td class="mono" style="text-align:right">${total>0 ? (Number(e.kg_co2e)/total*100).toFixed(1) : "0.0"}%</td>
+            </tr>`).join("") : carbonEmpty(8, "No emissions logged in this period.")}
+            </tbody></table>
+            </div>
+        </div>`;
+
+    /* 8 ── Per-factor detail */
+    const factorHtml = `
+        <div class="table-wrap">
+            <div class="table-title">Emission Factor Detail — ${data.by_factor.length} factor${data.by_factor.length===1?"":"s"} in use</div>
+            <div style="overflow-x:auto">
+            <table><thead><tr>
+                <th>Factor</th><th>Source</th><th>Scope</th><th style="text-align:right">Activity Qty</th><th>Unit</th>
+                <th style="text-align:right">Rate</th><th style="text-align:right">kg CO₂e</th><th style="text-align:right">% of Total</th>
+                <th style="text-align:right">Entries</th><th>Methodology</th>
+            </tr></thead><tbody>
+            ${data.by_factor.length ? data.by_factor.map(f => `<tr>
+                <td class="name">${f.label}</td>
+                <td>${f.source_label}</td>
+                <td>${carbonScopeTag(f.scope)}</td>
+                <td class="mono" style="text-align:right">${carbonNum(f.quantity,2)}</td>
+                <td>${f.unit}</td>
+                <td class="mono" style="text-align:right">${Number(f.factor_value).toFixed(4)}</td>
+                <td class="mono" style="text-align:right;color:var(--orange)">${carbonKg(f.kg_co2e)}</td>
+                <td class="mono" style="text-align:right">${Number(f.pct).toFixed(1)}%</td>
+                <td class="mono" style="text-align:right">${carbonNum(f.entries)}</td>
+                <td style="font-size:12px;color:var(--muted)">${f.methodology_source || "—"}${f.source_year ? ` (${f.source_year})` : ""}${f.region ? ` · ${f.region}` : ""}</td>
+            </tr>`).join("") : carbonEmpty(10, "No emission factors were used in this period.")}
+            </tbody></table>
+            </div>
+        </div>`;
+
+    /* 9 ── Full entry log */
+    const logHtml = `
+        <div class="table-wrap">
+            <div class="table-title">
+                <span>Emission Log</span>
+                <span style="color:var(--muted);font-weight:600;text-transform:none;letter-spacing:0">
+                    showing ${data.entries.length} of ${carbonNum(data.entries_total)} entries — export to Excel for the full log
+                </span>
+            </div>
+            <div style="overflow-x:auto;max-height:520px">
+            <table><thead><tr>
+                <th>Date</th><th>Factor</th><th>Source</th><th>Scope</th>
+                <th style="text-align:right">Qty</th><th>Unit</th><th style="text-align:right">Rate</th>
+                <th style="text-align:right">kg CO₂e</th><th>Origin</th><th>Farm</th><th>Logged By</th><th>Notes</th>
+            </tr></thead><tbody>
+            ${data.entries.length ? data.entries.map(e => `<tr>
+                <td class="mono">${e.date}</td>
+                <td class="name">${e.factor}</td>
+                <td>${e.source_label}</td>
+                <td>${carbonScopeTag(e.scope)}</td>
+                <td class="mono" style="text-align:right">${carbonNum(e.quantity,2)}</td>
+                <td>${e.unit}</td>
+                <td class="mono" style="text-align:right">${Number(e.factor_value).toFixed(4)}</td>
+                <td class="mono" style="text-align:right;color:var(--orange)">${Number(e.kg_co2e).toLocaleString(undefined,{maximumFractionDigits:3})}</td>
+                <td>${e.origin_label}${e.ref_id ? ` <span style="color:var(--muted)">#${e.ref_id}</span>` : ""}</td>
+                <td>${e.farm_name}</td>
+                <td>${e.user}</td>
+                <td style="font-size:12px;color:var(--muted)">${e.notes || "—"}</td>
+            </tr>`).join("") : carbonEmpty(12, "No emissions logged in this period.")}
+            </tbody></table>
+            </div>
+        </div>`;
+
+    /* 10 ── Methodology appendix */
+    const methodHtml = `
+        <div class="table-wrap">
+            <div class="table-title">Methodology Appendix — Active Emission Factors</div>
+            <div style="overflow-x:auto">
+            <table><thead><tr>
+                <th>Scope</th><th>Factor</th><th>Key</th><th>Source</th>
+                <th style="text-align:right">Value</th><th>Unit</th><th>Published Source</th><th>Year</th><th>Region</th>
+            </tr></thead><tbody>
+            ${data.methodology.length ? data.methodology.map(m => `<tr>
+                <td>${carbonScopeTag(m.scope)}</td>
+                <td class="name">${m.label}</td>
+                <td class="mono" style="font-size:12px;color:var(--muted)">${m.source_key}</td>
+                <td>${m.source_label}</td>
+                <td class="mono" style="text-align:right">${Number(m.factor_value).toFixed(4)}</td>
+                <td style="font-size:12px">kg CO₂e / ${m.unit}</td>
+                <td style="font-size:12px">${m.methodology_source || "—"}</td>
+                <td class="mono">${m.source_year || "—"}</td>
+                <td>${m.region || "—"}</td>
+            </tr>`).join("") : carbonEmpty(9, "No active emission factors configured.")}
+            </tbody></table>
+            </div>
+            <div style="padding:12px 16px;font-size:11px;color:var(--muted);line-height:1.6;border-top:1px solid var(--border)">
+                Emissions are calculated as <strong>activity quantity × emission factor</strong> and reported in
+                kg CO₂-equivalent, classified under the GHG Protocol Corporate Standard.
+                Scope 1 covers direct combustion and livestock methane, Scope 2 purchased electricity,
+                and Scope 3 value-chain sources such as third-party transport and waste disposal.
+                Factors are configurable in <a href="/carbon/factors" style="color:var(--blue)">Carbon → Emission Factors</a>.
+            </div>
+        </div>`;
+
+    const warnHtml = data.warning
+        ? `<div style="font-size:13px;color:var(--warn);background:rgba(255,181,71,.08);border:1px solid rgba(255,181,71,.25);border-radius:10px;padding:12px 14px">${data.warning}</div>`
+        : "";
+
+    document.getElementById("carbon-content").innerHTML =
+        `<div style="display:flex;flex-direction:column;gap:16px">`
+        + warnHtml + statsHtml + scopeHtml + sourceHtml + trendHtml + intensityHtml
+        + targetsHtml + hotspotHtml + factorHtml + logHtml + methodHtml
+        + `</div>`;
+}
+
+
 /* ── P&L ── */
 async function loadPL(){
     let r = getRange("pl-from","pl-to");
@@ -5574,6 +6483,7 @@ const __rawReportLoaders = {
     production: loadProduction,
     hr: loadHR,
     utilities: loadUtilities,
+    carbon: loadCarbon,
     pl: loadPL,
 };
 
@@ -5586,6 +6496,7 @@ loadSpoilage = () => runReportLoader("spoilage", __rawReportLoaders.spoilage);
 loadProduction = () => runReportLoader("production", __rawReportLoaders.production);
 loadHR = () => runReportLoader("hr", __rawReportLoaders.hr);
 loadUtilities = () => runReportLoader("utilities", __rawReportLoaders.utilities);
+loadCarbon = () => runReportLoader("carbon", __rawReportLoaders.carbon);
 loadPL = () => runReportLoader("pl", __rawReportLoaders.pl);
 
 function togglePLDetail(id){
@@ -5609,6 +6520,7 @@ function togglePLDetail(id){
     setEl("hr-from",    m); setEl("hr-to",     t);
     setEl("hr-period",  t.slice(0,7));
     setEl("util-from",  m); setEl("util-to",   t);
+    setEl("carbon-from",m); setEl("carbon-to", t);
     setEl("pl-from",    y); setEl("pl-to",     t);
     setEl("animals-from", m); setEl("animals-to", t);
     const invMode = document.getElementById("inv-mode");
