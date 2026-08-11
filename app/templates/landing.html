@@ -6,11 +6,9 @@
 <title>AZed Farm — Farm Management System</title>
 <meta name="description" content="AZed Farm — Farm Management System. Track farm operations, inventory, sales, and accounting in one place.">
 
-<!-- Favicon -->
 <link rel="icon" type="image/png" href="/static/ERP_logo.png">
 <link rel="apple-touch-icon" href="/static/ERP_logo.png">
 
-<!-- Open Graph (Facebook, WhatsApp, LinkedIn, iMessage, Slack, Discord) -->
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="AZed Farm">
 <meta property="og:title" content="AZed Farm — Farm Management System">
@@ -20,1691 +18,552 @@
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="AZed Farm — Farm Management System">
 
-<!-- Twitter / X Card -->
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="AZed Farm — Farm Management System">
 <meta name="twitter:description" content="AZed Farm — Farm Management System. Track farm operations, inventory, sales, and accounting in one place.">
 <meta name="twitter:image" content="/static/landing-preview.png">
-<meta name="twitter:image:alt" content="AZed Farm — Farm Management System">
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;700&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Noto+Sans:wght@400;500;600;700&family=Fustat:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --cream: #F5F0E8;
-    --cream-dark: #EDE5D4;
-    --soil: #3D2B1F;
-    --soil-mid: #6B4C38;
-    --soil-light: #A07858;
-    --leaf: #2D5A27;
-    --leaf-mid: #4A8A42;
-    --leaf-light: #7CBF72;
-    --leaf-pale: #C8E8C4;
-    --harvest: #C8882A;
-    --harvest-light: #F0C870;
-    --sky: #4A7FA5;
-    --sky-light: #C2DCF0;
-    --white: #FFFFFF;
-    --text-dark: #1E1410;
-    --text-mid: #5C4030;
-    --text-light: #8C7060;
-  }
-
   *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-
   html { scroll-behavior: smooth; }
-
   body {
-    font-family: 'DM Sans', sans-serif;
-    background: var(--cream);
-    color: var(--text-dark);
-    overflow-x: hidden;
+    font-family: 'Inter', sans-serif; background: #fff; color: #000;
+    overflow-x: hidden; -webkit-font-smoothing: antialiased;
   }
+  a { color: #000; text-decoration: none; }
+  a:hover { color: #505050; }
+  ul { list-style: none; }
+  h1, h2, h3, h4 { font-weight: inherit; }
 
-  /* ── NAV ──────────────────────────────────────────────── */
+  .eyebrow {
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500; font-size: 12px;
+    letter-spacing: .1em; text-transform: uppercase; color: #505050; margin-bottom: 16px;
+  }
+  .h2 {
+    font-family: 'Fustat', sans-serif; font-weight: 700; font-size: 48px;
+    letter-spacing: -2.4px; line-height: 1.05; color: #000; margin-bottom: 18px;
+  }
+  .lead {
+    font-family: 'Fustat', sans-serif; font-weight: 500; font-size: 18px;
+    letter-spacing: -.4px; line-height: 1.6; color: #505050; max-width: 620px;
+  }
+  .sec { padding: 112px 120px; }
+  section[id] { scroll-margin-top: 80px; }
+
+  /* HERO */
+  .hero { position: relative; width: 100%; height: 100vh; min-height: 900px; overflow: hidden; background: #fff; }
+  .hero-video {
+    position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+    width: 115%; height: 115%; object-fit: cover; object-position: top center; opacity: 0;
+  }
+  .hero-scrim {
+    position: absolute; inset: 0; opacity: .6;
+    background: linear-gradient(180deg, rgba(255,255,255,.72) 0%, rgba(255,255,255,.5) 45%, rgba(255,255,255,.72) 100%);
+  }
+  .hero-inner { position: relative; z-index: 2; display: flex; flex-direction: column; height: 100%; }
+
   nav {
-    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 20px 48px;
-    background: rgba(245,240,232,0.92);
-    backdrop-filter: blur(12px);
-    border-bottom: 1px solid rgba(160,120,88,0.15);
+    gap: clamp(12px, 2vw, 40px); padding: 16px clamp(20px, 8vw, 120px);
   }
-
-  .nav-brand {
-    display: flex; align-items: center; gap: 10px;
-  }
-
-  .nav-name {
-    font-family: 'Playfair Display', serif;
-    font-size: 18px; font-weight: 700;
-    color: var(--soil);
-  }
-
-  .nav-links { display: flex; gap: 32px; }
-
-  .nav-links a {
-    font-size: 14px; font-weight: 400; color: var(--text-mid);
-    text-decoration: none; letter-spacing: 0.01em;
-    transition: color 0.2s;
-  }
-
-  .nav-links a:hover { color: var(--leaf); }
-
-  .nav-cta {
-    background: var(--leaf); color: var(--cream) !important;
-    padding: 9px 22px; border-radius: 6px;
-    font-weight: 500 !important;
-    transition: background 0.2s !important;
-  }
-
-  .nav-cta:hover { background: var(--leaf-mid) !important; color: var(--cream) !important; }
-
-  /* ── HERO ─────────────────────────────────────────────── */
-  .hero {
-    min-height: 100vh;
-    display: grid; grid-template-columns: 1fr 1fr;
-    align-items: center;
-    padding: 120px 48px 80px;
-    gap: 80px;
-    background: var(--cream);
-    position: relative; overflow: hidden;
-  }
-
-  .hero::before {
-    content: '';
-    position: absolute; bottom: -60px; right: -60px;
-    width: 500px; height: 500px;
-    border-radius: 50%;
-    background: radial-gradient(circle, rgba(124,191,114,0.12) 0%, transparent 70%);
-    pointer-events: none;
-  }
-
-  .hero-eyebrow {
-    display: inline-flex; align-items: center; gap: 8px;
-    background: var(--leaf-pale); color: var(--leaf);
-    padding: 6px 14px; border-radius: 100px;
-    font-size: 12px; font-weight: 500; letter-spacing: 0.06em;
-    text-transform: uppercase; margin-bottom: 20px;
-  }
-
-  .hero-eyebrow span { width: 6px; height: 6px; background: var(--leaf); border-radius: 50%; }
-
-  .hero-title {
-    font-family: 'Playfair Display', serif;
-    font-size: clamp(38px, 4vw, 58px);
-    font-weight: 700; line-height: 1.12;
-    color: var(--soil);
-    margin-bottom: 22px;
-  }
-
-  .hero-title em {
-    font-style: italic; color: var(--leaf);
-  }
-
-  .hero-sub {
-    font-size: 17px; line-height: 1.7;
-    color: var(--text-mid); font-weight: 300;
-    max-width: 480px; margin-bottom: 40px;
-  }
-
-  .hero-actions { display: flex; gap: 16px; align-items: center; }
-
-  .btn-primary {
-    display: inline-flex; align-items: center; gap: 8px;
-    background: var(--leaf); color: var(--cream);
-    padding: 14px 28px; border-radius: 8px;
-    font-size: 15px; font-weight: 500;
-    text-decoration: none; transition: background 0.2s, transform 0.15s;
-  }
-
-  .btn-primary:hover { background: var(--leaf-mid); transform: translateY(-1px); }
-
-  .btn-secondary {
-    display: inline-flex; align-items: center; gap: 8px;
-    color: var(--soil); font-size: 15px; font-weight: 400;
-    text-decoration: none; transition: color 0.2s;
-  }
-
-  .btn-secondary:hover { color: var(--leaf); }
-
-  .btn-secondary svg { transition: transform 0.2s; }
-  .btn-secondary:hover svg { transform: translateX(3px); }
-
-  /* ── HERO RIGHT: Farm Ops Visual ─ */
-  .hero-visual {
-    position: relative; height: 480px;
-  }
-
-  .farm-card-main {
-    background: var(--white);
-    border-radius: 16px;
-    box-shadow: 0 4px 40px rgba(61,43,31,0.12);
-    padding: 24px;
-    position: absolute; top: 0; left: 0; right: 60px;
-  }
-
-  .farm-card-header {
-    display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 20px;
-  }
-
-  .farm-card-title {
-    font-size: 13px; font-weight: 500; color: var(--text-mid);
-    text-transform: uppercase; letter-spacing: 0.06em;
-  }
-
-  .status-badge {
-    font-size: 11px; font-weight: 500;
-    padding: 4px 10px; border-radius: 100px;
-  }
-
-  .status-live { background: #DCF5D8; color: var(--leaf); }
-
-  .farm-ops-grid {
-    display: grid; grid-template-columns: 1fr 1fr 1fr;
-    gap: 12px; margin-bottom: 20px;
-  }
-
-  .op-metric {
-    background: var(--cream); border-radius: 10px;
-    padding: 14px; text-align: center;
-  }
-
-  .op-metric-val {
-    font-family: 'Playfair Display', serif;
-    font-size: 24px; font-weight: 700; color: var(--soil);
-    line-height: 1;
-  }
-
-  .op-metric-lbl {
-    font-size: 11px; color: var(--text-light); margin-top: 4px;
-    font-weight: 400;
-  }
-
-  .farm-progress-wrap { margin-bottom: 16px; }
-
-  .farm-progress-label {
-    display: flex; justify-content: space-between;
-    font-size: 12px; color: var(--text-mid); margin-bottom: 6px;
-  }
-
-  .progress-bar {
-    height: 6px; background: var(--cream-dark);
-    border-radius: 3px; overflow: hidden;
-  }
-
-  .progress-fill {
-    height: 100%; border-radius: 3px;
-    background: linear-gradient(90deg, var(--leaf-mid), var(--leaf-light));
-    transition: width 1s ease;
-  }
-
-  .progress-fill.harvest { background: linear-gradient(90deg, var(--harvest), var(--harvest-light)); }
-  .progress-fill.sky { background: linear-gradient(90deg, var(--sky), #7BB8DA); }
-
-  .farm-activity {
-    border-top: 1px solid var(--cream-dark); padding-top: 16px;
-  }
-
-  .activity-item {
-    display: flex; align-items: center; gap: 10px;
-    padding: 7px 0; font-size: 13px; color: var(--text-mid);
-  }
-
-  .activity-dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .dot-green { background: var(--leaf-mid); }
-  .dot-amber { background: var(--harvest); }
-  .dot-blue { background: var(--sky); }
-
-  .activity-time { font-size: 11px; color: var(--text-light); margin-left: auto; }
-
-  /* floating mini cards */
-  .mini-card {
-    background: var(--white);
-    border-radius: 12px;
-    box-shadow: 0 4px 24px rgba(61,43,31,0.14);
-    padding: 14px 16px;
-    position: absolute;
-  }
-
-  .mini-card-1 {
-    bottom: 60px; right: 0; width: 180px;
-  }
-
-  .mini-card-2 {
-    top: 60px; right: -20px; width: 160px;
-  }
-
-  .mini-label { font-size: 11px; color: var(--text-light); margin-bottom: 4px; }
-
-  .mini-val {
-    font-family: 'Playfair Display', serif;
-    font-size: 20px; font-weight: 700; color: var(--soil);
-  }
-
-  .mini-change {
-    font-size: 12px; margin-top: 4px;
-    display: flex; align-items: center; gap: 4px;
-  }
-
-  .up { color: var(--leaf); }
-  .down { color: #E05050; }
-
-  /* ── STATS STRIP ─────────────────────────────────────── */
-  .stats-strip {
-    background: var(--soil);
-    padding: 36px 48px;
-    display: grid; grid-template-columns: repeat(4, 1fr);
-    gap: 0;
-  }
-
-  .stat-item {
-    text-align: center;
-    padding: 0 24px;
-    border-right: 1px solid rgba(245,240,232,0.1);
-  }
-
-  .stat-item:last-child { border-right: none; }
-
-  .stat-num {
-    font-family: 'Playfair Display', serif;
-    font-size: 36px; font-weight: 700; color: var(--cream);
-    line-height: 1;
-  }
-
-  .stat-label { font-size: 13px; color: var(--soil-light); margin-top: 6px; font-weight: 300; }
-
-  /* ── SECTION BASE ────────────────────────────────────── */
-  section { padding: 96px 48px; }
-
-  .section-eyebrow {
-    display: inline-flex; align-items: center; gap: 8px;
-    font-size: 11px; font-weight: 500; letter-spacing: 0.1em;
-    text-transform: uppercase; color: var(--leaf);
-    margin-bottom: 14px;
-  }
-
-  .section-eyebrow::before {
-    content: '';
-    display: block; width: 24px; height: 2px; background: var(--leaf);
-  }
-
-  .section-title {
-    font-family: 'Playfair Display', serif;
-    font-size: clamp(28px, 3vw, 40px);
-    font-weight: 700; line-height: 1.2;
-    color: var(--soil);
-    max-width: 560px;
-    margin-bottom: 16px;
-  }
-
-  .section-sub {
-    font-size: 16px; line-height: 1.7; color: var(--text-mid);
-    font-weight: 300; max-width: 560px;
-    margin-bottom: 56px;
-  }
-
-  /* ── CHALLENGES ─────────────────────────────────────── */
-  .challenges-section { background: var(--white); }
-
-  .challenges-layout {
-    display: grid; grid-template-columns: 1fr 1fr;
-    gap: 80px; align-items: start;
-  }
-
-  .challenge-cards { display: flex; flex-direction: column; gap: 16px; }
-
-  .challenge-card {
-    border: 1.5px solid var(--cream-dark);
-    border-radius: 12px; padding: 24px;
-    cursor: pointer;
-    transition: border-color 0.2s, box-shadow 0.2s;
-    position: relative;
-  }
-
-  .challenge-card:hover,
-  .challenge-card.active {
-    border-color: var(--leaf-mid);
-    box-shadow: 0 4px 20px rgba(74,138,66,0.1);
-  }
-
-  .challenge-card.active { background: #FAFFF9; }
-
-  .challenge-card-icon {
-    width: 40px; height: 40px; border-radius: 10px;
-    display: flex; align-items: center; justify-content: center;
-    margin-bottom: 12px;
-  }
-
-  .icon-red { background: #FEE8E8; }
-  .icon-amber { background: #FEF3DC; }
-  .icon-blue { background: #E8F2FE; }
-  .icon-purple { background: #F0ECFE; }
-
-  .challenge-card h3 {
-    font-size: 16px; font-weight: 500; color: var(--soil);
-    margin-bottom: 8px;
-  }
-
-  .challenge-card p {
-    font-size: 14px; line-height: 1.65; color: var(--text-mid);
-    font-weight: 300;
-  }
-
-  .challenge-visual {
-    position: sticky; top: 120px;
-  }
-
-  .challenge-illustration {
-    background: var(--cream); border-radius: 16px;
-    padding: 32px; min-height: 380px;
-    display: flex; flex-direction: column; justify-content: center;
-    gap: 16px;
-  }
-
-  /* spreadsheet chaos illustration */
-  .fake-spreadsheet {
-    background: var(--white); border-radius: 8px;
-    overflow: hidden; font-size: 12px;
-  }
-
-  .ss-header {
-    background: #E8EFDA; padding: 8px 12px;
-    display: grid; grid-template-columns: 2fr 1fr 1fr 1fr;
-    gap: 8px; font-weight: 500; color: var(--text-mid);
-    font-size: 11px;
-  }
-
-  .ss-row {
-    display: grid; grid-template-columns: 2fr 1fr 1fr 1fr;
-    gap: 8px; padding: 7px 12px;
-    border-bottom: 1px solid var(--cream-dark);
-  }
-
-  .ss-row:nth-child(even) { background: #FAFAFA; }
-
-  .ss-cell { color: var(--text-mid); font-size: 12px; }
-
-  .ss-cell.error {
-    color: #D93025; background: #FEE; padding: 2px 4px;
-    border-radius: 3px;
-  }
-
-  .chaos-label {
-    font-size: 13px; font-weight: 500; color: #D93025;
-    display: flex; align-items: center; gap: 6px;
-  }
-
-  /* ── FARM OPERATIONS ─────────────────────────────────── */
-  .farm-ops-section { background: var(--cream); }
-
-  .ops-modules {
-    display: grid; grid-template-columns: repeat(3, 1fr);
-    gap: 24px;
-  }
-
-  .ops-module {
-    background: var(--white); border-radius: 14px;
-    border: 1px solid var(--cream-dark);
-    padding: 28px; overflow: hidden;
-    position: relative;
-    transition: transform 0.2s, box-shadow 0.2s;
-  }
-
-  .ops-module:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 12px 40px rgba(61,43,31,0.1);
-  }
-
-  .ops-module::before {
-    content: '';
-    position: absolute; top: 0; left: 0; right: 0;
-    height: 3px;
-  }
-
-  .ops-module.green::before { background: var(--leaf-mid); }
-  .ops-module.amber::before { background: var(--harvest); }
-  .ops-module.sky::before { background: var(--sky); }
-  .ops-module.soil::before { background: var(--soil-mid); }
-  .ops-module.leaf-light::before { background: var(--leaf-light); }
-  .ops-module.harvest-light::before { background: var(--harvest-light); }
-  .ops-module.terracotta::before { background: #B85C3F; }
-  .ops-module.plum::before { background: #7A4A6E; }
-  .ops-module.slate::before { background: #4A5A6A; }
-
-  .ops-module-icon {
-    width: 44px; height: 44px; border-radius: 10px;
-    display: flex; align-items: center; justify-content: center;
-    margin-bottom: 16px;
-  }
-
-  .bg-leaf { background: var(--leaf-pale); }
-  .bg-harvest { background: #FEF3DC; }
-  .bg-sky { background: var(--sky-light); }
-  .bg-soil { background: var(--cream-dark); }
-  .bg-pink { background: #FDE8F0; }
-  .bg-teal { background: #DCF5EE; }
-  .bg-terracotta { background: #FBE4DA; }
-  .bg-plum { background: #F2E0EC; }
-  .bg-slate { background: #E2E8EE; }
-
-  .ops-module h3 {
-    font-size: 16px; font-weight: 500; color: var(--soil);
-    margin-bottom: 8px;
-  }
-
-  .ops-module p {
-    font-size: 14px; line-height: 1.65; color: var(--text-mid);
-    font-weight: 300; margin-bottom: 16px;
-  }
-
-  .ops-features { list-style: none; display: flex; flex-direction: column; gap: 7px; }
-
-  .ops-features li {
-    display: flex; align-items: flex-start; gap: 8px;
-    font-size: 13px; color: var(--text-mid);
-  }
-
-  .ops-features li::before {
-    content: '';
-    width: 5px; height: 5px; border-radius: 50%;
-    background: var(--leaf-mid); margin-top: 7px; flex-shrink: 0;
-  }
-
-  /* ── SOLUTION FLOW ───────────────────────────────────── */
-  .solution-section { background: var(--white); }
-
-  .solution-grid {
-    display: grid; grid-template-columns: 1fr 1fr;
-    gap: 80px; align-items: center;
-  }
-
-  .solution-steps { display: flex; flex-direction: column; gap: 0; }
-
-  .solution-step {
-    display: flex; gap: 24px;
-    padding: 24px 0;
-    border-bottom: 1px solid var(--cream-dark);
-  }
-
-  .solution-step:last-child { border-bottom: none; }
-
-  .step-num {
-    width: 36px; height: 36px; border-radius: 50%;
-    background: var(--leaf-pale); color: var(--leaf);
-    display: flex; align-items: center; justify-content: center;
-    font-family: 'Playfair Display', serif;
-    font-size: 16px; font-weight: 700;
-    flex-shrink: 0;
-  }
-
-  .step-body h4 {
-    font-size: 16px; font-weight: 500; color: var(--soil);
-    margin-bottom: 6px;
-  }
-
-  .step-body p {
-    font-size: 14px; line-height: 1.65; color: var(--text-mid);
-    font-weight: 300;
-  }
-
-  /* dashboard mock */
-  .dashboard-mock {
-    background: var(--cream); border-radius: 16px;
-    padding: 24px; position: relative;
-  }
-
-  .dash-top {
-    background: var(--soil); border-radius: 12px 12px 0 0;
-    padding: 14px 20px; display: flex; align-items: center; gap: 8px;
-  }
-
-  .dash-dot { width: 10px; height: 10px; border-radius: 50%; }
-
-  .dash-title {
-    font-size: 13px; color: rgba(245,240,232,0.7);
-    margin-left: 6px; font-weight: 300;
-  }
-
-  .dash-body {
-    background: var(--white); border-radius: 0 0 12px 12px;
-    padding: 20px; display: grid; grid-template-columns: 1fr 1fr;
-    gap: 12px;
-  }
-
-  .dash-metric {
-    background: var(--cream); border-radius: 8px;
-    padding: 14px; text-align: center;
-  }
-
-  .dash-metric-val {
-    font-family: 'Playfair Display', serif;
-    font-size: 22px; font-weight: 700; color: var(--soil);
-  }
-
-  .dash-metric-lbl {
-    font-size: 11px; color: var(--text-light); margin-top: 4px;
-  }
-
-  .dash-chart-row {
-    grid-column: 1 / -1; background: var(--cream);
-    border-radius: 8px; padding: 16px;
-  }
-
-  .bar-chart {
-    display: flex; align-items: flex-end; gap: 8px;
-    height: 80px; margin-top: 12px;
-  }
-
-  .bar-wrap { display: flex; flex-direction: column; align-items: center; flex: 1; gap: 4px; }
-
-  .bar {
-    width: 100%; border-radius: 4px 4px 0 0;
-    background: var(--leaf-light);
-    transition: height 0.5s ease;
-  }
-
-  .bar.highlight { background: var(--leaf); }
-
-  .bar-lbl { font-size: 10px; color: var(--text-light); }
-
-  /* ── CTA BANNER ─────────────────────────────────────── */
-  .cta-section {
-    background: var(--leaf);
-    padding: 80px 48px; text-align: center;
-  }
-
-  .cta-title {
-    font-family: 'Playfair Display', serif;
-    font-size: 40px; font-weight: 700;
-    color: var(--cream); margin-bottom: 16px; line-height: 1.15;
-  }
-
-  .cta-sub {
-    font-size: 17px; color: rgba(245,240,232,0.8);
-    font-weight: 300; margin-bottom: 40px;
-  }
-
-  .cta-btns { display: flex; gap: 16px; justify-content: center; }
-
-  .btn-cta-white {
-    display: inline-flex; align-items: center; gap: 8px;
-    background: var(--cream); color: var(--leaf);
-    padding: 14px 32px; border-radius: 8px;
-    font-size: 15px; font-weight: 500;
-    text-decoration: none; transition: background 0.2s, transform 0.15s;
-  }
-
-  .btn-cta-white:hover { background: var(--white); transform: translateY(-1px); }
-
-  .btn-cta-outline {
-    display: inline-flex; align-items: center; gap: 8px;
-    border: 1.5px solid rgba(245,240,232,0.5); color: var(--cream);
-    padding: 14px 32px; border-radius: 8px;
-    font-size: 15px; font-weight: 400;
-    text-decoration: none; transition: border-color 0.2s;
-  }
-
-  .btn-cta-outline:hover { border-color: var(--cream); }
-
-  /* ── FOOTER ──────────────────────────────────────────── */
-  footer {
-    background: var(--text-dark);
-    padding: 72px 48px 0;
-  }
-
-  .footer-inner {
-    display: grid;
-    grid-template-columns: 1.6fr 1fr 1fr 1fr;
-    gap: 48px;
-    padding-bottom: 56px;
-    border-bottom: 1px solid rgba(245,240,232,0.08);
-  }
-
-  .footer-logo {
-    display: flex; align-items: center; gap: 10px;
-    margin-bottom: 16px;
-  }
-
-  .footer-brand-name {
-    font-family: 'Playfair Display', serif;
-    font-size: 18px; font-weight: 700; color: var(--cream);
-  }
-
-  .footer-tagline-text {
-    font-size: 14px; line-height: 1.7; color: var(--soil-light);
-    font-weight: 300; margin-bottom: 20px;
-  }
-
-  .footer-carbon-badge {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: rgba(45,90,39,0.3);
-    border: 1px solid rgba(124,191,114,0.2);
-    color: var(--leaf-light);
-    padding: 6px 12px; border-radius: 100px;
-    font-size: 12px; font-weight: 400;
-  }
-
-  .footer-links-group {
-    display: flex; flex-direction: column; gap: 10px;
-  }
-
-  .footer-links-heading {
-    font-size: 11px; font-weight: 500;
-    text-transform: uppercase; letter-spacing: 0.08em;
-    color: var(--cream); margin-bottom: 4px;
-  }
-
-  .footer-link {
-    font-size: 14px; color: var(--soil-light);
-    text-decoration: none; font-weight: 300;
-    transition: color 0.2s;
-  }
-
-  .footer-link:hover { color: var(--leaf-light); }
-
-  .footer-bottom {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 24px 0;
-    font-size: 13px; color: rgba(160,120,88,0.6);
-  }
-
-  /* ── BEFORE / AFTER ─────────────────────────────────── */
-  .before-after-section { background: var(--cream); }
-
-  .ba-table-wrap { overflow-x: auto; }
-
-  .ba-table {
-    display: grid; grid-template-columns: 1fr 48px 1fr;
-    gap: 0; align-items: stretch;
-    background: var(--white);
-    border-radius: 16px;
-    border: 1px solid var(--cream-dark);
-    overflow: hidden;
-    min-width: 600px;
-  }
-
-  .ba-col { display: flex; flex-direction: column; }
-
-  .ba-col-head {
-    display: flex; align-items: center; gap: 12px;
-    padding: 20px 28px;
-    font-size: 15px; font-weight: 500;
-    border-bottom: 1px solid var(--cream-dark);
-  }
-
-  .ba-before .ba-col-head { background: #FEF0F0; color: #C0392B; }
-  .ba-after .ba-col-head { background: #EDF8EA; color: var(--leaf); }
-
-  .ba-col-icon {
-    width: 28px; height: 28px; border-radius: 50%;
-    background: #F9D4D4; color: #C0392B;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 14px; font-weight: 700;
-  }
-
-  .ba-icon-green { background: var(--leaf-pale); color: var(--leaf); }
-
-  .ba-row {
-    padding: 16px 28px;
-    border-bottom: 1px solid var(--cream-dark);
-    display: flex; flex-direction: column; gap: 4px;
-    flex: 1;
-  }
-
-  .ba-row:last-child { border-bottom: none; }
-
-  .ba-role {
-    font-size: 12px; font-weight: 500;
-    text-transform: uppercase; letter-spacing: 0.06em;
-    color: var(--text-light);
-  }
-
-  .ba-role-green { color: var(--leaf); }
-
-  .ba-desc { font-size: 14px; line-height: 1.6; color: var(--text-mid); font-weight: 300; }
-
-  .ba-divider {
-    display: flex; align-items: center; justify-content: center;
-    background: var(--cream); border-left: 1px solid var(--cream-dark);
-    border-right: 1px solid var(--cream-dark);
-  }
-
-  .ba-arrow {
-    font-size: 20px; color: var(--leaf-mid); font-weight: 300;
-  }
-
-  /* ── WORKFLOW ────────────────────────────────────────── */
-  .workflow-section { background: var(--white); }
-
-  .workflow-steps {
-    display: grid; grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr auto 1fr;
-    align-items: start; gap: 0;
-    margin-bottom: 32px;
-  }
-
-  .wf-step {
-    display: flex; flex-direction: column; align-items: center;
-    text-align: center; gap: 12px;
-  }
-
-  .wf-icon {
-    width: 56px; height: 56px; border-radius: 16px;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-  }
-
-  .wf-green { background: var(--leaf-pale); }
-  .wf-amber { background: #FEF3DC; }
-  .wf-sky { background: var(--sky-light); }
-  .wf-soil { background: var(--cream-dark); }
-  .wf-teal { background: #DCF5EE; }
-
-  .wf-label {
-    font-size: 14px; font-weight: 500; color: var(--soil);
-    line-height: 1.3;
-  }
-
-  .wf-detail {
-    font-size: 12px; line-height: 1.6; color: var(--text-light);
-    font-weight: 300; max-width: 150px;
-  }
-
-  .wf-arrow {
-    font-size: 22px; color: var(--leaf-light);
-    display: flex; align-items: flex-start; padding-top: 16px;
-    padding-left: 8px; padding-right: 8px;
-  }
-
-  .workflow-note {
-    display: flex; align-items: flex-start; gap: 10px;
-    background: var(--leaf-pale);
-    border-left: 3px solid var(--leaf-mid);
-    border-radius: 0 8px 8px 0;
-    padding: 14px 20px;
-    font-size: 14px; line-height: 1.6; color: var(--leaf);
-  }
-
-  /* ── SCROLL PROGRESS BAR ─────────────────────────────── */
-  .scroll-progress {
-    position: fixed; top: 0; left: 0; z-index: 200;
-    height: 3px; background: var(--leaf-mid);
-    width: 0%; transition: width 0.1s linear;
-  }
-
-  /* ── FAQ ─────────────────────────────────────────────── */
-  .faq-section { background: var(--cream); }
-
-  .faq-grid {
-    display: grid; grid-template-columns: 1fr 1fr;
-    gap: 16px;
-  }
-
-  .faq-item {
-    background: var(--white);
-    border: 1px solid var(--cream-dark);
-    border-radius: 12px; overflow: hidden;
-    cursor: pointer;
-    transition: border-color 0.2s;
-  }
-
-  .faq-item:hover { border-color: var(--leaf-light); }
-  .faq-item.open { border-color: var(--leaf-mid); }
-
-  .faq-question {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 20px 24px;
-    font-size: 15px; font-weight: 500; color: var(--soil);
-    gap: 16px;
-  }
-
-  .faq-icon {
-    width: 24px; height: 24px; border-radius: 50%;
-    background: var(--cream); flex-shrink: 0;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 16px; color: var(--leaf-mid);
-    transition: transform 0.3s, background 0.2s;
-    font-weight: 300; line-height: 1;
-  }
-
-  .faq-item.open .faq-icon { transform: rotate(45deg); background: var(--leaf-pale); }
-
-  .faq-answer {
-    max-height: 0; overflow: hidden;
-    transition: max-height 0.35s ease, padding 0.2s;
-    font-size: 14px; line-height: 1.7; color: var(--text-mid);
-    font-weight: 300; padding: 0 24px;
-  }
-
-  .faq-item.open .faq-answer { max-height: 200px; padding: 0 24px 20px; }
-
-  /* ── DARK MODE VARIABLES ─────────────────────────────── */
-  body.dark {
-    --cream:        #1A1A1A;
-    --cream-dark:   #242424;
-    --soil:         #E8DDD0;
-    --soil-mid:     #C4A882;
-    --soil-light:   #8A7060;
-    --leaf:         #4EAA44;
-    --leaf-mid:     #5DBF52;
-    --leaf-light:   #7DD472;
-    --leaf-pale:    #1A3018;
-    --harvest:      #D4943A;
-    --harvest-light:#F0C870;
-    --sky:          #5A90B5;
-    --sky-light:    #1E3A4A;
-    --white:        #222222;
-    --text-dark:    #F0E8DC;
-    --text-mid:     #B8A090;
-    --text-light:   #806858;
-  }
-
-  body.dark nav {
-    background: rgba(26,26,26,0.94);
-    border-bottom-color: rgba(255,255,255,0.06);
-  }
-
-  body.dark .mobile-menu { background: #1e1e1e; border-bottom-color: #333; }
-  body.dark .mobile-menu a { border-bottom-color: #333; }
-
-  body.dark .farm-card-main,
-  body.dark .mini-card,
-  body.dark .ops-module,
-  body.dark .challenge-card,
-  body.dark .faq-item,
-  body.dark .ba-table,
-  body.dark .dash-body,
-  body.dark .fake-spreadsheet { background: #2a2a2a; border-color: #333; }
-
-  body.dark .challenge-illustration,
-  body.dark .dashboard-mock { background: #1e1e1e; }
-
-  body.dark .ss-header { background: #1a2a18; }
-  body.dark .ss-row:nth-child(even) { background: #252525; }
-
-  body.dark .trusted-strip { background: #1e1e1e; border-bottom-color: #333; }
-
-  body.dark .ba-before .ba-col-head { background: #3a1a1a; }
-  body.dark .ba-after  .ba-col-head { background: #1a2e1a; }
-  body.dark .ba-divider { background: #1e1e1e; border-color: #333; }
-  body.dark .ba-row { border-bottom-color: #333; }
-
-  body.dark .challenges-section,
-  body.dark .solution-section,
-  body.dark .workflow-section { background: #1e1e1e; }
-
-  body.dark .dash-top { background: #111; }
-  body.dark .dash-metric { background: #1e1e1e; }
-  body.dark .dash-chart-row { background: #1e1e1e; }
-
-  body.dark .faq-item.active,
-  body.dark .challenge-card.active { background: #1a2e1a; }
-  body.dark .faq-icon { background: #1e1e1e; }
-  body.dark .faq-item.open .faq-icon { background: var(--leaf-pale); }
-
-  body.dark .workflow-note { background: #1a2e1a; }
-
-  body.dark .progress-bar { background: #333; }
-
-  body.dark .op-metric { background: #1e1e1e; }
-
-  /* ── LOGO RENDERING ──────────────────────────────────── */
+  .nav-brand { display: flex; align-items: center; flex: 0 0 auto; }
   .nav-brand img {
-    height: 38px;
-    object-fit: contain;
+    height: clamp(30px, 2.6vw, 38px); width: auto; object-fit: contain;
     filter: invert(1) hue-rotate(180deg);
-    transition: filter .18s ease;
+  }
+  .nav-links {
+    display: flex; align-items: center; flex: 0 0 auto; gap: clamp(8px, 2.2vw, 34px);
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500;
+    font-size: clamp(13px, 1.15vw, 16px); letter-spacing: -.2px; white-space: nowrap;
+  }
+  .nav-links a { color: #000; display: flex; align-items: center; gap: 5px; }
+  .nav-actions {
+    display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500;
+    font-size: clamp(13px, 1.1vw, 15px); letter-spacing: -.2px; white-space: nowrap;
+  }
+  .btn-ghost {
+    display: flex; align-items: center; justify-content: center; min-width: 72px;
+    padding: 0 14px; height: 40px; border-radius: 8px; background: transparent;
+    border: 1px solid rgba(0,0,0,.12); color: #000;
+  }
+  .btn-ghost:hover { background: rgba(255,255,255,.6); color: #000; }
+  .btn-dark {
+    display: flex; align-items: center; justify-content: center; padding: 0 18px;
+    height: 40px; border-radius: 8px; background: #000; color: #fff;
+  }
+  .btn-dark:hover { background: #1c1c1c; color: #fff; }
+
+  .hero-body {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 0 clamp(24px, 8vw, 120px); margin-top: -50px; gap: 44px;
+  }
+  .hero-stack { display: flex; flex-direction: column; align-items: center; gap: 34px; }
+  .hero-badge {
+    display: flex; align-items: center; gap: 10px; padding: 5px 14px 5px 5px;
+    background: transparent; border: 1px solid rgba(0,0,0,.12); border-radius: 100px;
+    font-size: 14px; color: #000;
+  }
+  .hero-badge .pill {
+    display: flex; align-items: center; gap: 6px; padding: 4px 10px;
+    background: #0e1311; color: #fff; border-radius: 100px; font-size: 13px;
+  }
+  .hero h1 {
+    font-family: 'Fustat', sans-serif; font-weight: 700; font-size: 80px; letter-spacing: -4.8px;
+    line-height: 1; text-align: center; max-width: 1000px; text-wrap: balance;
+  }
+  .hero-sub {
+    font-family: 'Fustat', sans-serif; font-weight: 500; font-size: 20px; letter-spacing: -.4px;
+    line-height: 1.5; color: #2a2a2a; text-align: center; width: 620px; max-width: 100%; text-wrap: pretty;
+  }
+  .hero-actions {
+    display: flex; align-items: center; gap: 12px;
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500; font-size: 15px; letter-spacing: -.2px;
+  }
+  .btn-lg-dark {
+    display: inline-flex; align-items: center; gap: 8px; height: 48px; padding: 0 24px;
+    border-radius: 10px; background: #000; color: #fff;
+  }
+  .btn-lg-dark:hover { background: #1c1c1c; color: #fff; }
+  .btn-lg-light {
+    display: inline-flex; align-items: center; height: 48px; padding: 0 24px; border-radius: 10px;
+    background: rgba(255,255,255,.7); border: 1px solid rgba(0,0,0,.12); color: #000;
+  }
+  .btn-lg-light:hover { background: #fff; color: #000; }
+
+  /* STATS */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); background: #0e1311; padding: 44px 120px; }
+  .stat { padding: 0 24px; border-right: 1px solid rgba(255,255,255,.1); text-align: center; }
+  .stat:last-child { border-right: none; }
+  .stat-num {
+    font-family: 'Fustat', sans-serif; font-weight: 700; font-size: 40px;
+    letter-spacing: -2px; line-height: 1; color: #fff;
+  }
+  .stat-lbl { font-size: 13px; color: rgba(255,255,255,.6); margin-top: 8px; }
+
+  /* TRUSTED */
+  .trusted {
+    background: #fff; border-bottom: 1px solid #ebebeb; padding: 28px 120px;
+    display: flex; align-items: center; justify-content: center; gap: 48px; flex-wrap: wrap;
+  }
+  .trusted-label {
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500; font-size: 12px;
+    letter-spacing: .1em; text-transform: uppercase; color: #505050; white-space: nowrap;
+  }
+  .trusted-logos {
+    display: flex; align-items: center; gap: 40px; flex-wrap: wrap; justify-content: center;
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 600; font-size: 15px;
+    letter-spacing: -.4px; color: #c9c9c9;
   }
 
-  body.dark .nav-brand img {
-    filter: none;
-  }
+  /* TWO-COLUMN SECTIONS */
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 80px; }
+  .split.top { align-items: start; }
+  .split.mid { align-items: center; }
 
-  .footer-logo img {
-    height: 44px;
-    object-fit: contain;
-    filter: none;
+  .card {
+    border: 1px solid #ebebeb; border-radius: 14px; padding: 26px; background: #fff;
   }
-  /* ── SIGN IN MODAL ───────────────────────────────────── */
-  .modal-overlay {
-    position: fixed; inset: 0; z-index: 500;
-    background: rgba(30,20,16,0.6);
-    backdrop-filter: blur(6px);
+  .card.tinted { background: #f8f8f8; }
+  .card h3, .module h3 {
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 600; font-size: 17px;
+    letter-spacing: -.4px; color: #000; margin-bottom: 8px;
+  }
+  .card p { font-size: 14px; line-height: 1.65; color: #505050; }
+  .stack-14 { display: flex; flex-direction: column; gap: 14px; }
+
+  .panel {
+    position: sticky; top: 40px; background: #f8f8f8; border: 1px solid #ebebeb;
+    border-radius: 18px; padding: 32px; display: flex; flex-direction: column; gap: 18px;
+  }
+  .panel-title {
+    display: flex; align-items: center; gap: 8px;
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 600; font-size: 13px;
+    letter-spacing: -.2px; color: #000;
+  }
+  .ss { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; overflow: hidden; font-family: 'Noto Sans', sans-serif; font-size: 12px; }
+  .ss-row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 8px; padding: 9px 14px; border-top: 1px solid #f1f1f1; color: #505050; }
+  .ss-head { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 8px; padding: 10px 14px; background: #f1f1f1; font-weight: 600; font-size: 11px; color: #505050; }
+  .bad { color: #b3261e; }
+  .panel-note { font-size: 13px; line-height: 1.65; color: #505050; }
+
+  /* MODULES */
+  .modules { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .module { background: #fff; border: 1px solid #ebebeb; border-radius: 16px; padding: 28px; }
+  .module-icon {
+    width: 44px; height: 44px; border-radius: 10px; background: #f1f1f1;
+    display: flex; align-items: center; justify-content: center; margin-bottom: 18px;
+  }
+  .module p { font-size: 14px; line-height: 1.65; color: #505050; margin-bottom: 18px; }
+  .module ul { display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #505050; }
+
+  /* STEPS */
+  .steps { display: flex; flex-direction: column; }
+  .step { display: flex; gap: 24px; padding: 24px 0; border-bottom: 1px solid #ebebeb; }
+  .step:last-child { border-bottom: none; }
+  .step-num {
+    width: 36px; height: 36px; flex: 0 0 36px; border-radius: 50%; background: #0e1311; color: #fff;
     display: flex; align-items: center; justify-content: center;
-    opacity: 0; pointer-events: none;
-    transition: opacity 0.25s ease;
-    padding: 20px;
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 600; font-size: 15px;
   }
-
-  .modal-overlay.open { opacity: 1; pointer-events: all; }
-
-  .modal-card {
-    background: var(--cream);
-    border-radius: 20px;
-    padding: 40px 36px;
-    width: 100%; max-width: 420px;
-    position: relative;
-    box-shadow: 0 24px 80px rgba(0,0,0,0.25);
-    transform: translateY(16px) scale(0.98);
-    transition: transform 0.25s ease;
+  .step h4 {
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 600; font-size: 17px;
+    letter-spacing: -.4px; color: #000; margin-bottom: 6px;
   }
+  .step p { font-size: 14px; line-height: 1.65; color: #505050; }
 
-  .modal-overlay.open .modal-card { transform: translateY(0) scale(1); }
+  /* DASHBOARD MOCK */
+  .dash { background: #f8f8f8; border: 1px solid #ebebeb; border-radius: 18px; padding: 24px; }
+  .dash-top { background: #0e1311; border-radius: 12px 12px 0 0; padding: 14px 20px; display: flex; align-items: center; gap: 8px; }
+  .dash-dot { width: 10px; height: 10px; border-radius: 50%; background: rgba(255,255,255,.25); }
+  .dash-dot.live { background: rgba(90,225,76,.89); }
+  .dash-title { font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500; font-size: 13px; color: rgba(255,255,255,.7); margin-left: 6px; }
+  .dash-body { background: #fff; border-radius: 0 0 12px 12px; padding: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .dash-metric { background: #f8f8f8; border-radius: 10px; padding: 16px; text-align: center; }
+  .dash-metric-val { font-family: 'Fustat', sans-serif; font-weight: 700; font-size: 24px; letter-spacing: -1.2px; color: #000; }
+  .dash-metric-lbl { font-size: 11px; color: #505050; margin-top: 4px; }
+  .dash-chart { grid-column: 1 / -1; background: #f8f8f8; border-radius: 10px; padding: 16px; }
+  .dash-chart-lbl { font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500; font-size: 12px; color: #505050; }
+  .bars { display: flex; align-items: flex-end; gap: 8px; height: 80px; margin-top: 12px; }
+  .bar-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .bar { width: 100%; border-radius: 4px 4px 0 0; background: #d8d8d8; }
+  .bar.hi { background: #0e1311; }
+  .bar-lbl { font-size: 10px; color: #505050; }
 
-  body.dark .modal-card { background: #222; box-shadow: 0 24px 80px rgba(0,0,0,0.5); }
-
-  .modal-close {
-    position: absolute; top: 16px; right: 16px;
-    width: 32px; height: 32px; border-radius: 50%;
-    border: none; background: var(--cream-dark);
-    color: var(--text-mid); font-size: 14px;
-    cursor: pointer; display: flex; align-items: center; justify-content: center;
-    transition: background 0.2s, color 0.2s;
+  /* BEFORE / AFTER */
+  .ba { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .ba-col { border-radius: 18px; overflow: hidden; }
+  .ba-before { background: #fff; border: 1px solid #ebebeb; }
+  .ba-after { background: #0e1311; }
+  .ba-head {
+    display: flex; align-items: center; gap: 12px; padding: 20px 28px;
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 600; font-size: 15px; letter-spacing: -.3px;
   }
-
-  .modal-close:hover { background: var(--leaf-pale); color: var(--leaf); }
-  body.dark .modal-close { background: #333; color: var(--soil-mid); }
-
-  .modal-logo { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
-
-  .modal-logo-img {
-    height: 44px; width: auto; object-fit: contain; flex-shrink: 0;
-    filter: invert(1) hue-rotate(180deg);
-    transition: filter .18s ease;
+  .ba-before .ba-head { border-bottom: 1px solid #ebebeb; color: #505050; }
+  .ba-after .ba-head { border-bottom: 1px solid rgba(255,255,255,.1); color: #fff; }
+  .ba-mark {
+    width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; font-size: 13px; background: #f1f1f1; color: #000;
   }
-
-  body.dark .modal-logo-img { filter: none; }
-
-  .modal-brand {
-    font-family: 'Playfair Display', serif;
-    font-size: 16px; font-weight: 700; color: var(--soil); line-height: 1.2;
+  .ba-after .ba-mark { background: rgba(90,225,76,.89); color: #0e1311; }
+  .ba-row { padding: 16px 28px; }
+  .ba-before .ba-row { border-bottom: 1px solid #f1f1f1; }
+  .ba-after .ba-row { border-bottom: 1px solid rgba(255,255,255,.08); }
+  .ba-row:last-child { border-bottom: none !important; }
+  .ba-role {
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500; font-size: 11px;
+    letter-spacing: .06em; text-transform: uppercase; color: #a0a0a0; margin-bottom: 4px;
   }
+  .ba-after .ba-role { color: rgba(90,225,76,.89); }
+  .ba-desc { font-size: 14px; line-height: 1.6; color: #505050; }
+  .ba-after .ba-desc { color: rgba(255,255,255,.75); }
 
-  .modal-subbrand { font-size: 11px; color: var(--text-light); font-weight: 300; }
-
-  .modal-title {
-    font-family: 'Playfair Display', serif;
-    font-size: 26px; font-weight: 700; color: var(--soil); margin-bottom: 6px;
+  /* WORKFLOW */
+  .flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px; margin-bottom: 28px; }
+  .flow-step { display: flex; flex-direction: column; gap: 14px; padding-right: 20px; border-right: 1px solid #ebebeb; }
+  .flow-step:last-child { border-right: none; padding-right: 0; }
+  .flow-icon { width: 52px; height: 52px; border-radius: 14px; background: #f8f8f8; display: flex; align-items: center; justify-content: center; }
+  .flow-title { font-family: 'Schibsted Grotesk', sans-serif; font-weight: 600; font-size: 15px; letter-spacing: -.3px; color: #000; }
+  .flow-desc { font-size: 13px; line-height: 1.6; color: #505050; }
+  .note {
+    display: flex; align-items: flex-start; gap: 10px; background: #f8f8f8; border-radius: 12px;
+    padding: 16px 20px; font-size: 14px; line-height: 1.6; color: #000;
   }
+  .note svg { flex-shrink: 0; margin-top: 3px; }
 
-  .modal-sub { font-size: 14px; color: var(--text-light); font-weight: 300; margin-bottom: 28px; }
+  /* FAQ */
+  .faq-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .faq {
+    background: #fff; border: 1px solid #ebebeb; border-radius: 14px; padding: 22px 24px;
+    cursor: pointer; align-self: start;
+  }
+  .faq-q { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .faq-q span:first-child {
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 600; font-size: 16px;
+    letter-spacing: -.3px; color: #000;
+  }
+  .faq-sign {
+    width: 24px; height: 24px; flex: 0 0 24px; border-radius: 50%; background: #f1f1f1; color: #000;
+    display: flex; align-items: center; justify-content: center; font-size: 15px; line-height: 1;
+  }
+  .faq-a { font-size: 14px; line-height: 1.7; color: #505050; margin-top: 14px; display: none; }
+  .faq.open .faq-a { display: block; }
 
-  .modal-form { display: flex; flex-direction: column; gap: 18px; }
+  /* CTA */
+  .cta { background: #0e1311; padding: 112px 120px; text-align: center; }
+  .cta h2 {
+    font-family: 'Fustat', sans-serif; font-weight: 700; font-size: 64px; letter-spacing: -3.5px;
+    line-height: 1.02; color: #fff; margin-bottom: 18px;
+  }
+  .cta p {
+    font-family: 'Fustat', sans-serif; font-weight: 500; font-size: 20px; letter-spacing: -.4px;
+    color: rgba(255,255,255,.7); margin-bottom: 40px;
+  }
+  .cta-btns {
+    display: flex; gap: 12px; justify-content: center;
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500; font-size: 15px; letter-spacing: -.2px;
+  }
+  .btn-white { display: inline-flex; align-items: center; gap: 8px; background: #fff; color: #0e1311; padding: 14px 28px; border-radius: 8px; }
+  .btn-white:hover { background: rgba(90,225,76,.89); color: #0e1311; }
+  .btn-outline { display: inline-flex; align-items: center; gap: 8px; border: 1px solid rgba(255,255,255,.3); color: #fff; padding: 14px 28px; border-radius: 8px; }
+  .btn-outline:hover { border-color: #fff; color: #fff; }
 
-  .form-group { display: flex; flex-direction: column; gap: 6px; }
+  /* FOOTER */
+  footer { background: #fff; padding: 80px 120px 0; border-top: 1px solid #ebebeb; }
+  .footer-inner { display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 48px; padding-bottom: 56px; border-bottom: 1px solid #ebebeb; }
+  .footer-logo { display: flex; align-items: center; margin-bottom: 16px; }
+  .footer-logo img { height: 44px; width: auto; object-fit: contain; filter: invert(1) hue-rotate(180deg); }
+  .footer-about { font-size: 14px; line-height: 1.7; color: #505050; margin-bottom: 20px; max-width: 340px; }
+  .footer-badge {
+    display: inline-flex; align-items: center; gap: 6px; background: #f8f8f8; border: 1px solid #ebebeb;
+    color: #000; padding: 7px 13px; border-radius: 100px;
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500; font-size: 12px;
+  }
+  .footer-col { display: flex; flex-direction: column; gap: 10px; }
+  .footer-head {
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 600; font-size: 11px;
+    letter-spacing: .08em; text-transform: uppercase; color: #000; margin-bottom: 6px;
+  }
+  .footer-col a { font-size: 14px; color: #505050; }
+  .footer-bottom { display: flex; justify-content: space-between; align-items: center; padding: 24px 0; font-size: 13px; color: #a0a0a0; }
 
-  .form-label {
+  /* SIGN IN MODAL */
+  .login-overlay {
+    position: fixed; inset: 0; z-index: 500; background: rgba(0,0,0,.5);
+    backdrop-filter: blur(6px); display: flex; align-items: center; justify-content: center;
+    padding: 20px; opacity: 0; transition: opacity .22s ease;
+  }
+  .login-overlay.open { opacity: 1; }
+  .login-modal {
+    background: #fff; border: 1px solid #ebebeb; border-radius: 18px; padding: 36px;
+    width: 100%; max-width: 420px; position: relative;
+    box-shadow: 0 24px 80px rgba(0,0,0,.22);
+    transform: translateY(14px) scale(.98); transition: transform .22s ease;
+  }
+  .login-overlay.open .login-modal { transform: none; }
+  .login-close {
+    position: absolute; top: 16px; right: 16px; width: 32px; height: 32px; border-radius: 50%;
+    border: 1px solid #ebebeb; background: #f8f8f8; color: #505050; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .login-close:hover { background: #f1f1f1; color: #000; }
+  .login-modal img { height: 40px; width: auto; object-fit: contain; filter: invert(1) hue-rotate(180deg); margin-bottom: 22px; }
+  .login-modal h2 {
+    font-family: 'Fustat', sans-serif; font-weight: 700; font-size: 28px;
+    letter-spacing: -1.4px; color: #000; margin-bottom: 6px;
+  }
+  .login-modal .sub { font-size: 14px; color: #505050; margin-bottom: 26px; }
+  .login-form { display: flex; flex-direction: column; gap: 16px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label {
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500; font-size: 13px; color: #505050;
     display: flex; justify-content: space-between; align-items: center;
-    font-size: 13px; font-weight: 500; color: var(--text-mid);
   }
-
-  .form-forgot { font-size: 12px; color: var(--leaf); text-decoration: none; font-weight: 400; transition: color 0.2s; }
-  .form-forgot:hover { color: var(--leaf-mid); text-decoration: underline; }
-
-  .input-wrap { position: relative; }
-
-  .form-input {
-    width: 100%; padding: 12px 16px;
-    border: 1.5px solid var(--cream-dark); border-radius: 8px;
-    background: var(--white);
-    font-family: 'DM Sans', sans-serif;
-    font-size: 14px; color: var(--soil); outline: none;
-    transition: border-color 0.2s, box-shadow 0.2s;
+  .field input {
+    width: 100%; padding: 12px 14px; border: 1px solid #e0e0e0; border-radius: 8px;
+    background: #fff; font-family: 'Inter', sans-serif; font-size: 14px; color: #000; outline: none;
   }
-
-  .form-input::placeholder { color: var(--text-light); }
-  .form-input:focus { border-color: var(--leaf-mid); box-shadow: 0 0 0 3px rgba(74,138,66,0.12); }
-  .input-wrap .form-input { padding-right: 44px; }
-
-  body.dark .form-input { background: #2a2a2a; border-color: #444; color: var(--soil); }
-  body.dark .form-input:focus { border-color: var(--leaf-mid); }
-
-  .input-eye {
-    position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
-    background: none; border: none; cursor: pointer;
-    color: var(--text-light); padding: 4px;
-    display: flex; align-items: center; justify-content: center; transition: color 0.2s;
+  .field input:focus { border-color: #000; }
+  .pwd-wrap { position: relative; }
+  .pwd-wrap input { padding-right: 44px; }
+  .pwd-eye {
+    position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+    background: none; border: none; cursor: pointer; color: #a0a0a0; padding: 4px;
+    display: flex; align-items: center;
   }
-
-  .input-eye:hover { color: var(--leaf); }
-
-  .checkbox-wrap {
-    display: flex; align-items: center; gap: 10px;
-    font-size: 13px; color: var(--text-mid); cursor: pointer; user-select: none;
+  .pwd-eye:hover { color: #000; }
+  .login-submit {
+    display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
+    height: 48px; background: #000; color: #fff; border: none; border-radius: 10px;
+    font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500; font-size: 15px; cursor: pointer;
   }
+  .login-submit:hover { background: #1c1c1c; }
+  .login-submit:disabled { opacity: .6; cursor: default; }
+  .login-msg { font-size: 13px; color: #b3261e; }
+  .login-notice { font-size: 13px; color: #505050; }
+  body.modal-open { overflow: hidden; }
 
-  .checkbox-wrap input { display: none; }
-
-  .checkbox-custom {
-    width: 18px; height: 18px; border-radius: 4px;
-    border: 1.5px solid var(--cream-dark);
-    background: var(--white); flex-shrink: 0;
-    display: flex; align-items: center; justify-content: center;
-    transition: background 0.2s, border-color 0.2s;
-  }
-
-  .checkbox-wrap input:checked + .checkbox-custom { background: var(--leaf); border-color: var(--leaf); }
-  .checkbox-wrap input:checked + .checkbox-custom::after {
-    content: ''; width: 5px; height: 9px;
-    border: 2px solid #fff; border-top: none; border-left: none;
-    transform: rotate(45deg) translateY(-1px); display: block;
-  }
-
-  .btn-signin {
-    display: flex; align-items: center; justify-content: center; gap: 8px;
-    width: 100%; padding: 14px;
-    background: var(--leaf); color: var(--cream);
-    border: none; border-radius: 8px;
-    font-family: 'DM Sans', sans-serif; font-size: 15px; font-weight: 500;
-    cursor: pointer; transition: background 0.2s, transform 0.15s;
-  }
-
-  .btn-signin:hover { background: var(--leaf-mid); transform: translateY(-1px); }
-
-  .modal-divider {
-    display: flex; align-items: center; gap: 12px;
-    font-size: 12px; color: var(--text-light);
-  }
-
-  .modal-divider::before, .modal-divider::after {
-    content: ''; flex: 1; height: 1px; background: var(--cream-dark);
-  }
-
-  .btn-demo-access {
-    width: 100%; padding: 12px;
-    background: transparent; border: 1.5px solid var(--cream-dark);
-    border-radius: 8px; font-family: 'DM Sans', sans-serif;
-    font-size: 14px; font-weight: 400; color: var(--text-mid);
-    cursor: pointer; transition: border-color 0.2s, color 0.2s;
-  }
-
-  .btn-demo-access:hover { border-color: var(--leaf); color: var(--leaf); }
-
-  .modal-footer-note { text-align: center; font-size: 12px; color: var(--text-light); margin-top: 20px; }
-  .modal-footer-note a { color: var(--leaf); text-decoration: none; }
-  .modal-footer-note a:hover { text-decoration: underline; }
-
-  /* ── NAV SIGN IN ──────────────────────────────────────── */
-  .nav-signin {
-    font-size: 14px; font-weight: 400; color: var(--text-mid) !important;
-    text-decoration: none; letter-spacing: 0.01em;
-    padding: 8px 14px; border-radius: 6px;
-    border: 1.5px solid var(--cream-dark);
-    transition: border-color 0.2s, color 0.2s, background 0.2s;
-  }
-
-  .nav-signin:hover {
-    border-color: var(--leaf);
-    color: var(--leaf) !important;
-  }
-
-  /* ── THEME TOGGLE ─────────────────────────────────────── */
-  .nav-right {
-    display: flex; align-items: center; gap: 12px;
-  }
-
-  .theme-toggle {
-    width: 36px; height: 36px;
-    border-radius: 8px;
-    border: 1.5px solid var(--cream-dark);
-    background: transparent;
-    cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    color: var(--text-mid);
-    transition: border-color 0.2s, color 0.2s, background 0.2s, transform 0.2s;
-    position: relative; overflow: hidden;
-  }
-
-  .theme-toggle:hover {
-    border-color: var(--leaf);
-    color: var(--leaf);
-    transform: rotate(20deg);
-  }
-
-  .theme-icon {
-    position: absolute;
-    display: flex; align-items: center; justify-content: center;
-    transition: opacity 0.3s, transform 0.3s;
-  }
-
-  /* Light mode: show sun, hide moon */
-  .theme-sun  { opacity: 1; transform: translateY(0); }
-  .theme-moon { opacity: 0; transform: translateY(8px); }
-
-  /* Dark mode: hide sun, show moon */
-  body.dark .theme-sun  { opacity: 0; transform: translateY(-8px); }
-  body.dark .theme-moon { opacity: 1; transform: translateY(0); }
-
-  body.dark .theme-toggle { border-color: #444; color: var(--soil-mid); }
-  body.dark .theme-toggle:hover { border-color: var(--leaf); color: var(--leaf); }
-  body.dark .nav-signin { border-color: #444; }
-
-  @media (max-width: 900px) {
-    .theme-toggle { display: flex; }
-  }
-  .nav-hamburger {
-    display: none;
-    flex-direction: column; justify-content: center; gap: 5px;
-    width: 36px; height: 36px;
-    background: none; border: none; cursor: pointer; padding: 4px;
-  }
-
-  .nav-hamburger span {
-    display: block; height: 2px; background: var(--soil);
-    border-radius: 2px; transition: all 0.25s;
-  }
-
+  /* MOBILE */
+  .nav-hamburger { display: none; flex-direction: column; justify-content: center; gap: 5px; width: 36px; height: 36px; background: none; border: none; cursor: pointer; padding: 4px; }
+  .nav-hamburger span { display: block; height: 2px; background: #000; border-radius: 2px; transition: all .25s; }
   .nav-hamburger.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
   .nav-hamburger.open span:nth-child(2) { opacity: 0; }
   .nav-hamburger.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
-
   .mobile-menu {
-    display: none;
-    position: fixed; top: 68px; left: 0; right: 0; z-index: 99;
-    background: var(--cream);
-    border-bottom: 1px solid var(--cream-dark);
-    flex-direction: column; padding: 16px 20px 24px;
-    gap: 4px;
-    box-shadow: 0 8px 32px rgba(61,43,31,0.1);
+    display: none; position: fixed; top: 68px; left: 0; right: 0; z-index: 99;
+    background: #fff; border-bottom: 1px solid #ebebeb; flex-direction: column;
+    padding: 12px 20px 20px; box-shadow: 0 8px 32px rgba(0,0,0,.08);
   }
-
   .mobile-menu.open { display: flex; }
-
-  .mobile-menu a {
-    font-size: 16px; font-weight: 400; color: var(--text-mid);
-    text-decoration: none; padding: 12px 0;
-    border-bottom: 1px solid var(--cream-dark);
-    transition: color 0.2s;
-  }
-
+  .mobile-menu a { font-size: 16px; color: #505050; padding: 12px 0; border-bottom: 1px solid #f1f1f1; }
   .mobile-menu a:last-child { border-bottom: none; }
-  .mobile-menu a:hover { color: var(--leaf); }
 
-  .mobile-cta {
-    margin-top: 8px;
-    background: var(--leaf) !important; color: var(--cream) !important;
-    text-align: center; border-radius: 8px;
-    padding: 14px 0 !important; font-weight: 500 !important;
-    border-bottom: none !important;
+  @media (max-width: 1100px) {
+    .sec, .cta, footer, .stats, .trusted { padding-left: 56px; padding-right: 56px; }
+    .modules { grid-template-columns: repeat(2, 1fr); }
+    .flow { grid-template-columns: repeat(2, 1fr); }
+    .flow-step { border-right: none; padding-right: 0; }
+    .split { gap: 48px; }
   }
-
-  /* ── TRUSTED BY STRIP ────────────────────────────────── */
-  .trusted-strip {
-    background: var(--white);
-    padding: 28px 48px;
-    border-bottom: 1px solid var(--cream-dark);
-  }
-
-  .trusted-inner {
-    display: flex; align-items: center; gap: 48px;
-    justify-content: center;
-  }
-
-  .trusted-label {
-    font-size: 12px; font-weight: 500; color: var(--text-light);
-    text-transform: uppercase; letter-spacing: 0.1em;
-    white-space: nowrap; flex-shrink: 0;
-  }
-
-  .trusted-logos {
-    display: flex; align-items: center; gap: 40px;
-    flex-wrap: wrap; justify-content: center;
-  }
-
-  .trusted-logo {
-    font-family: 'Playfair Display', serif;
-    font-size: 15px; font-weight: 700;
-    color: var(--cream-dark);
-    letter-spacing: 0.02em;
-    transition: color 0.2s;
-    white-space: nowrap;
-  }
-
-  .trusted-logo:hover { color: var(--soil-light); }
-
-  /* ── STAT COUNTER ANIMATION ──────────────────────────── */
-  .stat-num { transition: opacity 0.3s; }
-
-  /* ── SECTION ID PADDING FIX (nav offset) ────────────── */
-  section[id] { scroll-margin-top: 80px; }
-
-  @media (max-width: 900px) {
-    .trusted-strip { padding: 20px; }
-    .trusted-inner { gap: 24px; flex-wrap: wrap; }
-    .trusted-logos { gap: 20px; }
-    .nav-hamburger { display: flex; }
-    .nav-links { display: none !important; }
-  }
-  @media (max-width: 900px) {
-    nav { padding: 16px 20px; }
+  @media (max-width: 860px) {
     .nav-links { display: none; }
-
-    .hero {
-      grid-template-columns: 1fr;
-      padding: 100px 20px 60px;
-      gap: 48px;
-    }
-    .hero-visual { height: auto; }
-    .mini-card { display: none; }
-    .farm-card-main { right: 0; position: relative; }
-
-    .stats-strip { grid-template-columns: 1fr 1fr; gap: 24px; padding: 36px 24px; }
-    .stat-item { border-right: none; }
-
-    section { padding: 64px 20px; }
-
-    .challenges-layout { grid-template-columns: 1fr; gap: 40px; }
-    .challenge-visual { position: relative; top: auto; }
-
-    .ops-modules { grid-template-columns: 1fr; }
-
-    .solution-grid { grid-template-columns: 1fr; gap: 48px; }
-
-    .ba-table { grid-template-columns: 1fr; }
-    .ba-divider { display: none; }
-    .ba-before .ba-col-head::before { content: 'Without the system'; }
-
-    .workflow-steps {
-      grid-template-columns: 1fr;
-      gap: 24px;
-    }
-    .wf-arrow { transform: rotate(90deg); justify-content: center; padding: 0; }
-
-    .faq-grid { grid-template-columns: 1fr; }
-
-    .footer-inner { grid-template-columns: 1fr 1fr; gap: 32px; padding: 40px 0; }
-    footer { padding: 48px 20px 0; }
-    .footer-bottom { flex-direction: column; gap: 8px; text-align: center; }
-
-    .cta-section { padding: 64px 20px; }
+    .nav-hamburger { display: flex; }
+    .hero { min-height: 640px; height: 100svh; }
+    .hero h1 { font-size: 44px; letter-spacing: -2.2px; }
+    .hero-sub { font-size: 17px; width: auto; }
+    .hero-actions { flex-direction: column; width: 100%; max-width: 320px; }
+    .hero-actions a { width: 100%; justify-content: center; }
+    .sec, .cta, footer { padding: 64px 20px; }
+    footer { padding-bottom: 0; }
+    .stats { grid-template-columns: 1fr 1fr; gap: 24px; padding: 32px 20px; }
+    .stat { border-right: none; }
+    .trusted { padding: 20px; gap: 20px; }
+    .split, .modules, .ba, .faq-grid, .flow { grid-template-columns: 1fr; }
+    .panel { position: static; }
+    .h2 { font-size: 34px; letter-spacing: -1.6px; }
+    .cta h2 { font-size: 38px; letter-spacing: -1.8px; }
     .cta-btns { flex-direction: column; align-items: center; }
+    .footer-inner { grid-template-columns: 1fr 1fr; gap: 32px; }
+    .footer-bottom { flex-direction: column; gap: 8px; text-align: center; }
   }
-
-
-  .fade-in {
-    opacity: 0; transform: translateY(24px);
-    transition: opacity 0.6s ease, transform 0.6s ease;
-  }
-
-  .fade-in.visible {
-    opacity: 1; transform: translateY(0);
-  }
-
-  .fade-in-delay-1 { transition-delay: 0.1s; }
-  .fade-in-delay-2 { transition-delay: 0.2s; }
-  .fade-in-delay-3 { transition-delay: 0.3s; }
 </style>
 </head>
 <body>
-<div class="scroll-progress" id="scrollProgress"></div>
 
-<!-- NAV -->
-<nav>
-  <div class="nav-brand">
-    <img src="/static/ERP_logo.png" alt="AZed Farm" />
-  </div>
-  <div class="nav-links" id="navLinks">
-    <a href="#operations">Operations</a>
-    <a href="#challenges">Challenges</a>
-    <a href="#solutions">Solutions</a>
-    <a href="#" class="nav-signin" onclick="openSignin(event)">Sign In</a>
-    <a href="#" class="nav-cta">Request Demo</a>
-  </div>
-  <div class="nav-right">
-    <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" aria-label="Toggle dark mode">
-      <span class="theme-icon theme-sun">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 11a3 3 0 100-6 3 3 0 000 6zm0 1a4 4 0 100-8 4 4 0 000 8zM8 0a.5.5 0 01.5.5v1a.5.5 0 01-1 0v-1A.5.5 0 018 0zm0 13a.5.5 0 01.5.5v1a.5.5 0 01-1 0v-1A.5.5 0 018 13zm8-5a.5.5 0 01-.5.5h-1a.5.5 0 010-1h1a.5.5 0 01.5.5zM2 8a.5.5 0 01-.5.5h-1a.5.5 0 010-1h1A.5.5 0 012 8zm10.95-4.95a.5.5 0 010 .707l-.707.707a.5.5 0 11-.707-.707l.707-.707a.5.5 0 01.707 0zm-9.9 9.9a.5.5 0 010 .707l-.707.707a.5.5 0 01-.707-.707l.707-.707a.5.5 0 01.707 0zm9.9.707a.5.5 0 01-.707 0l-.707-.707a.5.5 0 01.707-.707l.707.707a.5.5 0 010 .707zM2.757 3.05a.5.5 0 01.707 0l.707.707A.5.5 0 013.464 4.464L2.757 3.757a.5.5 0 010-.707z"/></svg>
-      </span>
-      <span class="theme-icon theme-moon">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M6 .278a.768.768 0 01.08.858 7.208 7.208 0 00-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 01.81.316.733.733 0 01-.031.893A8.349 8.349 0 018.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 016 .278z"/></svg>
-      </span>
-    </button>
-    <button class="nav-hamburger" id="navHamburger" aria-label="Toggle menu" onclick="toggleMenu()">
-      <span></span><span></span><span></span>
-    </button>
-  </div>
-</nav>
-
-<!-- MOBILE MENU OVERLAY -->
-<div class="mobile-menu" id="mobileMenu">
-  <a href="#operations" onclick="closeMenu()">Operations</a>
-  <a href="#challenges" onclick="closeMenu()">Challenges</a>
-  <a href="#solutions" onclick="closeMenu()">Solutions</a>
-  <a href="#" onclick="closeMenu(); openSignin(event)">Sign In</a>
-  <a href="#" class="mobile-cta" onclick="closeMenu()">Request Demo</a>
-</div>
-
-<!-- SIGN IN MODAL -->
-<div class="modal-overlay" id="signinModal" onclick="closeSignin(event)">
-  <div class="modal-card">
-    <button class="modal-close" onclick="closeSigninBtn()" aria-label="Close">✕</button>
-
-    <div class="modal-logo">
-      <img src="/static/ERP_logo.png" alt="AZed Farm" class="modal-logo-img" />
-      <div>
-        <div class="modal-brand">AZed Farm</div>
-        <div class="modal-subbrand">Farm Management System</div>
-      </div>
-    </div>
-
-    <h2 class="modal-title">Welcome back</h2>
-    <p class="modal-sub">Sign in to your farm dashboard</p>
-
-    <div class="modal-form">
-      <div class="form-group">
-        <label class="form-label">Email address</label>
-        <input type="email" class="form-input" placeholder="you@farmname.com" id="signinEmail" />
-      </div>
-      <div class="form-group">
-        <label class="form-label">
-          Password
-          <a href="#" class="form-forgot">Forgot password?</a>
-        </label>
-        <div class="input-wrap">
-          <input type="password" class="form-input" placeholder="••••••••" id="signinPassword" />
-          <button class="input-eye" onclick="togglePassword()" type="button" id="eyeBtn">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" id="eyeIcon"><path d="M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 8 5.5S16 8 16 8zM1.173 8a13.133 13.133 0 011.66-2.043C4.12 4.668 5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.133 13.133 0 0114.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5c-2.12 0-3.879-1.168-5.168-2.457A13.134 13.134 0 011.172 8z"/><path d="M8 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5zM4.5 8a3.5 3.5 0 117 0 3.5 3.5 0 01-7 0z"/></svg>
-          </button>
-        </div>
-      </div>
-
-      <div class="form-remember">
-        <label class="checkbox-wrap">
-          <input type="checkbox" id="rememberMe" />
-          <span class="checkbox-custom"></span>
-          Keep me signed in
-        </label>
-      </div>
-
-      <button class="btn-signin" onclick="handleSignin()">
-        Sign In
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 8a.5.5 0 01.5-.5h11.793l-3.147-3.146a.5.5 0 01.708-.708l4 4a.5.5 0 010 .708l-4 4a.5.5 0 01-.708-.708L13.293 8.5H1.5A.5.5 0 011 8z"/></svg>
-      </button>
-
-      <div class="modal-divider"><span>or</span></div>
-
-      <button class="btn-demo-access" onclick="closeSigninBtn()">
-        Request a Demo Account
-      </button>
-    </div>
-
-    <p class="modal-footer-note">
-      Having trouble? <a href="#">Contact support</a>
-    </p>
-  </div>
-</div>
 <section class="hero">
-  <div class="hero-content">
-    <div class="hero-eyebrow"><span></span>Farm Management ERP</div>
-    <h1 class="hero-title">Your farm deserves <em>smart</em> operations</h1>
-    <p class="hero-sub">
-      From seed to sale — manage every aspect of your agricultural operation in one unified system. 
-      Eliminate spreadsheet chaos and gain real-time visibility over your farm.
-    </p>
-    <div class="hero-actions">
-      <a href="#operations" class="btn-primary">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 1.5a5.5 5.5 0 110 11 5.5 5.5 0 010-11zm.75 2.75v3.5l2.5 1.5-.75 1.25-3-1.75V5.25h1.25z"/></svg>
-        See How It Works
-      </a>
-      <a href="#challenges" class="btn-secondary">
-        Learn about challenges
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M6 3l5 5-5 5"/></svg>
-      </a>
-    </div>
-  </div>
+  <video class="hero-video" id="heroVideo" src="/static/hero.mp4" muted playsinline autoplay preload="auto"></video>
+  <div class="hero-scrim"></div>
 
-  <div class="hero-visual">
-    <div class="farm-card-main">
-      <div class="farm-card-header">
-        <span class="farm-card-title">Farm Operations — Today</span>
-        <span class="status-badge status-live">● Live</span>
+  <div class="hero-inner">
+    <nav>
+      <a href="/" class="nav-brand"><img src="/static/ERP_logo.png" alt="AZed Farm"></a>
+
+      <div class="nav-links">
+        <a href="#operations">Operations</a>
+        <a href="#operations">Modules
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 6.5L8 10.5L12 6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        </a>
+        <a href="#challenges">Challenges</a>
+        <a href="#solutions">Solutions</a>
+        <a href="#contact">Contact</a>
       </div>
 
-      <div class="farm-ops-grid">
-        <div class="op-metric">
-          <div class="op-metric-val">4</div>
-          <div class="op-metric-lbl">Active Farms</div>
+      <div class="nav-actions">
+        <a href="#" class="btn-ghost" data-open-login>Sign In</a>
+        <a href="#contact" class="btn-dark">Request Demo</a>
+        <button class="nav-hamburger" id="navHamburger" aria-label="Toggle menu"><span></span><span></span><span></span></button>
+      </div>
+    </nav>
+
+    <div class="hero-body">
+      <div class="hero-stack">
+        <div class="hero-badge">
+          <span class="pill">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M6 0.6l1.5 3.2 3.5.45-2.6 2.4.68 3.45L6 8.45 2.92 10.1l.68-3.45L1 4.25l3.5-.45L6 .6z"></path></svg>
+            New
+          </span>
+          Now with carbon footprint tracking
         </div>
-        <div class="op-metric">
-          <div class="op-metric-val">18</div>
-          <div class="op-metric-lbl">Workers on-site</div>
-        </div>
-        <div class="op-metric">
-          <div class="op-metric-val">3</div>
-          <div class="op-metric-lbl">Batches running</div>
-        </div>
+
+        <h1>Run Every Farm From One Place</h1>
+
+        <p class="hero-sub">Production, stock, deliveries, payroll and accounting in one system. Every entry posts itself, so your numbers are ready before you ask for them.</p>
       </div>
 
-      <div class="farm-progress-wrap">
-        <div class="farm-progress-label">
-          <span>Crop Yield — Season progress</span>
-          <span>74%</span>
-        </div>
-        <div class="progress-bar">
-          <div class="progress-fill" style="width: 74%"></div>
-        </div>
-      </div>
-
-      <div class="farm-progress-wrap">
-        <div class="farm-progress-label">
-          <span>Harvest deliveries this month</span>
-          <span>61%</span>
-        </div>
-        <div class="progress-bar">
-          <div class="progress-fill harvest" style="width: 61%"></div>
-        </div>
-      </div>
-
-      <div class="farm-progress-wrap">
-        <div class="farm-progress-label">
-          <span>Inventory health</span>
-          <span>88%</span>
-        </div>
-        <div class="progress-bar">
-          <div class="progress-fill sky" style="width: 88%"></div>
-        </div>
-      </div>
-
-      <div class="farm-activity">
-        <div class="activity-item">
-          <span class="activity-dot dot-green"></span>
-          Farm Al-Nour: Tomato batch #B-041 started
-          <span class="activity-time">9:12 AM</span>
-        </div>
-        <div class="activity-item">
-          <span class="activity-dot dot-amber"></span>
-          Delivery DEL-0089 dispatched → Market
-          <span class="activity-time">8:45 AM</span>
-        </div>
-        <div class="activity-item">
-          <span class="activity-dot dot-blue"></span>
-          Low stock alert: Fertilizer K-60
-          <span class="activity-time">8:20 AM</span>
-        </div>
-      </div>
-    </div>
-
-    <div class="mini-card mini-card-1">
-      <div class="mini-label">Monthly Revenue</div>
-      <div class="mini-val">EGP 124K</div>
-      <div class="mini-change up">
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M6 2l4 5H2z"/></svg>
-        +18% vs last month
-      </div>
-    </div>
-
-    <div class="mini-card mini-card-2">
-      <div class="mini-label">Spoilage Rate</div>
-      <div class="mini-val">2.1%</div>
-      <div class="mini-change up">
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" style="transform:rotate(180deg)"><path d="M6 2l4 5H2z"/></svg>
-        down from 6.4%
+      <div class="hero-actions">
+        <a href="#" class="btn-lg-dark" data-open-login>
+          Sign In
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        </a>
+        <a href="#operations" class="btn-lg-light">Explore all modules</a>
       </div>
     </div>
   </div>
 </section>
 
-<!-- STATS STRIP -->
-<div class="stats-strip">
-  <div class="stat-item">
-    <div class="stat-num">12+</div>
-    <div class="stat-label">Modules integrated</div>
-  </div>
-  <div class="stat-item">
-    <div class="stat-num">360°</div>
-    <div class="stat-label">Farm visibility</div>
-  </div>
-  <div class="stat-item">
-    <div class="stat-num">Real-time</div>
-    <div class="stat-label">Stock & delivery tracking</div>
-  </div>
-  <div class="stat-item">
-    <div class="stat-num">One</div>
-    <div class="stat-label">Unified platform</div>
+<div class="mobile-menu" id="mobileMenu">
+  <a href="#operations">Operations</a>
+  <a href="#challenges">Challenges</a>
+  <a href="#solutions">Solutions</a>
+  <a href="#contact">Contact</a>
+  <a href="#" data-open-login>Sign In</a>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="stat-num">12+</div><div class="stat-lbl">Modules integrated</div></div>
+  <div class="stat"><div class="stat-num">360°</div><div class="stat-lbl">Farm visibility</div></div>
+  <div class="stat"><div class="stat-num">Real-time</div><div class="stat-lbl">Stock &amp; delivery tracking</div></div>
+  <div class="stat"><div class="stat-num">One</div><div class="stat-lbl">Unified platform</div></div>
+</div>
+
+<div class="trusted">
+  <span class="trusted-label">Trusted by farms across Egypt</span>
+  <div class="trusted-logos">
+    <span>Al-Nour Farms</span>
+    <span>Delta Fresh</span>
+    <span>GreenValley Co.</span>
+    <span>Nile Harvest</span>
+    <span>SunRise Agri</span>
   </div>
 </div>
 
-<!-- TRUSTED BY -->
-<div class="trusted-strip">
-  <div class="trusted-inner">
-    <span class="trusted-label">Trusted by farms across Egypt</span>
-    <div class="trusted-logos">
-      <span class="trusted-logo">Al-Nour Farms</span>
-      <span class="trusted-logo">Delta Fresh</span>
-      <span class="trusted-logo">GreenValley Co.</span>
-      <span class="trusted-logo">Nile Harvest</span>
-      <span class="trusted-logo">SunRise Agri</span>
+<section id="challenges" class="sec split top">
+  <div>
+    <div class="eyebrow">The problem</div>
+    <h2 class="h2" style="max-width:560px">Running a farm shouldn't mean fighting data chaos</h2>
+    <p class="lead" style="max-width:560px;margin-bottom:48px">Agricultural businesses carry enormous operational complexity. Most farms still rely on disconnected tools that create more problems than they solve.</p>
+
+    <div class="stack-14">
+      <div class="card tinted">
+        <h3>Spreadsheet overload</h3>
+        <p>Multiple disconnected spreadsheets for inventory, sales, HR, and farm output. Manual data entry leads to costly errors, version conflicts, and missing records.</p>
+      </div>
+      <div class="card">
+        <h3>No visibility into production</h3>
+        <p>Farm batches, yields, and processing stages tracked informally. Managers can't see real-time status across multiple farms, causing poor decisions and harvest delays.</p>
+      </div>
+      <div class="card">
+        <h3>Fragmented financial tracking</h3>
+        <p>Sales, expenses, payroll, and purchasing live in separate systems. Reconciling end-of-month finances takes days, and errors only surface when it's too late to fix.</p>
+      </div>
+      <div class="card">
+        <h3>HR &amp; payroll pain</h3>
+        <p>Tracking attendance for field workers assigned to different farms, calculating payroll with loans and deductions — done manually on paper, every single month.</p>
+      </div>
     </div>
   </div>
-</div>
 
-<!-- CHALLENGES -->
-<section class="challenges-section" id="challenges">
-  <div class="challenges-layout">
-    <div>
-      <div class="section-eyebrow">The problem</div>
-      <h2 class="section-title fade-in">Running a farm shouldn't mean fighting data chaos</h2>
-      <p class="section-sub fade-in">Agricultural businesses carry enormous operational complexity. Most farms still rely on disconnected tools that create more problems than they solve.</p>
-
-      <div class="challenge-cards">
-        <div class="challenge-card active fade-in" onclick="activateChallenge(this)">
-          <div class="challenge-card-icon icon-red">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <rect x="2" y="4" width="16" height="12" rx="2" stroke="#D93025" stroke-width="1.5"/>
-              <path d="M6 8h8M6 11h5" stroke="#D93025" stroke-width="1.5" stroke-linecap="round"/>
-              <circle cx="14" cy="11" r="1.5" fill="#D93025"/>
-            </svg>
-          </div>
-          <h3>Spreadsheet overload</h3>
-          <p>Multiple disconnected spreadsheets for inventory, sales, HR, and farm output. Manual data entry leads to costly errors, version conflicts, and missing records.</p>
-        </div>
-
-        <div class="challenge-card fade-in fade-in-delay-1" onclick="activateChallenge(this)">
-          <div class="challenge-card-icon icon-amber">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <path d="M10 3v4M10 13v4M3 10h4M13 10h4" stroke="#C8882A" stroke-width="1.5" stroke-linecap="round"/>
-              <circle cx="10" cy="10" r="3" stroke="#C8882A" stroke-width="1.5"/>
-            </svg>
-          </div>
-          <h3>No visibility into production</h3>
-          <p>Farm batches, yields, and processing stages tracked informally. Managers can't see real-time status across multiple farms, causing poor decisions and harvest delays.</p>
-        </div>
-
-        <div class="challenge-card fade-in fade-in-delay-2" onclick="activateChallenge(this)">
-          <div class="challenge-card-icon icon-blue">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <path d="M4 14l4-4 3 3 5-6" stroke="#4A7FA5" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              <rect x="2" y="2" width="16" height="16" rx="2" stroke="#4A7FA5" stroke-width="1.5"/>
-            </svg>
-          </div>
-          <h3>Fragmented financial tracking</h3>
-          <p>Sales, expenses, payroll, and purchasing live in separate systems. Reconciling end-of-month finances takes days, and errors only surface when it's too late to fix.</p>
-        </div>
-
-        <div class="challenge-card fade-in fade-in-delay-3" onclick="activateChallenge(this)">
-          <div class="challenge-card-icon icon-purple">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <circle cx="8" cy="7" r="3" stroke="#6B4CC8" stroke-width="1.5"/>
-              <path d="M3 17c0-3 2.2-5 5-5M13 11v6M10 14h6" stroke="#6B4CC8" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
-          </div>
-          <h3>HR & payroll pain</h3>
-          <p>Tracking attendance for field workers assigned to different farms, calculating payroll with loans and deductions — done manually on paper, every single month.</p>
-        </div>
-      </div>
+  <div class="panel">
+    <div class="panel-title">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm-.75 4.25a.75.75 0 011.5 0v4a.75.75 0 01-1.5 0v-4zm.75 7.5a1 1 0 110-2 1 1 0 010 2z"></path></svg>
+      The spreadsheet reality
     </div>
-
-    <div class="challenge-visual fade-in">
-      <div class="challenge-illustration">
-        <div class="chaos-label">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm-.75 4.25a.75.75 0 011.5 0v4a.75.75 0 01-1.5 0v-4zm.75 7.5a1 1 0 110-2 1 1 0 010 2z"/></svg>
-          The spreadsheet reality
-        </div>
-        <div class="fake-spreadsheet">
-          <div class="ss-header">
-            <span>Product / Farm</span><span>Stock</span><span>Cost</span><span>Status</span>
-          </div>
-          <div class="ss-row">
-            <div class="ss-cell">Tomato — Farm 1</div>
-            <div class="ss-cell">240 kg</div>
-            <div class="ss-cell">EGP 2.80</div>
-            <div class="ss-cell">✓ OK</div>
-          </div>
-          <div class="ss-row">
-            <div class="ss-cell">Pepper — Farm 2</div>
-            <div class="ss-cell error">???</div>
-            <div class="ss-cell">EGP 4.20</div>
-            <div class="ss-cell error">Missing</div>
-          </div>
-          <div class="ss-row">
-            <div class="ss-cell">Cucumber — Farm 3</div>
-            <div class="ss-cell">180 kg</div>
-            <div class="ss-cell error">#REF!</div>
-            <div class="ss-cell">⚠ Check</div>
-          </div>
-          <div class="ss-row">
-            <div class="ss-cell">Fertilizer K-60</div>
-            <div class="ss-cell error">LOW</div>
-            <div class="ss-cell">—</div>
-            <div class="ss-cell error">Reorder!</div>
-          </div>
-          <div class="ss-row">
-            <div class="ss-cell">Payroll — May</div>
-            <div class="ss-cell error">WRONG</div>
-            <div class="ss-cell">EGP ???</div>
-            <div class="ss-cell error">Manual fix</div>
-          </div>
-        </div>
-        <p style="font-size:13px; color:var(--text-light); font-weight:300; line-height:1.6;">
-          Every farm manager knows this scene — critical data buried in broken formulas, missing entries, and version conflicts. The farm runs on guesswork.
-        </p>
-      </div>
+    <div class="ss">
+      <div class="ss-head"><span>Product / Farm</span><span>Stock</span><span>Cost</span><span>Status</span></div>
+      <div class="ss-row"><span>Tomato — Farm 1</span><span>240 kg</span><span>EGP 2.80</span><span>✓ OK</span></div>
+      <div class="ss-row"><span>Pepper — Farm 2</span><span class="bad">???</span><span>EGP 4.20</span><span class="bad">Missing</span></div>
+      <div class="ss-row"><span>Cucumber — Farm 3</span><span>180 kg</span><span class="bad">#REF!</span><span>⚠ Check</span></div>
+      <div class="ss-row"><span>Fertilizer K-60</span><span class="bad">LOW</span><span>—</span><span class="bad">Reorder!</span></div>
+      <div class="ss-row"><span>Payroll — May</span><span class="bad">WRONG</span><span>EGP ???</span><span class="bad">Manual fix</span></div>
     </div>
+    <p class="panel-note">Every farm manager knows this scene — critical data buried in broken formulas, missing entries, and version conflicts. The farm runs on guesswork.</p>
   </div>
 </section>
 
-<!-- FARM OPERATIONS -->
-<section class="farm-ops-section" id="operations">
-  <div class="section-eyebrow">What the system covers</div>
-  <h2 class="section-title fade-in">Every part of your farm operation, unified</h2>
-  <p class="section-sub fade-in">From fields, animals, and workers to checkout, suppliers, and carbon — nine connected modules covering the full agricultural value chain in one system.</p>
+<section id="operations" class="sec" style="background:#f8f8f8">
+  <div class="eyebrow">What the system covers</div>
+  <h2 class="h2" style="max-width:620px">Every part of your farm operation, unified</h2>
+  <p class="lead" style="margin-bottom:56px">From fields, animals, and workers to checkout, suppliers, and carbon — nine connected modules covering the full agricultural value chain in one system.</p>
 
-  <div class="ops-modules">
-    <div class="ops-module green fade-in">
-      <div class="ops-module-icon bg-leaf">
-        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-          <path d="M4 18C4 13 7 8 11 7c4-1 7 2 7 6" stroke="#2D5A27" stroke-width="1.6" stroke-linecap="round"/>
-          <path d="M11 7v11M7 14l4-3 4 3" stroke="#2D5A27" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </div>
-      <h3>Farm & Production Management</h3>
+  <div class="modules">
+    <div class="module">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 18C4 13 7 8 11 7c4-1 7 2 7 6" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><path d="M11 7v11M7 14l4-3 4 3" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
+      <h3>Farm &amp; Production Management</h3>
       <p>Track every farm location, assign workers, and run production batches with precise input-output recipe control.</p>
-      <ul class="ops-features">
+      <ul>
         <li>Multi-farm dashboard with real-time status</li>
         <li>Production batch tracking from start to finish</li>
         <li>Recipe-based batch inputs and expected outputs</li>
@@ -1712,17 +571,11 @@
       </ul>
     </div>
 
-    <div class="ops-module amber fade-in fade-in-delay-1">
-      <div class="ops-module-icon bg-harvest">
-        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-          <rect x="3" y="8" width="16" height="11" rx="2" stroke="#C8882A" stroke-width="1.6"/>
-          <path d="M7 8V6a4 4 0 018 0v2" stroke="#C8882A" stroke-width="1.6"/>
-          <path d="M9 13h4M11 11v4" stroke="#C8882A" stroke-width="1.6" stroke-linecap="round"/>
-        </svg>
-      </div>
-      <h3>Inventory & Stock Control</h3>
+    <div class="module">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="8" width="16" height="11" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M7 8V6a4 4 0 018 0v2" stroke="#000" stroke-width="1.6"></path><path d="M9 13h4M11 11v4" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path></svg></div>
+      <h3>Inventory &amp; Stock Control</h3>
       <p>Never run out of critical inputs or lose track of produce. Multi-location stock management with automatic reorder alerts.</p>
-      <ul class="ops-features">
+      <ul>
         <li>Multi-location stock tracking across farms</li>
         <li>Automated low-stock and reorder alerts</li>
         <li>Stock transfers between locations</li>
@@ -1730,16 +583,11 @@
       </ul>
     </div>
 
-    <div class="ops-module sky fade-in fade-in-delay-2">
-      <div class="ops-module-icon bg-sky">
-        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-          <path d="M4 11h14M4 11l4-4M4 11l4 4" stroke="#4A7FA5" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M18 6v10" stroke="#4A7FA5" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="2 2"/>
-        </svg>
-      </div>
-      <h3>Deliveries & Logistics</h3>
+    <div class="module">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 11h14M4 11l4-4M4 11l4 4" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><path d="M18 6v10" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="2 2"></path></svg></div>
+      <h3>Deliveries &amp; Logistics</h3>
       <p>Manage farm output delivery end-to-end with numbered delivery notes and auto-generated customer invoices.</p>
-      <ul class="ops-features">
+      <ul>
         <li>Farm delivery scheduling and tracking</li>
         <li>Auto-generated delivery documents</li>
         <li>Consignment management for B2B clients</li>
@@ -1747,17 +595,11 @@
       </ul>
     </div>
 
-    <div class="ops-module soil fade-in">
-      <div class="ops-module-icon bg-soil">
-        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-          <rect x="3" y="4" width="16" height="14" rx="2" stroke="#6B4C38" stroke-width="1.6"/>
-          <path d="M7 9h8M7 12h5" stroke="#6B4C38" stroke-width="1.6" stroke-linecap="round"/>
-          <circle cx="14.5" cy="12" r="1.5" fill="#6B4C38"/>
-        </svg>
-      </div>
-      <h3>Sales & Invoicing</h3>
+    <div class="module">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="4" width="16" height="14" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M7 9h8M7 12h5" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><circle cx="14.5" cy="12" r="1.5" fill="#000"></circle></svg></div>
+      <h3>Sales &amp; Invoicing</h3>
       <p>Retail and B2B sales managed in one place — with customer balances, custom pricing per client, and refund handling.</p>
-      <ul class="ops-features">
+      <ul>
         <li>Retail POS-style invoicing</li>
         <li>B2B client pricing and credit limits</li>
         <li>Customer discount configuration</li>
@@ -1765,16 +607,11 @@
       </ul>
     </div>
 
-    <div class="ops-module leaf-light fade-in fade-in-delay-1">
-      <div class="ops-module-icon bg-pink">
-        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-          <circle cx="9" cy="8" r="3" stroke="#C8486A" stroke-width="1.6"/>
-          <path d="M4 18c0-3.3 2.2-6 5-6M14 12v7M11 15.5h6" stroke="#C8486A" stroke-width="1.6" stroke-linecap="round"/>
-        </svg>
-      </div>
-      <h3>HR, Payroll & Attendance</h3>
+    <div class="module">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="9" cy="8" r="3" stroke="#000" stroke-width="1.6"></circle><path d="M4 18c0-3.3 2.2-6 5-6M14 12v7M11 15.5h6" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path></svg></div>
+      <h3>HR, Payroll &amp; Attendance</h3>
       <p>Manage field workers assigned per farm, track daily attendance with auto-status, and calculate payroll with deductions and loans.</p>
-      <ul class="ops-features">
+      <ul>
         <li>Employee farm assignments</li>
         <li>Daily attendance with auto-approval rules</li>
         <li>Payroll with loans and deduction tracking</li>
@@ -1782,17 +619,11 @@
       </ul>
     </div>
 
-    <div class="ops-module harvest-light fade-in fade-in-delay-2">
-      <div class="ops-module-icon bg-teal">
-        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-          <path d="M11 3v2M11 17v2M3 11h2M17 11h2" stroke="#0F6E56" stroke-width="1.6" stroke-linecap="round"/>
-          <circle cx="11" cy="11" r="4" stroke="#0F6E56" stroke-width="1.6"/>
-          <path d="M8 11a3 3 0 003-3" stroke="#0F6E56" stroke-width="1.4" stroke-linecap="round"/>
-        </svg>
-      </div>
-      <h3>Finance, Accounting & Carbon</h3>
+    <div class="module">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 3v2M11 17v2M3 11h2M17 11h2" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><circle cx="11" cy="11" r="4" stroke="#000" stroke-width="1.6"></circle><path d="M8 11a3 3 0 003-3" stroke="#000" stroke-width="1.4" stroke-linecap="round"></path></svg></div>
+      <h3>Finance, Accounting &amp; Carbon</h3>
       <p>Full chart of accounts with automatic journal posting for every transaction. Plus carbon emission logging and reduction goal tracking.</p>
-      <ul class="ops-features">
+      <ul>
         <li>Automated double-entry bookkeeping</li>
         <li>Purchase management with supplier balances</li>
         <li>Expense tracking by category</li>
@@ -1800,18 +631,11 @@
       </ul>
     </div>
 
-    <div class="ops-module terracotta fade-in">
-      <div class="ops-module-icon bg-terracotta">
-        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-          <path d="M6 13c0-3 2-5 5-5s5 2 5 5v3H6v-3z" stroke="#B85C3F" stroke-width="1.6" stroke-linejoin="round"/>
-          <circle cx="9" cy="6" r="1.4" fill="#B85C3F"/>
-          <circle cx="13" cy="6" r="1.4" fill="#B85C3F"/>
-          <path d="M8 8.5l-1.5-2M14 8.5l1.5-2" stroke="#B85C3F" stroke-width="1.4" stroke-linecap="round"/>
-        </svg>
-      </div>
-      <h3>Animals & Livestock</h3>
+    <div class="module">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M6 13c0-3 2-5 5-5s5 2 5 5v3H6v-3z" stroke="#000" stroke-width="1.6" stroke-linejoin="round"></path><circle cx="9" cy="6" r="1.4" fill="#000"></circle><circle cx="13" cy="6" r="1.4" fill="#000"></circle><path d="M8 8.5l-1.5-2M14 8.5l1.5-2" stroke="#000" stroke-width="1.4" stroke-linecap="round"></path></svg></div>
+      <h3>Animals &amp; Livestock</h3>
       <p>Track every animal across your farms with full lifecycle records and dedicated cost allocation that keeps livestock expenses cleanly separated from crop operations.</p>
-      <ul class="ops-features">
+      <ul>
         <li>Per-animal profiles and farm assignment</li>
         <li>Dedicated "Animals" expense bucket for clean P&amp;L</li>
         <li>Vet, feed, and care cost tracking</li>
@@ -1819,18 +643,11 @@
       </ul>
     </div>
 
-    <div class="ops-module plum fade-in fade-in-delay-1">
-      <div class="ops-module-icon bg-plum">
-        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-          <rect x="3" y="5" width="16" height="11" rx="2" stroke="#7A4A6E" stroke-width="1.6"/>
-          <path d="M3 9h16" stroke="#7A4A6E" stroke-width="1.6"/>
-          <path d="M7 13h3M13 13h2" stroke="#7A4A6E" stroke-width="1.6" stroke-linecap="round"/>
-          <circle cx="6.5" cy="7" r=".8" fill="#7A4A6E"/>
-        </svg>
-      </div>
-      <h3>POS Terminal & Receive Intake</h3>
+    <div class="module">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="5" width="16" height="11" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M3 9h16" stroke="#000" stroke-width="1.6"></path><path d="M7 13h3M13 13h2" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><circle cx="6.5" cy="7" r=".8" fill="#000"></circle></svg></div>
+      <h3>POS Terminal &amp; Receive Intake</h3>
       <p>A real point-of-sale checkout for retail counters plus a structured intake flow for incoming stock — both posting straight into accounting with the right expense categories.</p>
-      <ul class="ops-features">
+      <ul>
         <li>Fast checkout with discounts and settle-later</li>
         <li>Batch receive multiple products per delivery</li>
         <li>Suppliers, cash, or partial payment in one screen</li>
@@ -1838,18 +655,11 @@
       </ul>
     </div>
 
-    <div class="ops-module slate fade-in fade-in-delay-2">
-      <div class="ops-module-icon bg-slate">
-        <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-          <path d="M4 18V6M4 18h14" stroke="#4A5A6A" stroke-width="1.6" stroke-linecap="round"/>
-          <rect x="7" y="10" width="2.5" height="6" fill="#4A5A6A"/>
-          <rect x="11" y="7" width="2.5" height="9" fill="#4A5A6A"/>
-          <rect x="15" y="12" width="2.5" height="4" fill="#4A5A6A"/>
-        </svg>
-      </div>
-      <h3>Reports, Audit & Access Control</h3>
+    <div class="module">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 18V6M4 18h14" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><rect x="7" y="10" width="2.5" height="6" fill="#000"></rect><rect x="11" y="7" width="2.5" height="9" fill="#000"></rect><rect x="15" y="12" width="2.5" height="4" fill="#000"></rect></svg></div>
+      <h3>Reports, Audit &amp; Access Control</h3>
       <p>Granular per-role and per-user permissions, a full audit trail of every change in the system, and reports that read the same numbers your accountant trusts.</p>
-      <ul class="ops-features">
+      <ul>
         <li>Role-based permissions with per-user overrides</li>
         <li>Audit log of every create, edit, and delete</li>
         <li>Sales, expense, payroll, and inventory reports</li>
@@ -1859,629 +669,325 @@
   </div>
 </section>
 
-<!-- SOLUTION FLOW -->
-<section class="solution-section" id="solutions">
-  <div class="solution-grid">
-    <div>
-      <div class="section-eyebrow">How it solves it</div>
-      <h2 class="section-title fade-in">From scattered data to one clear view</h2>
-      <p class="section-sub fade-in">The system ties every part of your operation together. What used to require five tools and two days of reconciliation now happens automatically.</p>
+<section id="solutions" class="sec split mid">
+  <div>
+    <div class="eyebrow">How it solves it</div>
+    <h2 class="h2">From scattered data to one clear view</h2>
+    <p class="lead" style="max-width:560px;margin-bottom:40px">The system ties every part of your operation together. What used to require five tools and two days of reconciliation now happens automatically.</p>
 
-      <div class="solution-steps">
-        <div class="solution-step fade-in">
-          <div class="step-num">1</div>
-          <div class="step-body">
-            <h4>Capture everything at the source</h4>
-            <p>Every harvest batch, delivery, purchase, attendance record, and sale is logged at the point of action — by the person doing the work, on any device.</p>
-          </div>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div>
+          <h4>Capture everything at the source</h4>
+          <p>Every harvest batch, delivery, purchase, attendance record, and sale is logged at the point of action — by the person doing the work, on any device.</p>
         </div>
-
-        <div class="solution-step fade-in fade-in-delay-1">
-          <div class="step-num">2</div>
-          <div class="step-body">
-            <h4>Automatic accounting, zero reconciliation</h4>
-            <p>Every transaction posts a double-entry journal entry automatically. Stock levels, customer balances, and accounts update in real time without manual entry.</p>
-          </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div>
+          <h4>Automatic accounting, zero reconciliation</h4>
+          <p>Every transaction posts a double-entry journal entry automatically. Stock levels, customer balances, and accounts update in real time without manual entry.</p>
         </div>
-
-        <div class="solution-step fade-in fade-in-delay-2">
-          <div class="step-num">3</div>
-          <div class="step-body">
-            <h4>Alerts before problems become losses</h4>
-            <p>Low stock, reorder thresholds, spoilage anomalies, and overdue payments surface as alerts — so your team acts before the damage is done.</p>
-          </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div>
+          <h4>Alerts before problems become losses</h4>
+          <p>Low stock, reorder thresholds, spoilage anomalies, and overdue payments surface as alerts — so your team acts before the damage is done.</p>
         </div>
-
-        <div class="solution-step fade-in fade-in-delay-3">
-          <div class="step-num">4</div>
-          <div class="step-body">
-            <h4>Reports and dashboards on demand</h4>
-            <p>Farm-level performance, payroll summaries, profitability by product, and carbon footprint reports — ready instantly, with no manual compilation.</p>
-          </div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div>
+          <h4>Reports and dashboards on demand</h4>
+          <p>Farm-level performance, payroll summaries, profitability by product, and carbon footprint reports — ready instantly, with no manual compilation.</p>
         </div>
       </div>
     </div>
+  </div>
 
-    <div class="dashboard-mock fade-in">
-      <div class="dash-top">
-        <div class="dash-dot" style="background:#FF5F57"></div>
-        <div class="dash-dot" style="background:#FFBD2E"></div>
-        <div class="dash-dot" style="background:#28CA41"></div>
-        <span class="dash-title">AZed Farm — Operations Dashboard</span>
-      </div>
-      <div class="dash-body">
-        <div class="dash-metric">
-          <div class="dash-metric-val">EGP 94K</div>
-          <div class="dash-metric-lbl">Revenue this month</div>
-        </div>
-        <div class="dash-metric">
-          <div class="dash-metric-val">2.1%</div>
-          <div class="dash-metric-lbl">Spoilage rate</div>
-        </div>
-        <div class="dash-metric">
-          <div class="dash-metric-val">98%</div>
-          <div class="dash-metric-lbl">Delivery on-time</div>
-        </div>
-        <div class="dash-metric">
-          <div class="dash-metric-val">22</div>
-          <div class="dash-metric-lbl">Active employees</div>
-        </div>
-        <div class="dash-chart-row">
-          <div style="font-size:12px; color:var(--text-light); font-weight:500;">Harvest output (tons) — last 7 weeks</div>
-          <div class="bar-chart">
-            <div class="bar-wrap"><div class="bar" style="height:42px"></div><span class="bar-lbl">W1</span></div>
-            <div class="bar-wrap"><div class="bar" style="height:55px"></div><span class="bar-lbl">W2</span></div>
-            <div class="bar-wrap"><div class="bar" style="height:38px"></div><span class="bar-lbl">W3</span></div>
-            <div class="bar-wrap"><div class="bar" style="height:62px"></div><span class="bar-lbl">W4</span></div>
-            <div class="bar-wrap"><div class="bar" style="height:48px"></div><span class="bar-lbl">W5</span></div>
-            <div class="bar-wrap"><div class="bar" style="height:70px"></div><span class="bar-lbl">W6</span></div>
-            <div class="bar-wrap"><div class="bar highlight" style="height:76px"></div><span class="bar-lbl">W7</span></div>
-          </div>
+  <div class="dash">
+    <div class="dash-top">
+      <div class="dash-dot"></div><div class="dash-dot"></div><div class="dash-dot live"></div>
+      <span class="dash-title">AZed Farm — Operations Dashboard</span>
+    </div>
+    <div class="dash-body">
+      <div class="dash-metric"><div class="dash-metric-val">EGP 94K</div><div class="dash-metric-lbl">Revenue this month</div></div>
+      <div class="dash-metric"><div class="dash-metric-val">2.1%</div><div class="dash-metric-lbl">Spoilage rate</div></div>
+      <div class="dash-metric"><div class="dash-metric-val">98%</div><div class="dash-metric-lbl">Delivery on-time</div></div>
+      <div class="dash-metric"><div class="dash-metric-val">22</div><div class="dash-metric-lbl">Active employees</div></div>
+      <div class="dash-chart">
+        <div class="dash-chart-lbl">Harvest output (tons) — last 7 weeks</div>
+        <div class="bars">
+          <div class="bar-wrap"><div class="bar" style="height:42px"></div><span class="bar-lbl">W1</span></div>
+          <div class="bar-wrap"><div class="bar" style="height:55px"></div><span class="bar-lbl">W2</span></div>
+          <div class="bar-wrap"><div class="bar" style="height:38px"></div><span class="bar-lbl">W3</span></div>
+          <div class="bar-wrap"><div class="bar" style="height:62px"></div><span class="bar-lbl">W4</span></div>
+          <div class="bar-wrap"><div class="bar" style="height:48px"></div><span class="bar-lbl">W5</span></div>
+          <div class="bar-wrap"><div class="bar" style="height:70px"></div><span class="bar-lbl">W6</span></div>
+          <div class="bar-wrap"><div class="bar hi" style="height:76px"></div><span class="bar-lbl">W7</span></div>
         </div>
       </div>
     </div>
   </div>
 </section>
 
-<!-- BEFORE / AFTER -->
-<section class="before-after-section">
-  <div class="section-eyebrow">The transformation</div>
-  <h2 class="section-title fade-in">Before and after AZed Farm</h2>
-  <p class="section-sub fade-in">See what changes for every role on your farm team when everything connects.</p>
+<section class="sec" style="background:#f8f8f8">
+  <div class="eyebrow">The transformation</div>
+  <h2 class="h2">Before and after AZed Farm</h2>
+  <p class="lead" style="max-width:560px;margin-bottom:48px">See what changes for every role on your farm team when everything connects.</p>
 
-  <div class="ba-table-wrap fade-in">
-    <div class="ba-table">
-      <div class="ba-col ba-before">
-        <div class="ba-col-head">
-          <div class="ba-col-icon">✕</div>
-          <span>Without the system</span>
-        </div>
-        <div class="ba-row">
-          <div class="ba-role">Farm Manager</div>
-          <div class="ba-desc">Calls workers to get status, no unified view of batch progress across farms</div>
-        </div>
-        <div class="ba-row">
-          <div class="ba-role">Accountant</div>
-          <div class="ba-desc">Spends 3 days at month-end reconciling sales, purchases, and payroll manually</div>
-        </div>
-        <div class="ba-row">
-          <div class="ba-role">HR Manager</div>
-          <div class="ba-desc">Tracks attendance on paper, calculates payroll in Excel with manual deductions</div>
-        </div>
-        <div class="ba-row">
-          <div class="ba-role">Sales Team</div>
-          <div class="ba-desc">Doesn't know real stock levels — promises delivery dates that can't be met</div>
-        </div>
-        <div class="ba-row">
-          <div class="ba-role">Owner</div>
-          <div class="ba-desc">Gets a financial picture once a month — can't see real-time profitability</div>
-        </div>
-      </div>
+  <div class="ba">
+    <div class="ba-col ba-before">
+      <div class="ba-head"><span class="ba-mark">✕</span> Without the system</div>
+      <div class="ba-row"><div class="ba-role">Farm Manager</div><div class="ba-desc">Calls workers to get status, no unified view of batch progress across farms</div></div>
+      <div class="ba-row"><div class="ba-role">Accountant</div><div class="ba-desc">Spends 3 days at month-end reconciling sales, purchases, and payroll manually</div></div>
+      <div class="ba-row"><div class="ba-role">HR Manager</div><div class="ba-desc">Tracks attendance on paper, calculates payroll in Excel with manual deductions</div></div>
+      <div class="ba-row"><div class="ba-role">Sales Team</div><div class="ba-desc">Doesn't know real stock levels — promises delivery dates that can't be met</div></div>
+      <div class="ba-row"><div class="ba-role">Owner</div><div class="ba-desc">Gets a financial picture once a month — can't see real-time profitability</div></div>
+    </div>
 
-      <div class="ba-divider">
-        <div class="ba-arrow">→</div>
-      </div>
-
-      <div class="ba-col ba-after">
-        <div class="ba-col-head">
-          <div class="ba-col-icon ba-icon-green">✓</div>
-          <span>With AZed Farm</span>
-        </div>
-        <div class="ba-row">
-          <div class="ba-role ba-role-green">Farm Manager</div>
-          <div class="ba-desc">Live dashboard shows all farm batches, worker attendance, and alerts in one view</div>
-        </div>
-        <div class="ba-row">
-          <div class="ba-role ba-role-green">Accountant</div>
-          <div class="ba-desc">Every sale, purchase, and payroll auto-posts to the ledger — month-end takes minutes</div>
-        </div>
-        <div class="ba-row">
-          <div class="ba-role ba-role-green">HR Manager</div>
-          <div class="ba-desc">Attendance auto-captured per farm; payroll with loans/deductions calculated in one click</div>
-        </div>
-        <div class="ba-row">
-          <div class="ba-role ba-role-green">Sales Team</div>
-          <div class="ba-desc">Sees live stock levels, can set B2B client pricing and credit limits instantly</div>
-        </div>
-        <div class="ba-row">
-          <div class="ba-role ba-role-green">Owner</div>
-          <div class="ba-desc">Real-time revenue, spoilage rates, delivery performance, and carbon footprint — always on</div>
-        </div>
-      </div>
+    <div class="ba-col ba-after">
+      <div class="ba-head"><span class="ba-mark">✓</span> With AZed Farm</div>
+      <div class="ba-row"><div class="ba-role">Farm Manager</div><div class="ba-desc">Live dashboard shows all farm batches, worker attendance, and alerts in one view</div></div>
+      <div class="ba-row"><div class="ba-role">Accountant</div><div class="ba-desc">Every sale, purchase, and payroll auto-posts to the ledger — month-end takes minutes</div></div>
+      <div class="ba-row"><div class="ba-role">HR Manager</div><div class="ba-desc">Attendance auto-captured per farm; payroll with loans/deductions calculated in one click</div></div>
+      <div class="ba-row"><div class="ba-role">Sales Team</div><div class="ba-desc">Sees live stock levels, can set B2B client pricing and credit limits instantly</div></div>
+      <div class="ba-row"><div class="ba-role">Owner</div><div class="ba-desc">Real-time revenue, spoilage rates, delivery performance, and carbon footprint — always on</div></div>
     </div>
   </div>
 </section>
 
-<!-- FARM WORKFLOW JOURNEY -->
-<section class="workflow-section">
-  <div class="section-eyebrow">End-to-end flow</div>
-  <h2 class="section-title fade-in">How a harvest becomes revenue — automatically</h2>
-  <p class="section-sub fade-in">Every step in your farm's value chain is connected. No manual handoffs, no data gaps.</p>
+<section class="sec">
+  <div class="eyebrow">End-to-end flow</div>
+  <h2 class="h2">How a harvest becomes revenue — automatically</h2>
+  <p class="lead" style="max-width:560px;margin-bottom:56px">Every step in your farm's value chain is connected. No manual handoffs, no data gaps.</p>
 
-  <div class="workflow-steps fade-in">
-    <div class="wf-step">
-      <div class="wf-icon wf-green">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <path d="M12 3C8 3 5 7 5 11c0 3 2 5.5 5 7v3h4v-3c3-1.5 5-4 5-7 0-4-3-8-7-8z" stroke="#2D5A27" stroke-width="1.6" stroke-linejoin="round"/>
-        </svg>
-      </div>
-      <div class="wf-label">Farm &amp; Batch Setup</div>
-      <div class="wf-detail">Register farms, assign workers, configure production recipes with expected inputs and yields</div>
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 3C8 3 5 7 5 11c0 3 2 5.5 5 7v3h4v-3c3-1.5 5-4 5-7 0-4-3-8-7-8z" stroke="#000" stroke-width="1.6" stroke-linejoin="round"></path></svg></div>
+      <div class="flow-title">Farm &amp; Batch Setup</div>
+      <div class="flow-desc">Register farms, assign workers, configure production recipes with expected inputs and yields</div>
     </div>
-    <div class="wf-arrow">→</div>
-
-    <div class="wf-step">
-      <div class="wf-icon wf-amber">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <rect x="4" y="6" width="16" height="13" rx="2" stroke="#C8882A" stroke-width="1.6"/>
-          <path d="M8 6V5a4 4 0 018 0v1" stroke="#C8882A" stroke-width="1.6"/>
-          <path d="M9 13h6M12 10v6" stroke="#C8882A" stroke-width="1.6" stroke-linecap="round"/>
-        </svg>
-      </div>
-      <div class="wf-label">Production Run</div>
-      <div class="wf-detail">Log batch start, track real-time progress, record actual output vs expected, note any spoilage</div>
+    <div class="flow-step">
+      <div class="flow-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="4" y="6" width="16" height="13" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M8 6V5a4 4 0 018 0v1" stroke="#000" stroke-width="1.6"></path><path d="M9 13h6M12 10v6" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path></svg></div>
+      <div class="flow-title">Production Run</div>
+      <div class="flow-desc">Log batch start, track real-time progress, record actual output vs expected, note any spoilage</div>
     </div>
-    <div class="wf-arrow">→</div>
-
-    <div class="wf-step">
-      <div class="wf-icon wf-sky">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <path d="M5 12h14M5 12l4-4M5 12l4 4" stroke="#4A7FA5" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </div>
-      <div class="wf-label">Farm Delivery</div>
-      <div class="wf-detail">Issue numbered delivery note, update stock automatically, route to retail or B2B customer</div>
+    <div class="flow-step">
+      <div class="flow-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M5 12l4-4M5 12l4 4" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
+      <div class="flow-title">Farm Delivery</div>
+      <div class="flow-desc">Issue numbered delivery note, update stock automatically, route to retail or B2B customer</div>
     </div>
-    <div class="wf-arrow">→</div>
-
-    <div class="wf-step">
-      <div class="wf-icon wf-soil">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <rect x="4" y="3" width="16" height="18" rx="2" stroke="#6B4C38" stroke-width="1.6"/>
-          <path d="M8 9h8M8 13h5" stroke="#6B4C38" stroke-width="1.6" stroke-linecap="round"/>
-          <circle cx="15" cy="13" r="1.5" fill="#6B4C38"/>
-        </svg>
-      </div>
-      <div class="wf-label">Invoice &amp; Payment</div>
-      <div class="wf-detail">Auto-generate invoice from delivery, update customer balance, record payment method</div>
+    <div class="flow-step">
+      <div class="flow-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="4" y="3" width="16" height="18" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M8 9h8M8 13h5" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><circle cx="15" cy="13" r="1.5" fill="#000"></circle></svg></div>
+      <div class="flow-title">Invoice &amp; Payment</div>
+      <div class="flow-desc">Auto-generate invoice from delivery, update customer balance, record payment method</div>
     </div>
-    <div class="wf-arrow">→</div>
-
-    <div class="wf-step">
-      <div class="wf-icon wf-teal">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <path d="M4 15l4-4 3 3 5-6" stroke="#0F6E56" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-          <rect x="3" y="3" width="18" height="18" rx="2" stroke="#0F6E56" stroke-width="1.6"/>
-        </svg>
-      </div>
-      <div class="wf-label">Auto Accounting</div>
-      <div class="wf-detail">Journal entries post automatically — revenue, COGS, and receivables updated instantly, zero manual entry</div>
+    <div class="flow-step">
+      <div class="flow-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M4 15l4-4 3 3 5-6" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><rect x="3" y="3" width="18" height="18" rx="2" stroke="#000" stroke-width="1.6"></rect></svg></div>
+      <div class="flow-title">Auto Accounting</div>
+      <div class="flow-desc">Journal entries post automatically — revenue, COGS, and receivables updated instantly, zero manual entry</div>
     </div>
   </div>
 
-  <div class="workflow-note fade-in">
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="color:var(--leaf);flex-shrink:0;margin-top:2px"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm-.75 3.5h1.5v5h-1.5v-5zm.75 7.5a1 1 0 110-2 1 1 0 010 2z"/></svg>
+  <div class="note">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm-.75 3.5h1.5v5h-1.5v-5zm.75 7.5a1 1 0 110-2 1 1 0 010 2z"></path></svg>
     <span>Every step updates stock levels, customer balances, and the accounting ledger in real time — no manual syncing between systems.</span>
   </div>
 </section>
 
-<!-- FAQ -->
-<section class="faq-section">
-  <div class="section-eyebrow">Common questions</div>
-  <h2 class="section-title fade-in">Everything you need to know</h2>
-  <p class="section-sub fade-in">Questions from farm owners and managers before they get started.</p>
+<section class="sec" style="background:#f8f8f8">
+  <div class="eyebrow">Common questions</div>
+  <h2 class="h2">Everything you need to know</h2>
+  <p class="lead" style="max-width:560px;margin-bottom:48px">Questions from farm owners and managers before they get started.</p>
 
   <div class="faq-grid">
-    <div class="faq-item fade-in" onclick="toggleFaq(this)">
-      <div class="faq-question">
-        Can I manage multiple farms from one account?
-        <div class="faq-icon">+</div>
-      </div>
-      <div class="faq-answer">Yes — AZed Farm is built for multi-farm operations. Each farm has its own dashboard, production batches, worker assignments, and stock levels. You can view a consolidated overview or drill into any individual farm at any time.</div>
+    <div class="faq">
+      <div class="faq-q"><span>Can I manage multiple farms from one account?</span><span class="faq-sign">+</span></div>
+      <p class="faq-a">Yes — AZed Farm is built for multi-farm operations. Each farm has its own dashboard, production batches, worker assignments, and stock levels. You can view a consolidated overview or drill into any individual farm at any time.</p>
     </div>
-
-    <div class="faq-item fade-in fade-in-delay-1" onclick="toggleFaq(this)">
-      <div class="faq-question">
-        Does accounting require a separate accountant to set up?
-        <div class="faq-icon">+</div>
-      </div>
-      <div class="faq-answer">No. The system comes with a pre-configured chart of accounts suitable for agricultural businesses. Every sale, purchase, and payroll transaction automatically posts the correct journal entries — your accountant can review and export, but doesn't need to manually enter anything.</div>
+    <div class="faq">
+      <div class="faq-q"><span>Does accounting require a separate accountant to set up?</span><span class="faq-sign">+</span></div>
+      <p class="faq-a">No. The system comes with a pre-configured chart of accounts suitable for agricultural businesses. Every sale, purchase, and payroll transaction automatically posts the correct journal entries — your accountant can review and export, but doesn't need to manually enter anything.</p>
     </div>
-
-    <div class="faq-item fade-in fade-in-delay-1" onclick="toggleFaq(this)">
-      <div class="faq-question">
-        How does spoilage tracking work?
-        <div class="faq-icon">+</div>
-      </div>
-      <div class="faq-answer">Field workers or supervisors log spoilage directly against a stock item and farm. The system records the quantity, reason, and date — automatically deducting from inventory and posting a spoilage expense to the ledger. You get weekly spoilage rate reports per product and farm.</div>
+    <div class="faq">
+      <div class="faq-q"><span>How does spoilage tracking work?</span><span class="faq-sign">+</span></div>
+      <p class="faq-a">Field workers or supervisors log spoilage directly against a stock item and farm. The system records the quantity, reason, and date — automatically deducting from inventory and posting a spoilage expense to the ledger. You get weekly spoilage rate reports per product and farm.</p>
     </div>
-
-    <div class="faq-item fade-in fade-in-delay-2" onclick="toggleFaq(this)">
-      <div class="faq-question">
-        Can B2B customers have different pricing?
-        <div class="faq-icon">+</div>
-      </div>
-      <div class="faq-answer">Yes. Each B2B client can have a custom price list, discount percentage, credit limit, and payment terms. Invoices auto-populate with the correct prices based on the client — no manual lookups needed.</div>
+    <div class="faq">
+      <div class="faq-q"><span>Can B2B customers have different pricing?</span><span class="faq-sign">+</span></div>
+      <p class="faq-a">Yes. Each B2B client can have a custom price list, discount percentage, credit limit, and payment terms. Invoices auto-populate with the correct prices based on the client — no manual lookups needed.</p>
     </div>
-
-    <div class="faq-item fade-in fade-in-delay-2" onclick="toggleFaq(this)">
-      <div class="faq-question">
-        How is payroll calculated for field workers?
-        <div class="faq-icon">+</div>
-      </div>
-      <div class="faq-answer">Workers are assigned to specific farms. Attendance is logged daily with automatic status rules (present, absent, late). At payroll time, the system calculates gross pay, applies any active loans or deductions, and generates a payroll summary — all in one click.</div>
+    <div class="faq">
+      <div class="faq-q"><span>How is payroll calculated for field workers?</span><span class="faq-sign">+</span></div>
+      <p class="faq-a">Workers are assigned to specific farms. Attendance is logged daily with automatic status rules (present, absent, late). At payroll time, the system calculates gross pay, applies any active loans or deductions, and generates a payroll summary — all in one click.</p>
     </div>
-
-    <div class="faq-item fade-in fade-in-delay-3" onclick="toggleFaq(this)">
-      <div class="faq-question">
-        What is the carbon footprint module?
-        <div class="faq-icon">+</div>
-      </div>
-      <div class="faq-answer">Each farm can log emission events — fuel use, chemical application, transport — against emission categories. The system tracks your total carbon output over time and compares it against reduction goals you set, giving you a sustainability report ready for stakeholders or certifications.</div>
+    <div class="faq">
+      <div class="faq-q"><span>What is the carbon footprint module?</span><span class="faq-sign">+</span></div>
+      <p class="faq-a">Each farm can log emission events — fuel use, chemical application, transport — against emission categories. The system tracks your total carbon output over time and compares it against reduction goals you set, giving you a sustainability report ready for stakeholders or certifications.</p>
     </div>
   </div>
 </section>
 
-<!-- CTA -->
-<section class="cta-section">
-  <h2 class="cta-title">Ready to run your farm<br>without the chaos?</h2>
-  <p class="cta-sub">Get a guided demo and see how AZed Farm maps to your specific operation.</p>
+<section id="contact" class="cta">
+  <h2>Ready to run your farm<br>without the chaos?</h2>
+  <p>Get a guided demo and see how AZed Farm maps to your specific operation.</p>
   <div class="cta-btns">
-    <a href="#" class="btn-cta-white">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 1.5a5.5 5.5 0 110 11 5.5 5.5 0 010-11zm-.75 3.5h1.5v3.75l2.5 1.5-.75 1.25-3-1.75V6z"/></svg>
+    <a href="#" class="btn-white" data-open-login>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 1.5a5.5 5.5 0 110 11 5.5 5.5 0 010-11zm-.75 3.5h1.5v3.75l2.5 1.5-.75 1.25-3-1.75V6z"></path></svg>
       Schedule a Demo
     </a>
-    <a href="#operations" class="btn-cta-outline">Explore all modules</a>
+    <a href="#operations" class="btn-outline">Explore all modules</a>
   </div>
 </section>
 
-<!-- FOOTER -->
 <footer>
   <div class="footer-inner">
-    <div class="footer-brand-col">
-      <div class="footer-logo">
-        <img src="/static/ERP_logo.png" alt="AZed Farm" />
-      </div>
-      <p class="footer-tagline-text">A complete farm management ERP connecting every part of your agricultural operation into one unified platform.</p>
-      <div class="footer-carbon-badge">
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><path d="M7 1a6 6 0 100 12A6 6 0 007 1zm-.5 3.5h1v4h-1v-4zm.5 6a.75.75 0 110-1.5.75.75 0 010 1.5z"/></svg>
+    <div>
+      <div class="footer-logo"><img src="/static/ERP_logo.png" alt="AZed Farm"></div>
+      <p class="footer-about">A complete farm management ERP connecting every part of your agricultural operation into one unified platform.</p>
+      <div class="footer-badge">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="currentColor"><path d="M7 1a6 6 0 100 12A6 6 0 007 1zm-.5 3.5h1v4h-1v-4zm.5 6a.75.75 0 110-1.5.75.75 0 010 1.5z"></path></svg>
         Carbon footprint tracking included
       </div>
     </div>
 
-    <div class="footer-links-col">
-      <div class="footer-links-group">
-        <div class="footer-links-heading">Farm Modules</div>
-        <a href="#operations" class="footer-link">Farm &amp; Production</a>
-        <a href="#operations" class="footer-link">Inventory &amp; Stock</a>
-        <a href="#operations" class="footer-link">Deliveries &amp; Logistics</a>
-        <a href="#operations" class="footer-link">Spoilage Tracking</a>
-        <a href="#operations" class="footer-link">Weather Logs</a>
-        <a href="#operations" class="footer-link">Carbon Footprint</a>
-      </div>
+    <div class="footer-col">
+      <div class="footer-head">Farm Modules</div>
+      <a href="#operations">Farm &amp; Production</a>
+      <a href="#operations">Inventory &amp; Stock</a>
+      <a href="#operations">Deliveries &amp; Logistics</a>
+      <a href="#operations">Spoilage Tracking</a>
+      <a href="#operations">Weather Logs</a>
+      <a href="#operations">Carbon Footprint</a>
     </div>
 
-    <div class="footer-links-col">
-      <div class="footer-links-group">
-        <div class="footer-links-heading">Business Modules</div>
-        <a href="#operations" class="footer-link">Sales &amp; Invoicing</a>
-        <a href="#operations" class="footer-link">B2B Client Management</a>
-        <a href="#operations" class="footer-link">Purchasing &amp; Suppliers</a>
-        <a href="#operations" class="footer-link">HR &amp; Attendance</a>
-        <a href="#operations" class="footer-link">Payroll &amp; Loans</a>
-        <a href="#operations" class="footer-link">Accounting &amp; Journals</a>
-      </div>
+    <div class="footer-col">
+      <div class="footer-head">Business Modules</div>
+      <a href="#operations">Sales &amp; Invoicing</a>
+      <a href="#operations">B2B Client Management</a>
+      <a href="#operations">Purchasing &amp; Suppliers</a>
+      <a href="#operations">HR &amp; Attendance</a>
+      <a href="#operations">Payroll &amp; Loans</a>
+      <a href="#operations">Accounting &amp; Journals</a>
     </div>
 
-    <div class="footer-links-col">
-      <div class="footer-links-group">
-        <div class="footer-links-heading">Get Started</div>
-        <a href="#" class="footer-link">Request a Demo</a>
-        <a href="#challenges" class="footer-link">See the Challenges</a>
-        <a href="#solutions" class="footer-link">How It Works</a>
-        <a href="#" class="footer-link">Contact Sales</a>
-      </div>
+    <div class="footer-col">
+      <div class="footer-head">Get Started</div>
+      <a href="#" data-open-login>Request a Demo</a>
+      <a href="#challenges">See the Challenges</a>
+      <a href="#solutions">How It Works</a>
+      <a href="#contact">Contact Sales</a>
     </div>
   </div>
 
   <div class="footer-bottom">
     <span>© 2026 AZed Farm. Farm Management System.</span>
-    <span style="color:var(--soil-light);font-weight:300">Built for Egyptian agricultural operations</span>
+    <span>Built for Egyptian agricultural operations</span>
   </div>
 </footer>
 
+<!-- SIGN IN MODAL (ids match /static/landing.js) -->
+<div class="login-overlay" id="loginOverlay" hidden>
+  <div class="login-modal" role="dialog" aria-modal="true" aria-label="Sign in">
+    <button class="login-close" id="modalClose" type="button" aria-label="Close">✕</button>
+    <img src="/static/ERP_logo.png" alt="AZed Farm">
+    <h2>Welcome back</h2>
+    <p class="sub">Sign in to your farm dashboard</p>
+
+    <form class="login-form" id="loginForm" novalidate>
+      <p class="login-notice" id="noticeEl" hidden>Your session expired. Please sign in again.</p>
+      <div class="field">
+        <label for="emailInp">Email address</label>
+        <input type="email" id="emailInp" name="email" placeholder="you@farmname.com" autocomplete="email">
+      </div>
+      <div class="field">
+        <label for="pwdInp">Password</label>
+        <div class="pwd-wrap">
+          <input type="password" id="pwdInp" name="password" placeholder="••••••••" autocomplete="current-password">
+          <button class="pwd-eye" id="togglePassword" type="button" aria-label="Show password" aria-pressed="false">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 8 5.5S16 8 16 8zM1.173 8a13.133 13.133 0 011.66-2.043C4.12 4.668 5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.133 13.133 0 0114.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5c-2.12 0-3.879-1.168-5.168-2.457A13.134 13.134 0 011.172 8z"></path><path d="M8 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5zM4.5 8a3.5 3.5 0 117 0 3.5 3.5 0 01-7 0z"></path></svg>
+          </button>
+        </div>
+      </div>
+      <p class="login-msg" id="errEl" hidden></p>
+      <button class="login-submit" id="submitBtn" type="submit">
+        Sign In
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 8a.5.5 0 01.5-.5h11.793l-3.147-3.146a.5.5 0 01.708-.708l4 4a.5.5 0 010 .708l-4 4a.5.5 0 01-.708-.708L13.293 8.5H1.5A.5.5 0 011 8z"></path></svg>
+      </button>
+    </form>
+  </div>
+</div>
+
+<script src="/static/landing.js"></script>
 <script>
-  /* ── Sign In Modal ── */
-  function openSignin(e) {
-    if (e) e.preventDefault();
-    document.getElementById('signinModal').classList.add('open');
-    document.body.style.overflow = 'hidden';
-    setTimeout(() => document.getElementById('signinEmail').focus(), 250);
-  }
+(function () {
+  // Hero video: fade in, fade out near the end, restart seamlessly.
+  var v = document.getElementById('heroVideo');
+  if (v) {
+    var raf = null, fadingOut = false;
 
-  function closeSigninBtn() {
-    document.getElementById('signinModal').classList.remove('open');
-    document.body.style.overflow = '';
-  }
-
-  function closeSignin(e) {
-    // Only close if clicking the backdrop, not the card
-    if (e.target === document.getElementById('signinModal')) {
-      closeSigninBtn();
+    function animate(to, duration) {
+      if (raf) cancelAnimationFrame(raf);
+      var from = parseFloat(v.style.opacity || '0') || 0;
+      var start = performance.now();
+      (function step(now) {
+        var t = Math.min(1, (now - start) / duration);
+        v.style.opacity = String(from + (to - from) * t);
+        raf = t < 1 ? requestAnimationFrame(step) : null;
+      })(start);
     }
+    function fadeIn() { animate(1, 250); }
+    function fadeOut() { animate(0, 250); }
+
+    v.addEventListener('loadeddata', fadeIn);
+    v.addEventListener('timeupdate', function () {
+      if (!v.duration || fadingOut) return;
+      if (v.duration - v.currentTime <= 0.55) { fadingOut = true; fadeOut(); }
+    });
+    v.addEventListener('ended', function () {
+      v.style.opacity = '0';
+      setTimeout(function () {
+        v.currentTime = 0;
+        var p = v.play(); if (p && p.catch) p.catch(function () {});
+        fadingOut = false;
+        fadeIn();
+      }, 100);
+    });
+    if (v.readyState >= 2) fadeIn();
+    var p = v.play(); if (p && p.catch) p.catch(function () {});
   }
 
-  // Close on Escape key
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeSigninBtn();
-  });
-
-  function togglePassword() {
-    const input = document.getElementById('signinPassword');
-    const icon  = document.getElementById('eyeIcon');
-    const isHidden = input.type === 'password';
-    input.type = isHidden ? 'text' : 'password';
-    // Swap between eye-open / eye-slash icon
-    icon.innerHTML = isHidden
-      ? '<path d="M13.359 11.238C15.06 9.72 16 8 16 8s-3-5.5-8-5.5a7.028 7.028 0 00-2.79.588l.77.771A5.944 5.944 0 018 3.5c2.12 0 3.879 1.168 5.168 2.457A13.134 13.134 0 0114.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755-.165.165-.337.328-.517.486l.708.709z"/><path d="M11.297 9.176a3.5 3.5 0 00-4.474-4.474l.823.823a2.5 2.5 0 012.829 2.829l.822.822zm-2.943 1.299l.822.822a3.5 3.5 0 01-4.474-4.474l.823.823a2.5 2.5 0 002.829 2.829z"/><path d="M3.35 5.47c-.18.16-.353.322-.518.487A13.134 13.134 0 001.172 8l.195.288c.335.48.83 1.12 1.465 1.755C4.121 11.332 5.881 12.5 8 12.5c.716 0 1.39-.133 2.02-.36l.77.772A7.029 7.029 0 018 13.5C3 13.5 0 8 0 8s.939-1.721 2.641-3.238l.708.708zm10.296 8.884l-12-12 .708-.708 12 12-.708.708z"/>'
-      : '<path d="M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 8 5.5S16 8 16 8zM1.173 8a13.133 13.133 0 011.66-2.043C4.12 4.668 5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.133 13.133 0 0114.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5c-2.12 0-3.879-1.168-5.168-2.457A13.134 13.134 0 011.172 8z"/><path d="M8 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5zM4.5 8a3.5 3.5 0 117 0 3.5 3.5 0 01-7 0z"/>';
-  }
-
-  function firstAllowedPage(data) {
-    return '/home';
-  }
-
-  function showSigninError(msg) {
-    const existing = document.getElementById('signinErrorMsg');
-    if (existing) { existing.textContent = msg; return; }
-    const err = document.createElement('p');
-    err.id = 'signinErrorMsg';
-    err.style.cssText = 'color:#E05050;font-size:13px;margin:0 0 12px 0;text-align:center;';
-    err.textContent = msg;
-    const btn = document.querySelector('.btn-signin');
-    btn.parentNode.insertBefore(err, btn);
-  }
-
-  function clearSigninError() {
-    const existing = document.getElementById('signinErrorMsg');
-    if (existing) existing.remove();
-  }
-
-  async function handleSignin() {
-    const email    = document.getElementById('signinEmail').value.trim();
-    const password = document.getElementById('signinPassword').value;
-    const btn      = document.querySelector('.btn-signin');
-    const originalHTML = btn.innerHTML;
-
-    clearSigninError();
-
-    if (!email || !password) {
-      [document.getElementById('signinEmail'), document.getElementById('signinPassword')]
-        .forEach(el => {
-          if (!el.value.trim()) {
-            el.style.borderColor = '#E05050';
-            el.style.boxShadow   = '0 0 0 3px rgba(224,80,80,0.15)';
-            setTimeout(() => { el.style.borderColor = ''; el.style.boxShadow = ''; }, 2000);
-          }
-        });
-      return;
-    }
-
-    btn.textContent = 'Signing in\u2026';
-    btn.style.opacity = '0.7';
-    btn.disabled = true;
-
-    try {
-      const response = await fetch('/auth/login', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
+  // FAQ accordion
+  document.querySelectorAll('.faq').forEach(function (item) {
+    item.addEventListener('click', function () {
+      var wasOpen = item.classList.contains('open');
+      document.querySelectorAll('.faq.open').forEach(function (o) {
+        o.classList.remove('open');
+        o.querySelector('.faq-sign').textContent = '+';
       });
-
-      let data = {};
-      try { data = await response.json(); } catch (_) {}
-
-      if (!response.ok) {
-        showSigninError(data.detail || 'Invalid email or password.');
-        btn.innerHTML = originalHTML;
-        btn.style.opacity = '1';
-        btn.disabled = false;
-        return;
-      }
-
-      btn.innerHTML = '\u2713 Redirecting\u2026';
-      btn.style.opacity = '1';
-      window.location.href = firstAllowedPage(data);
-
-    } catch (_) {
-      showSigninError('Connection error. Please try again.');
-      btn.innerHTML = originalHTML;
-      btn.style.opacity = '1';
-      btn.disabled = false;
-    }
-  }
-
-  /* ── Theme toggle ── */
-  function toggleTheme() {
-    const isDark = document.body.classList.toggle('dark');
-    localStorage.setItem('azed-theme', isDark ? 'dark' : 'light');
-    document.getElementById('themeToggle').setAttribute('aria-label', isDark ? 'Switch to light mode' : 'Switch to dark mode');
-  }
-
-  /* Apply saved theme on load */
-  (function() {
-    const saved = localStorage.getItem('azed-theme');
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    if (saved === 'dark' || (!saved && prefersDark)) {
-      document.body.classList.add('dark');
-    }
-  })();
-
-  /* ── Scroll progress bar ── */
-  const progressBar = document.getElementById('scrollProgress');
-  window.addEventListener('scroll', () => {
-    const pct = (window.scrollY / (document.documentElement.scrollHeight - window.innerHeight)) * 100;
-    progressBar.style.width = Math.min(pct, 100) + '%';
-  }, { passive: true });
-
-  /* ── Mobile hamburger ── */
-  function toggleMenu() {
-    const btn = document.getElementById('navHamburger');
-    const menu = document.getElementById('mobileMenu');
-    btn.classList.toggle('open');
-    menu.classList.toggle('open');
-  }
-
-  function closeMenu() {
-    document.getElementById('navHamburger').classList.remove('open');
-    document.getElementById('mobileMenu').classList.remove('open');
-  }
-
-  /* ── Fade-in on scroll ── */
-  const fadeObserver = new IntersectionObserver((entries) => {
-    entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
-  }, { threshold: 0.08, rootMargin: '0px 0px -32px 0px' });
-  document.querySelectorAll('.fade-in').forEach(el => fadeObserver.observe(el));
-
-  /* ── Challenge card toggle ── */
-  function activateChallenge(el) {
-    document.querySelectorAll('.challenge-card').forEach(c => c.classList.remove('active'));
-    el.classList.add('active');
-  }
-
-  /* ── FAQ accordion ── */
-  function toggleFaq(el) {
-    const isOpen = el.classList.contains('open');
-    document.querySelectorAll('.faq-item.open').forEach(f => f.classList.remove('open'));
-    if (!isOpen) el.classList.add('open');
-  }
-
-  /* ── Animated counter util ── */
-  function animateCounter(el, target, suffix, duration) {
-    const step = target / (duration / 16);
-    let val = 0;
-    const tick = () => {
-      val = Math.min(val + step, target);
-      el.textContent = Math.round(val) + suffix;
-      if (val < target) requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-  }
-
-  /* ── Hero op-metrics counter ── */
-  const heroGrid = document.querySelector('.farm-ops-grid');
-  if (heroGrid) {
-    const heroObs = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting) {
-        const vals = heroGrid.querySelectorAll('.op-metric-val');
-        [4, 18, 3].forEach((t, i) => animateCounter(vals[i], t, '', 900));
-        heroObs.unobserve(heroGrid);
-      }
-    }, { threshold: 0.5 });
-    heroObs.observe(heroGrid);
-  }
-
-  /* ── Stats strip counters ── */
-  const statsStrip = document.querySelector('.stats-strip');
-  if (statsStrip) {
-    const statNums = statsStrip.querySelectorAll('.stat-num');
-    const stripObs = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting) {
-        // "12+" farms, "360°" → skip non-numeric, animate numeric ones
-        animateCounter(statNums[0], 12, '+', 800);
-        stripObs.unobserve(statsStrip);
-      }
-    }, { threshold: 0.5 });
-    stripObs.observe(statsStrip);
-  }
-
-  /* ── Bar chart animate on scroll ── */
-  const barChart = document.querySelector('.bar-chart');
-  if (barChart) {
-    const barObs = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting) {
-        barChart.querySelectorAll('.bar').forEach((bar, i) => {
-          const h = bar.style.height;
-          bar.style.height = '0';
-          setTimeout(() => { bar.style.transition = 'height 0.5s ease'; bar.style.height = h; }, i * 80);
-        });
-        barObs.unobserve(barChart);
-      }
-    }, { threshold: 0.4 });
-    barObs.observe(barChart);
-  }
-
-  /* ── Spoilage mini-card count-up ── */
-  const miniCards = document.querySelectorAll('.mini-val');
-  if (miniCards.length) {
-    const mcObs = new IntersectionObserver((entries) => {
-      entries.forEach(e => {
-        if (e.isIntersecting) {
-          const el = e.target;
-          const txt = el.textContent.trim();
-          if (txt.includes('124')) animateCounter(el, 124, 'K', 1000);
-          if (txt.includes('2.1')) {
-            let v = 0;
-            const step2 = () => { v = Math.min(v + 0.1, 2.1); el.textContent = v.toFixed(1) + '%'; if (v < 2.1) requestAnimationFrame(step2); };
-            requestAnimationFrame(step2);
-          }
-          mcObs.unobserve(e.target);
-        }
-      });
-    }, { threshold: 0.6 });
-    miniCards.forEach(c => mcObs.observe(c));
-  }
-
-  /* ── Active nav link on scroll ── */
-  const sections = document.querySelectorAll('section[id]');
-  const navLinks = document.querySelectorAll('#navLinks a[href^="#"]');
-  window.addEventListener('scroll', () => {
-    let current = '';
-    sections.forEach(s => { if (window.scrollY >= s.offsetTop - 120) current = s.id; });
-    navLinks.forEach(a => {
-      const isActive = a.getAttribute('href') === '#' + current;
-      if (!a.classList.contains('nav-cta')) {
-        a.style.color = isActive ? 'var(--leaf)' : '';
-        a.style.fontWeight = isActive ? '500' : '';
+      if (!wasOpen) {
+        item.classList.add('open');
+        item.querySelector('.faq-sign').textContent = '–';
       }
     });
-  }, { passive: true });
-
-  /* ── Close mobile menu on outside click ── */
-  document.addEventListener('click', (e) => {
-    const menu = document.getElementById('mobileMenu');
-    const btn = document.getElementById('navHamburger');
-    if (menu.classList.contains('open') && !menu.contains(e.target) && !btn.contains(e.target)) {
-      closeMenu();
-    }
   });
 
-  /* ── Trusted logo hover shimmer (stagger) ── */
-  document.querySelectorAll('.trusted-logo').forEach((el, i) => {
-    el.style.animationDelay = (i * 0.15) + 's';
-  });
+  // Mobile menu
+  var burger = document.getElementById('navHamburger');
+  var menu = document.getElementById('mobileMenu');
+  if (burger && menu) {
+    burger.addEventListener('click', function () {
+      burger.classList.toggle('open');
+      menu.classList.toggle('open');
+    });
+    menu.addEventListener('click', function (e) {
+      if (e.target.tagName === 'A') { burger.classList.remove('open'); menu.classList.remove('open'); }
+    });
+  }
+})();
 </script>
-
 </body>
 </html>
