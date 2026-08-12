@@ -36,6 +36,94 @@
   a { color: #000; text-decoration: none; }
   a:hover { color: #505050; }
   ul { list-style: none; }
+
+  /* animated section backgrounds */
+  .bg-stats {
+    background-color: #0e1311;
+    background-image: radial-gradient(circle, rgba(90,225,76,.30) 0%, rgba(90,225,76,0) 68%), radial-gradient(circle, rgba(255,255,255,.10) 0%, rgba(255,255,255,0) 70%), repeating-linear-gradient(135deg, rgba(255,255,255,.06) 0 1px, rgba(255,255,255,0) 1px 14px);
+    background-size: 520px 520px, 420px 420px, auto;
+    background-repeat: no-repeat, no-repeat, repeat;
+    animation: omStats 22s ease-in-out infinite;
+  }
+  .bg-challenges {
+    background-color: #fff;
+    background-image: radial-gradient(circle, rgba(90,225,76,.20) 0%, rgba(90,225,76,0) 70%), radial-gradient(circle, rgba(14,19,17,.12) 0%, rgba(14,19,17,0) 72%), radial-gradient(rgba(0,0,0,.07) 1.4px, transparent 1.4px);
+    background-size: 640px 640px, 520px 520px, 28px 28px;
+    background-repeat: no-repeat, no-repeat, repeat;
+    animation: omCh 24s ease-in-out infinite;
+  }
+  .bg-operations {
+    background-color: #f8f8f8;
+    background-image: radial-gradient(circle, rgba(90,225,76,.18) 0%, rgba(90,225,76,0) 70%), repeating-linear-gradient(45deg, rgba(0,0,0,.05) 0 2px, rgba(0,0,0,0) 2px 26px);
+    background-size: 760px 760px, auto;
+    background-repeat: no-repeat, repeat;
+    animation: omOps 26s ease-in-out infinite;
+  }
+  .bg-solutions {
+    background-color: #fff;
+    background-image: radial-gradient(circle, rgba(14,19,17,.14) 0%, rgba(14,19,17,0) 70%), radial-gradient(circle, rgba(90,225,76,.18) 0%, rgba(90,225,76,0) 70%);
+    background-size: 680px 680px, 560px 560px;
+    background-repeat: no-repeat, no-repeat;
+    animation: omSol 28s ease-in-out infinite;
+  }
+  .bg-ba {
+    background-color: #f8f8f8;
+    background-image: radial-gradient(circle, rgba(90,225,76,.18) 0%, rgba(90,225,76,0) 70%), radial-gradient(circle, rgba(14,19,17,.12) 0%, rgba(14,19,17,0) 72%), radial-gradient(rgba(0,0,0,.08) 1.6px, transparent 1.6px);
+    background-size: 620px 620px, 520px 520px, 30px 30px;
+    background-repeat: no-repeat, no-repeat, repeat;
+    animation: omBa 25s ease-in-out infinite;
+  }
+  .bg-faq {
+    background-color: #f8f8f8;
+    background-image: radial-gradient(circle, rgba(14,19,17,.13) 0%, rgba(14,19,17,0) 72%), repeating-linear-gradient(-45deg, rgba(0,0,0,.05) 0 2px, rgba(0,0,0,0) 2px 30px);
+    background-size: 700px 700px, auto;
+    background-repeat: no-repeat, repeat;
+    animation: omFaq 27s ease-in-out infinite;
+  }
+  .cta {
+    background-image: radial-gradient(circle, rgba(90,225,76,.34) 0%, rgba(90,225,76,0) 66%), radial-gradient(circle, rgba(255,255,255,.11) 0%, rgba(255,255,255,0) 70%), repeating-linear-gradient(90deg, rgba(255,255,255,.05) 0 1px, rgba(255,255,255,0) 1px 46px);
+    background-size: 680px 680px, 520px 520px, auto;
+    background-repeat: no-repeat, no-repeat, repeat;
+    animation: omCta 24s ease-in-out infinite;
+  }
+  @keyframes omStats { 0%,100% { background-position: -8% 20%, 106% 80%, 0 0; } 50% { background-position: 55% 90%, 30% 10%, 60px 0; } }
+  @keyframes omCh { 0%,100% { background-position: -12% 8%, 108% 82%, 0 0; } 50% { background-position: 62% 74%, 14% 2%, 28px 28px; } }
+  @keyframes omOps { 0%,100% { background-position: 112% -6%, 0 0; } 50% { background-position: -14% 96%, 320px 320px; } }
+  @keyframes omSol { 0%,100% { background-position: 104% -8%, -8% 96%; } 50% { background-position: 40% 60%, 60% 10%; } }
+  @keyframes omBa { 0%,100% { background-position: -10% 96%, 106% 4%, 0 0; } 50% { background-position: 70% 8%, 18% 88%, -30px 30px; } }
+  @keyframes omFaq { 0%,100% { background-position: 106% 92%, 0 0; } 50% { background-position: -8% 6%, -300px 0; } }
+  @keyframes omCta { 0%,100% { background-position: -10% 110%, 108% -10%, 0 0; } 50% { background-position: 70% 20%, 20% 100%, 90px 0; } }
+
+  /* scroll reveal */
+  [data-reveal] { transition: opacity .75s cubic-bezier(.16,.84,.44,1), transform .75s cubic-bezier(.16,.84,.44,1); }
+  .js [data-reveal="up"] { opacity: 0; transform: translateY(28px); }
+  .js [data-reveal="left"] { opacity: 0; transform: translateX(-26px); }
+  .js [data-reveal="right"] { opacity: 0; transform: translateX(26px); }
+  .js [data-reveal="line"] { transform: scaleX(0); transform-origin: left center; transition: transform 1.1s cubic-bezier(.16,.84,.44,1); }
+  [data-reveal].is-in { opacity: 1 !important; transform: none !important; }
+  .js .bar { height: 0 !important; transition: height .9s cubic-bezier(.16,.84,.44,1); }
+  .js .bar.is-in { height: var(--h) !important; }
+  .js .meter-fill { width: 0 !important; transition: width 1.1s cubic-bezier(.16,.84,.44,1); }
+  .js .meter-fill.is-in { width: var(--w) !important; }
+
+  /* consumption meters */
+  .meters { display: flex; flex-direction: column; gap: 12px; }
+  .meter { display: flex; flex-direction: column; gap: 5px; }
+  .meter-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .meter-head span:first-child { font-size: 11px; color: #505050; white-space: nowrap; }
+  .meter-head span:last-child { font-family: 'Noto Sans', sans-serif; font-size: 11px; color: #000; white-space: nowrap; }
+  .meter-track { display: block; width: 100%; height: 6px; border-radius: 100px; background: #ebebeb; overflow: hidden; }
+  .meter-fill { display: block; height: 100%; border-radius: 100px; background: #0e1311; }
+
+  /* workflow connector */
+  .flow-wrap { position: relative; margin-bottom: 28px; }
+  .flow-line { position: absolute; top: 26px; left: 26px; right: 26px; height: 1px; background: #ebebeb; }
+  .flow { position: relative; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+    .js [data-reveal] { opacity: 1 !important; transform: none !important; }
+  }
   h1, h2, h3, h4 { font-weight: inherit; }
 
   .eyebrow {
@@ -79,7 +167,20 @@
     font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500;
     font-size: clamp(13px, 1.15vw, 16px); letter-spacing: -.2px; white-space: nowrap;
   }
-  .nav-links a { color: #000; display: flex; align-items: center; gap: 5px; }
+  .nav-links a {
+    color: #000; display: flex; align-items: center; gap: 5px;
+    position: relative; padding: 6px 2px; transition: color .2s ease;
+  }
+  .nav-links a::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+    background: #0e1311; border-radius: 2px;
+    transform: scaleX(0); transform-origin: left center; transition: transform .28s cubic-bezier(.16,.84,.44,1);
+  }
+  .nav-links a:hover { color: #0e1311; }
+  .nav-links a:hover::after, .nav-links a.active::after { transform: scaleX(1); }
+  .nav-links a.active { color: #000; font-weight: 600; }
+  .nav-links a.active::after { background: rgba(90,225,76,.89); }
+  .mobile-menu a.active { color: #000; font-weight: 600; }
   .nav-actions {
     display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
     font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500;
@@ -453,8 +554,8 @@
       </div>
 
       <div class="nav-actions">
-        <a href="#" class="btn-ghost" data-open-login>Sign In</a>
-        <a href="#contact" class="btn-dark">Request Demo</a>
+        <a href="#" class="btn-ghost" data-open-login>Sign in</a>
+        <a href="#contact" class="btn-dark">Request demo</a>
         <button class="nav-hamburger" id="navHamburger" aria-label="Toggle menu"><span></span><span></span><span></span></button>
       </div>
     </nav>
@@ -469,14 +570,14 @@
           Now with carbon footprint tracking
         </div>
 
-        <h1>The Ground Your Farm Stands On, and the Numbers Behind It</h1>
+        <h1>The ground your farm stands on, and the numbers behind it</h1>
 
-        <p class="hero-sub">Monitor stock, animals, production, and running costs per farm — including water and electricity consumption — so you always know what each farm is producing and what it takes to run it.</p>
+        <p class="hero-sub">Monitor stock, animals, production, and running costs per farm, including water and electricity consumption, so you always know what each farm is producing and what it takes to run it.</p>
       </div>
 
       <div class="hero-actions">
         <a href="#" class="btn-lg-dark" data-open-login>
-          Sign In
+          Sign in
           <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
         </a>
         <a href="#operations" class="btn-lg-light">Explore all modules</a>
@@ -490,79 +591,68 @@
   <a href="#challenges">Challenges</a>
   <a href="#solutions">Solutions</a>
   <a href="#contact">Contact</a>
-  <a href="#" data-open-login>Sign In</a>
+  <a href="#" data-open-login>Sign in</a>
 </div>
 
-<div class="stats">
-  <div class="stat"><div class="stat-num">12+</div><div class="stat-lbl">Modules integrated</div></div>
-  <div class="stat"><div class="stat-num">360°</div><div class="stat-lbl">Farm visibility</div></div>
-  <div class="stat"><div class="stat-num">Real-time</div><div class="stat-lbl">Stock &amp; delivery tracking</div></div>
-  <div class="stat"><div class="stat-num">One</div><div class="stat-lbl">Unified platform</div></div>
+<div class="stats bg-stats">
+  <div class="stat" data-reveal="up"><div class="stat-num" data-count="12" data-count-suffix="+">12+</div><div class="stat-lbl">Modules integrated</div></div>
+  <div class="stat" data-reveal="up" data-reveal-delay="90"><div class="stat-num" data-count="360" data-count-suffix="°">360°</div><div class="stat-lbl">Farm visibility</div></div>
+  <div class="stat" data-reveal="up" data-reveal-delay="180"><div class="stat-num">Real-time</div><div class="stat-lbl">Stock &amp; delivery tracking</div></div>
+  <div class="stat" data-reveal="up" data-reveal-delay="270"><div class="stat-num">One</div><div class="stat-lbl">Unified platform</div></div>
 </div>
 
-<div class="trusted">
-  <span class="trusted-label">Trusted by farms across Egypt</span>
-  <div class="trusted-logos">
-    <span>Al-Nour Farms</span>
-    <span>Delta Fresh</span>
-    <span>GreenValley Co.</span>
-    <span>Nile Harvest</span>
-    <span>SunRise Agri</span>
-  </div>
-</div>
-
-<section id="challenges" class="sec split top">
+<section id="challenges" class="sec split top bg-challenges">
   <div>
-    <div class="eyebrow">The problem</div>
-    <h2 class="h2" style="max-width:560px">Running a farm shouldn't mean fighting data chaos</h2>
-    <p class="lead" style="max-width:560px;margin-bottom:48px">Agricultural businesses carry enormous operational complexity. Most farms still rely on disconnected tools that create more problems than they solve.</p>
+    <div class="eyebrow" data-reveal="up">The problem</div>
+    <h2 data-reveal="up" data-reveal-delay="90" class="h2" style="max-width:560px">Running a farm shouldn't mean fighting data chaos</h2>
+    <p data-reveal="up" data-reveal-delay="170" class="lead" style="max-width:560px;margin-bottom:48px">Agricultural businesses carry enormous operational complexity. Most farms still rely on disconnected tools that create more problems than they solve.</p>
 
     <div class="stack-14">
-      <div class="card tinted">
+      <div class="card tinted" data-reveal="up">
         <h3>Spreadsheet overload</h3>
         <p>Multiple disconnected spreadsheets for inventory, sales, HR, and farm output. Manual data entry leads to costly errors, version conflicts, and missing records.</p>
       </div>
-      <div class="card">
+      <div class="card" data-reveal="up">
         <h3>No visibility into production</h3>
         <p>Farm batches, yields, and processing stages tracked informally. Managers can't see real-time status across multiple farms, causing poor decisions and harvest delays.</p>
       </div>
-      <div class="card">
+      <div class="card" data-reveal="up">
         <h3>Fragmented financial tracking</h3>
         <p>Sales, expenses, payroll, and purchasing live in separate systems. Reconciling end-of-month finances takes days, and errors only surface when it's too late to fix.</p>
       </div>
-      <div class="card">
+      <div class="card" data-reveal="up">
         <h3>HR &amp; payroll pain</h3>
-        <p>Tracking attendance for field workers assigned to different farms, calculating payroll with loans and deductions — done manually on paper, every single month.</p>
+        <p>Tracking attendance for field workers assigned to different farms, calculating payroll with loans and deductions, done manually on paper, every single month.</p>
       </div>
     </div>
   </div>
 
-  <div class="panel">
+  <div class="panel" data-reveal="right">
     <div class="panel-title">
       <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm-.75 4.25a.75.75 0 011.5 0v4a.75.75 0 01-1.5 0v-4zm.75 7.5a1 1 0 110-2 1 1 0 010 2z"></path></svg>
       The spreadsheet reality
     </div>
     <div class="ss">
       <div class="ss-head"><span>Product / Farm</span><span>Stock</span><span>Cost</span><span>Status</span></div>
-      <div class="ss-row"><span>Tomato — Farm 1</span><span>240 kg</span><span>EGP 2.80</span><span>✓ OK</span></div>
-      <div class="ss-row"><span>Pepper — Farm 2</span><span class="bad">???</span><span>EGP 4.20</span><span class="bad">Missing</span></div>
-      <div class="ss-row"><span>Cucumber — Farm 3</span><span>180 kg</span><span class="bad">#REF!</span><span>⚠ Check</span></div>
+      <div class="ss-row"><span>Tomato, Farm 1</span><span>240 kg</span><span>EGP 2.80</span><span>✓ OK</span></div>
+      <div class="ss-row"><span>Pepper, Farm 2</span><span class="bad">???</span><span>EGP 4.20</span><span class="bad">Missing</span></div>
+      <div class="ss-row"><span>Cucumber, Farm 3</span><span>180 kg</span><span class="bad">#REF!</span><span>⚠ Check</span></div>
       <div class="ss-row"><span>Fertilizer K-60</span><span class="bad">LOW</span><span>—</span><span class="bad">Reorder!</span></div>
-      <div class="ss-row"><span>Payroll — May</span><span class="bad">WRONG</span><span>EGP ???</span><span class="bad">Manual fix</span></div>
+      <div class="ss-row"><span>Payroll, May</span><span class="bad">WRONG</span><span>EGP ???</span><span class="bad">Manual fix</span></div>
     </div>
-    <p class="panel-note">Every farm manager knows this scene — critical data buried in broken formulas, missing entries, and version conflicts. The farm runs on guesswork.</p>
+    <p class="panel-note">Every farm manager knows this scene: critical data buried in broken formulas, missing entries, and version conflicts. The farm runs on guesswork.</p>
   </div>
 </section>
 
-<section id="operations" class="sec" style="background:#f8f8f8">
-  <div class="eyebrow">What the system covers</div>
-  <h2 class="h2" style="max-width:620px">Every part of your farm operation, unified</h2>
-  <p class="lead" style="margin-bottom:56px">From fields, animals, and workers to checkout, suppliers, and carbon — nine connected modules covering the full agricultural value chain in one system.</p>
+<section id="operations" class="sec bg-operations">
+  <div class="eyebrow" data-reveal="up">What the system covers</div>
+  <h2 data-reveal="up" data-reveal-delay="90" class="h2" style="max-width:620px">Every part of your farm operation, unified</h2>
+  <p data-reveal="up" data-reveal-delay="170" class="lead" style="margin-bottom:56px">From fields, animals, and workers to checkout, suppliers, and carbon, nine connected modules covering the full agricultural value chain in one system.</p>
 
   <div class="modules">
-    <div class="module">
+    <div class="module" data-reveal="up" data-reveal-delay="0">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 18C4 13 7 8 11 7c4-1 7 2 7 6" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><path d="M11 7v11M7 14l4-3 4 3" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
-      <h3>Farm &amp; Production Management</h3>
+      <h3>Farm &amp; production management</h3>
       <p>Track every farm location, assign workers, and run production batches with precise input-output recipe control.</p>
       <ul>
         <li>Multi-farm dashboard with real-time status</li>
@@ -572,9 +662,9 @@
       </ul>
     </div>
 
-    <div class="module">
+    <div class="module" data-reveal="up" data-reveal-delay="70">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="8" width="16" height="11" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M7 8V6a4 4 0 018 0v2" stroke="#000" stroke-width="1.6"></path><path d="M9 13h4M11 11v4" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path></svg></div>
-      <h3>Inventory &amp; Stock Control</h3>
+      <h3>Inventory &amp; stock control</h3>
       <p>Never run out of critical inputs or lose track of produce. Multi-location stock management with automatic reorder alerts.</p>
       <ul>
         <li>Multi-location stock tracking across farms</li>
@@ -584,9 +674,9 @@
       </ul>
     </div>
 
-    <div class="module">
+    <div class="module" data-reveal="up" data-reveal-delay="140">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 11h14M4 11l4-4M4 11l4 4" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><path d="M18 6v10" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="2 2"></path></svg></div>
-      <h3>Deliveries &amp; Logistics</h3>
+      <h3>Deliveries &amp; logistics</h3>
       <p>Manage farm output delivery end-to-end with numbered delivery notes and auto-generated customer invoices.</p>
       <ul>
         <li>Farm delivery scheduling and tracking</li>
@@ -596,10 +686,10 @@
       </ul>
     </div>
 
-    <div class="module">
+    <div class="module" data-reveal="up" data-reveal-delay="210">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="4" width="16" height="14" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M7 9h8M7 12h5" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><circle cx="14.5" cy="12" r="1.5" fill="#000"></circle></svg></div>
-      <h3>Sales &amp; Invoicing</h3>
-      <p>Retail and B2B sales managed in one place — with customer balances, custom pricing per client, and refund handling.</p>
+      <h3>Sales &amp; invoicing</h3>
+      <p>Retail and B2B sales managed in one place, with customer balances, custom pricing per client, and refund handling.</p>
       <ul>
         <li>Retail POS-style invoicing</li>
         <li>B2B client pricing and credit limits</li>
@@ -608,9 +698,9 @@
       </ul>
     </div>
 
-    <div class="module">
+    <div class="module" data-reveal="up" data-reveal-delay="280">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="9" cy="8" r="3" stroke="#000" stroke-width="1.6"></circle><path d="M4 18c0-3.3 2.2-6 5-6M14 12v7M11 15.5h6" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path></svg></div>
-      <h3>HR, Payroll &amp; Attendance</h3>
+      <h3>HR, payroll &amp; attendance</h3>
       <p>Manage field workers assigned per farm, track daily attendance with auto-status, and calculate payroll with deductions and loans.</p>
       <ul>
         <li>Employee farm assignments</li>
@@ -620,9 +710,9 @@
       </ul>
     </div>
 
-    <div class="module">
+    <div class="module" data-reveal="up" data-reveal-delay="350">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 3v2M11 17v2M3 11h2M17 11h2" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><circle cx="11" cy="11" r="4" stroke="#000" stroke-width="1.6"></circle><path d="M8 11a3 3 0 003-3" stroke="#000" stroke-width="1.4" stroke-linecap="round"></path></svg></div>
-      <h3>Finance, Accounting &amp; Carbon</h3>
+      <h3>Finance, accounting &amp; carbon</h3>
       <p>Full chart of accounts with automatic journal posting for every transaction. Plus carbon emission logging and reduction goal tracking.</p>
       <ul>
         <li>Automated double-entry bookkeeping</li>
@@ -632,9 +722,9 @@
       </ul>
     </div>
 
-    <div class="module">
+    <div class="module" data-reveal="up" data-reveal-delay="420">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M6 13c0-3 2-5 5-5s5 2 5 5v3H6v-3z" stroke="#000" stroke-width="1.6" stroke-linejoin="round"></path><circle cx="9" cy="6" r="1.4" fill="#000"></circle><circle cx="13" cy="6" r="1.4" fill="#000"></circle><path d="M8 8.5l-1.5-2M14 8.5l1.5-2" stroke="#000" stroke-width="1.4" stroke-linecap="round"></path></svg></div>
-      <h3>Animals &amp; Livestock</h3>
+      <h3>Animals &amp; livestock</h3>
       <p>Track every animal across your farms with full lifecycle records and dedicated cost allocation that keeps livestock expenses cleanly separated from crop operations.</p>
       <ul>
         <li>Per-animal profiles and farm assignment</li>
@@ -644,10 +734,10 @@
       </ul>
     </div>
 
-    <div class="module">
+    <div class="module" data-reveal="up" data-reveal-delay="490">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="5" width="16" height="11" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M3 9h16" stroke="#000" stroke-width="1.6"></path><path d="M7 13h3M13 13h2" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><circle cx="6.5" cy="7" r=".8" fill="#000"></circle></svg></div>
-      <h3>POS Terminal &amp; Receive Intake</h3>
-      <p>A real point-of-sale checkout for retail counters plus a structured intake flow for incoming stock — both posting straight into accounting with the right expense categories.</p>
+      <h3>POS terminal &amp; receive intake</h3>
+      <p>A real point-of-sale checkout for retail counters plus a structured intake flow for incoming stock, both posting straight into accounting with the right expense categories.</p>
       <ul>
         <li>Fast checkout with discounts and settle-later</li>
         <li>Batch receive multiple products per delivery</li>
@@ -656,9 +746,9 @@
       </ul>
     </div>
 
-    <div class="module">
+    <div class="module" data-reveal="up" data-reveal-delay="560">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 18V6M4 18h14" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><rect x="7" y="10" width="2.5" height="6" fill="#000"></rect><rect x="11" y="7" width="2.5" height="9" fill="#000"></rect><rect x="15" y="12" width="2.5" height="4" fill="#000"></rect></svg></div>
-      <h3>Reports, Audit &amp; Access Control</h3>
+      <h3>Reports, audit &amp; access control</h3>
       <p>Granular per-role and per-user permissions, a full audit trail of every change in the system, and reports that read the same numbers your accountant trusts.</p>
       <ul>
         <li>Role-based permissions with per-user overrides</li>
@@ -670,48 +760,48 @@
   </div>
 </section>
 
-<section id="solutions" class="sec split mid">
+<section id="solutions" class="sec split mid bg-solutions">
   <div>
-    <div class="eyebrow">How it solves it</div>
-    <h2 class="h2">From scattered data to one clear view</h2>
-    <p class="lead" style="max-width:560px;margin-bottom:40px">The system ties every part of your operation together. What used to require five tools and two days of reconciliation now happens automatically.</p>
+    <div class="eyebrow" data-reveal="up">How it solves it</div>
+    <h2 data-reveal="up" data-reveal-delay="90" class="h2">From scattered data to one clear view</h2>
+    <p data-reveal="up" data-reveal-delay="170" class="lead" style="max-width:560px;margin-bottom:40px">The system ties every part of your operation together. What used to require five tools and two days of reconciliation now happens automatically.</p>
 
     <div class="steps">
-      <div class="step">
+      <div class="step" data-reveal="left">
         <div class="step-num">1</div>
         <div>
           <h4>Capture everything at the source</h4>
-          <p>Every harvest batch, delivery, purchase, attendance record, and sale is logged at the point of action — by the person doing the work, on any device.</p>
+          <p>Every harvest batch, delivery, purchase, attendance record, and sale is logged at the point of action, by the person doing the work, on any device.</p>
         </div>
       </div>
-      <div class="step">
+      <div class="step" data-reveal="left">
         <div class="step-num">2</div>
         <div>
           <h4>Automatic accounting, zero reconciliation</h4>
           <p>Every transaction posts a double-entry journal entry automatically. Stock levels, customer balances, and accounts update in real time without manual entry.</p>
         </div>
       </div>
-      <div class="step">
+      <div class="step" data-reveal="left">
         <div class="step-num">3</div>
         <div>
           <h4>Alerts before problems become losses</h4>
-          <p>Low stock, reorder thresholds, spoilage anomalies, and overdue payments surface as alerts — so your team acts before the damage is done.</p>
+          <p>Low stock, reorder thresholds, spoilage anomalies, and overdue payments surface as alerts, so your team acts before the damage is done.</p>
         </div>
       </div>
-      <div class="step">
+      <div class="step" data-reveal="left">
         <div class="step-num">4</div>
         <div>
           <h4>Reports and dashboards on demand</h4>
-          <p>Farm-level performance, payroll summaries, profitability by product, and carbon footprint reports — ready instantly, with no manual compilation.</p>
+          <p>Farm-level performance, payroll summaries, profitability by product, and carbon footprint reports, ready instantly, with no manual compilation.</p>
         </div>
       </div>
     </div>
   </div>
 
-  <div class="dash">
+  <div class="dash" data-reveal="up">
     <div class="dash-top">
       <div class="dash-dot"></div><div class="dash-dot"></div><div class="dash-dot live"></div>
-      <span class="dash-title">AZed Farm — Operations Dashboard</span>
+      <span class="dash-title">AZed Farm operations dashboard</span>
     </div>
     <div class="dash-body">
       <div class="dash-metric"><div class="dash-metric-val">EGP 94K</div><div class="dash-metric-lbl">Revenue this month</div></div>
@@ -719,115 +809,136 @@
       <div class="dash-metric"><div class="dash-metric-val">98%</div><div class="dash-metric-lbl">Delivery on-time</div></div>
       <div class="dash-metric"><div class="dash-metric-val">22</div><div class="dash-metric-lbl">Active employees</div></div>
       <div class="dash-chart">
-        <div class="dash-chart-lbl">Harvest output (tons) — last 7 weeks</div>
-        <div class="bars">
-          <div class="bar-wrap"><div class="bar" style="height:42px"></div><span class="bar-lbl">W1</span></div>
-          <div class="bar-wrap"><div class="bar" style="height:55px"></div><span class="bar-lbl">W2</span></div>
-          <div class="bar-wrap"><div class="bar" style="height:38px"></div><span class="bar-lbl">W3</span></div>
-          <div class="bar-wrap"><div class="bar" style="height:62px"></div><span class="bar-lbl">W4</span></div>
-          <div class="bar-wrap"><div class="bar" style="height:48px"></div><span class="bar-lbl">W5</span></div>
-          <div class="bar-wrap"><div class="bar" style="height:70px"></div><span class="bar-lbl">W6</span></div>
-          <div class="bar-wrap"><div class="bar hi" style="height:76px"></div><span class="bar-lbl">W7</span></div>
+        <div class="dash-chart-lbl">Harvest output (tons), last 7 weeks</div>
+        <div class="bars" data-bars>
+          <div class="bar-wrap"><div class="bar" style="--h:42px;height:42px"></div><span class="bar-lbl">W1</span></div>
+          <div class="bar-wrap"><div class="bar" style="--h:55px;height:55px"></div><span class="bar-lbl">W2</span></div>
+          <div class="bar-wrap"><div class="bar" style="--h:38px;height:38px"></div><span class="bar-lbl">W3</span></div>
+          <div class="bar-wrap"><div class="bar" style="--h:62px;height:62px"></div><span class="bar-lbl">W4</span></div>
+          <div class="bar-wrap"><div class="bar" style="--h:48px;height:48px"></div><span class="bar-lbl">W5</span></div>
+          <div class="bar-wrap"><div class="bar" style="--h:70px;height:70px"></div><span class="bar-lbl">W6</span></div>
+          <div class="bar-wrap"><div class="bar hi" style="--h:76px;height:76px"></div><span class="bar-lbl">W7</span></div>
+        </div>
+      </div>
+      <div class="dash-chart" data-reveal="up" data-meters>
+        <div class="dash-chart-lbl" style="margin-bottom:12px">Consumption this month, all farms</div>
+        <div class="meters">
+          <div class="meter">
+            <div class="meter-head"><span>Water</span><span>1,840 m³</span></div>
+            <span class="meter-track"><span class="meter-fill" style="--w:72%;width:72%"></span></span>
+          </div>
+          <div class="meter">
+            <div class="meter-head"><span>Electricity</span><span>9,320 kWh</span></div>
+            <span class="meter-track"><span class="meter-fill" style="--w:58%;width:58%"></span></span>
+          </div>
+          <div class="meter">
+            <div class="meter-head"><span>Fuel</span><span>640 L</span></div>
+            <span class="meter-track"><span class="meter-fill" style="--w:34%;width:34%"></span></span>
+          </div>
         </div>
       </div>
     </div>
   </div>
 </section>
 
-<section class="sec" style="background:#f8f8f8">
-  <div class="eyebrow">The transformation</div>
-  <h2 class="h2">Before and after AZed Farm</h2>
-  <p class="lead" style="max-width:560px;margin-bottom:48px">See what changes for every role on your farm team when everything connects.</p>
+<section class="sec bg-ba">
+  <div class="eyebrow" data-reveal="up">The transformation</div>
+  <h2 data-reveal="up" data-reveal-delay="90" class="h2">Before and after AZed Farm</h2>
+  <p data-reveal="up" data-reveal-delay="170" class="lead" style="max-width:560px;margin-bottom:48px">See what changes for every role on your farm team when everything connects.</p>
 
   <div class="ba">
-    <div class="ba-col ba-before">
+    <div class="ba-col ba-before" data-reveal="up">
       <div class="ba-head"><span class="ba-mark">✕</span> Without the system</div>
       <div class="ba-row"><div class="ba-role">Farm Manager</div><div class="ba-desc">Calls workers to get status, no unified view of batch progress across farms</div></div>
       <div class="ba-row"><div class="ba-role">Accountant</div><div class="ba-desc">Spends 3 days at month-end reconciling sales, purchases, and payroll manually</div></div>
       <div class="ba-row"><div class="ba-role">HR Manager</div><div class="ba-desc">Tracks attendance on paper, calculates payroll in Excel with manual deductions</div></div>
-      <div class="ba-row"><div class="ba-role">Sales Team</div><div class="ba-desc">Doesn't know real stock levels — promises delivery dates that can't be met</div></div>
-      <div class="ba-row"><div class="ba-role">Owner</div><div class="ba-desc">Gets a financial picture once a month — can't see real-time profitability</div></div>
+      <div class="ba-row"><div class="ba-role">Sales Team</div><div class="ba-desc">Doesn't know real stock levels, promises delivery dates that can't be met</div></div>
+      <div class="ba-row"><div class="ba-role">Owner</div><div class="ba-desc">Gets a financial picture once a month, can't see real-time profitability</div></div>
     </div>
 
-    <div class="ba-col ba-after">
+    <div class="ba-col ba-after" data-reveal="up" data-reveal-delay="120">
       <div class="ba-head"><span class="ba-mark">✓</span> With AZed Farm</div>
       <div class="ba-row"><div class="ba-role">Farm Manager</div><div class="ba-desc">Live dashboard shows all farm batches, worker attendance, and alerts in one view</div></div>
-      <div class="ba-row"><div class="ba-role">Accountant</div><div class="ba-desc">Every sale, purchase, and payroll auto-posts to the ledger — month-end takes minutes</div></div>
+      <div class="ba-row"><div class="ba-role">Accountant</div><div class="ba-desc">Every sale, purchase, and payroll auto-posts to the ledger, month-end takes minutes</div></div>
       <div class="ba-row"><div class="ba-role">HR Manager</div><div class="ba-desc">Attendance auto-captured per farm; payroll with loans/deductions calculated in one click</div></div>
       <div class="ba-row"><div class="ba-role">Sales Team</div><div class="ba-desc">Sees live stock levels, can set B2B client pricing and credit limits instantly</div></div>
-      <div class="ba-row"><div class="ba-role">Owner</div><div class="ba-desc">Real-time revenue, spoilage rates, delivery performance, and carbon footprint — always on</div></div>
+      <div class="ba-row"><div class="ba-role">Owner</div><div class="ba-desc">Real-time revenue, spoilage rates, delivery performance, and carbon footprint, always on</div></div>
     </div>
   </div>
 </section>
 
 <section class="sec">
-  <div class="eyebrow">End-to-end flow</div>
-  <h2 class="h2">How a harvest becomes revenue — automatically</h2>
-  <p class="lead" style="max-width:560px;margin-bottom:56px">Every step in your farm's value chain is connected. No manual handoffs, no data gaps.</p>
+  <div class="eyebrow" data-reveal="up">End-to-end flow</div>
+  <h2 data-reveal="up" data-reveal-delay="90" class="h2">How a harvest becomes revenue, automatically</h2>
+  <p data-reveal="up" data-reveal-delay="170" class="lead" style="max-width:560px;margin-bottom:56px">Every step in your farm's value chain is connected. No manual handoffs, no data gaps.</p>
 
-  <div class="flow">
-    <div class="flow-step">
+  <div class="flow-wrap">
+    <div class="flow-line" data-reveal="line"></div>
+    <div class="flow">
+    <div class="flow-step" data-reveal="up" data-reveal-delay="0">
       <div class="flow-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 3C8 3 5 7 5 11c0 3 2 5.5 5 7v3h4v-3c3-1.5 5-4 5-7 0-4-3-8-7-8z" stroke="#000" stroke-width="1.6" stroke-linejoin="round"></path></svg></div>
-      <div class="flow-title">Farm &amp; Batch Setup</div>
+      <div class="flow-title">Farm &amp; batch setup</div>
       <div class="flow-desc">Register farms, assign workers, configure production recipes with expected inputs and yields</div>
     </div>
-    <div class="flow-step">
+    <div class="flow-step" data-reveal="up" data-reveal-delay="110">
       <div class="flow-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="4" y="6" width="16" height="13" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M8 6V5a4 4 0 018 0v1" stroke="#000" stroke-width="1.6"></path><path d="M9 13h6M12 10v6" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path></svg></div>
-      <div class="flow-title">Production Run</div>
+      <div class="flow-title">Production run</div>
       <div class="flow-desc">Log batch start, track real-time progress, record actual output vs expected, note any spoilage</div>
     </div>
-    <div class="flow-step">
+    <div class="flow-step" data-reveal="up" data-reveal-delay="220">
       <div class="flow-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M5 12l4-4M5 12l4 4" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
-      <div class="flow-title">Farm Delivery</div>
+      <div class="flow-title">Farm delivery</div>
       <div class="flow-desc">Issue numbered delivery note, update stock automatically, route to retail or B2B customer</div>
     </div>
-    <div class="flow-step">
+    <div class="flow-step" data-reveal="up" data-reveal-delay="330">
       <div class="flow-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="4" y="3" width="16" height="18" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M8 9h8M8 13h5" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><circle cx="15" cy="13" r="1.5" fill="#000"></circle></svg></div>
-      <div class="flow-title">Invoice &amp; Payment</div>
+      <div class="flow-title">Invoice &amp; payment</div>
       <div class="flow-desc">Auto-generate invoice from delivery, update customer balance, record payment method</div>
     </div>
-    <div class="flow-step">
+    <div class="flow-step" data-reveal="up" data-reveal-delay="440">
       <div class="flow-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M4 15l4-4 3 3 5-6" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><rect x="3" y="3" width="18" height="18" rx="2" stroke="#000" stroke-width="1.6"></rect></svg></div>
-      <div class="flow-title">Auto Accounting</div>
-      <div class="flow-desc">Journal entries post automatically — revenue, COGS, and receivables updated instantly, zero manual entry</div>
+      <div class="flow-title">Auto accounting</div>
+      <div class="flow-desc">Journal entries post automatically: revenue, COGS, and receivables updated instantly, zero manual entry</div>
     </div>
   </div>
 
-  <div class="note">
+  </div>
+
+  <div class="note" data-reveal="up">
     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm-.75 3.5h1.5v5h-1.5v-5zm.75 7.5a1 1 0 110-2 1 1 0 010 2z"></path></svg>
-    <span>Every step updates stock levels, customer balances, and the accounting ledger in real time — no manual syncing between systems.</span>
+    <span>Every step updates stock levels, customer balances, and the accounting ledger in real time, no manual syncing between systems.</span>
   </div>
 </section>
 
-<section class="sec" style="background:#f8f8f8">
-  <div class="eyebrow">Common questions</div>
-  <h2 class="h2">Everything you need to know</h2>
-  <p class="lead" style="max-width:560px;margin-bottom:48px">Questions from farm owners and managers before they get started.</p>
+<section class="sec bg-faq">
+  <div class="eyebrow" data-reveal="up">Common questions</div>
+  <h2 data-reveal="up" data-reveal-delay="90" class="h2">Everything you need to know</h2>
+  <p data-reveal="up" data-reveal-delay="170" class="lead" style="max-width:560px;margin-bottom:48px">Questions from farm owners and managers before they get started.</p>
 
   <div class="faq-grid">
-    <div class="faq">
+    <div class="faq" data-reveal="up">
       <div class="faq-q"><span>Can I manage multiple farms from one account?</span><span class="faq-sign">+</span></div>
-      <p class="faq-a">Yes — AZed Farm is built for multi-farm operations. Each farm has its own dashboard, production batches, worker assignments, and stock levels. You can view a consolidated overview or drill into any individual farm at any time.</p>
+      <p class="faq-a">Yes. AZed Farm is built for multi-farm operations. Each farm has its own dashboard, production batches, worker assignments, and stock levels. You can view a consolidated overview or drill into any individual farm at any time.</p>
     </div>
-    <div class="faq">
+    <div class="faq" data-reveal="up">
       <div class="faq-q"><span>Does accounting require a separate accountant to set up?</span><span class="faq-sign">+</span></div>
-      <p class="faq-a">No. The system comes with a pre-configured chart of accounts suitable for agricultural businesses. Every sale, purchase, and payroll transaction automatically posts the correct journal entries — your accountant can review and export, but doesn't need to manually enter anything.</p>
+      <p class="faq-a">No. The system comes with a pre-configured chart of accounts suitable for agricultural businesses. Every sale, purchase, and payroll transaction automatically posts the correct journal entries; your accountant can review and export, but doesn't need to manually enter anything.</p>
     </div>
-    <div class="faq">
+    <div class="faq" data-reveal="up">
       <div class="faq-q"><span>How does spoilage tracking work?</span><span class="faq-sign">+</span></div>
-      <p class="faq-a">Field workers or supervisors log spoilage directly against a stock item and farm. The system records the quantity, reason, and date — automatically deducting from inventory and posting a spoilage expense to the ledger. You get weekly spoilage rate reports per product and farm.</p>
+      <p class="faq-a">Field workers or supervisors log spoilage directly against a stock item and farm. The system records the quantity, reason, and date, automatically deducting from inventory and posting a spoilage expense to the ledger. You get weekly spoilage rate reports per product and farm.</p>
     </div>
-    <div class="faq">
+    <div class="faq" data-reveal="up">
       <div class="faq-q"><span>Can B2B customers have different pricing?</span><span class="faq-sign">+</span></div>
-      <p class="faq-a">Yes. Each B2B client can have a custom price list, discount percentage, credit limit, and payment terms. Invoices auto-populate with the correct prices based on the client — no manual lookups needed.</p>
+      <p class="faq-a">Yes. Each B2B client can have a custom price list, discount percentage, credit limit, and payment terms. Invoices auto-populate with the correct prices based on the client, no manual lookups needed.</p>
     </div>
-    <div class="faq">
+    <div class="faq" data-reveal="up">
       <div class="faq-q"><span>How is payroll calculated for field workers?</span><span class="faq-sign">+</span></div>
-      <p class="faq-a">Workers are assigned to specific farms. Attendance is logged daily with automatic status rules (present, absent, late). At payroll time, the system calculates gross pay, applies any active loans or deductions, and generates a payroll summary — all in one click.</p>
+      <p class="faq-a">Workers are assigned to specific farms. Attendance is logged daily with automatic status rules (present, absent, late). At payroll time, the system calculates gross pay, applies any active loans or deductions, and generates a payroll summary, all in one click.</p>
     </div>
-    <div class="faq">
+    <div class="faq" data-reveal="up">
       <div class="faq-q"><span>What is the carbon footprint module?</span><span class="faq-sign">+</span></div>
-      <p class="faq-a">Each farm can log emission events — fuel use, chemical application, transport — against emission categories. The system tracks your total carbon output over time and compares it against reduction goals you set, giving you a sustainability report ready for stakeholders or certifications.</p>
+      <p class="faq-a">Each farm can log emission events (fuel use, chemical application, transport) against emission categories. The system tracks your total carbon output over time and compares it against reduction goals you set, giving you a sustainability report ready for stakeholders or certifications.</p>
     </div>
   </div>
 </section>
@@ -838,7 +949,7 @@
   <div class="cta-btns">
     <a href="#" class="btn-white" data-open-login>
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zm0 1.5a5.5 5.5 0 110 11 5.5 5.5 0 010-11zm-.75 3.5h1.5v3.75l2.5 1.5-.75 1.25-3-1.75V6z"></path></svg>
-      Schedule a Demo
+      Schedule a demo
     </a>
     <a href="#operations" class="btn-outline">Explore all modules</a>
   </div>
@@ -856,31 +967,31 @@
     </div>
 
     <div class="footer-col">
-      <div class="footer-head">Farm Modules</div>
-      <a href="#operations">Farm &amp; Production</a>
-      <a href="#operations">Inventory &amp; Stock</a>
-      <a href="#operations">Deliveries &amp; Logistics</a>
-      <a href="#operations">Spoilage Tracking</a>
-      <a href="#operations">Weather Logs</a>
-      <a href="#operations">Carbon Footprint</a>
+      <div class="footer-head">Farm modules</div>
+      <a href="#operations">Farm &amp; production</a>
+      <a href="#operations">Inventory &amp; stock</a>
+      <a href="#operations">Deliveries &amp; logistics</a>
+      <a href="#operations">Spoilage tracking</a>
+      <a href="#operations">Weather logs</a>
+      <a href="#operations">Carbon footprint</a>
     </div>
 
     <div class="footer-col">
-      <div class="footer-head">Business Modules</div>
-      <a href="#operations">Sales &amp; Invoicing</a>
-      <a href="#operations">B2B Client Management</a>
-      <a href="#operations">Purchasing &amp; Suppliers</a>
-      <a href="#operations">HR &amp; Attendance</a>
-      <a href="#operations">Payroll &amp; Loans</a>
-      <a href="#operations">Accounting &amp; Journals</a>
+      <div class="footer-head">Business modules</div>
+      <a href="#operations">Sales &amp; invoicing</a>
+      <a href="#operations">B2B client management</a>
+      <a href="#operations">Purchasing &amp; suppliers</a>
+      <a href="#operations">HR &amp; attendance</a>
+      <a href="#operations">Payroll &amp; loans</a>
+      <a href="#operations">Accounting &amp; journals</a>
     </div>
 
     <div class="footer-col">
-      <div class="footer-head">Get Started</div>
-      <a href="#" data-open-login>Request a Demo</a>
-      <a href="#challenges">See the Challenges</a>
-      <a href="#solutions">How It Works</a>
-      <a href="#contact">Contact Sales</a>
+      <div class="footer-head">Get started</div>
+      <a href="#" data-open-login>Request a demo</a>
+      <a href="#challenges">See the challenges</a>
+      <a href="#solutions">How it works</a>
+      <a href="#contact">Contact sales</a>
     </div>
   </div>
 
@@ -915,13 +1026,14 @@
       </div>
       <p class="login-msg" id="errEl" hidden></p>
       <button class="login-submit" id="submitBtn" type="submit">
-        Sign In
+        Sign in
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 8a.5.5 0 01.5-.5h11.793l-3.147-3.146a.5.5 0 01.708-.708l4 4a.5.5 0 010 .708l-4 4a.5.5 0 01-.708-.708L13.293 8.5H1.5A.5.5 0 011 8z"></path></svg>
       </button>
     </form>
   </div>
 </div>
 
+<script>document.documentElement.classList.add('js');</script>
 <script src="/static/landing.js"></script>
 <script>
 (function () {
@@ -960,6 +1072,80 @@
     if (v.readyState >= 2) fadeIn();
     var p = v.play(); if (p && p.catch) p.catch(function () {});
   }
+
+  // Scroll reveal
+  (function () {
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var targets = [].slice.call(document.querySelectorAll('[data-reveal], [data-bars], [data-meters]'));
+    if (reduce) { document.documentElement.classList.remove('js'); return; }
+
+    function show(el) {
+      if (el.dataset.revealed) return;
+      el.dataset.revealed = '1';
+      var delay = parseFloat(el.getAttribute('data-reveal-delay') || '0');
+      setTimeout(function () {
+        el.classList.add('is-in');
+        [].forEach.call(el.querySelectorAll('[data-count]'), countUp);
+        [].forEach.call(el.querySelectorAll('.meter-fill'), function (m, i) {
+          setTimeout(function () { m.classList.add('is-in'); }, i * 120);
+        });
+        [].forEach.call(el.querySelectorAll('.bar'), function (b, i) {
+          setTimeout(function () { b.classList.add('is-in'); }, i * 70);
+        });
+      }, delay);
+    }
+
+    function countUp(el) {
+      var target = parseFloat(el.getAttribute('data-count'));
+      var suffix = el.getAttribute('data-count-suffix') || '';
+      var start = performance.now();
+      (function step(now) {
+        var p = Math.min(1, (now - start) / 1100);
+        var eased = 1 - Math.pow(1 - p, 3);
+        el.textContent = Math.round(target * eased).toLocaleString() + suffix;
+        if (p < 1) requestAnimationFrame(step);
+      })(start);
+    }
+
+    [].forEach.call(document.querySelectorAll('[data-count]'), function (c) {
+      c.textContent = '0' + (c.getAttribute('data-count-suffix') || '');
+    });
+
+    function check() {
+      var h = window.innerHeight || 800;
+      targets.forEach(function (el) {
+        if (el.dataset.revealed) return;
+        if (el.getBoundingClientRect().top < h * 0.92) show(el);
+      });
+    }
+    window.addEventListener('scroll', check, { passive: true });
+    window.addEventListener('resize', check);
+    window.addEventListener('load', check);
+    window.addEventListener('beforeprint', function () { targets.forEach(show); });
+    requestAnimationFrame(check);
+    setTimeout(check, 120);
+  })();
+
+  // Active nav link on scroll
+  (function () {
+    var links = [].slice.call(document.querySelectorAll('.nav-links a[href^="#"], .mobile-menu a[href^="#"]'));
+    var sections = links.map(function (a) { return document.querySelector(a.getAttribute('href')); });
+    function spy() {
+      var best = -1, bestTop = -Infinity;
+      sections.forEach(function (sec, i) {
+        if (!sec) return;
+        var top = sec.getBoundingClientRect().top - 120;
+        if (top <= 0 && top > bestTop) { bestTop = top; best = i; }
+      });
+      links.forEach(function (a, i) {
+        var href = a.getAttribute('href');
+        a.classList.toggle('active', best >= 0 && href === links[best].getAttribute('href'));
+      });
+    }
+    window.addEventListener('scroll', spy, { passive: true });
+    window.addEventListener('resize', spy);
+    spy();
+  })();
 
   // FAQ accordion
   document.querySelectorAll('.faq').forEach(function (item) {
