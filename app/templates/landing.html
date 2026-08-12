@@ -154,6 +154,7 @@
   .hero-inner { position: relative; z-index: 2; display: flex; flex-direction: column; height: 100%; }
 
   nav {
+    position: relative; z-index: 3;
     display: flex; align-items: center; justify-content: space-between;
     gap: clamp(12px, 2vw, 40px); padding: 16px clamp(20px, 8vw, 120px);
   }
@@ -199,6 +200,7 @@
   .btn-dark:hover { background: #1c1c1c; color: #fff; }
 
   .hero-body {
+    position: relative; z-index: 1;
     flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
     padding: 0 clamp(24px, 8vw, 120px); margin-top: -50px; gap: 44px;
   }
@@ -513,11 +515,16 @@
   @media (max-width: 860px) {
     .nav-links { display: none; }
     .nav-hamburger { display: flex; }
-    .hero { min-height: 640px; height: 100svh; }
-    .hero h1 { font-size: 44px; letter-spacing: -2.2px; }
-    .hero-sub { font-size: 17px; width: auto; }
+    .hero { height: auto; min-height: 100svh; }
+    .hero-body { margin-top: 0; padding: 56px 20px 72px; gap: 32px; justify-content: center; }
+    .hero-stack { gap: 22px; }
+    .hero h1 { font-size: 40px; letter-spacing: -1.8px; }
+    .hero-sub { font-size: 16px; width: auto; }
+    .hero-badge { font-size: 12px; }
+    .hero-badge .pill { font-size: 11px; }
     .hero-actions { flex-direction: column; width: 100%; max-width: 320px; }
-    .hero-actions a { width: 100%; justify-content: center; }
+    .hero-actions a { width: 100%; justify-content: center; height: 50px; }
+    .btn-ghost, .btn-dark { height: 44px; min-width: 0; padding: 0 14px; }
     .sec, .cta, footer { padding: 64px 20px; }
     footer { padding-bottom: 0; }
     .stats { grid-template-columns: 1fr 1fr; gap: 24px; padding: 32px 20px; }
@@ -530,6 +537,15 @@
     .cta-btns { flex-direction: column; align-items: center; }
     .footer-inner { grid-template-columns: 1fr 1fr; gap: 32px; }
     .footer-bottom { flex-direction: column; gap: 8px; text-align: center; }
+  }
+  @media (max-width: 520px) {
+    nav { padding: 12px 16px; gap: 10px; }
+    .nav-brand img { height: 26px; }
+    .nav-actions { gap: 6px; font-size: 13px; }
+    .nav-actions .btn-dark { display: none; }
+    .hero h1 { font-size: 32px; letter-spacing: -1.2px; }
+    .hero-sub { font-size: 15px; }
+    .hero-badge { padding: 4px 12px 4px 4px; }
   }
 </style>
 </head>
@@ -1128,8 +1144,11 @@
 
   // Active nav link on scroll
   (function () {
-    var links = [].slice.call(document.querySelectorAll('.nav-links a[href^="#"], .mobile-menu a[href^="#"]'));
-    var sections = links.map(function (a) { return document.querySelector(a.getAttribute('href')); });
+    var links = [].slice.call(document.querySelectorAll('.nav-links a[href^="#"]:not([href="#"]), .mobile-menu a[href^="#"]:not([href="#"])'));
+    var sections = links.map(function (a) {
+      var href = a.getAttribute('href');
+      return href && href.length > 1 ? document.querySelector(href) : null;
+    });
     function spy() {
       var best = -1, bestTop = -Infinity;
       sections.forEach(function (sec, i) {
