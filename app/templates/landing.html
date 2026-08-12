@@ -101,6 +101,9 @@
   .js [data-reveal="right"] { opacity: 0; transform: translateX(26px); }
   .js [data-reveal="line"] { transform: scaleX(0); transform-origin: left center; transition: transform 1.1s cubic-bezier(.16,.84,.44,1); }
   [data-reveal].is-in { opacity: 1 !important; transform: none !important; }
+  /* revealed off-screen ahead of an anchor jump: skip the animation so the
+     browser scrolls to the card's final position, not its mid-animation one */
+  .reveal-instant { transition: none !important; }
   .js .bar { height: 0 !important; transition: height .9s cubic-bezier(.16,.84,.44,1); }
   .js .bar.is-in { height: var(--h) !important; }
   .js .meter-fill { width: 0 !important; transition: width 1.1s cubic-bezier(.16,.84,.44,1); }
@@ -182,6 +185,53 @@
   .nav-links a.active { color: #000; font-weight: 600; }
   .nav-links a.active::after { background: rgba(90,225,76,.89); }
   .mobile-menu a.active { color: #000; font-weight: 600; }
+
+  /* MODULES DROPDOWN */
+  .nav-dd { position: relative; display: flex; align-items: center; }
+  .nav-dd-caret { transition: transform .25s ease; }
+  .nav-dd.open .nav-dd-caret { transform: rotate(180deg); }
+  .nav-dd-menu {
+    position: absolute; top: calc(100% + 16px); left: 50%;
+    transform: translateX(-50%) translateY(-8px);
+    width: min(620px, 80vw); padding: 10px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 2px;
+    background: rgba(255,255,255,.97); backdrop-filter: blur(18px);
+    border: 1px solid rgba(0,0,0,.08); border-radius: 16px;
+    box-shadow: 0 24px 64px rgba(0,0,0,.16);
+    opacity: 0; visibility: hidden; pointer-events: none;
+    transition: opacity .22s ease, transform .22s cubic-bezier(.16,.84,.44,1), visibility .22s;
+    z-index: 60;
+  }
+  /* keeps the pointer inside the dropdown while crossing the gap from the trigger */
+  .nav-dd-menu::before { content: ""; position: absolute; top: -16px; left: 0; right: 0; height: 16px; }
+  .nav-dd.open .nav-dd-menu {
+    opacity: 1; visibility: visible; pointer-events: auto;
+    transform: translateX(-50%) translateY(0);
+  }
+  .nav-links .nav-dd-item {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+    padding: 10px 12px; border-radius: 10px; white-space: normal;
+    color: #0e1311; transition: background .18s ease;
+  }
+  .nav-links .nav-dd-item::after { display: none; }
+  .nav-links .nav-dd-item:hover, .nav-links .nav-dd-item:focus-visible { background: rgba(90,225,76,.14); }
+  .nav-dd-item strong { font-size: 13.5px; font-weight: 600; letter-spacing: -.2px; }
+  .nav-dd-item span { font-size: 11.5px; line-height: 1.45; color: #6b6b6b; font-weight: 400; }
+  @media (max-width: 1024px) { .nav-dd-menu { grid-template-columns: 1fr; width: min(340px, 82vw); } }
+
+  /* MOBILE MENU — modules sub-list */
+  .mm-group { border-bottom: 1px solid #f1f1f1; }
+  .mm-toggle {
+    display: flex; align-items: center; justify-content: space-between; width: 100%;
+    padding: 12px 0; background: none; border: none; cursor: pointer;
+    font-family: 'Schibsted Grotesk', sans-serif; font-size: 16px; color: #505050;
+  }
+  .mm-caret { transition: transform .25s ease; }
+  .mm-group.open .mm-caret { transform: rotate(180deg); }
+  .mm-sub { display: none; flex-direction: column; padding: 0 0 10px 14px; }
+  .mm-group.open .mm-sub { display: flex; }
+  .mobile-menu .mm-sub a { font-size: 14px; color: #6b6b6b; padding: 9px 0; border-bottom: none; }
+
   .nav-actions {
     display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
     font-family: 'Schibsted Grotesk', sans-serif; font-weight: 500;
@@ -215,9 +265,14 @@
     background: #0e1311; color: #fff; border-radius: 100px; font-size: 13px;
   }
   .hero h1 {
-    font-family: 'Fustat', sans-serif; font-weight: 700; font-size: 80px; letter-spacing: -4.8px;
-    line-height: 1; text-align: center; max-width: 1000px; text-wrap: balance;
+    font-family: 'Fustat', sans-serif; font-weight: 700;
+    /* sized so the longer clause still fits on one line between 900px and
+       1280px, where a flat 80px would wrap it */
+    font-size: clamp(44px, calc(7.4vw - 14px), 80px); letter-spacing: -.06em;
+    line-height: 1.06; text-align: center; max-width: 1180px;
   }
+  /* the headline breaks on its own clause, not wherever the line happens to run out */
+  .hero h1 .h1-line { display: block; }
   .hero-sub {
     font-family: 'Fustat', sans-serif; font-weight: 500; font-size: 20px; letter-spacing: -.4px;
     line-height: 1.5; color: #2a2a2a; text-align: center; width: 620px; max-width: 100%; text-wrap: pretty;
@@ -302,6 +357,17 @@
   }
   .module p { font-size: 14px; line-height: 1.65; color: #505050; margin-bottom: 18px; }
   .module ul { display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #505050; }
+  .module { scroll-margin-top: 96px; }
+  /* brief ring on the card you picked from the Modules dropdown */
+  .module.is-target { animation: modulePulse 1.9s cubic-bezier(.16,.84,.44,1); }
+  @keyframes modulePulse {
+    0%   { box-shadow: 0 0 0 0 rgba(90,225,76,.6);  border-color: rgba(90,225,76,.95); }
+    35%  { box-shadow: 0 0 0 10px rgba(90,225,76,.18); border-color: rgba(90,225,76,.95); }
+    100% { box-shadow: 0 0 0 18px rgba(90,225,76,0); border-color: #ebebeb; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .module.is-target { animation: none; border-color: rgba(90,225,76,.95); }
+  }
 
   /* STEPS */
   .steps { display: flex; flex-direction: column; }
@@ -518,7 +584,7 @@
     .hero { height: auto; min-height: 100svh; }
     .hero-body { margin-top: 0; padding: 56px 20px 72px; gap: 32px; justify-content: center; }
     .hero-stack { gap: 22px; }
-    .hero h1 { font-size: 40px; letter-spacing: -1.8px; }
+    .hero h1 { font-size: clamp(30px, calc(6.6vw - 2px), 40px); letter-spacing: -.045em; }
     .hero-sub { font-size: 16px; width: auto; }
     .hero-badge { font-size: 12px; }
     .hero-badge .pill { font-size: 11px; }
@@ -543,7 +609,7 @@
     .nav-brand img { height: 26px; }
     .nav-actions { gap: 6px; font-size: 13px; }
     .nav-actions .btn-dark { display: none; }
-    .hero h1 { font-size: 32px; letter-spacing: -1.2px; }
+    .hero h1 { font-size: clamp(24px, calc(8.6vw - 4px), 32px); letter-spacing: -.0375em; }
     .hero-sub { font-size: 15px; }
     .hero-badge { padding: 4px 12px 4px 4px; }
   }
@@ -561,9 +627,22 @@
 
       <div class="nav-links">
         <a href="#operations">Operations</a>
-        <a href="#operations">Modules
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 6.5L8 10.5L12 6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
-        </a>
+        <div class="nav-dd" id="navModules">
+          <a href="#operations" id="navModulesTrigger" aria-haspopup="true" aria-expanded="false" aria-controls="navModulesMenu">Modules
+            <svg class="nav-dd-caret" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 6.5L8 10.5L12 6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+          </a>
+          <div class="nav-dd-menu" id="navModulesMenu" role="menu" aria-labelledby="navModulesTrigger">
+            <a class="nav-dd-item" role="menuitem" href="#mod-farm"><strong>Farm &amp; production</strong><span>Multi-farm dashboard, batches, recipes</span></a>
+            <a class="nav-dd-item" role="menuitem" href="#mod-inventory"><strong>Inventory &amp; stock</strong><span>Multi-location stock, reorder alerts</span></a>
+            <a class="nav-dd-item" role="menuitem" href="#mod-deliveries"><strong>Deliveries &amp; logistics</strong><span>Delivery notes, consignment, reconciliation</span></a>
+            <a class="nav-dd-item" role="menuitem" href="#mod-sales"><strong>Sales &amp; invoicing</strong><span>Retail and B2B pricing, refunds</span></a>
+            <a class="nav-dd-item" role="menuitem" href="#mod-hr"><strong>HR, payroll &amp; attendance</strong><span>Workers per farm, payroll, loans</span></a>
+            <a class="nav-dd-item" role="menuitem" href="#mod-finance"><strong>Finance, accounting &amp; carbon</strong><span>Double-entry books, emissions tracking</span></a>
+            <a class="nav-dd-item" role="menuitem" href="#mod-animals"><strong>Animals &amp; livestock</strong><span>Lifecycle records, dedicated cost bucket</span></a>
+            <a class="nav-dd-item" role="menuitem" href="#mod-pos"><strong>POS &amp; receive intake</strong><span>Checkout counter, batch stock intake</span></a>
+            <a class="nav-dd-item" role="menuitem" href="#mod-reports"><strong>Reports, audit &amp; access</strong><span>Permissions, audit trail, exports</span></a>
+          </div>
+        </div>
         <a href="#challenges">Challenges</a>
         <a href="#solutions">Solutions</a>
         <a href="#contact">Contact</a>
@@ -586,7 +665,7 @@
           Now with carbon footprint tracking
         </div>
 
-        <h1>The ground your farm stands on, and the numbers behind it</h1>
+        <h1><span class="h1-line">The ground your farm stands on,</span><span class="h1-line">and the numbers behind it</span></h1>
 
         <p class="hero-sub">Monitor stock, animals, production, and running costs per farm, including water and electricity consumption, so you always know what each farm is producing and what it takes to run it.</p>
       </div>
@@ -604,6 +683,23 @@
 
 <div class="mobile-menu" id="mobileMenu">
   <a href="#operations">Operations</a>
+  <div class="mm-group" id="mmModules">
+    <button type="button" class="mm-toggle" id="mmModulesToggle" aria-expanded="false" aria-controls="mmModulesSub">
+      Modules
+      <svg class="mm-caret" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 6.5L8 10.5L12 6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+    </button>
+    <div class="mm-sub" id="mmModulesSub">
+      <a href="#mod-farm">Farm &amp; production</a>
+      <a href="#mod-inventory">Inventory &amp; stock</a>
+      <a href="#mod-deliveries">Deliveries &amp; logistics</a>
+      <a href="#mod-sales">Sales &amp; invoicing</a>
+      <a href="#mod-hr">HR, payroll &amp; attendance</a>
+      <a href="#mod-finance">Finance, accounting &amp; carbon</a>
+      <a href="#mod-animals">Animals &amp; livestock</a>
+      <a href="#mod-pos">POS &amp; receive intake</a>
+      <a href="#mod-reports">Reports, audit &amp; access</a>
+    </div>
+  </div>
   <a href="#challenges">Challenges</a>
   <a href="#solutions">Solutions</a>
   <a href="#contact">Contact</a>
@@ -666,7 +762,7 @@
   <p data-reveal="up" data-reveal-delay="170" class="lead" style="margin-bottom:56px">From fields, animals, and workers to checkout, suppliers, and carbon, nine connected modules covering the full agricultural value chain in one system.</p>
 
   <div class="modules">
-    <div class="module" data-reveal="up" data-reveal-delay="0">
+    <div class="module" id="mod-farm" data-reveal="up" data-reveal-delay="0">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 18C4 13 7 8 11 7c4-1 7 2 7 6" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><path d="M11 7v11M7 14l4-3 4 3" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
       <h3>Farm &amp; production management</h3>
       <p>Track every farm location, assign workers, and run production batches with precise input-output recipe control.</p>
@@ -678,7 +774,7 @@
       </ul>
     </div>
 
-    <div class="module" data-reveal="up" data-reveal-delay="70">
+    <div class="module" id="mod-inventory" data-reveal="up" data-reveal-delay="70">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="8" width="16" height="11" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M7 8V6a4 4 0 018 0v2" stroke="#000" stroke-width="1.6"></path><path d="M9 13h4M11 11v4" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path></svg></div>
       <h3>Inventory &amp; stock control</h3>
       <p>Never run out of critical inputs or lose track of produce. Multi-location stock management with automatic reorder alerts.</p>
@@ -690,7 +786,7 @@
       </ul>
     </div>
 
-    <div class="module" data-reveal="up" data-reveal-delay="140">
+    <div class="module" id="mod-deliveries" data-reveal="up" data-reveal-delay="140">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 11h14M4 11l4-4M4 11l4 4" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><path d="M18 6v10" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="2 2"></path></svg></div>
       <h3>Deliveries &amp; logistics</h3>
       <p>Manage farm output delivery end-to-end with numbered delivery notes and auto-generated customer invoices.</p>
@@ -702,7 +798,7 @@
       </ul>
     </div>
 
-    <div class="module" data-reveal="up" data-reveal-delay="210">
+    <div class="module" id="mod-sales" data-reveal="up" data-reveal-delay="210">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="4" width="16" height="14" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M7 9h8M7 12h5" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><circle cx="14.5" cy="12" r="1.5" fill="#000"></circle></svg></div>
       <h3>Sales &amp; invoicing</h3>
       <p>Retail and B2B sales managed in one place, with customer balances, custom pricing per client, and refund handling.</p>
@@ -714,7 +810,7 @@
       </ul>
     </div>
 
-    <div class="module" data-reveal="up" data-reveal-delay="280">
+    <div class="module" id="mod-hr" data-reveal="up" data-reveal-delay="280">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="9" cy="8" r="3" stroke="#000" stroke-width="1.6"></circle><path d="M4 18c0-3.3 2.2-6 5-6M14 12v7M11 15.5h6" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path></svg></div>
       <h3>HR, payroll &amp; attendance</h3>
       <p>Manage field workers assigned per farm, track daily attendance with auto-status, and calculate payroll with deductions and loans.</p>
@@ -726,7 +822,7 @@
       </ul>
     </div>
 
-    <div class="module" data-reveal="up" data-reveal-delay="350">
+    <div class="module" id="mod-finance" data-reveal="up" data-reveal-delay="350">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 3v2M11 17v2M3 11h2M17 11h2" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><circle cx="11" cy="11" r="4" stroke="#000" stroke-width="1.6"></circle><path d="M8 11a3 3 0 003-3" stroke="#000" stroke-width="1.4" stroke-linecap="round"></path></svg></div>
       <h3>Finance, accounting &amp; carbon</h3>
       <p>Full chart of accounts with automatic journal posting for every transaction. Plus carbon emission logging and reduction goal tracking.</p>
@@ -738,7 +834,7 @@
       </ul>
     </div>
 
-    <div class="module" data-reveal="up" data-reveal-delay="420">
+    <div class="module" id="mod-animals" data-reveal="up" data-reveal-delay="420">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M6 13c0-3 2-5 5-5s5 2 5 5v3H6v-3z" stroke="#000" stroke-width="1.6" stroke-linejoin="round"></path><circle cx="9" cy="6" r="1.4" fill="#000"></circle><circle cx="13" cy="6" r="1.4" fill="#000"></circle><path d="M8 8.5l-1.5-2M14 8.5l1.5-2" stroke="#000" stroke-width="1.4" stroke-linecap="round"></path></svg></div>
       <h3>Animals &amp; livestock</h3>
       <p>Track every animal across your farms with full lifecycle records and dedicated cost allocation that keeps livestock expenses cleanly separated from crop operations.</p>
@@ -750,7 +846,7 @@
       </ul>
     </div>
 
-    <div class="module" data-reveal="up" data-reveal-delay="490">
+    <div class="module" id="mod-pos" data-reveal="up" data-reveal-delay="490">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="5" width="16" height="11" rx="2" stroke="#000" stroke-width="1.6"></rect><path d="M3 9h16" stroke="#000" stroke-width="1.6"></path><path d="M7 13h3M13 13h2" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><circle cx="6.5" cy="7" r=".8" fill="#000"></circle></svg></div>
       <h3>POS terminal &amp; receive intake</h3>
       <p>A real point-of-sale checkout for retail counters plus a structured intake flow for incoming stock, both posting straight into accounting with the right expense categories.</p>
@@ -762,7 +858,7 @@
       </ul>
     </div>
 
-    <div class="module" data-reveal="up" data-reveal-delay="560">
+    <div class="module" id="mod-reports" data-reveal="up" data-reveal-delay="560">
       <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 18V6M4 18h14" stroke="#000" stroke-width="1.6" stroke-linecap="round"></path><rect x="7" y="10" width="2.5" height="6" fill="#000"></rect><rect x="11" y="7" width="2.5" height="9" fill="#000"></rect><rect x="15" y="12" width="2.5" height="4" fill="#000"></rect></svg></div>
       <h3>Reports, audit &amp; access control</h3>
       <p>Granular per-role and per-user permissions, a full audit trail of every change in the system, and reports that read the same numbers your accountant trusts.</p>
@@ -1144,7 +1240,9 @@
 
   // Active nav link on scroll
   (function () {
-    var links = [].slice.call(document.querySelectorAll('.nav-links a[href^="#"]:not([href="#"]), .mobile-menu a[href^="#"]:not([href="#"])'));
+    // Module links point at cards inside #operations, not at sections of their
+    // own — they are excluded so the spy keeps highlighting the top-level nav.
+    var links = [].slice.call(document.querySelectorAll('.nav-links a[href^="#"]:not([href="#"]):not([href^="#mod-"]), .mobile-menu a[href^="#"]:not([href="#"]):not([href^="#mod-"])'));
     var sections = links.map(function (a) {
       var href = a.getAttribute('href');
       return href && href.length > 1 ? document.querySelector(href) : null;
@@ -1180,6 +1278,133 @@
       }
     });
   });
+
+  // Modules dropdown → jump to the picked module card
+  (function () {
+    var dd = document.getElementById('navModules');
+    var trigger = document.getElementById('navModulesTrigger');
+    var mmGroup = document.getElementById('mmModules');
+    var mmToggle = document.getElementById('mmModulesToggle');
+
+    function closeDropdown() {
+      if (!dd || !dd.classList.contains('open')) return;
+      dd.classList.remove('open');
+      if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    }
+
+    if (trigger && dd) {
+      trigger.addEventListener('click', function (e) {
+        e.preventDefault();
+        var open = !dd.classList.contains('open');
+        dd.classList.toggle('open', open);
+        trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+      document.addEventListener('click', function (e) {
+        if (!dd.contains(e.target)) closeDropdown();
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && dd.classList.contains('open')) {
+          closeDropdown();
+          trigger.focus();
+        }
+      });
+    }
+
+    if (mmToggle && mmGroup) {
+      mmToggle.addEventListener('click', function () {
+        var open = !mmGroup.classList.contains('open');
+        mmGroup.classList.toggle('open', open);
+        mmToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+    }
+
+    // The cards animate in on scroll; reveal them up front so the browser
+    // scrolls to a card that is already at its final position.
+    // Reveal-on-scroll grows bars and meters as they enter view, so anything
+    // still hidden ABOVE the target would push it down after we scrolled to
+    // it. Settle everything up to the target first (instantly, no animation);
+    // whatever sits below it keeps its entrance animation.
+    function settleAbove(card) {
+      // Filter on is-in, not on data-revealed: the reveal system marks an
+      // element revealed up front but only adds is-in after its stagger delay,
+      // so a card can be "revealed" and still 28px below its resting place.
+      var pending = [].slice.call(document.querySelectorAll('[data-reveal], [data-bars], [data-meters]'))
+        .filter(function (el) {
+          if (el.classList.contains('is-in')) return false;
+          return el === card || el.contains(card) ||
+            (el.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+        });
+      if (!pending.length) return;
+      pending.forEach(function (el) {
+        el.dataset.revealed = '1';
+        el.classList.add('reveal-instant', 'is-in');
+        [].forEach.call(el.querySelectorAll('.bar, .meter-fill'), function (x) {
+          x.classList.add('reveal-instant', 'is-in');
+        });
+        [].forEach.call(el.querySelectorAll('[data-count]'), function (c) {
+          var n = parseFloat(c.getAttribute('data-count'));
+          c.textContent = Math.round(n).toLocaleString() + (c.getAttribute('data-count-suffix') || '');
+        });
+      });
+      void pending[0].offsetWidth;                        // flush layout before scrolling
+      requestAnimationFrame(function () {
+        pending.forEach(function (el) {
+          el.classList.remove('reveal-instant');
+          [].forEach.call(el.querySelectorAll('.reveal-instant'), function (x) {
+            x.classList.remove('reveal-instant');
+          });
+        });
+      });
+    }
+
+    var flashTimer = null;
+    function goToModule(hash) {
+      var card = hash && hash.length > 1 ? document.getElementById(hash.slice(1)) : null;
+      if (!card) return false;
+      settleAbove(card);
+      [].forEach.call(document.querySelectorAll('.module.is-target'), function (el) {
+        el.classList.remove('is-target');
+      });
+      card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // restart the pulse even when the same card is picked twice in a row
+      void card.offsetWidth;
+      card.classList.add('is-target');
+      clearTimeout(flashTimer);
+      flashTimer = setTimeout(function () { card.classList.remove('is-target'); }, 2000);
+      if (history.replaceState) history.replaceState(null, '', hash);
+      return true;
+    }
+
+    document.addEventListener('click', function (e) {
+      var link = e.target.closest ? e.target.closest('a[href^="#mod-"]') : null;
+      if (!link) return;
+      e.preventDefault();
+      closeDropdown();
+      if (mmGroup) mmGroup.classList.remove('open');
+      var burgerBtn = document.getElementById('navHamburger');
+      var mobileNav = document.getElementById('mobileMenu');
+      if (burgerBtn) burgerBtn.classList.remove('open');
+      if (mobileNav) mobileNav.classList.remove('open');
+      goToModule(link.getAttribute('href'));
+    });
+
+    // Landing straight on /#mod-… (shared link, refresh, back button). Wait for
+    // images and webfonts first — jumping before they settle lands short,
+    // because the reflow they cause moves the card after we scrolled to it.
+    if (location.hash.indexOf('#mod-') === 0) {
+      var jump = function () {
+        var fonts = document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve();
+        fonts.then(function () {
+          requestAnimationFrame(function () { goToModule(location.hash); });
+        });
+      };
+      if (document.readyState === 'complete') jump();
+      else window.addEventListener('load', jump);
+    }
+    window.addEventListener('hashchange', function () {
+      if (location.hash.indexOf('#mod-') === 0) goToModule(location.hash);
+    });
+  })();
 
   // Mobile menu
   var burger = document.getElementById('navHamburger');
