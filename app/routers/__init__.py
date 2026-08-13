@@ -16,6 +16,7 @@ from app.routers import (
     hr,
     import_data,
     inventory,
+    portal,
     pos,
     production,
     products,
@@ -45,6 +46,7 @@ except Exception as exc:  # noqa: BLE001
 _base_routers = (
     auth.router,
     home.router,
+    portal.router,
     pos.router,
     import_data.router,
     dashboard.router,

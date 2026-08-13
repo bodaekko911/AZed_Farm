@@ -221,6 +221,38 @@ async def ensure_consignment_sales_tables() -> None:
         logger.exception("ensure_consignment_sales_tables: failed (could not open DB session)")
 
 
+async def ensure_b2b_portal_columns() -> None:
+    """Self-healing guard for the shareable client-portal link on b2b_clients.
+    Mirrors migration 20260812_0044 so a client link keeps working even if
+    alembic is blocked. Idempotent — ADD COLUMN IF NOT EXISTS on every boot."""
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal
+
+    statements = [
+        "ALTER TABLE b2b_clients ADD COLUMN IF NOT EXISTS portal_token VARCHAR(64)",
+        "ALTER TABLE b2b_clients ADD COLUMN IF NOT EXISTS portal_enabled BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE b2b_clients ADD COLUMN IF NOT EXISTS portal_created_at TIMESTAMPTZ",
+        "ALTER TABLE b2b_clients ADD COLUMN IF NOT EXISTS portal_last_viewed_at TIMESTAMPTZ",
+        "ALTER TABLE b2b_clients ADD COLUMN IF NOT EXISTS portal_view_count INTEGER DEFAULT 0",
+        # The token is the only credential on the portal URL — two clients must
+        # never be able to share one.
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_b2b_clients_portal_token "
+        "ON b2b_clients (portal_token)",
+    ]
+    try:
+        async with AsyncSessionLocal() as db:
+            for stmt in statements:
+                try:
+                    await db.execute(text(stmt))
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("ensure_b2b_portal_columns: statement failed: %s", stmt)
+            logger.info("ensure_b2b_portal_columns: client portal columns ready")
+    except Exception:
+        logger.exception("ensure_b2b_portal_columns: failed (could not open DB session)")
+
+
 async def ensure_carbon_methodology() -> None:
     """Self-healing guard for the carbon module's methodology upgrade.
 
@@ -537,6 +569,7 @@ async def lifespan(_: FastAPI):
     await ensure_delivery_transport_columns()
     await ensure_product_categories_table()
     await ensure_consignment_sales_tables()
+    await ensure_b2b_portal_columns()
     await ensure_carbon_methodology()
     await sync_livestock_emissions_on_boot()
     await seed_chart_of_accounts()

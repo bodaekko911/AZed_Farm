@@ -21,6 +21,18 @@ class B2BClient(Base):
     is_active       = Column(Boolean, default=True)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
 
+    # ── Client portal (shareable read-only link) ──
+    # A client opens /portal/c/<portal_token> and sees their own live statement
+    # and received-products list with no login. The token is the only secret,
+    # so it is generated with secrets.token_urlsafe and can be revoked or
+    # rotated per client at any time. portal_enabled is the kill switch:
+    # revoking clears the token AND flips this to False.
+    portal_token          = Column(String(64), unique=True, index=True, nullable=True)
+    portal_enabled        = Column(Boolean, default=False)
+    portal_created_at     = Column(DateTime(timezone=True), nullable=True)
+    portal_last_viewed_at = Column(DateTime(timezone=True), nullable=True)
+    portal_view_count     = Column(Integer, default=0)
+
     invoices        = relationship("B2BInvoice", back_populates="client")
     consignments    = relationship("Consignment", back_populates="client")
 

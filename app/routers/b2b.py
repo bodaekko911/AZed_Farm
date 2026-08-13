@@ -361,6 +361,8 @@ async def get_clients(q: str = "", db: AsyncSession = Depends(get_async_session)
             "outstanding":    float(computed_outstanding or 0),
             "notes":          c.notes or "",
             "invoice_count":  len(c.invoices),
+            "portal_enabled": bool(c.portal_enabled and c.portal_token),
+            "portal_views":   int(c.portal_view_count or 0),
         }
         for c, computed_outstanding in rows
     ]
@@ -1560,6 +1562,311 @@ async def _build_client_statement_payload(
     }
 
 
+# ── Client portal link (shareable, read-only, revocable) ────────────────────
+def _portal_path(token: str) -> str:
+    return f"/portal/c/{token}"
+
+
+def _portal_url(request: Request, token: str) -> str:
+    """Absolute URL to hand the client. Built from the request so it is correct
+    behind a proxy/custom domain without extra configuration."""
+    return str(request.base_url).rstrip("/") + _portal_path(token)
+
+
+def _portal_state(client: B2BClient, request: Request) -> dict:
+    enabled = bool(client.portal_enabled and client.portal_token)
+    return {
+        "enabled":        enabled,
+        "url":            _portal_url(request, client.portal_token) if enabled else None,
+        "created_at":     client.portal_created_at.strftime("%d-%b-%Y %H:%M") if client.portal_created_at else None,
+        "last_viewed_at": client.portal_last_viewed_at.strftime("%d-%b-%Y %H:%M") if client.portal_last_viewed_at else None,
+        "view_count":     int(client.portal_view_count or 0),
+    }
+
+
+async def _get_client_or_404(db: AsyncSession, client_id: int) -> B2BClient:
+    result = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
+    client = result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return client
+
+
+@router.get("/api/clients/{client_id}/portal")
+async def get_client_portal_link(
+    client_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_async_session),
+):
+    client = await _get_client_or_404(db, client_id)
+    return _portal_state(client, request)
+
+
+@router.post("/api/clients/{client_id}/portal", dependencies=[Depends(require_action("b2b", "clients", "update_client"))])
+async def create_client_portal_link(
+    client_id: int,
+    request: Request,
+    rotate: bool = False,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Issue (or re-issue) the client's portal link.
+
+    Without ``rotate`` an existing token is kept, so re-opening the share dialog
+    hands out the same URL the client already bookmarked. With ``rotate=true``
+    a fresh token is minted and the old link stops working immediately.
+    """
+    import secrets
+
+    client = await _get_client_or_404(db, client_id)
+    rotated = False
+    if rotate or not client.portal_token:
+        client.portal_token = secrets.token_urlsafe(32)
+        client.portal_created_at = datetime.now(timezone.utc)
+        client.portal_view_count = 0
+        client.portal_last_viewed_at = None
+        rotated = True
+    client.portal_enabled = True
+
+    record(db, "B2B", "portal_link",
+           f"{'Rotated' if rotated else 'Enabled'} client portal link — {client.name}",
+           user=current_user, ref_type="b2b_client", ref_id=client.id)
+    await db.commit()
+    await db.refresh(client)
+    return {**_portal_state(client, request), "rotated": rotated}
+
+
+@router.delete("/api/clients/{client_id}/portal", dependencies=[Depends(require_action("b2b", "clients", "update_client"))])
+async def revoke_client_portal_link(
+    client_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Kill the link. Clears the token as well as the flag, so the old URL 404s
+    even if the flag is ever flipped back on."""
+    client = await _get_client_or_404(db, client_id)
+    client.portal_token = None
+    client.portal_enabled = False
+    client.portal_created_at = None
+
+    record(db, "B2B", "portal_link", f"Revoked client portal link — {client.name}",
+           user=current_user, ref_type="b2b_client", ref_id=client.id)
+    await db.commit()
+    return {"ok": True, "enabled": False}
+
+
+async def _build_client_products_payload(
+    client_id: int,
+    db: AsyncSession,
+    *,
+    as_of: Optional[date] = None,
+):
+    """
+    Everything the client has physically received, netted against returns.
+
+    Sources, chosen so nothing is counted twice:
+      • invoice items — every invoice type, including consignment invoices
+      • consignment items (qty_sent) — ONLY for consignments with no linked
+        invoice, because a consignment invoice already writes the same lines
+        onto both the invoice and the consignment
+      • refund items and consignment qty_returned — subtracted; the settle
+        flow moves stock back without writing a refund, so these never overlap
+
+    Returns a per-product roll-up plus a dated delivery log.
+    """
+    cutoff = (
+        datetime.combine(as_of + timedelta(days=1), time.min, tzinfo=timezone.utc)
+        if as_of else None
+    )
+
+    invoice_stmt = (
+        select(B2BInvoice)
+        .where(B2BInvoice.client_id == client_id)
+        .options(selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product))
+        .order_by(B2BInvoice.created_at)
+    )
+    consignment_stmt = (
+        select(Consignment)
+        .where(Consignment.client_id == client_id)
+        .options(selectinload(Consignment.items).selectinload(ConsignmentItem.product))
+        .order_by(Consignment.created_at)
+    )
+    refund_stmt = (
+        select(B2BRefund)
+        .where(B2BRefund.client_id == client_id)
+        .options(selectinload(B2BRefund.items).selectinload(B2BRefundItem.product))
+        .order_by(B2BRefund.created_at)
+    )
+    if cutoff is not None:
+        invoice_stmt = invoice_stmt.where(B2BInvoice.created_at < cutoff)
+        consignment_stmt = consignment_stmt.where(Consignment.created_at < cutoff)
+        refund_stmt = refund_stmt.where(B2BRefund.created_at < cutoff)
+
+    invoices = (await db.execute(invoice_stmt)).scalars().all()
+    consignments = (await db.execute(consignment_stmt)).scalars().all()
+    refunds = (await db.execute(refund_stmt)).scalars().all()
+
+    products: dict[int, dict] = {}
+
+    def bucket(product, product_id):
+        entry = products.get(product_id)
+        if entry is None:
+            entry = {
+                "product_id":    product_id,
+                "name":          getattr(product, "name", None) or f"Product #{product_id}",
+                "sku":           getattr(product, "sku", None) or "",
+                "unit":          getattr(product, "unit", None) or "",
+                "qty_received":  0.0,
+                "qty_returned":  0.0,
+                "value_received": 0.0,
+                "value_returned": 0.0,
+                "last_received": None,
+            }
+            products[product_id] = entry
+        return entry
+
+    def note_received(product, product_id, qty, value, when):
+        entry = bucket(product, product_id)
+        entry["qty_received"] += qty
+        entry["value_received"] += value
+        if when and (entry["last_received"] is None or when > entry["last_received"]):
+            entry["last_received"] = when
+
+    def note_returned(product, product_id, qty, value):
+        entry = bucket(product, product_id)
+        entry["qty_returned"] += qty
+        entry["value_returned"] += value
+
+    deliveries = []
+
+    for inv in invoices:
+        lines = []
+        for it in inv.items:
+            qty, value = float(it.qty or 0), float(it.total or 0)
+            note_received(it.product, it.product_id, qty, value, inv.created_at)
+            lines.append({
+                "product":    getattr(it.product, "name", None) or f"Product #{it.product_id}",
+                "qty":        round(qty, 3),
+                "unit":       getattr(it.product, "unit", None) or "",
+                "unit_price": round(float(it.unit_price or 0), 2),
+                "total":      round(value, 2),
+            })
+        if not lines:
+            continue
+        deliveries.append({
+            "date":     inv.created_at,
+            "date_str": inv.created_at.strftime("%d-%b-%Y") if inv.created_at else "—",
+            "ref":      inv.invoice_number or f"INV-{inv.id}",
+            "kind":     "delivery",
+            "label":    f"{(inv.invoice_type or 'b2b').replace('_', ' ').title()} Invoice",
+            "items":    lines,
+            "total":    round(sum(l["total"] for l in lines), 2),
+        })
+
+    for cons in consignments:
+        lines = []
+        for ci in cons.items:
+            # Consignment invoices already contributed these lines above.
+            if cons.invoice_id is None:
+                qty, price = float(ci.qty_sent or 0), float(ci.unit_price or 0)
+                if qty:
+                    note_received(ci.product, ci.product_id, qty, qty * price, cons.created_at)
+                    lines.append({
+                        "product":    getattr(ci.product, "name", None) or f"Product #{ci.product_id}",
+                        "qty":        round(qty, 3),
+                        "unit":       getattr(ci.product, "unit", None) or "",
+                        "unit_price": round(price, 2),
+                        "total":      round(qty * price, 2),
+                    })
+            returned = float(ci.qty_returned or 0)
+            if returned:
+                note_returned(ci.product, ci.product_id, returned, returned * float(ci.unit_price or 0))
+        if not lines:
+            continue
+        deliveries.append({
+            "date":     cons.created_at,
+            "date_str": cons.created_at.strftime("%d-%b-%Y") if cons.created_at else "—",
+            "ref":      cons.ref_number or f"CONS-{cons.id}",
+            "kind":     "delivery",
+            "label":    "Consignment Delivery",
+            "items":    lines,
+            "total":    round(sum(l["total"] for l in lines), 2),
+        })
+
+    for rfnd in refunds:
+        lines = []
+        for it in rfnd.items:
+            qty, value = float(it.qty or 0), float(it.total or 0)
+            note_returned(it.product, it.product_id, qty, value)
+            lines.append({
+                "product":    getattr(it.product, "name", None) or f"Product #{it.product_id}",
+                "qty":        round(qty, 3),
+                "unit":       getattr(it.product, "unit", None) or "",
+                "unit_price": round(float(it.unit_price or 0), 2),
+                "total":      round(value, 2),
+            })
+        if not lines:
+            continue
+        deliveries.append({
+            "date":     rfnd.created_at,
+            "date_str": rfnd.created_at.strftime("%d-%b-%Y") if rfnd.created_at else "—",
+            "ref":      rfnd.refund_number or f"REF-{rfnd.id}",
+            "kind":     "return",
+            "label":    "Return / Credit",
+            "items":    lines,
+            "total":    round(sum(l["total"] for l in lines), 2),
+        })
+
+    deliveries.sort(
+        key=lambda d: d["date"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True
+    )
+    for d in deliveries:
+        d.pop("date", None)
+
+    rows = []
+    for entry in products.values():
+        qty_net = entry["qty_received"] - entry["qty_returned"]
+        value_net = entry["value_received"] - entry["value_returned"]
+        rows.append({
+            "product_id":     entry["product_id"],
+            "name":           entry["name"],
+            "sku":            entry["sku"],
+            "unit":           entry["unit"],
+            "qty_received":   round(entry["qty_received"], 3),
+            "qty_returned":   round(entry["qty_returned"], 3),
+            "qty_net":        round(qty_net, 3),
+            "value_received": round(entry["value_received"], 2),
+            "value_returned": round(entry["value_returned"], 2),
+            "value_net":      round(value_net, 2),
+            "avg_unit_price": round(value_net / qty_net, 2) if qty_net else 0.0,
+            "last_received":  entry["last_received"].strftime("%d-%b-%Y") if entry["last_received"] else "—",
+        })
+    rows.sort(key=lambda r: r["value_net"], reverse=True)
+
+    return {
+        "products": rows,
+        "deliveries": deliveries,
+        "totals": {
+            "product_lines":  len(rows),
+            "deliveries":     sum(1 for d in deliveries if d["kind"] == "delivery"),
+            "returns":        sum(1 for d in deliveries if d["kind"] == "return"),
+            "qty_net":        round(sum(r["qty_net"] for r in rows), 3),
+            "value_received": round(sum(r["value_received"] for r in rows), 2),
+            "value_returned": round(sum(r["value_returned"] for r in rows), 2),
+            "value_net":      round(sum(r["value_net"] for r in rows), 2),
+        },
+    }
+
+
+@router.get("/api/clients/{client_id}/products")
+async def client_products_data(
+    client_id: int,
+    as_of: Optional[date] = None,
+    db: AsyncSession = Depends(get_async_session),
+):
+    return await _build_client_products_payload(client_id, db, as_of=as_of)
+
+
 @router.get("/api/clients/{client_id}/statement")
 async def client_statement_data(
     client_id: int,
@@ -1697,6 +2004,8 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;pa
 .btn-warn:hover{filter:brightness(1.1);transform:translateY(-1px);}
 .btn-teal {background:linear-gradient(135deg,var(--teal),var(--blue));color:#001a18;}
 .btn-teal:hover{filter:brightness(1.1);transform:translateY(-1px);}
+.btn-danger{background:transparent;border:1px solid var(--danger);color:var(--danger);}
+.btn-danger:hover{background:var(--danger);color:#fff;}
 .toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
 .search-box{display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:0 14px;flex:1;min-width:200px;}
 .search-box input{background:transparent;border:none;outline:none;color:var(--text);font-family:var(--sans);font-size:14px;padding:11px 0;width:100%;}
@@ -1988,6 +2297,20 @@ td.name{color:var(--text);font-weight:600;}
                 <thead><tr><th>Product</th><th>SKU</th><th>Default Price</th><th>Client Price</th><th>Difference</th><th>Actions</th></tr></thead>
                 <tbody id="pl-body"><tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">Select a client to view their price list.</td></tr></tbody>
             </table>
+        </div>
+    </div>
+</div>
+
+<!-- CLIENT PORTAL LINK MODAL -->
+<div class="modal-bg" id="portal-modal">
+    <div class="modal" style="width:600px">
+        <div class="modal-title">Client Account Link</div>
+        <div class="modal-sub" id="portal-modal-sub">Send this to the client so they can see their statement and received products, live.</div>
+
+        <div id="portal-body" style="margin-top:16px"></div>
+
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="document.getElementById('portal-modal').classList.remove('open')">Close</button>
         </div>
     </div>
 </div>
@@ -2386,6 +2709,7 @@ async function loadClients(){
             <td style="display:flex;gap:6px;flex-wrap:wrap">
                 ${hasPermission("tab_b2b_invoices")?`<button class="action-btn green" onclick="quickInvoice(${c.id})">+ Invoice</button>`:""}
                 <button class="action-btn" onclick="window.open('/b2b/client/${c.id}/statement','_blank')" title="Account Statement">&#128196; Statement</button>
+                ${hasPermission("action_b2b_clients_update")?`<button class="action-btn${c.portal_enabled?" green":""}" onclick="openPortalLink(${c.id})" title="Shareable live account link for this client">&#128279; ${c.portal_enabled?"Link&nbsp;on":"Share&nbsp;link"}</button>`:""}
                 <button class="action-btn" onclick="openEditClient(${c.id})">Edit</button>
                 ${hasPermission("action_b2b_delete")?`<button class="action-btn danger" onclick="deleteClient(${c.id},'${c.name.replace(/'/g,"\\'")}')">Remove</button>`:""}
             </td>
@@ -2450,6 +2774,113 @@ async function deleteClient(id,name){
     await fetch(`/b2b/api/clients/${id}`,{method:"DELETE"});
     showToast("Client removed ✓");
     loadClients(); loadStats();
+}
+
+/* ── CLIENT PORTAL LINK ── */
+let portalClientId = null;
+
+function portalEscape(v){
+    return String(v == null ? "" : v).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+async function openPortalLink(clientId){
+    portalClientId = clientId;
+    const client = allClients.find(c => c.id === clientId);
+    document.getElementById("portal-modal-sub").innerText =
+        `${client ? client.name : "Client"} — they see their own statement and received products, live. No login needed.`;
+    document.getElementById("portal-body").innerHTML =
+        `<div style="color:var(--muted);font-size:13px;padding:18px 0">Loading link…</div>`;
+    document.getElementById("portal-modal").classList.add("open");
+    await renderPortalState();
+}
+
+async function renderPortalState(){
+    let state;
+    try{
+        const res = await fetch(`/b2b/api/clients/${portalClientId}/portal`, { credentials: "same-origin" });
+        state = await res.json();
+        if(!res.ok) throw new Error(state.detail || "Could not load the link");
+    } catch(e){
+        document.getElementById("portal-body").innerHTML =
+            `<div style="color:var(--danger);font-size:13px;padding:18px 0">${portalEscape(e.message)}</div>`;
+        return;
+    }
+
+    if(!state.enabled){
+        document.getElementById("portal-body").innerHTML = `
+            <div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:16px 18px;font-size:13px;color:var(--sub);line-height:1.6">
+                No link has been issued for this client yet.<br>
+                Creating one generates a private web address. <strong>Anyone who has that address can see this
+                client's statement and deliveries</strong>, so send it only to them. You can revoke it at any time.
+            </div>
+            <button class="btn btn-blue" style="margin-top:14px" onclick="createPortalLink(false)">Create link</button>`;
+        return;
+    }
+
+    const url = state.url;
+    const seen = state.last_viewed_at
+        ? `Opened ${state.view_count} time${state.view_count === 1 ? "" : "s"} · last on ${portalEscape(state.last_viewed_at)}`
+        : "Not opened yet";
+    document.getElementById("portal-body").innerHTML = `
+        <div class="fld"><label>Client's private link</label>
+            <input id="portal-url" readonly value="${portalEscape(url)}"
+                onclick="this.select()"
+                style="width:100%;background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;color:var(--text);font-family:var(--mono);font-size:12.5px;outline:none">
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+            <button class="btn btn-blue" onclick="copyPortalLink()">Copy link</button>
+            <button class="btn" style="background:#25D366;color:#07260f" onclick="sharePortalWhatsApp()">Send on WhatsApp</button>
+            <button class="btn-cancel" onclick="window.open(document.getElementById('portal-url').value,'_blank')">Preview</button>
+        </div>
+        <div style="font-size:12px;color:var(--muted);margin-top:14px;line-height:1.7">
+            ${portalEscape(seen)}${state.created_at ? ` · issued ${portalEscape(state.created_at)}` : ""}<br>
+            The page refreshes itself, so the client always sees current numbers.
+        </div>
+        <div style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-cancel" onclick="createPortalLink(true)" title="Issue a new address and kill the old one">Replace link</button>
+            <button class="btn btn-danger" onclick="revokePortalLink()" title="Stop the link working">Revoke access</button>
+        </div>`;
+}
+
+async function createPortalLink(rotate){
+    if(rotate && !confirm("Replace the link?\\n\\nThe address you already sent this client will stop working immediately.")) return;
+    const res = await fetch(`/b2b/api/clients/${portalClientId}/portal?rotate=${rotate ? "true" : "false"}`,
+        { method: "POST", credentials: "same-origin" });
+    const data = await res.json();
+    if(!res.ok){ showToast("Error: " + (data.detail || "Could not create the link")); return; }
+    showToast(rotate ? "New link issued — old one is dead" : "Link created ✓");
+    await renderPortalState();
+    loadClients();
+}
+
+async function revokePortalLink(){
+    if(!confirm("Revoke access?\\n\\nThe client's link stops working immediately.")) return;
+    const res = await fetch(`/b2b/api/clients/${portalClientId}/portal`,
+        { method: "DELETE", credentials: "same-origin" });
+    const data = await res.json().catch(() => ({}));
+    if(!res.ok){ showToast("Error: " + (data.detail || "Could not revoke the link")); return; }
+    showToast("Link revoked ✓");
+    await renderPortalState();
+    loadClients();
+}
+
+async function copyPortalLink(){
+    const input = document.getElementById("portal-url");
+    try{
+        await navigator.clipboard.writeText(input.value);
+    } catch(e){
+        // clipboard API needs HTTPS or permission — fall back to selecting it
+        input.select();
+        document.execCommand("copy");
+    }
+    showToast("Link copied ✓");
+}
+
+function sharePortalWhatsApp(){
+    const client = allClients.find(c => c.id === portalClientId);
+    const url = document.getElementById("portal-url").value;
+    const msg = `Hello${client ? " " + client.name : ""}, here is your live account with Habiba Organic Farm — statement and products received: ${url}`;
+    window.open("https://wa.me/?text=" + encodeURIComponent(msg), "_blank");
 }
 
 /* ── INVOICE MODAL ── */
