@@ -31,6 +31,7 @@ from html import escape
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -89,7 +90,20 @@ async def _portal_payload(db: AsyncSession, client: B2BClient) -> dict:
         "as_of":            statement["statement_date"],
         "generated_at":     datetime.now(timezone.utc).strftime("%d-%b-%Y %H:%M UTC"),
         "transactions":     statement["transactions"],
-        "payment_activity": statement["payment_activity"],
+        # Projected down to the four fields the page shows, deliberately:
+        #   • the raw "date" datetime is dropped — JSONResponse serialises with
+        #     json.dumps, which cannot encode a datetime (it 500s the endpoint)
+        #   • "user_name" is dropped — that is OUR staff member who recorded the
+        #     payment, and it has no business being in a client-facing payload
+        "payment_activity": [
+            {
+                "date":   p.get("date_str") or "—",
+                "ref":    p.get("ref") or "—",
+                "desc":   p.get("desc") or "Payment received",
+                "amount": float(p.get("amount") or 0),
+            }
+            for p in statement["payment_activity"]
+        ],
         "total_invoiced":   statement["total_invoiced"],
         "total_paid":       statement["total_paid"],
         "balance_due":      statement["balance_due"],
@@ -104,7 +118,10 @@ async def portal_data(token: str, db: AsyncSession = Depends(get_async_session))
     """JSON behind the page — polled so the view stays live without a reload."""
     client = await _resolve_client(db, token)
     payload = await _portal_payload(db, client)
-    return JSONResponse(payload, headers=PORTAL_HEADERS)
+    # jsonable_encoder, not raw JSONResponse: building the Response ourselves
+    # skips FastAPI's encoding step, so any Decimal or datetime that ever
+    # reaches this payload would raise inside json.dumps and 500 the page.
+    return JSONResponse(jsonable_encoder(payload), headers=PORTAL_HEADERS)
 
 
 @router.get("/c/{token}", response_class=HTMLResponse)
@@ -319,9 +336,9 @@ function renderStatement(d){
 
   const pays = d.payment_activity.length ? d.payment_activity.map(p => `
     <tr>
-      <td class="num" style="text-align:left">${esc(p.date_str)}</td>
-      <td class="name">${esc(p.reference || "—")}</td>
-      <td>${esc(p.description || "—")}</td>
+      <td class="num" style="text-align:left">${esc(p.date)}</td>
+      <td class="name">${esc(p.ref)}</td>
+      <td>${esc(p.desc)}</td>
       <td class="num v-green">${money(p.amount)}</td>
     </tr>`).join("") : empty(4, "No payments recorded yet.");
 

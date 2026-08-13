@@ -345,6 +345,59 @@ def test_unknown_revoked_and_disabled_tokens_all_404():
         assert "Green Cafe" not in res.text, label
 
 
+def seed_payment(session, *, amount="300", invoice_id=1, description="Bank transfer for B2B-00001"):
+    """A recorded client payment — journal + cash-account entry, the shape
+    _load_client_payment_activity looks for."""
+    session.add(Account(id=1, code="1000", name="Cash", type="asset"))
+    session.flush()
+    session.add(Journal(id=1, ref_type="b2b_payment", ref_id=invoice_id, description=description,
+                        created_at=datetime(2026, 8, 5, tzinfo=timezone.utc)))
+    session.flush()
+    session.add(JournalEntry(journal_id=1, account_id=1, debit=Decimal(amount), credit=Decimal("0")))
+    session.commit()
+
+
+def test_portal_data_serialises_when_the_client_has_payments():
+    """Regression: payment records carry a raw datetime under "date", and
+    building the JSONResponse ourselves skips FastAPI's encoder — so this
+    endpoint used to 500 for every client who had ever paid anything."""
+    with make_session() as session:
+        seed(session)
+        seed_payment(session)
+        with make_client(session) as api:
+            res = api.get(f"/portal/c/{TOKEN}/data")
+
+    assert res.status_code == 200
+    payments = res.json()["payment_activity"]
+    assert len(payments) == 1
+    # The four fields the page actually renders, under the names it reads
+    assert payments[0] == {
+        "date": "05-Aug-2026",
+        "ref": "B2B-00001",
+        "desc": "Bank transfer for B2B-00001",
+        "amount": 300.0,
+    }
+
+
+def test_portal_never_exposes_our_staff_names():
+    """Payment records carry the employee who booked the payment. That is
+    internal — it must not ride along in a client-facing payload."""
+    with make_session() as session:
+        seed(session)
+        session.add(User(id=7, name="Sara Bookkeeper", email="sara@farm.example",
+                         password="x", role="accountant"))
+        session.flush()
+        seed_payment(session)
+        session.execute(Journal.__table__.update().values(user_id=7))
+        session.commit()
+        with make_client(session) as api:
+            res = api.get(f"/portal/c/{TOKEN}/data")
+
+    assert res.status_code == 200
+    assert "Sara Bookkeeper" not in res.text
+    assert "user_name" not in res.text
+
+
 def fake_request(host="farm.example.com"):
     from starlette.requests import Request
     return Request({
