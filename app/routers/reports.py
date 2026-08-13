@@ -1821,6 +1821,25 @@ async def production_report(date_from: Optional[str] = None, date_to: Optional[s
     return await _build_production_report(db, d_from=d_from, d_to=d_to, skip=skip, limit=limit)
 
 
+def _production_line(item, product):
+    """One material line as structured fields — name, qty and unit stay in
+    separate keys so the report can put them in separate columns instead of
+    flattening them into '30kg Tomato'."""
+    return {
+        "product_id": getattr(item, "product_id", None),
+        "product":    getattr(product, "name", None) or "—",
+        "sku":        getattr(product, "sku", None) or "",
+        "qty":        round(_num(getattr(item, "qty", 0)), 3),
+        "unit":       getattr(product, "unit", None) or "",
+    }
+
+
+def _production_lines_str(lines) -> str:
+    """Legacy one-cell rendering, kept for the Excel batch sheet where a single
+    'Inputs' column still reads better than one row per material."""
+    return ", ".join(f"{l['qty']:g} {l['unit']} {l['product']}".replace("  ", " ") for l in lines)
+
+
 async def _build_production_report(db, *, d_from, d_to, skip=0, limit=100, include_all=False):
     batch_res = await db.execute(
         select(ProductionBatch)
@@ -1834,12 +1853,14 @@ async def _build_production_report(db, *, d_from, d_to, skip=0, limit=100, inclu
     rows, losses, total_proc, total_pkg = [], [], 0, 0
     for b in batches:
         is_pkg = b.batch_number.startswith("PKG")
-        inputs_str  = ", ".join(f"{float(i.qty):.0f}{i.product.unit if i.product else ''} {i.product.name if i.product else '—'}" for i in b.inputs)
-        outputs_str = ", ".join(f"{float(o.qty):.0f}{o.product.unit if o.product else ''} {o.product.name if o.product else '—'}" for o in b.outputs)
+        inputs  = [_production_line(i, i.product) for i in b.inputs]
+        outputs = [_production_line(o, o.product) for o in b.outputs]
         rows.append({"batch_number":b.batch_number,"type":"Packaging" if is_pkg else "Processing",
             "recipe":b.recipe.name if b.recipe else "Custom","waste_pct":float(b.waste_pct),
             "notes":b.notes or "","date":b.created_at.strftime("%Y-%m-%d") if b.created_at else "—",
-            "inputs_str":inputs_str,"outputs_str":outputs_str,"user_name":b.user.name if b.user else "—"})
+            "inputs":inputs,"outputs":outputs,
+            "inputs_str":_production_lines_str(inputs),"outputs_str":_production_lines_str(outputs),
+            "user_name":b.user.name if b.user else "—"})
         if is_pkg: total_pkg  += 1
         else:      total_proc += 1; losses.append(float(b.waste_pct))
     # ── Drying batches ──────────────────────────────────
@@ -1863,14 +1884,8 @@ async def _build_production_report(db, *, d_from, d_to, skip=0, limit=100, inclu
         stages = db_b.stages or []
         stage1 = stages[0] if stages else None
         last_closed = next((s for s in reversed(stages) if s.total_output_qty is not None), None)
-        inputs_str  = ", ".join(
-            f"{float(i.qty):.0f}{i.product.unit if i.product else ''} {i.product.name if i.product else '—'}"
-            for i in (stage1.inputs if stage1 else [])
-        )
-        outputs_str = ", ".join(
-            f"{float(o.qty):.0f}{o.product.unit if o.product else ''} {o.product.name if o.product else '—'}"
-            for o in (last_closed.outputs if last_closed else [])
-        )
+        inputs  = [_production_line(i, i.product) for i in (stage1.inputs if stage1 else [])]
+        outputs = [_production_line(o, o.product) for o in (last_closed.outputs if last_closed else [])]
         yield_pct = float(last_closed.cumulative_yield_pct) if (last_closed and last_closed.cumulative_yield_pct is not None) else None
         waste_pct = (100.0 - yield_pct) if yield_pct is not None else 0.0
         rows.append({
@@ -1880,8 +1895,10 @@ async def _build_production_report(db, *, d_from, d_to, skip=0, limit=100, inclu
             "waste_pct": waste_pct,
             "notes": db_b.notes or "",
             "date": db_b.started_at.strftime("%Y-%m-%d") if db_b.started_at else "—",
-            "inputs_str": inputs_str,
-            "outputs_str": outputs_str,
+            "inputs": inputs,
+            "outputs": outputs,
+            "inputs_str": _production_lines_str(inputs),
+            "outputs_str": _production_lines_str(outputs),
             "user_name": db_b.started_by.name if db_b.started_by else "—",
         })
         if yield_pct is not None:
@@ -1890,32 +1907,117 @@ async def _build_production_report(db, *, d_from, d_to, skip=0, limit=100, inclu
     # Re-sort all rows by date desc
     rows.sort(key=lambda r: r["date"], reverse=True)
     total_batches = len(rows)
-    if not include_all:
-        rows = rows[skip : skip + limit]
-    return {"batches":rows,"total_processing":total_proc,"total_packaging":total_pkg,"total_drying":total_drying,
-            "avg_loss_pct":round(sum(losses)/len(losses),2) if losses else 0,"total_batches":total_batches}
+
+    # ── Roll-ups across the whole window (not just the visible page) ──
+    # One line per product with the quantity in its own column, so "what did we
+    # consume / produce this month" is readable without opening every batch.
+    def _rollup(direction):
+        buckets = {}
+        for row in rows:
+            for line in row[direction]:
+                key = (line["product_id"], line["product"], line["unit"])
+                entry = buckets.setdefault(key, {
+                    "product_id": line["product_id"],
+                    "product":    line["product"],
+                    "sku":        line["sku"],
+                    "unit":       line["unit"],
+                    "qty":        0.0,
+                    "batches":    set(),
+                })
+                entry["qty"] += line["qty"]
+                entry["batches"].add(row["batch_number"])
+        out = [{
+            "product_id": e["product_id"],
+            "product":    e["product"],
+            "sku":        e["sku"],
+            "unit":       e["unit"],
+            "qty":        round(e["qty"], 3),
+            "batches":    len(e["batches"]),
+        } for e in buckets.values()]
+        out.sort(key=lambda r: r["qty"], reverse=True)
+        return out
+
+    consumed = _rollup("inputs")
+    produced = _rollup("outputs")
+
+    # Flat one-line-per-material view — the shape Excel and any pivot want
+    items = []
+    for row in rows:
+        for direction, lines in (("Input", row["inputs"]), ("Output", row["outputs"])):
+            for line in lines:
+                items.append({
+                    "batch_number": row["batch_number"],
+                    "type":         row["type"],
+                    "date":         row["date"],
+                    "direction":    direction,
+                    "product":      line["product"],
+                    "sku":          line["sku"],
+                    "qty":          line["qty"],
+                    "unit":         line["unit"],
+                })
+
+    paged = rows if include_all else rows[skip : skip + limit]
+    return {"batches":paged,"total_processing":total_proc,"total_packaging":total_pkg,"total_drying":total_drying,
+            "avg_loss_pct":round(sum(losses)/len(losses),2) if losses else 0,"total_batches":total_batches,
+            "consumed":consumed,"produced":produced,"items":items,
+            "totals":{"materials_consumed":len(consumed),"products_produced":len(produced),"item_lines":len(items)}}
 
 @router.get("/export/production", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_production"))])
 async def export_production(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     data = await _build_production_report(db, d_from=d_from, d_to=d_to, include_all=True)
-    rows = [[b["batch_number"],b["type"],b["recipe"],b["inputs_str"],b["outputs_str"],b["waste_pct"],b["date"],b["user_name"],b["notes"]] for b in data["batches"]]
-    buf = to_xlsx(
-        ["Batch #","Type","Recipe","Inputs","Outputs","Loss %","Date","Performed By","Notes"],
-        rows,
-        "Production",
-        report_title="Production Report",
-        metadata=[
-            ("Date Range", f"{d_from.strftime('%Y-%m-%d')} to {d_to.strftime('%Y-%m-%d')}"),
-            ("Total Batches", data["total_batches"]),
-            ("Processing Batches", data["total_processing"]),
-            ("Packaging Batches", data["total_packaging"]),
-            ("Drying Batches", data.get("total_drying", 0)),
-            ("Average Loss %", f"{data['avg_loss_pct']:.2f}%"),
-        ],
-        column_formats={"Loss %": "percent_value", "Date": "date"},
-        wrap_columns={"Inputs", "Outputs", "Notes"},
-    )
+    period = [
+        ("Date Range", f"{d_from.strftime('%Y-%m-%d')} to {d_to.strftime('%Y-%m-%d')}"),
+        ("Total Batches", data["total_batches"]),
+        ("Processing Batches", data["total_processing"]),
+        ("Packaging Batches", data["total_packaging"]),
+        ("Drying Batches", data.get("total_drying", 0)),
+        ("Average Loss %", f"{data['avg_loss_pct']:.2f}%"),
+    ]
+    wb = build_report_workbook([
+        {
+            "sheet_name": "Batches",
+            "report_title": "Production Report — Batches",
+            "headers": ["Batch #", "Type", "Recipe", "Items In", "Items Out", "Loss %", "Date", "Performed By", "Notes"],
+            "rows": [[b["batch_number"], b["type"], b["recipe"], len(b["inputs"]), len(b["outputs"]),
+                      b["waste_pct"], b["date"], b["user_name"], b["notes"]] for b in data["batches"]],
+            "metadata": period,
+            "column_formats": {"Items In": "int", "Items Out": "int", "Loss %": "percent_value", "Date": "date"},
+            "wrap_columns": {"Notes"},
+            "tab_color": "B45309",
+        },
+        {
+            # One row per material with Item, Qty and Unit in separate columns —
+            # the shape a pivot table or a stock reconciliation actually needs.
+            "sheet_name": "Batch Items",
+            "report_title": "Production Report — Item Detail",
+            "headers": ["Batch #", "Type", "Date", "Direction", "Item", "SKU", "Qty", "Unit"],
+            "rows": [[i["batch_number"], i["type"], i["date"], i["direction"],
+                      i["product"], i["sku"], i["qty"], i["unit"]] for i in data["items"]],
+            "metadata": period + [("Item Lines", len(data["items"]))],
+            "column_formats": {"Date": "date", "Qty": "qty"},
+            "tab_color": "334155",
+        },
+        {
+            "sheet_name": "Materials Consumed",
+            "report_title": "Materials Consumed in the Period",
+            "headers": ["Item", "SKU", "Qty", "Unit", "Batches"],
+            "rows": [[c["product"], c["sku"], c["qty"], c["unit"], c["batches"]] for c in data["consumed"]],
+            "metadata": period,
+            "column_formats": {"Qty": "qty", "Batches": "int"},
+            "tab_color": "C2410C",
+        },
+        {
+            "sheet_name": "Products Produced",
+            "report_title": "Products Produced in the Period",
+            "headers": ["Item", "SKU", "Qty", "Unit", "Batches"],
+            "rows": [[p["product"], p["sku"], p["qty"], p["unit"], p["batches"]] for p in data["produced"]],
+            "metadata": period,
+            "column_formats": {"Qty": "qty", "Batches": "int"},
+            "tab_color": "2F6F4F",
+        },
+    ])
+    buf = workbook_to_buffer(wb)
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=production_{date.today()}.xlsx"})
 
@@ -4846,10 +4948,41 @@ td.mono{font-family:var(--mono);}
             <div class="stat-card sc-orange"><div class="stat-label">Drying Batches</div>   <div class="stat-value sv-orange" id="prod-drying">—</div></div>
             <div class="stat-card sc-danger"><div class="stat-label">Avg Loss %</div>        <div class="stat-value sv-danger" id="prod-loss">—</div></div>
         </div>
+        <div class="two-col">
+            <div class="table-wrap">
+                <div class="table-title"><span>Materials Consumed</span><span id="prod-consumed-count" style="color:var(--muted);font-weight:600;text-transform:none;letter-spacing:0"></span></div>
+                <div style="overflow-x:auto">
+                <table><thead><tr><th>Item</th><th style="text-align:right">Qty</th><th>Unit</th><th style="text-align:right">Batches</th></tr></thead>
+                <tbody id="prod-consumed-body"></tbody></table>
+                </div>
+            </div>
+            <div class="table-wrap">
+                <div class="table-title"><span>Products Produced</span><span id="prod-produced-count" style="color:var(--muted);font-weight:600;text-transform:none;letter-spacing:0"></span></div>
+                <div style="overflow-x:auto">
+                <table><thead><tr><th>Item</th><th style="text-align:right">Qty</th><th>Unit</th><th style="text-align:right">Batches</th></tr></thead>
+                <tbody id="prod-produced-body"></tbody></table>
+                </div>
+            </div>
+        </div>
         <div class="table-wrap">
-            <div class="table-title">All Batches</div>
-            <table><thead><tr><th>Batch #</th><th>Type</th><th>Recipe</th><th>Inputs</th><th>Outputs</th><th>Loss %</th><th>Date</th><th>By</th></tr></thead>
+            <div class="table-title">
+                <span>All Batches</span>
+                <span style="color:var(--muted);font-weight:600;text-transform:none;letter-spacing:0">Click a batch to see its item detail</span>
+            </div>
+            <div style="overflow-x:auto">
+            <table><thead><tr><th style="width:26px"></th><th>Batch #</th><th>Type</th><th>Recipe</th><th style="text-align:right">Items In</th><th style="text-align:right">Items Out</th><th style="text-align:right">Loss %</th><th>Date</th><th>By</th></tr></thead>
             <tbody id="prod-body"></tbody></table>
+            </div>
+        </div>
+        <div class="table-wrap">
+            <div class="table-title">
+                <span>Batch Item Detail</span>
+                <span id="prod-items-count" style="color:var(--muted);font-weight:600;text-transform:none;letter-spacing:0"></span>
+            </div>
+            <div style="overflow-x:auto;max-height:520px">
+            <table><thead><tr><th>Batch #</th><th>Type</th><th>Date</th><th>Direction</th><th>Item</th><th style="text-align:right">Qty</th><th>Unit</th></tr></thead>
+            <tbody id="prod-items-body"></tbody></table>
+            </div>
         </div>
     </div>
 
@@ -5913,21 +6046,94 @@ async function loadProduction(){
     document.getElementById("prod-drying").innerText = data.total_drying || 0;
     document.getElementById("prod-loss").innerText   = data.avg_loss_pct.toFixed(1)+"%";
     setPrintDates("ph-prod-dates", r.from, r.to);
+
+    const prodQty = v => Number(v||0).toLocaleString(undefined,{maximumFractionDigits:3});
+    const typeStyle = t => t==="Packaging" ? ["var(--teal)","rgba(45,212,191,.1)"]
+                         : t==="Drying"    ? ["var(--warn)","rgba(245,158,11,.1)"]
+                                           : ["var(--orange)","rgba(251,146,60,.1)"];
+
+    /* Materials consumed / products produced — item and qty in their own columns */
+    const rollup = (rows, emptyMsg, color) => rows.length
+        ? rows.map(x=>`<tr>
+            <td class="name">${x.product}${x.sku?` <span style="color:var(--muted);font-weight:400;font-size:11px">${x.sku}</span>`:""}</td>
+            <td class="mono" style="text-align:right;color:${color}">${prodQty(x.qty)}</td>
+            <td style="font-size:12px;color:var(--muted)">${x.unit||"—"}</td>
+            <td class="mono" style="text-align:right;color:var(--muted)">${x.batches}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px">${emptyMsg}</td></tr>`;
+
+    document.getElementById("prod-consumed-body").innerHTML = rollup(data.consumed, "Nothing consumed in this period", "var(--orange)");
+    document.getElementById("prod-produced-body").innerHTML = rollup(data.produced, "Nothing produced in this period", "var(--green)");
+    document.getElementById("prod-consumed-count").innerText = `${data.consumed.length} item${data.consumed.length===1?"":"s"}`;
+    document.getElementById("prod-produced-count").innerText = `${data.produced.length} item${data.produced.length===1?"":"s"}`;
+
+    /* Batch rows — item lists moved out of the cells into an expandable panel */
+    __prodBatches = data.batches;
+    const lineTable = (lines, color) => lines.length
+        ? `<table style="width:100%;border-collapse:collapse">
+             <thead><tr>
+               <th style="text-align:left;padding:5px 10px;font-size:10px;color:var(--muted)">Item</th>
+               <th style="text-align:right;padding:5px 10px;font-size:10px;color:var(--muted)">Qty</th>
+               <th style="text-align:left;padding:5px 10px;font-size:10px;color:var(--muted)">Unit</th>
+             </tr></thead>
+             <tbody>${lines.map(l=>`<tr>
+               <td style="padding:5px 10px;border-top:1px solid var(--border);color:var(--text);font-size:12px">${l.product}</td>
+               <td style="padding:5px 10px;border-top:1px solid var(--border);text-align:right;font-family:var(--mono);font-size:12px;color:${color}">${prodQty(l.qty)}</td>
+               <td style="padding:5px 10px;border-top:1px solid var(--border);font-size:12px;color:var(--muted)">${l.unit||"—"}</td>
+             </tr>`).join("")}</tbody>
+           </table>`
+        : `<div style="color:var(--muted);font-size:12px;padding:6px 10px">None recorded</div>`;
+
     document.getElementById("prod-body").innerHTML = data.batches.length
-        ? data.batches.map(b=>{
-            const typeColor = (b.type==="Packaging") ? "var(--teal)" : (b.type==="Drying") ? "var(--warn)" : "var(--orange)";
-            const typeBg    = (b.type==="Packaging") ? "rgba(45,212,191,.1)" : (b.type==="Drying") ? "rgba(245,158,11,.1)" : "rgba(251,146,60,.1)";
-            return `<tr>
+        ? data.batches.map((b,i)=>{
+            const [typeColor, typeBg] = typeStyle(b.type);
+            return `<tr style="cursor:pointer" onclick="toggleProdBatch(${i})">
+            <td style="color:var(--muted);font-size:11px" id="prod-caret-${i}">${(b.inputs.length||b.outputs.length)?"▶":""}</td>
             <td class="mono" style="font-size:12px;color:${typeColor}">${b.batch_number}</td>
             <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:${typeBg};color:${typeColor}">${b.type}</span></td>
             <td class="name" style="font-size:12px">${b.recipe}</td>
-            <td style="font-size:11px;color:var(--sub);max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.inputs_str||"—"}</td>
-            <td style="font-size:11px;color:var(--green);max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.outputs_str||"—"}</td>
-            <td class="mono" style="color:${b.waste_pct<10?"var(--green)":b.waste_pct<25?"var(--warn)":"var(--danger)"}">${b.waste_pct.toFixed(1)}%</td>
+            <td class="mono" style="text-align:right;color:var(--orange)">${b.inputs.length}</td>
+            <td class="mono" style="text-align:right;color:var(--green)">${b.outputs.length}</td>
+            <td class="mono" style="text-align:right;color:${b.waste_pct<10?"var(--green)":b.waste_pct<25?"var(--warn)":"var(--danger)"}">${b.waste_pct.toFixed(1)}%</td>
             <td class="mono" style="font-size:12px;color:var(--muted)">${b.date}</td>
             <td style="font-size:12px;color:var(--muted);white-space:nowrap">${b.user_name}</td>
+          </tr>
+          <tr id="prod-detail-${i}" style="display:none"><td colspan="9" style="padding:0;background:var(--bg)">
+            <div class="two-col" style="gap:12px;padding:12px 16px">
+              <div><div class="chart-title" style="margin-bottom:6px">Inputs — consumed</div>${lineTable(b.inputs,"var(--orange)")}</div>
+              <div><div class="chart-title" style="margin-bottom:6px">Outputs — produced</div>${lineTable(b.outputs,"var(--green)")}</div>
+            </div>
+            ${b.notes?`<div style="padding:0 16px 12px;font-size:12px;color:var(--muted)">Note: ${b.notes}</div>`:""}
+          </td></tr>`;}).join("")
+        : `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:30px">No batches in this period</td></tr>`;
+
+    /* Flat item list — one row per material, every field in its own column */
+    document.getElementById("prod-items-count").innerText =
+        `${data.items.length} line${data.items.length===1?"":"s"} across ${data.total_batches} batch${data.total_batches===1?"":"es"}`;
+    document.getElementById("prod-items-body").innerHTML = data.items.length
+        ? data.items.map(it=>{
+            const [typeColor, typeBg] = typeStyle(it.type);
+            const isOut = it.direction === "Output";
+            return `<tr>
+            <td class="mono" style="font-size:12px;color:${typeColor}">${it.batch_number}</td>
+            <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:${typeBg};color:${typeColor}">${it.type}</span></td>
+            <td class="mono" style="font-size:12px;color:var(--muted)">${it.date}</td>
+            <td><span style="font-size:11px;font-weight:700;color:${isOut?"var(--green)":"var(--orange)"}">${isOut?"↑ Out":"↓ In"}</span></td>
+            <td class="name">${it.product}${it.sku?` <span style="color:var(--muted);font-weight:400;font-size:11px">${it.sku}</span>`:""}</td>
+            <td class="mono" style="text-align:right;color:${isOut?"var(--green)":"var(--orange)"}">${prodQty(it.qty)}</td>
+            <td style="font-size:12px;color:var(--muted)">${it.unit||"—"}</td>
           </tr>`;}).join("")
-        : `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:30px">No batches in this period</td></tr>`;
+        : `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No batch items in this period</td></tr>`;
+}
+
+let __prodBatches = [];
+function toggleProdBatch(i){
+    const row = document.getElementById("prod-detail-"+i);
+    const caret = document.getElementById("prod-caret-"+i);
+    if(!row) return;
+    const open = row.style.display === "none";
+    row.style.display = open ? "table-row" : "none";
+    if(caret && caret.innerText) caret.innerText = open ? "▼" : "▶";
 }
 
 
