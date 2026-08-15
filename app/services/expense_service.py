@@ -1189,6 +1189,101 @@ async def delete_expense_entry(
     return {"ok": True}
 
 
+def _delivered_kg(qty: float, unit: Optional[str], product) -> Optional[float]:
+    """Delivered quantity expressed in kilograms, or None when the product has
+    no mass basis.
+
+    Splitting a cost pool by "quantity" is only meaningful if the quantities
+    share a unit — adding 800 kg of tomato to 200 heads of lettuce and calling
+    it "1000 units" makes the split arbitrary. Same rule the carbon module
+    uses: kg as-is, grams ÷ 1000, and piece/bunch products only when the
+    product carries a configured average weight.
+    """
+    from app.routers.production import _MASS_UNITS_G, _MASS_UNITS_KG
+
+    normalized = (unit or getattr(product, "unit", None) or "").strip().lower()
+    if normalized in _MASS_UNITS_KG:
+        return float(qty or 0)
+    if normalized in _MASS_UNITS_G:
+        return float(qty or 0) / 1000.0
+    piece_kg = getattr(product, "unit_weight_kg", None)
+    if piece_kg and float(piece_kg) > 0:
+        return float(qty or 0) * float(piece_kg)
+    return None
+
+
+async def _realised_unit_prices(
+    db: AsyncSession,
+    *,
+    product_ids: list[int],
+    start_date: date_type,
+    end_date: date_type,
+) -> dict[int, dict]:
+    """What each product actually sold for in the window, net of refunds.
+
+    The report used to value harvest at Product.price — the current list price
+    — which ignores B2B client pricing, per-client discounts and POS discounts,
+    so margins came out flattering. This reads real sales instead: retail
+    invoices plus B2B invoices, minus retail and B2B refunds, and divides net
+    revenue by net quantity to get the price actually achieved.
+
+    Returns {product_id: {"qty": net qty sold, "revenue": net revenue,
+    "price": realised unit price}} — products with no net sales are absent, and
+    the caller falls back to list price for those.
+    """
+    from app.models.b2b import B2BInvoice, B2BInvoiceItem, B2BRefund, B2BRefundItem
+    from app.models.invoice import Invoice, InvoiceItem
+    from app.models.refund import RetailRefund, RetailRefundItem
+
+    if not product_ids:
+        return {}
+
+    start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+    end_dt = datetime.combine(end_date, datetime.max.time(), tzinfo=timezone.utc)
+
+    totals: dict[int, dict] = {}
+
+    def accumulate(product_id, qty, revenue, sign=1):
+        entry = totals.setdefault(product_id, {"qty": 0.0, "revenue": 0.0})
+        entry["qty"] += sign * float(qty or 0)
+        entry["revenue"] += sign * float(revenue or 0)
+
+    # (item table, parent table, parent date column, sign)
+    sources = [
+        (InvoiceItem, Invoice, Invoice.created_at, InvoiceItem.invoice_id, 1),
+        (B2BInvoiceItem, B2BInvoice, B2BInvoice.created_at, B2BInvoiceItem.invoice_id, 1),
+        (RetailRefundItem, RetailRefund, RetailRefund.created_at, RetailRefundItem.refund_id, -1),
+        (B2BRefundItem, B2BRefund, B2BRefund.created_at, B2BRefundItem.refund_id, -1),
+    ]
+    for item_model, parent_model, date_col, join_col, sign in sources:
+        try:
+            rows = await db.execute(
+                select(item_model.product_id, item_model.qty, item_model.total)
+                .join(parent_model, join_col == parent_model.id)
+                .where(
+                    item_model.product_id.in_(product_ids),
+                    date_col >= start_dt,
+                    date_col <= end_dt,
+                )
+            )
+        except Exception:
+            # A sales table missing on a partial deployment must not take the
+            # whole season report down — that channel just goes uncounted.
+            continue
+        for product_id, qty, total in rows.all():
+            accumulate(product_id, qty, total, sign)
+
+    realised = {}
+    for product_id, entry in totals.items():
+        if entry["qty"] > 0 and entry["revenue"] > 0:
+            realised[product_id] = {
+                "qty": round(entry["qty"], 3),
+                "revenue": round(entry["revenue"], 2),
+                "price": entry["revenue"] / entry["qty"],
+            }
+    return realised
+
+
 async def get_cost_allocation(
     db: AsyncSession,
     *,
@@ -1283,15 +1378,51 @@ async def get_cost_allocation(
                     "product_id": item.product_id,
                     "product_name": product.name if product else f"#{item.product_id}",
                     "unit": item.unit or (product.unit if product else "kg"),
+                    "list_price": float(product.price) if product else 0,
                     "sale_price": float(product.price) if product else 0,
                     "total_qty": 0,
+                    "total_kg": 0.0,
+                    "has_mass": True,
                 }
-            quantity_by_product[item.product_id]["total_qty"] += float(item.qty)
+            entry = quantity_by_product[item.product_id]
+            entry["total_qty"] += float(item.qty)
+            kg = _delivered_kg(item.qty, item.unit, product)
+            if kg is None:
+                entry["has_mass"] = False
+            else:
+                entry["total_kg"] += kg
+
+    # ── Value the harvest at prices actually achieved, not the list price ──
+    realised = await _realised_unit_prices(
+        db,
+        product_ids=list(quantity_by_product.keys()),
+        start_date=start_date,
+        end_date=end_date,
+    )
+    missing_price: list[str] = []
+    for product_id, info in quantity_by_product.items():
+        hit = realised.get(product_id)
+        if hit:
+            info["sale_price"] = hit["price"]
+            info["price_basis"] = "realised"
+            info["qty_sold"] = hit["qty"]
+            info["revenue_actual"] = hit["revenue"]
+        else:
+            info["price_basis"] = "list"
+            info["qty_sold"] = 0.0
+            info["revenue_actual"] = 0.0
+            if info["list_price"] > 0:
+                missing_price.append(info["product_name"])
 
     total_quantity = sum(item["total_qty"] for item in quantity_by_product.values())
+    total_kg = sum(item["total_kg"] for item in quantity_by_product.values())
     estimated_revenue = sum(
         info["total_qty"] * info["sale_price"] for info in quantity_by_product.values()
     )
+    # Weight-based splitting only holds if EVERY delivered product converts to
+    # kilograms; one unconvertible product makes the denominator meaningless.
+    missing_mass = [i["product_name"] for i in quantity_by_product.values() if not i["has_mass"]]
+    weight_basis_complete = bool(quantity_by_product) and not missing_mass and total_kg > 0
 
     # ── Shared / unassigned organisation costs (expenses NOT tagged to a farm).
     #    Charged to this scope only as its FAIR SHARE, weighted by revenue:
@@ -1304,86 +1435,161 @@ async def get_cost_allocation(
     if shared_norm not in {"exclude", "separate", "spread"}:
         shared_norm = "exclude"
 
-    shared_cost_total = 0.0
-    shared_cost_allocated = 0.0
-    if shared_norm != "exclude":
-        shared_total_result = await db.execute(
-            select(func.coalesce(func.sum(Expense.amount), 0)).where(
-                Expense.farm_id.is_(None),
-                Expense.expense_date >= start_date,
-                Expense.expense_date <= end_date,
+    # Always computed now, not just when the caller opts in: the report shows a
+    # direct and a fully-absorbed cost price side by side, so it needs the fair
+    # share in every response.
+    shared_total_result = await db.execute(
+        select(func.coalesce(func.sum(Expense.amount), 0)).where(
+            Expense.farm_id.is_(None),
+            Expense.expense_date >= start_date,
+            Expense.expense_date <= end_date,
+        )
+    )
+    shared_cost_total = float(shared_total_result.scalar() or 0)
+    shared_remaining = max(0.0, shared_cost_total - unassigned_salary_cost)
+
+    all_farms_result = await db.execute(select(Farm.id).where(Farm.is_active == 1))
+    all_farm_ids = [row[0] for row in all_farms_result.all()]
+    org_value = 0.0
+    if all_farm_ids:
+        org_deliveries = await db.execute(
+            select(FarmDelivery)
+            .options(selectinload(FarmDelivery.items).selectinload(FarmDeliveryItem.product))
+            .where(
+                FarmDelivery.farm_id.in_(all_farm_ids),
+                FarmDelivery.delivery_date >= start_date,
+                FarmDelivery.delivery_date <= end_date,
             )
         )
-        shared_cost_total = float(shared_total_result.scalar() or 0)
-        shared_remaining = max(0.0, shared_cost_total - unassigned_salary_cost)
+        org_items = [
+            (item.product_id, float(item.qty or 0), item.product)
+            for delivery in org_deliveries.scalars().all()
+            for item in delivery.items
+        ]
+        # Price the org-wide denominator the SAME way as this scope's numerator.
+        # Mixing realised prices on top and list prices underneath would skew
+        # every farm's share of head-office costs.
+        org_price_ids = [pid for pid, _q, _p in org_items if pid not in realised]
+        org_realised = dict(realised)
+        org_realised.update(await _realised_unit_prices(
+            db, product_ids=org_price_ids, start_date=start_date, end_date=end_date,
+        ))
+        for product_id, qty, product in org_items:
+            hit = org_realised.get(product_id)
+            price = hit["price"] if hit else (float(product.price) if product else 0)
+            org_value += qty * price
 
-        all_farms_result = await db.execute(select(Farm.id).where(Farm.is_active == 1))
-        all_farm_ids = [row[0] for row in all_farms_result.all()]
-        org_value = 0.0
-        if all_farm_ids:
-            org_deliveries = await db.execute(
-                select(FarmDelivery)
-                .options(selectinload(FarmDelivery.items).selectinload(FarmDeliveryItem.product))
-                .where(
-                    FarmDelivery.farm_id.in_(all_farm_ids),
-                    FarmDelivery.delivery_date >= start_date,
-                    FarmDelivery.delivery_date <= end_date,
-                )
-            )
-            for delivery in org_deliveries.scalars().all():
-                for item in delivery.items:
-                    product = item.product
-                    org_value += float(item.qty) * (float(product.price) if product else 0)
+    if org_value > 0:
+        share_factor = estimated_revenue / org_value
+    elif all_farm_ids:
+        share_factor = len(selected_farm_ids) / len(all_farm_ids)
+    else:
+        share_factor = 0.0
+    share_factor = max(0.0, min(1.0, share_factor))
+    shared_cost_allocated = shared_remaining * share_factor
 
-        if org_value > 0:
-            share_factor = estimated_revenue / org_value
-        elif all_farm_ids:
-            share_factor = len(selected_farm_ids) / len(all_farm_ids)
-        else:
-            share_factor = 0.0
-        share_factor = max(0.0, min(1.0, share_factor))
-        shared_cost_allocated = shared_remaining * share_factor
+    # Two pools, always both computed, so the report can show the direct cost
+    # price and the fully-absorbed one side by side instead of making the user
+    # re-run with a different setting to see the other number.
+    direct_pool = total_cost
+    absorbed_pool = total_cost + shared_cost_allocated
 
-    # Cost pool distributed across products. Only "spread" folds the shared
-    # share into per-product cost; "separate" keeps products on direct cost.
-    alloc_pool = total_cost + (shared_cost_allocated if shared_norm == "spread" else 0.0)
-
-    # Weighting: "quantity" (share of kg/units) or "value" (share of sale value,
-    # qty × price). Value falls back to quantity if there are no sale prices.
+    # Weighting. "quantity" now means BY WEIGHT and uses kilograms whenever
+    # every product converts; otherwise it degrades in a stated order rather
+    # than silently splitting on a mixed-unit denominator:
+    #   weight → value (if there is revenue to weight by) → raw quantity.
     alloc_method = (allocation_method or "quantity").strip().lower()
-    if alloc_method not in {"quantity", "value"}:
+    if alloc_method not in {"quantity", "value", "weight"}:
         alloc_method = "quantity"
-    use_value = alloc_method == "value" and estimated_revenue > 0
+    wants_value = alloc_method == "value"
+
+    warnings: list[str] = []
+    if wants_value and estimated_revenue > 0:
+        basis = "value"
+    elif weight_basis_complete:
+        basis = "weight"
+    elif estimated_revenue > 0:
+        basis = "value"
+        if missing_mass:
+            warnings.append(
+                "Split by sale value because these products have no weight set, so "
+                "quantities cannot be compared: " + ", ".join(sorted(set(missing_mass))[:6])
+                + ". Set an average weight per unit on the product to split by weight."
+            )
+    else:
+        basis = "quantity"
+        if missing_mass:
+            warnings.append(
+                "Products are measured in different units and no sale prices are available, "
+                "so the split is by raw quantity and is only indicative: "
+                + ", ".join(sorted(set(missing_mass))[:6])
+            )
+    if missing_price:
+        warnings.append(
+            "No sales recorded in this period for "
+            + ", ".join(sorted(set(missing_price))[:6])
+            + " — the list price was used for those."
+        )
+
+    def share_for(info):
+        if basis == "value":
+            product_value = info["total_qty"] * info["sale_price"]
+            return product_value / estimated_revenue if estimated_revenue > 0 else 0
+        if basis == "weight":
+            return info["total_kg"] / total_kg if total_kg > 0 else 0
+        return info["total_qty"] / total_quantity if total_quantity > 0 else 0
 
     products = []
     for product_id, info in quantity_by_product.items():
-        product_value = info["total_qty"] * info["sale_price"]
-        if use_value:
-            share = product_value / estimated_revenue if estimated_revenue > 0 else 0
-        else:
-            share = info["total_qty"] / total_quantity if total_quantity > 0 else 0
-        allocated_cost = alloc_pool * share
-        cost_per_unit = allocated_cost / info["total_qty"] if info["total_qty"] > 0 else 0
-        profit_per_unit = info["sale_price"] - cost_per_unit
+        share = share_for(info)
+        qty = info["total_qty"]
+        direct_cost = direct_pool * share
+        absorbed_cost = absorbed_pool * share
+        cost_per_unit = direct_cost / qty if qty > 0 else 0
+        cost_per_unit_absorbed = absorbed_cost / qty if qty > 0 else 0
+        sale_price = info["sale_price"]
+        profit_per_unit = sale_price - cost_per_unit
+        profit_per_unit_absorbed = sale_price - cost_per_unit_absorbed
+        cost_per_kg = (direct_cost / info["total_kg"]) if info["total_kg"] > 0 else None
         products.append(
             {
                 "product_id": product_id,
                 "product_name": info["product_name"],
                 "unit": info["unit"],
-                "total_qty": round(info["total_qty"], 3),
+                "total_qty": round(qty, 3),
+                "total_kg": round(info["total_kg"], 3) if info["has_mass"] else None,
                 "share_pct": round(share * 100, 1),
-                "allocated_cost": round(allocated_cost, 2),
+                # Direct = farm costs only. Absorbed = plus this farm's share of
+                # untagged head-office costs.
+                "allocated_cost": round(direct_cost, 2),
+                "allocated_cost_absorbed": round(absorbed_cost, 2),
                 "cost_per_unit": round(cost_per_unit, 2),
-                "sale_price": round(info["sale_price"], 2),
+                "cost_per_unit_absorbed": round(cost_per_unit_absorbed, 2),
+                "cost_per_kg": round(cost_per_kg, 2) if cost_per_kg is not None else None,
+                "sale_price": round(sale_price, 2),
+                "list_price": round(info["list_price"], 2),
+                "price_basis": info["price_basis"],
+                "qty_sold": info["qty_sold"],
+                "revenue_actual": info["revenue_actual"],
                 "profit_per_unit": round(profit_per_unit, 2),
+                "profit_per_unit_absorbed": round(profit_per_unit_absorbed, 2),
                 "profit_margin_pct": round(
-                    (profit_per_unit / info["sale_price"] * 100) if info["sale_price"] > 0 else 0,
-                    1,
+                    (profit_per_unit / sale_price * 100) if sale_price > 0 else 0, 1
+                ),
+                "profit_margin_absorbed_pct": round(
+                    (profit_per_unit_absorbed / sale_price * 100) if sale_price > 0 else 0, 1
                 ),
             }
         )
 
     products.sort(key=lambda item: item["allocated_cost"], reverse=True)
+    # Costs tagged to the farm but with nothing harvested to carry them would
+    # otherwise vanish from the table without explanation.
+    if total_cost > 0 and not products:
+        warnings.append(
+            f"{total_cost:,.2f} EGP of costs are tagged to this scope but no deliveries "
+            "were recorded in this period, so there is nothing to spread them across."
+        )
     return {
         "farm_id": farm_id,
         "farm_ids": selected_farm_ids,
@@ -1398,12 +1604,27 @@ async def get_cost_allocation(
         "unassigned_salary_cost": round(unassigned_salary_cost, 2),
         "estimated_revenue": round(estimated_revenue, 2),
         "net_profit": round(estimated_revenue - total_cost, 2),
-        "allocation_method": "value" if use_value else "quantity",
+        "allocation_method": basis,
+        "allocation_basis_label": {
+            "weight": "By weight (kg)",
+            "value": "By sale value",
+            "quantity": "By raw quantity",
+        }[basis],
+        "revenue_basis": (
+            "realised" if quantity_by_product and not missing_price
+            else "mixed" if quantity_by_product and len(missing_price) < len(quantity_by_product)
+            else "list"
+        ),
+        "weight_basis_complete": weight_basis_complete,
+        "products_missing_weight": sorted(set(missing_mass)),
+        "products_missing_sales": sorted(set(missing_price)),
+        "warnings": warnings,
         "shared_mode": shared_norm,
         "shared_cost_total": round(shared_cost_total, 2),
         "shared_cost_allocated": round(shared_cost_allocated, 2),
         "fully_absorbed_cost": round(total_cost + shared_cost_allocated, 2),
         "total_qty": round(total_quantity, 3),
+        "total_kg": round(total_kg, 3),
         "cost_by_category": [
             {"name": name, "amount": round(amount, 2)}
             for name, amount in sorted(cost_by_category.items(), key=lambda item: -item[1])

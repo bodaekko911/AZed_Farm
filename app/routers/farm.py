@@ -874,19 +874,11 @@ td.name{color:var(--text);font-weight:600;}
                     <label>Season End</label>
                     <input id="season-to" type="date" style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%">
                 </div>
-                <div class="fld" style="min-width:160px">
-                    <label>Allocate Costs By</label>
-                    <select class="filter-sel" id="season-method" style="width:100%">
-                        <option value="quantity">Quantity (kg / units)</option>
-                        <option value="value">Sale value (qty × price)</option>
-                    </select>
-                </div>
                 <div class="fld" style="min-width:200px">
-                    <label>Shared Org Costs</label>
-                    <select class="filter-sel" id="season-shared" style="width:100%">
-                        <option value="exclude">Direct farm costs only</option>
-                        <option value="separate">Show shared costs separately</option>
-                        <option value="spread">Spread shared costs into products</option>
+                    <label>Split Costs By</label>
+                    <select class="filter-sel" id="season-method" style="width:100%">
+                        <option value="quantity">Weight harvested (kg)</option>
+                        <option value="value">Sale value (qty × price)</option>
                     </select>
                 </div>
                 <button class="btn btn-lime" onclick="loadSeasonAnalysis()">Analyze</button>
@@ -905,22 +897,35 @@ td.name{color:var(--text);font-weight:600;}
                     <div class="history-title">Harvest by Product (kg)</div>
                 </div>
             </div>
+            <div id="season-warnings"></div>
             <div class="table-wrap">
+                <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+                    <div style="font-size:13px;font-weight:700">Cost Price per Crop</div>
+                    <div style="font-size:11px;color:var(--muted)" id="season-basis-note"></div>
+                </div>
+                <div style="overflow-x:auto">
                 <table>
                     <thead>
                         <tr>
-                            <th>Product</th>
-                            <th>Harvested</th>
-                            <th>Share</th>
-                            <th>Allocated Cost</th>
-                            <th>Cost / Unit</th>
-                            <th>Sale Price</th>
-                            <th>Profit / Unit</th>
-                            <th>Margin</th>
+                            <th rowspan="2" style="vertical-align:bottom">Crop</th>
+                            <th rowspan="2" style="vertical-align:bottom;text-align:right">Harvested</th>
+                            <th rowspan="2" style="vertical-align:bottom;text-align:right">Share of Cost</th>
+                            <th colspan="2" style="text-align:center;border-bottom:1px solid var(--border)">Farm Cost Only</th>
+                            <th colspan="2" style="text-align:center;border-bottom:1px solid var(--border)">Incl. Overhead</th>
+                            <th rowspan="2" style="vertical-align:bottom;text-align:right">Sold For</th>
+                            <th rowspan="2" style="vertical-align:bottom;text-align:right">Profit / Unit</th>
+                            <th rowspan="2" style="vertical-align:bottom;text-align:right">Margin</th>
+                        </tr>
+                        <tr>
+                            <th style="text-align:right">Total Cost</th>
+                            <th style="text-align:right">Cost Price</th>
+                            <th style="text-align:right">Total Cost</th>
+                            <th style="text-align:right">Cost Price</th>
                         </tr>
                     </thead>
                     <tbody id="season-body"></tbody>
                 </table>
+                </div>
             </div>
         </div>
         <div id="season-empty" style="color:var(--muted);text-align:center;padding:40px;display:none">Select a farm and date range, then click Analyze.</div>
@@ -2123,13 +2128,12 @@ async function loadSeasonAnalysis(){
     let dateFrom = document.getElementById("season-from").value;
     let dateTo   = document.getElementById("season-to").value;
     let method   = (document.getElementById("season-method") || {}).value || "quantity";
-    let shared   = (document.getElementById("season-shared") || {}).value || "exclude";
     if(!farmId)  { showToast("Select a farm first"); return; }
     if(!dateFrom || !dateTo){ showToast("Set a date range"); return; }
     if(dateFrom > dateTo){ showToast("Start date must be before end date"); return; }
 
     try{
-        let res  = await fetch(`/expenses/api/cost-allocation?farm_id=${encodeURIComponent(farmId)}&date_from=${dateFrom}&date_to=${dateTo}&method=${encodeURIComponent(method)}&shared=${encodeURIComponent(shared)}`);
+        let res  = await fetch(`/expenses/api/cost-allocation?farm_id=${encodeURIComponent(farmId)}&date_from=${dateFrom}&date_to=${dateTo}&method=${encodeURIComponent(method)}`);
         let data = null;
         try{
             data = await res.json();
@@ -2150,27 +2154,39 @@ async function loadSeasonAnalysis(){
         document.getElementById("season-empty").style.display  = "none";
         document.getElementById("season-result").style.display = "";
 
-        const fmt = (n)=>Number(n || 0).toLocaleString(undefined,{minimumFractionDigits:2});
-        const sharedOn = data.shared_mode && data.shared_mode !== "exclude";
-        const directLabel = (data.shared_mode === "spread") ? "Direct Farm Costs" : "Total Farm Costs";
+        const fmt = (n)=>Number(n || 0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});
+        const harvestLabel = data.weight_basis_complete
+            ? `${Number(data.total_kg || 0).toFixed(1)} kg`
+            : `${Number(data.total_qty || 0).toFixed(1)} units`;
 
         // Summary cards
         let cards = `
             <div class="stat-card" style="border-top:2px solid var(--blue)"><div class="stat-label">Scope</div><div class="stat-value" style="font-size:20px;color:var(--blue)">${data.farm_scope_label || data.farm_name}</div></div>
-            <div class="stat-card green"><div class="stat-label">${directLabel}</div><div class="stat-value green" style="font-size:20px">${fmt(data.total_cost)} EGP</div></div>
-            <div class="stat-card" style="border-top:2px solid var(--blue)"><div class="stat-label">Est. Revenue</div><div class="stat-value" style="font-size:20px;color:var(--blue)">${fmt(data.estimated_revenue)} EGP</div></div>`;
-        if(sharedOn){
-            cards += `
-            <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Shared Org Costs (period)</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${fmt(data.shared_cost_total)} EGP</div></div>
-            <div class="stat-card" style="border-top:2px solid var(--warn)"><div class="stat-label">This Scope's Share</div><div class="stat-value" style="font-size:20px;color:var(--warn)">${fmt(data.shared_cost_allocated)} EGP</div></div>
-            <div class="stat-card" style="border-top:2px solid var(--danger)"><div class="stat-label">Fully-Absorbed Cost</div><div class="stat-value" style="font-size:20px;color:var(--danger)">${fmt(data.fully_absorbed_cost)} EGP</div></div>`;
-        }
-        cards += `
-            <div class="stat-card lime"><div class="stat-label">Total Harvested</div><div class="stat-value lime" style="font-size:20px">${Number(data.total_qty || 0).toFixed(1)} units</div></div>
+            <div class="stat-card green"><div class="stat-label">Farm Costs</div><div class="stat-value green" style="font-size:20px">${fmt(data.total_cost)} EGP</div></div>
+            <div class="stat-card" style="border-top:2px solid var(--warn)"><div class="stat-label">+ Share of Overhead</div><div class="stat-value" style="font-size:20px;color:var(--warn)">${fmt(data.shared_cost_allocated)} EGP</div></div>
+            <div class="stat-card" style="border-top:2px solid var(--danger)"><div class="stat-label">Total Cost to Absorb</div><div class="stat-value" style="font-size:20px;color:var(--danger)">${fmt(data.fully_absorbed_cost)} EGP</div></div>
+            <div class="stat-card" style="border-top:2px solid var(--blue)"><div class="stat-label">Harvest Value${data.revenue_basis === "realised" ? "" : " (part list price)"}</div><div class="stat-value" style="font-size:20px;color:var(--blue)">${fmt(data.estimated_revenue)} EGP</div></div>
+            <div class="stat-card lime"><div class="stat-label">Total Harvested</div><div class="stat-value lime" style="font-size:20px">${harvestLabel}</div></div>
             <div class="stat-card teal"><div class="stat-label">Expenses Tagged</div><div class="stat-value teal" style="font-size:20px">${Number(data.expense_count || 0)}</div></div>
             <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Deliveries</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${Number(data.delivery_count || 0)}</div></div>
         `;
         document.getElementById("season-summary-cards").innerHTML = cards;
+
+        // How the numbers were arrived at — stated, not hidden in a tooltip
+        const basisNote = document.getElementById("season-basis-note");
+        if(basisNote){
+            const priceNote = data.revenue_basis === "realised" ? "prices actually achieved"
+                            : data.revenue_basis === "mixed"    ? "prices achieved, list price where nothing sold"
+                                                                : "list prices (no sales in this period)";
+            basisNote.innerText = `Costs split ${(data.allocation_basis_label||"").toLowerCase()} · valued at ${priceNote}`;
+        }
+        const warnBox = document.getElementById("season-warnings");
+        if(warnBox){
+            const warns = Array.isArray(data.warnings) ? data.warnings : [];
+            warnBox.innerHTML = warns.length
+                ? warns.map(w=>`<div style="background:rgba(255,181,71,.08);border:1px solid rgba(255,181,71,.28);border-radius:10px;padding:11px 14px;font-size:12.5px;color:var(--warn);line-height:1.55;margin-bottom:10px">${w}</div>`).join("")
+                : "";
+        }
 
         // Cost breakdown chart
         let maxCost = costCategories.length ? costCategories[0].amount : 1;
@@ -2203,20 +2219,29 @@ async function loadSeasonAnalysis(){
         // Products table
         if(!products.length){
             document.getElementById("season-body").innerHTML =
-                `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px">No deliveries recorded for ${data.farm_scope_label || data.farm_name} in this period.</td></tr>`;
+                `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:40px">No deliveries recorded for ${data.farm_scope_label || data.farm_name} in this period.</td></tr>`;
         } else {
+            const mono = "font-family:var(--mono);text-align:right";
             document.getElementById("season-body").innerHTML = products.map(p=>{
                 let marginColor = p.profit_margin_pct >= 30 ? "var(--green)" : p.profit_margin_pct >= 0 ? "var(--warn)" : "var(--danger)";
                 let profitColor = p.profit_per_unit >= 0 ? "var(--green)" : "var(--danger)";
+                const soldNote = p.price_basis === "realised"
+                    ? `<div style="font-size:10px;color:var(--muted)">${Number(p.qty_sold||0).toFixed(1)} ${p.unit} sold</div>`
+                    : `<div style="font-size:10px;color:var(--warn)">list price</div>`;
+                const harvested = (p.total_kg !== null && p.total_kg !== undefined && p.unit !== "kg")
+                    ? `${p.total_qty.toFixed(2)} ${p.unit}<div style="font-size:10px;color:var(--muted)">${p.total_kg.toFixed(1)} kg</div>`
+                    : `${p.total_qty.toFixed(2)} ${p.unit}`;
                 return `<tr>
                     <td class="name">${p.product_name}</td>
-                    <td style="font-family:var(--mono)">${p.total_qty.toFixed(2)} ${p.unit}</td>
-                    <td style="font-family:var(--mono);color:var(--muted)">${p.share_pct}%</td>
-                    <td style="font-family:var(--mono);color:var(--orange)">${p.allocated_cost.toLocaleString(undefined,{minimumFractionDigits:2})}</td>
-                    <td style="font-family:var(--mono);color:var(--warn)">${p.cost_per_unit.toFixed(2)}</td>
-                    <td style="font-family:var(--mono);color:var(--blue)">${p.sale_price.toFixed(2)}</td>
-                    <td style="font-family:var(--mono);font-weight:700;color:${profitColor}">${p.profit_per_unit.toFixed(2)}</td>
-                    <td style="font-family:var(--mono);font-weight:700;color:${marginColor}">${p.profit_margin_pct}%</td>
+                    <td style="${mono}">${harvested}</td>
+                    <td style="${mono};color:var(--muted)">${p.share_pct}%</td>
+                    <td style="${mono};color:var(--orange)">${fmt(p.allocated_cost)}</td>
+                    <td style="${mono};color:var(--warn);font-weight:700">${p.cost_per_unit.toFixed(2)}<div style="font-size:10px;color:var(--muted);font-weight:400">per ${p.unit}</div></td>
+                    <td style="${mono};color:var(--orange)">${fmt(p.allocated_cost_absorbed)}</td>
+                    <td style="${mono};color:var(--danger);font-weight:700">${p.cost_per_unit_absorbed.toFixed(2)}<div style="font-size:10px;color:var(--muted);font-weight:400">per ${p.unit}</div></td>
+                    <td style="${mono};color:var(--blue)">${p.sale_price.toFixed(2)}${soldNote}</td>
+                    <td style="${mono};font-weight:700;color:${profitColor}">${p.profit_per_unit.toFixed(2)}</td>
+                    <td style="${mono};font-weight:700;color:${marginColor}">${p.profit_margin_pct}%</td>
                 </tr>`;
             }).join("");
         }
