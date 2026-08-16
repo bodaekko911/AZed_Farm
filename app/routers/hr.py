@@ -1726,8 +1726,42 @@ async def _earned_allowance_for_payroll(db: AsyncSession, payroll) -> Decimal:
     earned_food = _money(food_daily * _dec(days_present))
     earned_allowance = _money(earned_food + trans_all)
     _, open_advance_total = await _open_allowance_advances(db, emp.id)
-    applied = _money(min(open_advance_total, earned_allowance))
+    # Advances settled against THIS run are no longer 'open', but they were
+    # still recovered from its allowance when it ran. Re-apply them, exactly as
+    # run_payroll does on a re-run — otherwise the recomputed allowance comes
+    # out higher than the run produced, and the payable net with it.
+    settled_result = await db.execute(
+        select(func.coalesce(func.sum(EmployeeAllowanceAdvance.amount), 0)).where(
+            EmployeeAllowanceAdvance.employee_id == emp.id,
+            EmployeeAllowanceAdvance.status == "deducted",
+            EmployeeAllowanceAdvance.payroll_id == payroll.id,
+        )
+    )
+    settled_total = _money(settled_result.scalar() or 0)
+    applied = _money(min(open_advance_total + settled_total, earned_allowance))
     return _money(earned_allowance - applied)
+
+
+async def _payable_net_salary(db: AsyncSession, payroll) -> Decimal:
+    """Net salary derived from its parts, including the earned allowance.
+
+    The single source of truth for "what is owed on this run". Rows written
+    before allowances were folded into payroll store a net that omits the
+    allowance, and an allowance advance settled after the run moves it again —
+    so the stored value cannot be trusted while a run is still unpaid.
+
+    Every surface must agree on this number: the payroll list shows it, the
+    edit screen recomputes it, and marking paid validates against it. When they
+    disagreed, paying the amount the screen offered was rejected as exceeding
+    the net.
+    """
+    allowance = await _earned_allowance_for_payroll(db, payroll) if payroll.employee else Decimal("0")
+    return _money(
+        _dec(payroll.base_salary or 0)
+        + _dec(payroll.bonuses or 0)
+        + allowance
+        - _dec(payroll.deductions or 0)
+    )
 
 
 async def _payroll_preview_for_employee(
@@ -2117,15 +2151,7 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
         # (which omitted the allowance) display correctly without a re-run.
         # For a PAID row we trust the stored net (it's what was actually paid).
         stored_net = _money(r.net_salary) if r.net_salary is not None else Decimal("0")
-        if r.paid:
-            net = stored_net
-        else:
-            net = _money(
-                _dec(r.base_salary or 0)
-                + _dec(r.bonuses or 0)
-                + allowance
-                - _dec(r.deductions or 0)
-            )
+        net = stored_net if r.paid else await _payable_net_salary(db, r)
         out.append({
             "id":          r.id,
             "employee_id": r.employee_id,
@@ -2685,8 +2711,7 @@ async def update_payroll(payroll_id: int, data: PayrollUpdate, db: AsyncSession 
     # Recompute the allowance that was earned for this run (food prorated by
     # attendance + full transport, net of any settled advance) so editing a
     # payroll never drops the allowance from net salary. Mirrors run_payroll.
-    earned_allowance = await _earned_allowance_for_payroll(db, p)
-    p.net_salary = _money(_dec(p.base_salary) + p.bonuses + earned_allowance - p.deductions)
+    p.net_salary = await _payable_net_salary(db, p)
     if data.notes and p.manual_deductions > 0:
         db.add(
             EmployeePayrollDeduction(
@@ -2721,7 +2746,14 @@ async def mark_paid(payroll_id: int, data: Optional[PayrollPayRequest] = None, d
     now = datetime.now(timezone.utc)
     payment_method = (data.payment_method if data else "cash") or "cash"
 
-    net = _money(p.net_salary or 0)
+    # Validate against the net the payroll screen showed, not the stored one.
+    # They differ whenever the run predates allowances being included, or an
+    # allowance advance was settled after the run — and the screen offers the
+    # recomputed figure, so checking the stale one rejected valid payments.
+    net = await _payable_net_salary(db, p)
+    if net != _money(p.net_salary or 0):
+        # Heal the record so what is stored matches what is being paid.
+        p.net_salary = net
     # How much cash is actually being paid out
     if data and data.paid_amount is not None:
         paid_amount = _money(data.paid_amount)
@@ -2730,7 +2762,10 @@ async def mark_paid(payroll_id: int, data: Optional[PayrollPayRequest] = None, d
     if paid_amount <= 0:
         raise HTTPException(status_code=400, detail="Payment amount must be greater than 0.")
     if paid_amount > net:
-        raise HTTPException(status_code=400, detail="Payment can't exceed the net salary.")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Payment can't exceed the net salary ({float(net):,.2f} EGP).",
+        )
 
     remaining = _money(net - paid_amount)
     days_off_credited = Decimal("0")

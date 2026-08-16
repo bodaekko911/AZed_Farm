@@ -14,7 +14,7 @@ from app.database import Base
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm, FarmDelivery
-from app.models.hr import Attendance, Employee, Payroll
+from app.models.hr import EmployeeAllowanceAdvance, Attendance, Employee, Payroll
 from app.models.user import User
 from app.services.expense_service import SALARY_CATEGORY_NAME, get_cost_allocation
 
@@ -56,6 +56,7 @@ def make_session():
             Attendance.__table__,
             Employee.__table__,
             Payroll.__table__,
+            EmployeeAllowanceAdvance.__table__,
             ExpenseCategory.__table__,
             Account.__table__,
             Journal.__table__,
@@ -206,6 +207,12 @@ def test_mark_payroll_paid_creates_one_salary_expense_linked_to_employee_farm():
             employee=employee,
             period="2026-04",
             base_salary=Decimal("1200.00"),
+            # 200 of deductions, so net reconciles with its parts. Previously
+            # this row carried a bare net of 1,000 against a 1,200 base with no
+            # deductions — unreachable from the payroll formula, and it only
+            # passed because mark_paid trusted the stored net blindly.
+            deductions=Decimal("200.00"),
+            manual_deductions=Decimal("200.00"),
             net_salary=Decimal("1000.00"),
             paid=False,
         )
