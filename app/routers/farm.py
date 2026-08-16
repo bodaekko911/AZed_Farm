@@ -2427,7 +2427,9 @@ async function loadSeasonAnalysis(){
             document.getElementById("season-body").innerHTML = products.map(p=>{
                 let marginColor = p.profit_margin_pct >= 30 ? "var(--green)" : p.profit_margin_pct >= 0 ? "var(--warn)" : "var(--danger)";
                 let profitColor = p.profit_per_unit >= 0 ? "var(--green)" : "var(--danger)";
-                const soldNote = p.price_basis === "realised"
+                const soldNote = p.sale_price <= 0
+                    ? `<div style="font-size:10px;color:var(--danger)">no price set</div>`
+                    : p.price_basis === "realised"
                     ? `<div style="font-size:10px;color:var(--muted)">${Number(p.qty_sold||0).toFixed(1)} ${p.unit} sold</div>`
                     : `<div style="font-size:10px;color:var(--warn)">list price</div>`;
                 const harvested = (p.total_kg !== null && p.total_kg !== undefined && p.unit !== "kg")

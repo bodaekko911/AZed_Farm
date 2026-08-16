@@ -456,3 +456,96 @@ def test_costs_are_recomputed_server_side_not_taken_from_the_caller():
     params = set(inspect.signature(apply_cost_allocation_to_products).parameters)
     assert {"farm_id", "date_from", "date_to", "basis"} <= params
     assert not {"cost", "costs", "new_cost", "amount"} & params
+
+
+# ── A basis must work for every product, or it is not used ───────────────────
+
+def test_unpriced_product_does_not_get_a_zero_share_under_value_weighting():
+    """Regression: value weighting gave a product with no price a 0% share, so
+    it came out at zero cost AND its share of the costs was silently loaded
+    onto the priced crops."""
+    with make_session() as session:
+        seed_base(session)
+        lettuce = session.get(Product, 2)
+        lettuce.price = Decimal("0")
+        session.commit()
+        data = allocate(session, method="value")
+
+    by_name = {p["product_name"]: p for p in data["products"]}
+    assert data["value_basis_complete"] is False
+    assert data["products_missing_price"] == ["Lettuce"]
+    # Falls back to weight, which every product here can be measured on
+    assert data["allocation_method"] == "weight"
+    assert by_name["Lettuce"]["share_pct"] == 11.1
+    assert by_name["Lettuce"]["cost_per_unit"] > 0
+    # Tomato is charged its own share, not the lettuce's as well
+    assert by_name["Tomato"]["cost_per_unit"] == 17.78
+    assert any("no sale price" in w for w in data["warnings"])
+
+
+def test_no_weight_and_no_price_falls_all_the_way_to_raw_quantity():
+    with make_session() as session:
+        seed_base(session, lettuce_weight=None)
+        lettuce = session.get(Product, 2)
+        lettuce.price = Decimal("0")
+        session.commit()
+        data = allocate(session)
+
+    assert data["allocation_method"] == "quantity"
+    by_name = {p["product_name"]: p for p in data["products"]}
+    assert by_name["Lettuce"]["share_pct"] == 20.0      # 200 of 1000 raw units
+    assert by_name["Lettuce"]["cost_per_unit"] > 0
+    assert any("only indicative" in w for w in data["warnings"])
+
+
+def test_every_product_keeps_a_share_whichever_basis_is_used():
+    for method, weight, price in [
+        ("quantity", Decimal("0.5"), Decimal("30")),
+        ("value", Decimal("0.5"), Decimal("30")),
+        ("value", None, Decimal("30")),
+        ("quantity", None, Decimal("0")),
+    ]:
+        with make_session() as session:
+            seed_base(session, lettuce_weight=weight)
+            lettuce = session.get(Product, 2)
+            lettuce.price = price
+            session.commit()
+            data = allocate(session, method=method)
+
+        shares = {p["product_name"]: p["share_pct"] for p in data["products"]}
+        assert all(s > 0 for s in shares.values()), (method, weight, price, shares)
+        assert round(sum(shares.values()), 1) == 100.0
+
+
+def test_zero_cost_skip_reason_explains_the_cause():
+    """A piece-priced crop is fine to apply; the old blanket "cost price is
+    zero" message gave no clue that a missing price was the cause."""
+    with make_session() as session:
+        seed_base(session)
+        # Only lettuce delivered, and it has no price — nothing to weight by
+        session.execute(FarmDeliveryItem.__table__.delete().where(
+            FarmDeliveryItem.__table__.c.product_id == 1))
+        lettuce = session.get(Product, 2)
+        lettuce.price = Decimal("0")
+        lettuce.unit_weight_kg = None
+        session.commit()
+        result = apply_costs(session, dry_run=True)
+
+    if result["skipped"]:
+        assert "0% share" in result["skipped"][0]["reason"] or \
+               "Nothing harvested" in result["skipped"][0]["reason"]
+
+
+def test_piece_priced_product_can_have_its_cost_applied():
+    """Pieces are not blocked — a product delivered in the same unit it is
+    priced in applies cleanly, whatever that unit is."""
+    with make_session() as session:
+        seed_base(session)
+        result = apply_costs(session)
+        lettuce = session.get(Product, 2)
+        session.refresh(lettuce)
+
+    entry = next(p for p in result["applied"] if p["product_name"] == "Lettuce")
+    assert entry["unit"] == "pcs"
+    assert entry["new_cost"] == 8.89
+    assert float(lettuce.cost) == 8.89

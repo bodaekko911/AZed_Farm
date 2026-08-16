@@ -1604,25 +1604,56 @@ async def get_cost_allocation(
     wants_value = alloc_method == "value"
 
     warnings: list[str] = []
-    if wants_value and estimated_revenue > 0:
-        basis = "value"
-    elif weight_basis_complete:
-        basis = "weight"
-    elif estimated_revenue > 0:
-        basis = "value"
-        if missing_mass:
+
+    # A basis is only usable if EVERY delivered product can be measured on it.
+    # Value weighting used to be applied unconditionally, which gave any product
+    # with no price a 0% share — it came out at zero cost AND pushed its entire
+    # share of the costs onto the priced crops, overstating their cost price.
+    missing_value = [
+        info["product_name"]
+        for info in quantity_by_product.values()
+        if info["total_qty"] > 0 and info["sale_price"] <= 0
+    ]
+    value_basis_complete = (
+        bool(quantity_by_product) and not missing_value and estimated_revenue > 0
+    )
+
+    preference = ["value", "weight", "quantity"] if wants_value else ["weight", "value", "quantity"]
+    for candidate in preference:
+        if candidate == "value" and value_basis_complete:
+            basis = "value"
+            break
+        if candidate == "weight" and weight_basis_complete:
+            basis = "weight"
+            break
+        if candidate == "quantity":
+            basis = "quantity"
+            break
+
+    requested = "value" if wants_value else "weight"
+    if basis != requested:
+        blocker = missing_value if requested == "value" else missing_mass
+        what = (
+            "no sale price and no sales in this period"
+            if requested == "value" else "no weight set"
+        )
+        fix = (
+            "Set a price on the product, or record its sales, to split by sale value."
+            if requested == "value"
+            else "Set an average weight per unit on the product to split by weight."
+        )
+        detail = (": " + ", ".join(sorted(set(blocker))[:6])) if blocker else ""
+        warnings.append(
+            f"Split {('by sale value' if basis == 'value' else 'by weight' if basis == 'weight' else 'by raw quantity')} "
+            f"instead — these products have {what}{detail}. {fix}"
+        )
+    if basis == "quantity":
+        distinct_units = {u for info in quantity_by_product.values() for u in info["units_seen"] if u}
+        if len(distinct_units) > 1:
             warnings.append(
-                "Split by sale value because these products have no weight set, so "
-                "quantities cannot be compared: " + ", ".join(sorted(set(missing_mass))[:6])
-                + ". Set an average weight per unit on the product to split by weight."
-            )
-    else:
-        basis = "quantity"
-        if missing_mass:
-            warnings.append(
-                "Products are measured in different units and no sale prices are available, "
-                "so the split is by raw quantity and is only indicative: "
-                + ", ".join(sorted(set(missing_mass))[:6])
+                "Costs are split by raw quantity across different units "
+                f"({', '.join(sorted(distinct_units)[:6])}), so the split is only indicative. "
+                "Set weights or prices on the products for a meaningful split."
             )
     if missing_price:
         warnings.append(
@@ -1748,7 +1779,9 @@ async def get_cost_allocation(
             else "list"
         ),
         "weight_basis_complete": weight_basis_complete,
+        "value_basis_complete": value_basis_complete,
         "products_missing_weight": sorted(set(missing_mass)),
+        "products_missing_price": sorted(set(missing_value)),
         "products_missing_sales": sorted(set(missing_price)),
         "animal_cost_excluded": round(animal_cost_excluded, 2),
         "overhead_by_category": overhead_by_category,
@@ -1821,10 +1854,20 @@ async def apply_cost_allocation_to_products(
             })
             continue
         if new_cost <= 0:
+            # Say why it is zero, not just that it is. A 0% share means the
+            # product could not be measured on whichever basis was used.
+            if allocation["allocation_method"] == "value" and row["sale_price"] <= 0:
+                reason = "No price and no sales this period, so it got a 0% share of costs"
+            elif allocation["allocation_method"] == "weight" and not row.get("total_kg"):
+                reason = "No weight set, so it got a 0% share of costs"
+            elif row["total_qty"] <= 0:
+                reason = "Nothing harvested in this period"
+            else:
+                reason = "Computed cost price is zero"
             skipped.append({
                 "product_id": row["product_id"],
                 "product_name": row["product_name"],
-                "reason": "Computed cost price is zero",
+                "reason": reason,
             })
             continue
 
