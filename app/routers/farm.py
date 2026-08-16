@@ -898,6 +898,13 @@ td.name{color:var(--text);font-weight:600;}
                 </div>
             </div>
             <div id="season-warnings"></div>
+            <div class="table-wrap" style="margin-bottom:14px">
+                <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer" onclick="toggleOverheadDetail()">
+                    <div style="font-size:13px;font-weight:700"><span id="season-overhead-caret" style="color:var(--muted);font-size:11px">▶</span> What's in the overhead pool?</div>
+                    <div style="font-size:11px;color:var(--muted)" id="season-overhead-note"></div>
+                </div>
+                <div id="season-overhead-detail" style="display:none"></div>
+            </div>
             <div class="table-wrap">
                 <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
                     <div style="font-size:13px;font-weight:700">Cost Price per Crop</div>
@@ -2123,6 +2130,15 @@ async function deleteWeatherLog(id, dateStr){
 }
 
 /* ── SEASON ANALYSIS ── */
+function toggleOverheadDetail(){
+    const box = document.getElementById("season-overhead-detail");
+    const caret = document.getElementById("season-overhead-caret");
+    if(!box) return;
+    const open = box.style.display === "none";
+    box.style.display = open ? "block" : "none";
+    if(caret) caret.innerText = open ? "▼" : "▶";
+}
+
 async function loadSeasonAnalysis(){
     let farmId   = document.getElementById("season-farm").value;
     let dateFrom = document.getElementById("season-from").value;
@@ -2178,8 +2194,55 @@ async function loadSeasonAnalysis(){
             const priceNote = data.revenue_basis === "realised" ? "prices actually achieved"
                             : data.revenue_basis === "mixed"    ? "prices achieved, list price where nothing sold"
                                                                 : "list prices (no sales in this period)";
-            basisNote.innerText = `Costs split ${(data.allocation_basis_label||"").toLowerCase()} · valued at ${priceNote}`;
+            basisNote.innerText = `Crop costs only, animals excluded · split ${(data.allocation_basis_label||"").toLowerCase()} · valued at ${priceNote}`;
         }
+        // Overhead pool — what is in it, so a big number can be checked not guessed
+        const ohCats = Array.isArray(data.overhead_by_category) ? data.overhead_by_category : [];
+        const ohTop  = Array.isArray(data.overhead_top) ? data.overhead_top : [];
+        const ohNote = document.getElementById("season-overhead-note");
+        if(ohNote){
+            ohNote.innerText = `${fmt(data.shared_cost_total)} EGP untagged in this period · `
+                + `${fmt(data.shared_cost_allocated)} EGP charged to this scope`
+                + (data.animal_cost_excluded > 0 ? ` · ${fmt(data.animal_cost_excluded)} EGP of animal costs excluded` : "");
+        }
+        const ohBox = document.getElementById("season-overhead-detail");
+        if(ohBox){
+            ohBox.innerHTML = (!ohCats.length && !ohTop.length)
+                ? `<div style="padding:18px;color:var(--muted);font-size:13px">No untagged expenses in this period — every expense is assigned to a farm.</div>`
+                : `<div style="padding:14px 16px">
+                     <div style="font-size:11px;color:var(--muted);font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">By category</div>
+                     <table style="width:100%;border-collapse:collapse;margin-bottom:18px">
+                       <tbody>${ohCats.map(c=>`<tr>
+                         <td style="padding:6px 0;color:var(--text);font-size:13px">${c.category}</td>
+                         <td style="padding:6px 0;text-align:right;color:var(--muted);font-size:12px">${c.count} entr${c.count===1?"y":"ies"}</td>
+                         <td style="padding:6px 0;text-align:right;font-family:var(--mono);color:var(--warn);width:120px">${fmt(c.amount)}</td>
+                       </tr>`).join("")}</tbody>
+                     </table>
+                     <div style="font-size:11px;color:var(--muted);font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">Largest single expenses</div>
+                     <table style="width:100%;border-collapse:collapse">
+                       <thead><tr>
+                         <th style="text-align:left;font-size:10px;color:var(--muted);padding:4px 0">Date</th>
+                         <th style="text-align:left;font-size:10px;color:var(--muted);padding:4px 8px">Ref</th>
+                         <th style="text-align:left;font-size:10px;color:var(--muted);padding:4px 8px">Category</th>
+                         <th style="text-align:left;font-size:10px;color:var(--muted);padding:4px 8px">Vendor / Description</th>
+                         <th style="text-align:right;font-size:10px;color:var(--muted);padding:4px 0">Amount</th>
+                       </tr></thead>
+                       <tbody>${ohTop.map(e=>`<tr>
+                         <td style="padding:6px 0;border-top:1px solid var(--border);font-family:var(--mono);font-size:12px;color:var(--muted)">${e.date}</td>
+                         <td style="padding:6px 8px;border-top:1px solid var(--border);font-family:var(--mono);font-size:12px">${e.ref}</td>
+                         <td style="padding:6px 8px;border-top:1px solid var(--border);font-size:12px">${e.category}</td>
+                         <td style="padding:6px 8px;border-top:1px solid var(--border);font-size:12px;color:var(--sub)">${e.vendor}${e.description?` — ${e.description}`:""}</td>
+                         <td style="padding:6px 0;border-top:1px solid var(--border);text-align:right;font-family:var(--mono);color:var(--warn)">${fmt(e.amount)}</td>
+                       </tr>`).join("")}</tbody>
+                     </table>
+                     <div style="font-size:11.5px;color:var(--muted);margin-top:12px;line-height:1.6">
+                       These are expenses saved without a farm. Anything here that belongs to a farm should be
+                       tagged on the <a href="/expenses/" style="color:var(--lime);text-decoration:none">Expenses page</a> —
+                       it will then count as a direct farm cost instead of being spread as overhead.
+                     </div>
+                   </div>`;
+        }
+
         const warnBox = document.getElementById("season-warnings");
         if(warnBox){
             const warns = Array.isArray(data.warnings) ? data.warnings : [];

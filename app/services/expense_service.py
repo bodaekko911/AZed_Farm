@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -1189,6 +1189,33 @@ async def delete_expense_entry(
     return {"ok": True}
 
 
+def _crop_expense_filter():
+    """Season Analysis costs crops, so livestock spending is kept out of it.
+
+    Feed, vet bills and animal-handler salaries have nothing to do with what a
+    kilogram of tomato costs — leaving them in inflates every crop's cost price.
+    Two markers identify them, and either one is enough:
+      • is_animal_expense — set on animal expenses and on payroll for staff
+        flagged works_with_animals
+      • animal_group_id   — the expense is booked against a specific herd
+
+    Written NULL-safe rather than as a plain `== False`, because rows created
+    before the column existed carry NULL and would otherwise be dropped from
+    the crop pool as if they were animal costs.
+    """
+    return and_(
+        or_(Expense.is_animal_expense.is_(False), Expense.is_animal_expense.is_(None)),
+        Expense.animal_group_id.is_(None),
+    )
+
+
+def _animal_expense_filter():
+    return or_(
+        Expense.is_animal_expense.is_(True),
+        Expense.animal_group_id.isnot(None),
+    )
+
+
 def _delivered_kg(qty: float, unit: Optional[str], product) -> Optional[float]:
     """Delivered quantity expressed in kilograms, or None when the product has
     no mass basis.
@@ -1339,12 +1366,27 @@ async def get_cost_allocation(
         .options(selectinload(Expense.category))
         .where(
             expense_scope,
+            _crop_expense_filter(),
             Expense.expense_date >= start_date,
             Expense.expense_date <= end_date,
         )
     )
     expenses = expenses_result.scalars().all()
     total_cost = sum(float(expense.amount) for expense in expenses)
+
+    # Reported, not silently dropped — you should be able to see how much
+    # livestock spending was set aside and confirm it looks right.
+    animal_cost_result = await db.execute(
+        select(func.coalesce(func.sum(Expense.amount), 0))
+        .join(ExpenseCategory, Expense.category_id == ExpenseCategory.id)
+        .where(
+            expense_scope,
+            _animal_expense_filter(),
+            Expense.expense_date >= start_date,
+            Expense.expense_date <= end_date,
+        )
+    )
+    animal_cost_excluded = float(animal_cost_result.scalar() or 0)
 
     cost_by_category: dict[str, float] = {}
     salary_cost = 0.0
@@ -1438,15 +1480,69 @@ async def get_cost_allocation(
     # Always computed now, not just when the caller opts in: the report shows a
     # direct and a fully-absorbed cost price side by side, so it needs the fair
     # share in every response.
+    # Livestock spending is excluded here too — an untagged vet bill is still a
+    # livestock cost and must not reach crops through the overhead pool.
+    shared_where = (
+        Expense.farm_id.is_(None),
+        _crop_expense_filter(),
+        Expense.expense_date >= start_date,
+        Expense.expense_date <= end_date,
+    )
     shared_total_result = await db.execute(
+        select(func.coalesce(func.sum(Expense.amount), 0)).where(*shared_where)
+    )
+    shared_cost_total = float(shared_total_result.scalar() or 0)
+    shared_remaining = max(0.0, shared_cost_total - unassigned_salary_cost)
+
+    animal_shared_result = await db.execute(
         select(func.coalesce(func.sum(Expense.amount), 0)).where(
             Expense.farm_id.is_(None),
+            _animal_expense_filter(),
             Expense.expense_date >= start_date,
             Expense.expense_date <= end_date,
         )
     )
-    shared_cost_total = float(shared_total_result.scalar() or 0)
-    shared_remaining = max(0.0, shared_cost_total - unassigned_salary_cost)
+    animal_cost_excluded += float(animal_shared_result.scalar() or 0)
+
+    # ── What is actually sitting in the overhead pool ──
+    # The pool is only trustworthy if you can see inside it. A large overhead
+    # figure usually means farm costs were entered without a farm, not that
+    # head office really costs that much.
+    overhead_by_category_rows = await db.execute(
+        select(
+            ExpenseCategory.name,
+            func.coalesce(func.sum(Expense.amount), 0).label("amount"),
+            func.count(Expense.id).label("count"),
+        )
+        .join(ExpenseCategory, Expense.category_id == ExpenseCategory.id)
+        .where(*shared_where)
+        .group_by(ExpenseCategory.name)
+        .order_by(func.coalesce(func.sum(Expense.amount), 0).desc())
+    )
+    overhead_by_category = [
+        {"category": name or "Uncategorised", "amount": round(float(amount or 0), 2), "count": int(count or 0)}
+        for name, amount, count in overhead_by_category_rows.all()
+    ]
+
+    overhead_top_rows = await db.execute(
+        select(Expense)
+        .join(ExpenseCategory, Expense.category_id == ExpenseCategory.id)
+        .options(selectinload(Expense.category))
+        .where(*shared_where)
+        .order_by(Expense.amount.desc())
+        .limit(15)
+    )
+    overhead_top = [
+        {
+            "ref": expense.ref_number or f"EXP-{expense.id}",
+            "date": expense.expense_date.isoformat() if expense.expense_date else "—",
+            "category": expense.category.name if expense.category else "Uncategorised",
+            "vendor": expense.vendor or "—",
+            "description": expense.description or "",
+            "amount": round(float(expense.amount or 0), 2),
+        }
+        for expense in overhead_top_rows.scalars().all()
+    ]
 
     all_farms_result = await db.execute(select(Farm.id).where(Farm.is_active == 1))
     all_farm_ids = [row[0] for row in all_farms_result.all()]
@@ -1529,6 +1625,14 @@ async def get_cost_allocation(
             "No sales recorded in this period for "
             + ", ".join(sorted(set(missing_price))[:6])
             + " — the list price was used for those."
+        )
+    # Overhead outweighing direct farm cost almost always means expenses were
+    # entered without a farm, not that head office really costs that much.
+    if total_cost > 0 and shared_cost_allocated > total_cost:
+        warnings.append(
+            f"Overhead charged here ({shared_cost_allocated:,.0f} EGP) is larger than the costs "
+            f"tagged to the farm ({total_cost:,.0f} EGP). Expenses saved without a farm land in "
+            "overhead — check the breakdown below and tag any that belong to a farm."
         )
 
     def share_for(info):
@@ -1618,6 +1722,9 @@ async def get_cost_allocation(
         "weight_basis_complete": weight_basis_complete,
         "products_missing_weight": sorted(set(missing_mass)),
         "products_missing_sales": sorted(set(missing_price)),
+        "animal_cost_excluded": round(animal_cost_excluded, 2),
+        "overhead_by_category": overhead_by_category,
+        "overhead_top": overhead_top,
         "warnings": warnings,
         "shared_mode": shared_norm,
         "shared_cost_total": round(shared_cost_total, 2),

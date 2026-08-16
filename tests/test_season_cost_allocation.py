@@ -237,6 +237,101 @@ def test_absorbed_equals_direct_when_there_is_no_overhead():
         assert p["cost_per_unit"] == p["cost_per_unit_absorbed"]
 
 
+# ── Animals excluded ─────────────────────────────────────────────────────────
+
+def test_animal_expenses_do_not_inflate_crop_cost_prices():
+    """Feed and vet bills are livestock costs — a kilo of tomato must not carry
+    them, whether they are flagged or booked against a herd."""
+    with make_session() as session:
+        seed_base(session)
+        session.add_all([
+            Expense(id=10, category_id=1, farm_id=1, amount=Decimal("9000"),
+                    expense_date=date(2026, 8, 6), description="Goat feed",
+                    is_animal_expense=True),
+            Expense(id=11, category_id=1, farm_id=1, amount=Decimal("1000"),
+                    expense_date=date(2026, 8, 7), description="Vet visit",
+                    animal_group_id=None, is_animal_expense=True),
+        ])
+        session.commit()
+        data = allocate(session)
+
+    assert data["total_cost"] == 16000.0            # unchanged by the 10,000 of animal cost
+    assert data["animal_cost_excluded"] == 10000.0
+    tomato = next(p for p in data["products"] if p["product_name"] == "Tomato")
+    assert tomato["cost_per_unit"] == 17.78         # not 28.89
+
+
+def test_untagged_animal_costs_do_not_reach_crops_through_overhead():
+    with make_session() as session:
+        seed_base(session)
+        session.add_all([
+            Expense(id=20, category_id=1, farm_id=None, amount=Decimal("4000"),
+                    expense_date=date(2026, 8, 9), description="Office rent"),
+            Expense(id=21, category_id=1, farm_id=None, amount=Decimal("7000"),
+                    expense_date=date(2026, 8, 9), description="Untagged feed",
+                    is_animal_expense=True),
+        ])
+        session.commit()
+        data = allocate(session)
+
+    assert data["shared_cost_total"] == 4000.0      # feed kept out of the overhead pool
+    assert data["shared_cost_allocated"] == 4000.0
+    assert data["animal_cost_excluded"] == 7000.0
+    assert data["fully_absorbed_cost"] == 20000.0   # 16,000 + 4,000
+
+
+def test_ordinary_expenses_stay_in_the_crop_pool():
+    """The exclusion must be surgical — only rows carrying an animal marker
+    leave. (The NULL-flag case the filter also guards against is unreachable
+    here: the model declares the column NOT NULL, so it can only occur on
+    legacy Postgres rows written before the column was added.)"""
+    with make_session() as session:
+        seed_base(session)
+        data = allocate(session)
+
+    assert data["total_cost"] == 16000.0
+    assert data["animal_cost_excluded"] == 0.0
+    assert len(data["products"]) == 2
+
+
+# ── Overhead transparency ────────────────────────────────────────────────────
+
+def test_overhead_pool_is_broken_down_by_category_and_biggest_items():
+    with make_session() as session:
+        seed_base(session)
+        session.add_all([
+            Expense(id=30, category_id=1, farm_id=None, amount=Decimal("20000"),
+                    expense_date=date(2026, 8, 9), vendor="Landlord", description="Office rent"),
+            Expense(id=31, category_id=2, farm_id=None, amount=Decimal("8000"),
+                    expense_date=date(2026, 8, 11), vendor="Payroll", description="Admin salary"),
+            Expense(id=32, category_id=1, farm_id=None, amount=Decimal("2000"),
+                    expense_date=date(2026, 8, 12), vendor="ISP", description="Internet"),
+        ])
+        session.commit()
+        data = allocate(session)
+
+    by_cat = {c["category"]: c for c in data["overhead_by_category"]}
+    assert by_cat["Fertiliser"]["amount"] == 22000.0     # rent + internet on that category
+    assert by_cat["Fertiliser"]["count"] == 2
+    assert by_cat["Farm Labour"]["amount"] == 8000.0
+
+    top = data["overhead_top"]
+    assert [e["amount"] for e in top] == [20000.0, 8000.0, 2000.0]   # biggest first
+    assert top[0]["vendor"] == "Landlord"
+    assert top[0]["description"] == "Office rent"
+
+
+def test_overhead_larger_than_farm_costs_is_called_out():
+    with make_session() as session:
+        seed_base(session)
+        session.add(Expense(id=40, category_id=1, farm_id=None, amount=Decimal("30000"),
+                            expense_date=date(2026, 8, 9), description="Head office"))
+        session.commit()
+        data = allocate(session)
+
+    assert any("larger than the costs" in w for w in data["warnings"])
+
+
 def test_costs_with_no_harvest_are_reported_not_silently_dropped():
     with make_session() as session:
         session.add_all([
