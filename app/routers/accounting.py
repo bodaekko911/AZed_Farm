@@ -996,7 +996,7 @@ async def get_client_consignment_items(client_id: int, db: AsyncSession = Depend
                 "product_id": ci.product_id,
                 "name": ci.product.name if ci.product else f"#{ci.product_id}",
                 "sku": ci.product.sku if ci.product else "",
-                "unit": (ci.product.unit if ci.product else "") or "pcs",
+                "unit": (ci.product.unit if ci.product else "") or "piece",
                 "unit_price": price,
                 "qty_sent": 0.0,
                 "qty_remaining": 0.0,
@@ -1032,7 +1032,7 @@ async def get_client_consignment_sales(client_id: int, db: AsyncSession = Depend
                 {
                     "product_id": it.product_id,
                     "name": it.product.name if it.product else f"#{it.product_id}",
-                    "unit": (it.product.unit if it.product else "") or "pcs",
+                    "unit": (it.product.unit if it.product else "") or "piece",
                     "qty": round(float(it.qty), 3),
                     "unit_price": round(float(it.unit_price), 2),
                     "total": round(float(it.total), 2),

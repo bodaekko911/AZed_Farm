@@ -620,7 +620,7 @@ async def import_b2b_sales(
                     "cost": 0,
                     "stock": 0,
                     "min_stock": 5,
-                    "unit": "pcs",
+                    "unit": "piece",
                     "is_active": True,
                     "category": "Imported - Historical B2B",
                     "item_type": "finished",

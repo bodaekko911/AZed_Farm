@@ -643,3 +643,27 @@ def test_cost_per_kg_absorbed_includes_the_overhead_share():
 
     assert data["cost_per_kg"] == round(16000 / 900, 4)
     assert data["cost_per_kg_absorbed"] == round(46000 / 900, 4)
+
+
+def test_cost_applies_across_pcs_and_piece_spellings():
+    """A product whose unit was renamed to 'piece' must still match its own
+    historical delivery lines recorded as 'pcs'."""
+    with make_session() as session:
+        seed_base(session)
+        session.get(Product, 2).unit = "piece"       # renamed on the product
+        session.commit()                             # delivery line still says 'pcs'
+        result = apply_costs(session, dry_run=True)
+
+    applied = {p["product_name"] for p in result["applied"]}
+    assert "Lettuce" in applied, result["skipped"]
+
+
+def test_genuine_unit_mismatch_is_still_refused():
+    with make_session() as session:
+        seed_base(session)
+        session.get(Product, 2).unit = "kg"          # priced per kg, delivered in pcs
+        session.commit()
+        result = apply_costs(session, dry_run=True)
+
+    skipped = {s["product_name"] for s in result["skipped"]}
+    assert "Lettuce" in skipped

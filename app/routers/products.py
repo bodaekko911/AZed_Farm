@@ -560,7 +560,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
                 <select id="f-unit">
                     <option value="gram">gram</option>
                     <option value="kg">kg</option>
-                    <option value="pcs">pcs</option>
+                    <option value="piece">piece</option>
                     <option value="ltr">ltr</option>
                     <option value="ml">ml</option>
                     <option value="box">box</option>

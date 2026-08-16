@@ -1759,15 +1759,21 @@ async def get_cost_allocation(
         # when they differ would silently corrupt the product's cost, so both a
         # single consistent delivery unit AND a match to the product's unit are
         # required before offering to apply it.
-        units_seen = {u for u in info["units_seen"] if u}
-        product_unit = (info["product_unit"] or "").strip().lower()
+        # Compared on canonical names, so "pcs" and "piece" are the same unit.
+        # A raw string comparison would make a product stop matching its own
+        # historical delivery lines the moment its unit was renamed.
+        from app.core.units import canonical_unit, units_match
+
+        units_seen = {canonical_unit(u) for u in info["units_seen"] if u}
+        product_unit = info["product_unit"] or ""
         if qty <= 0:
             can_apply, skip_reason = False, "Nothing harvested in this period"
         elif len(units_seen) > 1:
             can_apply, skip_reason = False, f"Deliveries mix units ({', '.join(sorted(units_seen))})"
-        elif product_unit and units_seen and product_unit not in units_seen:
+        elif units_seen and not units_match(product_unit, next(iter(units_seen))):
             can_apply, skip_reason = False, (
-                f"Delivered in {next(iter(units_seen))} but the product is priced per {product_unit}"
+                f"Delivered in {next(iter(units_seen))} but the product is priced per "
+                f"{canonical_unit(product_unit)}"
             )
         else:
             can_apply, skip_reason = True, None

@@ -95,7 +95,7 @@ async def import_products(products_path: str, soh_path: str, db: AsyncSession) -
 
         cost  = row.get("Unit Cost",   0)
         price = row.get("Sales price", 0)
-        unit  = str(row.get("UOM",   "pcs")).strip()
+        unit  = str(row.get("UOM",   "piece")).strip()
         stock = stock_lookup.get(sku, 0)
 
         cost  = float(cost)  if str(cost)  != "nan" else 0.0

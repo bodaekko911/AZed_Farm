@@ -404,7 +404,7 @@ async def import_sales(
                     cost=cost_val,
                     stock=0,
                     min_stock=5,
-                    unit="pcs",
+                    unit="piece",
                     is_active=True,
                     category="Imported - Historical",
                     created_by_import_batch=batch_id,
