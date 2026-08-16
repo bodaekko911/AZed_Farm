@@ -51,8 +51,16 @@ class JournalCreate(BaseModel):
     description: Optional[str] = Field(None, max_length=500)
     entries:     List[JournalEntryIn]
 
+class B2BRefundItemIn(BaseModel):
+    product_id: int
+    qty:        float = Field(..., gt=0)
+    unit_price: float = Field(..., ge=0)
+
+
 class B2BRefundIn(BaseModel):
-    amount: float = Field(..., gt=0)
+    # Item-based, matching the B2B page. The old amount-only form could not
+    # restock returned goods or record what was actually sent back.
+    items:  List[B2BRefundItemIn]
     reason: Optional[str] = Field(None, max_length=255)
 
 
@@ -1036,48 +1044,79 @@ async def get_client_consignment_sales(client_id: int, db: AsyncSession = Depend
     ]
 
 
+@router.get("/api/products-list")
+async def products_for_refund(client_id: int = None, db: AsyncSession = Depends(get_async_session)):
+    """Active products for the client-refund picker, with the client's own
+    price where one is set.
+
+    Proxied here (gated by page_accounting at the router level) so an
+    accountant who can raise a client refund doesn't also need page_b2b or
+    page_products just to populate the dropdown — same pattern as the farm
+    picker on the expenses page.
+    """
+    from app.models.b2b import B2BClientPrice
+    from app.models.product import Product
+
+    result = await db.execute(
+        select(Product).where(Product.is_active == True).order_by(Product.name)  # noqa: E712
+    )
+    products = result.scalars().all()
+
+    custom: dict[int, float] = {}
+    if client_id:
+        price_rows = await db.execute(
+            select(B2BClientPrice).where(B2BClientPrice.client_id == client_id)
+        )
+        for row in price_rows.scalars().all():
+            custom[row.product_id] = float(row.price)
+
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "sku": p.sku,
+            "unit": p.unit or "",
+            "price": custom.get(p.id, float(p.price or 0)),
+        }
+        for p in products
+    ]
+
+
 @router.post("/api/b2b-clients/{client_id}/refund", dependencies=[Depends(require_permission("action_b2b_refund"))])
-async def refund_b2b_client_account(client_id: int, data: B2BRefundIn, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+async def refund_b2b_client_account(
+    client_id: int,
+    data: B2BRefundIn,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Refund a B2B client from the accounting screen.
+
+    Delegates to the same routine the B2B page uses, so a refund raised here is
+    identical to one raised there: a numbered B2BRefund with line items, stock
+    returned, journal posted, and the client's balance credited. It previously
+    wrote only a journal and decremented a stored balance field, which meant
+    the refund never showed up in the B2B refunds list, never restocked the
+    returned goods, and left the client's outstanding untouched on screen.
+    """
+    from app.routers.b2b import ClientRefundCreate, RefundItemIn, create_client_refund_core
+
     client_result = await db.execute(select(B2BClient).where(B2BClient.id == client_id))
     client = client_result.scalar_one_or_none()
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
+    if not data.items:
+        raise HTTPException(status_code=400, detail="Refund must have at least one item")
 
-    amount = round(float(data.amount or 0), 2)
-    outstanding = round(float(client.outstanding or 0), 2)
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
-    if outstanding <= 0.01:
-        raise HTTPException(status_code=400, detail="This client has no outstanding balance to reduce")
-    if amount > outstanding + 0.01:
-        raise HTTPException(status_code=400, detail=f"Amount exceeds client outstanding: {outstanding:.2f}")
-
-    client.outstanding = Decimal(str(max(0, float(client.outstanding) - amount)))
-
-    reason = (data.reason or "").strip()
-    note_suffix = f" - {reason}" if reason else ""
-    journal = Journal(
-        ref_type="b2b_refund",
-        description=f"B2B client account refund - {client.name}{note_suffix}",
-        user_id=current_user.id,
+    payload = ClientRefundCreate(
+        client_id=client_id,
+        notes=(data.reason or None),
+        items=[
+            RefundItemIn(product_id=i.product_id, qty=i.qty, unit_price=i.unit_price)
+            for i in data.items
+        ],
     )
-    db.add(journal); await db.flush()
-    for code, debit, credit in [
-        ("2200", amount, 0),
-        ("1100", 0, amount),
-    ]:
-        acc_result = await db.execute(select(Account).where(Account.code == code))
-        acc = acc_result.scalar_one_or_none()
-        if acc:
-            db.add(JournalEntry(journal_id=journal.id, account_id=acc.id, debit=debit, credit=credit))
-            acc.balance += Decimal(str(debit)) - Decimal(str(credit))
-
-    await db.commit()
-    return {
-        "ok": True,
-        "client": client.name,
-        "client_outstanding": round(float(client.outstanding), 2),
-    }
+    result = await create_client_refund_core(db, current_user, payload)
+    return {**result, "client_outstanding": result["outstanding"]}
 
 
 # ── UI ─────────────────────────────────────────────────
@@ -1525,11 +1564,12 @@ td.cr { font-family:var(--mono); color:var(--blue); }
 
 <!-- B2B REFUND MODAL -->
 <div class="modal-bg" id="refund-modal">
-    <div class="modal" style="width:440px">
-        <div class="modal-title">Adjust Client Account</div>
+    <div class="modal" style="width:640px">
+        <div class="modal-title">Client Refund</div>
         <div class="modal-sub" id="refund-modal-sub"></div>
         <div style="background:rgba(255,181,71,.08);border:1px solid rgba(255,181,71,.18);border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:var(--warn)">
-            This reduces the client's outstanding balance without editing an invoice.
+            Records a numbered refund, returns the goods to stock and credits the client's balance —
+            the same refund the B2B page creates.
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">
             <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Confirm Client Name *</label>
@@ -1537,9 +1577,12 @@ td.cr { font-family:var(--mono); color:var(--blue); }
                 style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--mono);font-size:14px;outline:none;width:100%">
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">
-            <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Adjustment Amount *</label>
-            <input id="refund-amount" type="number" placeholder="0.00" min="0.01" step="any"
-                style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--mono);font-size:14px;outline:none;width:100%">
+            <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Returned Items *</label>
+            <div id="refund-items"></div>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:6px">
+                <button onclick="addRefundItem()" style="background:transparent;border:1px dashed var(--border2);color:var(--sub);padding:8px 14px;border-radius:10px;font-family:var(--sans);font-size:12px;font-weight:700;cursor:pointer">+ Add item</button>
+                <div style="font-family:var(--mono);font-size:14px;font-weight:800" id="refund-total">0.00 EGP</div>
+            </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px">
             <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Reason</label>
@@ -2698,20 +2741,82 @@ function recalcConsTotal(){
     document.getElementById("cons-amount-display").innerText = `${total.toFixed(2)} EGP`;
 }
 
-function openRefundModal(clientId, clientName, outstanding){
+let refundProducts = [];
+let refundProductsClientId = null;
+
+async function ensureRefundProducts(clientId){
+    // Re-fetch per client: the picker must offer that client's own agreed
+    // price, not the generic list price.
+    if(refundProducts.length && refundProductsClientId === clientId) return;
+    try{
+        const res = await fetch(`/accounting/api/products-list?client_id=${clientId}`, { credentials: "same-origin" });
+        refundProducts = res.ok ? await res.json() : [];
+        refundProductsClientId = clientId;
+    }catch(e){ refundProducts = []; }
+}
+
+function refundProductOptions(selected){
+    return refundProducts.map(p =>
+        `<option value="${p.id}" data-price="${p.price}" ${String(p.id)===String(selected)?"selected":""}>${p.name}</option>`
+    ).join("");
+}
+
+function addRefundItem(){
+    const wrap = document.getElementById("refund-items");
+    const row = document.createElement("div");
+    row.className = "refund-item-row";
+    row.style.cssText = "display:grid;grid-template-columns:1fr 90px 110px 30px;gap:8px;margin-bottom:8px;align-items:center";
+    row.innerHTML = `
+        <select data-field="product" onchange="onRefundProductChange(this)"
+            style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:9px 10px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;width:100%">
+            ${refundProductOptions(null)}
+        </select>
+        <input data-field="qty" type="number" min="0" step="any" placeholder="Qty" oninput="refreshRefundTotal()"
+            style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:9px 10px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;width:100%">
+        <input data-field="price" type="number" min="0" step="any" placeholder="Unit price" oninput="refreshRefundTotal()"
+            style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:9px 10px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;width:100%">
+        <button onclick="this.parentElement.remove();refreshRefundTotal()" title="Remove"
+            style="background:transparent;border:none;color:var(--danger);font-size:16px;cursor:pointer">×</button>`;
+    wrap.appendChild(row);
+    onRefundProductChange(row.querySelector('[data-field="product"]'));
+}
+
+function onRefundProductChange(sel){
+    const opt = sel.options[sel.selectedIndex];
+    const priceInput = sel.parentElement.querySelector('[data-field="price"]');
+    if(opt && priceInput && !priceInput.value) priceInput.value = opt.dataset.price || "";
+    refreshRefundTotal();
+}
+
+function collectRefundItems(){
+    return [].slice.call(document.querySelectorAll("#refund-items .refund-item-row")).map(row => ({
+        product_id: parseInt(row.querySelector('[data-field="product"]').value, 10),
+        qty:        parseFloat(row.querySelector('[data-field="qty"]').value) || 0,
+        unit_price: parseFloat(row.querySelector('[data-field="price"]').value) || 0,
+    }));
+}
+
+function refreshRefundTotal(){
+    const total = collectRefundItems().reduce((s, i) => s + i.qty * i.unit_price, 0);
+    const el = document.getElementById("refund-total");
+    if(el) el.innerText = total.toFixed(2) + " EGP";
+}
+
+async function openRefundModal(clientId, clientName, outstanding){
     refundInvoiceId  = clientId;
     refundInvoiceNum = clientName;
-    document.getElementById("refund-modal-sub").innerText = `${clientName} — Outstanding balance: ${outstanding.toFixed(2)} EGP`;
+    document.getElementById("refund-modal-sub").innerText = `${clientName} — Outstanding balance: ${Number(outstanding||0).toFixed(2)} EGP`;
     document.getElementById("refund-inv-num").value = "";
-    document.getElementById("refund-amount").value = outstanding.toFixed(2);
     document.getElementById("refund-reason").value = "";
     document.getElementById("refund-inv-num").style.border = "1px solid var(--border2)";
+    document.getElementById("refund-items").innerHTML = "";
     document.getElementById("refund-modal").classList.add("open");
+    await ensureRefundProducts(clientId);
+    addRefundItem();
 }
 
 async function saveRefund(){
     let typed  = document.getElementById("refund-inv-num").value.trim();
-    let amount = parseFloat(document.getElementById("refund-amount").value) || 0;
     let reason = document.getElementById("refund-reason").value.trim();
     if(!typed){ showToast("Please enter the client name to confirm"); return; }
     if(typed !== refundInvoiceNum){
@@ -2720,16 +2825,18 @@ async function saveRefund(){
         return;
     }
     document.getElementById("refund-inv-num").style.border = "1px solid var(--border2)";
-    if(amount<=0){ showToast("Enter a valid refund amount"); return; }
+    const items = collectRefundItems().filter(i => i.product_id && i.qty > 0);
+    if(!items.length){ showToast("Add at least one returned item"); return; }
     let res  = await fetch(`/accounting/api/b2b-clients/${refundInvoiceId}/refund`,{
         method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({amount, reason:reason||null}),
+        body:JSON.stringify({items, reason:reason||null}),
     });
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
     document.getElementById("refund-modal").classList.remove("open");
-    showToast(`✓ Client refund recorded — New outstanding: ${data.client_outstanding.toFixed(2)} EGP`);
+    showToast(`✓ ${data.refund_number} recorded — New outstanding: ${Number(data.client_outstanding||0).toFixed(2)} EGP`);
     loadB2BInvoices();
+    if(typeof loadB2BClients === "function") loadB2BClients();
 }
 
 async function saveConsPayment(){

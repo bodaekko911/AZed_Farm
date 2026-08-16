@@ -319,9 +319,40 @@ async def seed_accounts(db: AsyncSession = Depends(get_async_session), _: User =
 
 
 # ── CLIENT API ─────────────────────────────────────────
+def _client_refund_subquery():
+    """Total refunded per client. Refunds are credits against the account, so
+    they must come off the balance owed — see _client_outstanding_value."""
+    return (
+        select(
+            B2BRefund.client_id,
+            func.coalesce(func.sum(B2BRefund.total), 0).label("refunded"),
+        )
+        .group_by(B2BRefund.client_id)
+        .subquery()
+    )
+
+
+async def _client_outstanding_value(db: AsyncSession, client_id: int) -> float:
+    """What a single client actually owes, computed the same way the clients
+    list and the statement do: unpaid invoice balances less refunds issued."""
+    invoiced = await db.execute(
+        select(func.coalesce(func.sum(B2BInvoice.total - B2BInvoice.amount_paid), 0))
+        .where(B2BInvoice.client_id == client_id, B2BInvoice.status.in_(["unpaid", "partial"]))
+    )
+    refunded = await db.execute(
+        select(func.coalesce(func.sum(B2BRefund.total), 0))
+        .where(B2BRefund.client_id == client_id)
+    )
+    return max(float(invoiced.scalar() or 0) - float(refunded.scalar() or 0), 0.0)
+
+
 @router.get("/api/clients")
 async def get_clients(q: str = "", db: AsyncSession = Depends(get_async_session)):
-    # Compute outstanding live from invoice data so it always matches the invoices tab
+    # Compute outstanding live from invoice data so it always matches the
+    # invoices tab — less refunds, which are credits against the account. The
+    # refund leg used to be missing here, so issuing a refund left the balance
+    # on this screen unchanged even though the statement and the client
+    # analysis both already netted it off.
     outstanding_sub = (
         select(
             B2BInvoice.client_id,
@@ -333,9 +364,18 @@ async def get_clients(q: str = "", db: AsyncSession = Depends(get_async_session)
         .group_by(B2BInvoice.client_id)
         .subquery()
     )
+    refund_sub = _client_refund_subquery()
+    # Clamped to zero in Python, not SQL: a two-argument MAX is an aggregate in
+    # Postgres (GREATEST is the scalar there) but a scalar in SQLite, so doing
+    # it in the query would only work on one of them.
+    computed_outstanding_expr = (
+        func.coalesce(outstanding_sub.c.outstanding, 0)
+        - func.coalesce(refund_sub.c.refunded, 0)
+    )
     stmt = (
-        select(B2BClient, func.coalesce(outstanding_sub.c.outstanding, 0).label("computed_outstanding"))
+        select(B2BClient, computed_outstanding_expr.label("computed_outstanding"))
         .outerjoin(outstanding_sub, outstanding_sub.c.client_id == B2BClient.id)
+        .outerjoin(refund_sub, refund_sub.c.client_id == B2BClient.id)
         .where(B2BClient.is_active == True)
         .options(selectinload(B2BClient.invoices))
         .order_by(B2BClient.name)
@@ -358,7 +398,7 @@ async def get_clients(q: str = "", db: AsyncSession = Depends(get_async_session)
             "payment_terms":  c.payment_terms,
             "discount_pct":   float(c.discount_pct or 0),
             "credit_limit":   float(c.credit_limit or 0),
-            "outstanding":    float(computed_outstanding or 0),
+            "outstanding":    max(float(computed_outstanding or 0), 0.0),
             "notes":          c.notes or "",
             "invoice_count":  len(c.invoices),
             "portal_enabled": bool(c.portal_enabled and c.portal_token),
@@ -931,8 +971,13 @@ async def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: Asy
     await db.commit()
     return {"ok": True, "invoice_number": invoice.invoice_number, "amount": amount, "status": invoice.status}
 
-@router.post("/api/refunds", dependencies=[Depends(require_action("b2b", "invoices", "refund"))])
-async def create_client_refund(data: ClientRefundCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+async def create_client_refund_core(db: AsyncSession, current_user: User, data: ClientRefundCreate):
+    """Create a B2B client refund: refund record + line items, stock returned,
+    journal posted, client balance credited.
+
+    Shared so the Accounting page issues exactly the same refund as the B2B
+    page — one code path, one set of side effects, one refund record.
+    """
     _r = await db.execute(select(B2BClient).where(B2BClient.id == data.client_id, B2BClient.is_active == True))
     client = _r.scalar_one_or_none()
     if not client:
@@ -959,8 +1004,15 @@ async def create_client_refund(data: ClientRefundCreate, db: AsyncSession = Depe
     total = round(subtotal - discount, 2)
     if total <= 0:
         raise HTTPException(status_code=400, detail="Refund total must be greater than 0")
-    if total > float(client.outstanding) + 0.01:
-        raise HTTPException(status_code=400, detail=f"Refund exceeds client outstanding: {float(client.outstanding):.2f}")
+    # Check against the live balance, the same one the clients list shows. The
+    # stored client.outstanding drifts (it is not maintained by every path), so
+    # using it here rejected valid refunds and allowed invalid ones.
+    live_outstanding = await _client_outstanding_value(db, client.id)
+    if total > live_outstanding + 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Refund exceeds client outstanding: {live_outstanding:.2f}",
+        )
 
     refund = B2BRefund(
         refund_number=refund_number,
@@ -1017,8 +1069,17 @@ async def create_client_refund(data: ClientRefundCreate, db: AsyncSession = Depe
         "discount": discount,
         "discount_pct": discount_pct,
         "amount": total,
-        "outstanding": float(client.outstanding),
+        "outstanding": await _client_outstanding_value(db, client.id),
     }
+
+
+@router.post("/api/refunds", dependencies=[Depends(require_action("b2b", "invoices", "refund"))])
+async def create_client_refund(
+    data: ClientRefundCreate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    return await create_client_refund_core(db, current_user, data)
 
 
 # ── STATS ──────────────────────────────────────────────

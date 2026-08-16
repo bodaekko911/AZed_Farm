@@ -1618,9 +1618,36 @@ async def get_cost_allocation(
         for info in quantity_by_product.values()
         if info["total_qty"] > 0 and info["sale_price"] <= 0
     ]
-    value_basis_complete = (
-        bool(quantity_by_product) and not missing_value and estimated_revenue > 0
+
+    # An unpriced crop would take a 0% share under value weighting. Do NOT
+    # abandon the basis for everyone because of it: falling back to raw
+    # quantity gives EVERY crop the identical cost price (the quantity cancels
+    # out), which is a worse answer than the problem it avoids. Impute a price
+    # from what the priced crops averaged instead — the unpriced crop then
+    # carries a fair share and the rest stay distinct.
+    priced_qty = sum(
+        i["total_qty"] for i in quantity_by_product.values() if i["sale_price"] > 0
     )
+    priced_value = sum(
+        i["total_qty"] * i["sale_price"]
+        for i in quantity_by_product.values() if i["sale_price"] > 0
+    )
+    imputed_unit_price = (priced_value / priced_qty) if priced_qty > 0 else 0.0
+    for info in quantity_by_product.values():
+        has_price = info["sale_price"] > 0
+        info["price_imputed"] = (
+            not has_price and info["total_qty"] > 0 and imputed_unit_price > 0
+        )
+        unit_value = info["sale_price"] if has_price else (
+            imputed_unit_price if info["price_imputed"] else 0.0
+        )
+        info["split_value"] = info["total_qty"] * unit_value
+
+    split_value_total = sum(i["split_value"] for i in quantity_by_product.values())
+    imputed_products = [
+        i["product_name"] for i in quantity_by_product.values() if i["price_imputed"]
+    ]
+    value_basis_complete = bool(quantity_by_product) and split_value_total > 0
 
     preference = ["value", "weight", "quantity"] if wants_value else ["weight", "value", "quantity"]
     for candidate in preference:
@@ -1635,6 +1662,9 @@ async def get_cost_allocation(
             break
 
     requested = "value" if wants_value else "weight"
+    basis_label = {
+        "value": "by sale value", "weight": "by weight", "quantity": "by raw quantity",
+    }[basis]
     if basis != requested:
         blocker = missing_value if requested == "value" else missing_mass
         what = (
@@ -1648,8 +1678,14 @@ async def get_cost_allocation(
         )
         detail = (": " + ", ".join(sorted(set(blocker))[:6])) if blocker else ""
         warnings.append(
-            f"Split {('by sale value' if basis == 'value' else 'by weight' if basis == 'weight' else 'by raw quantity')} "
-            f"instead — these products have {what}{detail}. {fix}"
+            f"Split {basis_label} instead — these products have {what}{detail}. {fix}"
+        )
+    if basis == "value" and imputed_products:
+        warnings.append(
+            "These products have no price, so an average price of "
+            f"{imputed_unit_price:,.2f} per unit was assumed for them when splitting costs: "
+            + ", ".join(sorted(set(imputed_products))[:6])
+            + ". Set their price for an accurate share."
         )
     # A unit weight of 100 kg+ for a single piece/bunch is almost always grams
     # typed into a kilogram field. One such entry inflates the total weight by
@@ -1699,8 +1735,7 @@ async def get_cost_allocation(
 
     def share_for(info):
         if basis == "value":
-            product_value = info["total_qty"] * info["sale_price"]
-            return product_value / estimated_revenue if estimated_revenue > 0 else 0
+            return info["split_value"] / split_value_total if split_value_total > 0 else 0
         if basis == "weight":
             return info["total_kg"] / total_kg if total_kg > 0 else 0
         return info["total_qty"] / total_quantity if total_quantity > 0 else 0
@@ -1759,6 +1794,7 @@ async def get_cost_allocation(
                 "sale_price": round(sale_price, 2),
                 "list_price": round(info["list_price"], 2),
                 "price_basis": info["price_basis"],
+                "price_imputed": bool(info.get("price_imputed")),
                 "qty_sold": info["qty_sold"],
                 "revenue_actual": info["revenue_actual"],
                 "profit_per_unit": round(profit_per_unit, 2),
@@ -1817,6 +1853,8 @@ async def get_cost_allocation(
         ),
         "products_missing_weight": sorted(set(missing_mass)),
         "products_missing_price": sorted(set(missing_value)),
+        "products_imputed_price": sorted(set(imputed_products)),
+        "imputed_unit_price": round(imputed_unit_price, 4),
         "products_missing_sales": sorted(set(missing_price)),
         "animal_cost_excluded": round(animal_cost_excluded, 2),
         "overhead_by_category": overhead_by_category,

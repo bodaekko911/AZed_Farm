@@ -118,6 +118,21 @@ def seed_retail_sale(session, product_id, qty, total, invoice_id=1):
     session.commit()
 
 
+def seed_third_crop(session, *, price=Decimal("12"), qty=Decimal("500"), weight=None):
+    """A third crop, so the priced pool has more than one price in it.
+
+    With a single priced product the imputed price IS that product's price, and
+    value weighting collapses into quantity weighting — every crop lands on the
+    same cost. Two distinct prices is the smallest setup where the basis can
+    actually differentiate.
+    """
+    session.add(Product(id=3, sku="CUC", name="Cucumber", price=price,
+                        unit="pcs", unit_weight_kg=weight))
+    session.flush()
+    session.add(FarmDeliveryItem(delivery_id=1, product_id=3, qty=qty, unit="pcs"))
+    session.commit()
+
+
 def allocate(session, method="quantity", farm_id="1"):
     return run(get_cost_allocation(
         AsyncSessionAdapter(session), farm_id=farm_id,
@@ -460,42 +475,65 @@ def test_costs_are_recomputed_server_side_not_taken_from_the_caller():
 
 # ── A basis must work for every product, or it is not used ───────────────────
 
-def test_unpriced_product_does_not_get_a_zero_share_under_value_weighting():
-    """Regression: value weighting gave a product with no price a 0% share, so
-    it came out at zero cost AND its share of the costs was silently loaded
-    onto the priced crops."""
+def test_unpriced_product_keeps_a_share_and_the_others_stay_distinct():
+    """Regression, twice over. Value weighting first gave an unpriced product a
+    0% share (zero cost, its costs loaded onto the priced crops). The first fix
+    then refused value weighting entirely, which dropped the report to raw
+    quantity — where the quantity cancels and EVERY crop shows the identical
+    cost price. Neither is acceptable: keep the basis, impute the price."""
     with make_session() as session:
-        seed_base(session)
+        seed_base(session, lettuce_weight=None)      # no weights, so value is the basis
+        seed_third_crop(session)
         lettuce = session.get(Product, 2)
         lettuce.price = Decimal("0")
         session.commit()
         data = allocate(session, method="value")
 
     by_name = {p["product_name"]: p for p in data["products"]}
-    assert data["value_basis_complete"] is False
-    assert data["products_missing_price"] == ["Lettuce"]
-    # Falls back to weight, which every product here can be measured on
-    assert data["allocation_method"] == "weight"
-    assert by_name["Lettuce"]["share_pct"] == 11.1
+    assert data["allocation_method"] == "value"
+    assert data["products_imputed_price"] == ["Lettuce"]
+    assert by_name["Lettuce"]["price_imputed"] is True
+    assert by_name["Lettuce"]["share_pct"] > 0
     assert by_name["Lettuce"]["cost_per_unit"] > 0
-    # Tomato is charged its own share, not the lettuce's as well
-    assert by_name["Tomato"]["cost_per_unit"] == 17.78
-    assert any("no sale price" in w for w in data["warnings"])
+    # The crops must NOT all land on the same number
+    costs = {p["cost_per_unit"] for p in data["products"]}
+    assert len(costs) > 1, costs
+    # Each share is rounded to 1dp independently, so allow the rounding drift
+    assert abs(sum(p["share_pct"] for p in data["products"]) - 100.0) <= 0.2
+    # The allocated money must still reconcile exactly
+    assert round(sum(p["allocated_cost"] for p in data["products"]), 2) == data["total_cost"]
+    assert any("average price" in w for w in data["warnings"])
 
 
-def test_no_weight_and_no_price_falls_all_the_way_to_raw_quantity():
+def test_raw_quantity_is_only_used_when_nothing_is_priced_at_all():
+    """Raw quantity gives every crop an identical cost price, so it is the last
+    resort — reachable only when there is no weight and no price anywhere."""
     with make_session() as session:
         seed_base(session, lettuce_weight=None)
-        lettuce = session.get(Product, 2)
-        lettuce.price = Decimal("0")
+        for pid in (1, 2):
+            session.get(Product, pid).price = Decimal("0")
         session.commit()
         data = allocate(session)
 
     assert data["allocation_method"] == "quantity"
-    by_name = {p["product_name"]: p for p in data["products"]}
-    assert by_name["Lettuce"]["share_pct"] == 20.0      # 200 of 1000 raw units
-    assert by_name["Lettuce"]["cost_per_unit"] > 0
+    costs = {p["cost_per_unit"] for p in data["products"]}
+    assert len(costs) == 1                       # the known consequence
     assert any("only indicative" in w for w in data["warnings"])
+
+
+def test_one_unpriced_crop_does_not_flatten_everyone_else():
+    """The specific regression reported: a single crop without a price used to
+    drag the whole report onto raw quantity."""
+    with make_session() as session:
+        seed_base(session, lettuce_weight=None)
+        seed_third_crop(session)
+        session.get(Product, 2).price = Decimal("0")
+        session.commit()
+        data = allocate(session)
+
+    assert data["allocation_method"] != "quantity"
+    costs = {p["cost_per_unit"] for p in data["products"]}
+    assert len(costs) > 1, costs
 
 
 def test_every_product_keeps_a_share_whichever_basis_is_used():
