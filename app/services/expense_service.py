@@ -1420,13 +1420,17 @@ async def get_cost_allocation(
                     "product_id": item.product_id,
                     "product_name": product.name if product else f"#{item.product_id}",
                     "unit": item.unit or (product.unit if product else "kg"),
+                    "product_unit": (product.unit if product else "") or "",
+                    "units_seen": set(),
                     "list_price": float(product.price) if product else 0,
                     "sale_price": float(product.price) if product else 0,
+                    "current_cost": float(product.cost or 0) if product else 0.0,
                     "total_qty": 0,
                     "total_kg": 0.0,
                     "has_mass": True,
                 }
             entry = quantity_by_product[item.product_id]
+            entry["units_seen"].add(((item.unit or (product.unit if product else "")) or "").strip().lower())
             entry["total_qty"] += float(item.qty)
             kg = _delivered_kg(item.qty, item.unit, product)
             if kg is None:
@@ -1655,11 +1659,35 @@ async def get_cost_allocation(
         profit_per_unit = sale_price - cost_per_unit
         profit_per_unit_absorbed = sale_price - cost_per_unit_absorbed
         cost_per_kg = (direct_cost / info["total_kg"]) if info["total_kg"] > 0 else None
+
+        # Can this cost price be written back onto the product?
+        # Product.cost is per the product's own unit, while the figures here are
+        # per the unit the delivery was recorded in. Writing one into the other
+        # when they differ would silently corrupt the product's cost, so both a
+        # single consistent delivery unit AND a match to the product's unit are
+        # required before offering to apply it.
+        units_seen = {u for u in info["units_seen"] if u}
+        product_unit = (info["product_unit"] or "").strip().lower()
+        if qty <= 0:
+            can_apply, skip_reason = False, "Nothing harvested in this period"
+        elif len(units_seen) > 1:
+            can_apply, skip_reason = False, f"Deliveries mix units ({', '.join(sorted(units_seen))})"
+        elif product_unit and units_seen and product_unit not in units_seen:
+            can_apply, skip_reason = False, (
+                f"Delivered in {next(iter(units_seen))} but the product is priced per {product_unit}"
+            )
+        else:
+            can_apply, skip_reason = True, None
+
         products.append(
             {
                 "product_id": product_id,
                 "product_name": info["product_name"],
                 "unit": info["unit"],
+                "product_unit": info["product_unit"],
+                "current_cost": round(info["current_cost"], 3),
+                "can_apply_cost": can_apply,
+                "apply_skip_reason": skip_reason,
                 "total_qty": round(qty, 3),
                 "total_kg": round(info["total_kg"], 3) if info["has_mass"] else None,
                 "share_pct": round(share * 100, 1),
@@ -1739,4 +1767,112 @@ async def get_cost_allocation(
         "products": products,
         "expense_count": len(expenses),
         "delivery_count": len(deliveries),
+    }
+
+async def apply_cost_allocation_to_products(
+    db: AsyncSession,
+    current_user: User,
+    *,
+    farm_id: int | str,
+    date_from: str,
+    date_to: str,
+    allocation_method: str = "quantity",
+    basis: str = "direct",          # "direct" (farm costs) | "absorbed" (incl. overhead)
+    product_ids: Optional[list[int]] = None,
+    dry_run: bool = False,
+) -> dict:
+    """Write the season's computed cost price onto Product.cost.
+
+    The allocation is recomputed here from the same parameters rather than
+    accepting figures from the browser — a caller must not be able to post an
+    arbitrary cost for a product through this route.
+
+    Products whose delivery unit does not match their own unit are refused, not
+    silently converted: Product.cost feeds inventory valuation and every margin
+    in POS and B2B, so a wrong unit here is expensive and hard to spot later.
+    """
+    from app.models.product import Product
+
+    basis_norm = (basis or "direct").strip().lower()
+    if basis_norm not in {"direct", "absorbed"}:
+        basis_norm = "direct"
+
+    allocation = await get_cost_allocation(
+        db,
+        farm_id=farm_id,
+        date_from=date_from,
+        date_to=date_to,
+        allocation_method=allocation_method,
+    )
+
+    wanted = set(product_ids) if product_ids else None
+    cost_key = "cost_per_unit" if basis_norm == "direct" else "cost_per_unit_absorbed"
+
+    applied, skipped = [], []
+    for row in allocation["products"]:
+        if wanted is not None and row["product_id"] not in wanted:
+            continue
+        new_cost = row[cost_key]
+        if not row.get("can_apply_cost"):
+            skipped.append({
+                "product_id": row["product_id"],
+                "product_name": row["product_name"],
+                "reason": row.get("apply_skip_reason") or "Cannot be applied",
+            })
+            continue
+        if new_cost <= 0:
+            skipped.append({
+                "product_id": row["product_id"],
+                "product_name": row["product_name"],
+                "reason": "Computed cost price is zero",
+            })
+            continue
+
+        product = (await db.execute(
+            select(Product).where(Product.id == row["product_id"])
+        )).scalar_one_or_none()
+        if product is None:
+            skipped.append({
+                "product_id": row["product_id"],
+                "product_name": row["product_name"],
+                "reason": "Product no longer exists",
+            })
+            continue
+
+        old_cost = float(product.cost or 0)
+        entry = {
+            "product_id": product.id,
+            "product_name": product.name,
+            "unit": product.unit or "",
+            "old_cost": round(old_cost, 3),
+            "new_cost": round(float(new_cost), 3),
+            "change": round(float(new_cost) - old_cost, 3),
+        }
+        if not dry_run:
+            product.cost = Decimal(str(round(float(new_cost), 3)))
+        applied.append(entry)
+
+    if not dry_run and applied:
+        record(
+            db, "Products", "apply_season_cost",
+            f"Applied {allocation['farm_scope_label']} season cost "
+            f"({'incl. overhead' if basis_norm == 'absorbed' else 'farm costs only'}, "
+            f"{date_from} to {date_to}) to {len(applied)} product(s)",
+            user=current_user, ref_type="cost_allocation", ref_id=None,
+        )
+        await db.commit()
+
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "basis": basis_norm,
+        "farm_scope_label": allocation["farm_scope_label"],
+        "date_from": allocation["date_from"],
+        "date_to": allocation["date_to"],
+        "allocation_method": allocation["allocation_method"],
+        "allocation_basis_label": allocation["allocation_basis_label"],
+        "applied": applied,
+        "skipped": skipped,
+        "applied_count": len(applied),
+        "skipped_count": len(skipped),
     }

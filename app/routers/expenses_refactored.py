@@ -1,10 +1,11 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.permissions import require_action, require_permission
+from app.core.permissions import get_current_user, require_action, require_permission
 from app.database import get_async_session
 from app.models.user import User
 from app.routers.expenses import expenses_ui as legacy_expenses_ui
@@ -15,6 +16,7 @@ from app.schemas.expense import (
     ExpenseUpdate,
 )
 from app.services.expense_service import (
+    apply_cost_allocation_to_products,
     archive_category,
     create_category,
     create_expense_entry,
@@ -140,6 +142,44 @@ async def get_expense_cost_allocation(
         date_to=date_to,
         allocation_method=method,
         shared_mode=shared,
+    )
+
+
+class ApplyCostAllocationRequest(BaseModel):
+    farm_id: str
+    date_from: str
+    date_to: str
+    method: str = "quantity"
+    basis: str = "direct"                       # "direct" | "absorbed"
+    product_ids: Optional[list[int]] = None     # None = every applicable product
+    dry_run: bool = False
+
+
+@router.post(
+    "/api/cost-allocation/apply",
+    dependencies=[Depends(require_action("products", "products", "update"))],
+)
+async def apply_cost_allocation(
+    data: ApplyCostAllocationRequest,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Write the season's cost price onto each crop's product cost.
+
+    Gated on the products edit permission, not an expenses one — this changes
+    product master data, which drives inventory valuation and every margin in
+    POS and B2B.
+    """
+    return await apply_cost_allocation_to_products(
+        db,
+        current_user,
+        farm_id=data.farm_id,
+        date_from=data.date_from,
+        date_to=data.date_to,
+        allocation_method=data.method,
+        basis=data.basis,
+        product_ids=data.product_ids,
+        dry_run=data.dry_run,
     )
 
 

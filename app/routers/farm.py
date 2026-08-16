@@ -908,7 +908,11 @@ td.name{color:var(--text);font-weight:600;}
             <div class="table-wrap">
                 <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
                     <div style="font-size:13px;font-weight:700">Cost Price per Crop</div>
-                    <div style="font-size:11px;color:var(--muted)" id="season-basis-note"></div>
+                    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                        <div style="font-size:11px;color:var(--muted)" id="season-basis-note"></div>
+                        <button class="btn btn-lime" id="season-apply-btn" style="display:none;padding:7px 12px;font-size:12px"
+                                onclick="openApplyCostModal()">Apply to product costs</button>
+                    </div>
                 </div>
                 <div style="overflow-x:auto">
                 <table>
@@ -2129,6 +2133,130 @@ async function deleteWeatherLog(id, dateStr){
     loadWeatherLogs();
 }
 
+/* ── APPLY SEASON COST TO PRODUCT COSTS ── */
+let _seasonQuery = null;      // the exact scope the visible numbers came from
+
+function closeApplyCostModal(){
+    const o = document.getElementById("apply-cost-overlay");
+    if(o) o.remove();
+}
+
+function openApplyCostModal(){
+    if(!_seasonQuery){ showToast("Run the analysis first"); return; }
+    closeApplyCostModal();
+    const overlay = document.createElement("div");
+    overlay.id = "apply-cost-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9999;padding:20px";
+    overlay.innerHTML = `
+      <div style="background:var(--card,#fff);color:var(--text,#111);border:1px solid var(--border2,#ccc);border-radius:14px;width:min(94vw,760px);max-height:88vh;overflow-y:auto;padding:22px">
+        <div style="font-weight:800;font-size:17px;margin-bottom:4px">Apply cost price to products</div>
+        <div style="font-size:12.5px;color:var(--muted);margin-bottom:16px">
+          This overwrites the <strong>Cost</strong> field on each crop's product record. Product cost drives
+          inventory valuation and every profit figure in POS, B2B and the P&amp;L.
+        </div>
+        <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px">
+          <div class="fld" style="min-width:230px">
+            <label>Which cost price</label>
+            <select class="filter-sel" id="apply-cost-basis" style="width:100%" onchange="refreshApplyPreview()">
+              <option value="direct">Farm cost only — production cost</option>
+              <option value="absorbed">Incl. overhead — break-even cost</option>
+            </select>
+          </div>
+          <div style="font-size:11.5px;color:var(--muted);flex:1;min-width:220px;line-height:1.5">
+            Farm cost only is the usual choice for product cost; overhead is normally handled
+            further down the P&amp;L rather than inside a unit cost.
+          </div>
+        </div>
+        <div id="apply-cost-preview" style="font-size:13px;color:var(--muted)">Loading preview…</div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">
+          <button class="btn-cancel" onclick="closeApplyCostModal()">Cancel</button>
+          <button class="btn btn-lime" id="apply-cost-confirm" onclick="confirmApplyCost()" disabled>Apply</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    refreshApplyPreview();
+}
+
+async function fetchApplyResult(dryRun){
+    const basis = (document.getElementById("apply-cost-basis") || {}).value || "direct";
+    const res = await fetch("/expenses/api/cost-allocation/apply", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        credentials: "same-origin",
+        body: JSON.stringify({..._seasonQuery, basis, dry_run: dryRun}),
+    });
+    const data = await res.json().catch(()=>null);
+    if(!res.ok) throw new Error(getErrorMessage(data, `Request failed (${res.status})`));
+    return data;
+}
+
+async function refreshApplyPreview(){
+    const box = document.getElementById("apply-cost-preview");
+    const btn = document.getElementById("apply-cost-confirm");
+    if(!box) return;
+    box.innerHTML = `<div style="color:var(--muted)">Loading preview…</div>`;
+    if(btn) btn.disabled = true;
+    let data;
+    try{
+        data = await fetchApplyResult(true);      // dry run — nothing is written
+    }catch(err){
+        box.innerHTML = `<div style="color:var(--danger)">${err.message}</div>`;
+        return;
+    }
+    const fmtc = (n)=>Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:3});
+    const rows = data.applied.map(p=>{
+        const up = p.change > 0, same = Math.abs(p.change) < 0.0005;
+        const col = same ? "var(--muted)" : up ? "var(--danger)" : "var(--green)";
+        return `<tr>
+            <td style="padding:7px 0;border-top:1px solid var(--border)">${p.product_name}</td>
+            <td style="padding:7px 8px;border-top:1px solid var(--border);text-align:right;font-family:var(--mono);color:var(--muted)">${fmtc(p.old_cost)}</td>
+            <td style="padding:7px 8px;border-top:1px solid var(--border);text-align:center;color:var(--muted)">→</td>
+            <td style="padding:7px 8px;border-top:1px solid var(--border);text-align:right;font-family:var(--mono);font-weight:700">${fmtc(p.new_cost)}</td>
+            <td style="padding:7px 0;border-top:1px solid var(--border);text-align:right;font-family:var(--mono);color:${col}">${same?"—":(up?"+":"")+fmtc(p.change)}</td>
+            <td style="padding:7px 8px;border-top:1px solid var(--border);color:var(--muted);font-size:12px">per ${p.unit||"unit"}</td>
+        </tr>`;
+    }).join("");
+
+    const skipped = data.skipped.length
+        ? `<div style="margin-top:14px;background:rgba(255,181,71,.08);border:1px solid rgba(255,181,71,.28);border-radius:10px;padding:11px 13px">
+             <div style="font-size:12px;font-weight:700;color:var(--warn);margin-bottom:6px">Not applied (${data.skipped.length})</div>
+             ${data.skipped.map(s=>`<div style="font-size:12px;color:var(--warn);line-height:1.6">${s.product_name} — ${s.reason}</div>`).join("")}
+           </div>`
+        : "";
+
+    box.innerHTML = (data.applied.length
+        ? `<div style="font-size:12px;color:var(--muted);margin-bottom:6px">${data.applied.length} product${data.applied.length===1?"":"s"} will change</div>
+           <table style="width:100%;border-collapse:collapse">
+             <thead><tr>
+               <th style="text-align:left;font-size:10px;color:var(--muted);padding:4px 0">Product</th>
+               <th style="text-align:right;font-size:10px;color:var(--muted);padding:4px 8px">Current</th>
+               <th></th>
+               <th style="text-align:right;font-size:10px;color:var(--muted);padding:4px 8px">New</th>
+               <th style="text-align:right;font-size:10px;color:var(--muted);padding:4px 0">Change</th>
+               <th style="padding:4px 8px"></th>
+             </tr></thead>
+             <tbody>${rows}</tbody>
+           </table>`
+        : `<div style="color:var(--muted)">No product costs can be applied for this period.</div>`) + skipped;
+
+    if(btn) btn.disabled = data.applied.length === 0;
+}
+
+async function confirmApplyCost(){
+    const btn = document.getElementById("apply-cost-confirm");
+    if(btn){ btn.disabled = true; btn.innerText = "Applying…"; }
+    try{
+        const data = await fetchApplyResult(false);
+        showToast(`Updated cost on ${data.applied_count} product${data.applied_count===1?"":"s"}`
+            + (data.skipped_count ? ` — ${data.skipped_count} skipped` : ""));
+        closeApplyCostModal();
+        loadSeasonAnalysis();
+    }catch(err){
+        showToast("Error: " + (err.message || "Could not apply costs"));
+        if(btn){ btn.disabled = false; btn.innerText = "Apply"; }
+    }
+}
+
 /* ── SEASON ANALYSIS ── */
 function toggleOverheadDetail(){
     const box = document.getElementById("season-overhead-detail");
@@ -2169,6 +2297,17 @@ async function loadSeasonAnalysis(){
 
         document.getElementById("season-empty").style.display  = "none";
         document.getElementById("season-result").style.display = "";
+
+        // Remember exactly what produced these numbers. The apply endpoint
+        // recomputes from these parameters rather than trusting figures from
+        // this page, so the scope has to travel with the request.
+        _seasonQuery = {farm_id: farmId, date_from: dateFrom, date_to: dateTo, method: method};
+        const applyBtn = document.getElementById("season-apply-btn");
+        if(applyBtn){
+            const applicable = products.filter(p => p.can_apply_cost).length;
+            applyBtn.style.display = (applicable > 0 && hasPermission("action_products_edit")) ? "" : "none";
+            applyBtn.title = `Write the cost price onto ${applicable} product record${applicable===1?"":"s"}`;
+        }
 
         const fmt = (n)=>Number(n || 0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});
         const harvestLabel = data.weight_basis_complete

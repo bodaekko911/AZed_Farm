@@ -12,6 +12,7 @@ and each is pinned here:
 import asyncio
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -20,6 +21,7 @@ from tests.env_defaults import apply_test_environment_defaults
 
 apply_test_environment_defaults()
 
+from app.core.log import ActivityLog
 from app.database import Base
 from app.models.b2b import B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund, B2BRefundItem
 from app.models.customer import Customer
@@ -38,6 +40,18 @@ class AsyncSessionAdapter:
     async def execute(self, statement, params=None):
         return self.session.execute(statement, params or {})
 
+    async def commit(self):
+        self.session.commit()
+
+    async def rollback(self):
+        self.session.rollback()
+
+    async def flush(self):
+        self.session.flush()
+
+    def add(self, obj):
+        self.session.add(obj)
+
 
 def run(coro):
     loop = asyncio.new_event_loop()
@@ -53,7 +67,7 @@ def make_session():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine, tables=[
         Farm.__table__, Product.__table__, ExpenseCategory.__table__, Expense.__table__,
-        Customer.__table__,
+        Customer.__table__, ActivityLog.__table__,
         FarmDelivery.__table__, FarmDeliveryItem.__table__,
         Invoice.__table__, InvoiceItem.__table__,
         B2BClient.__table__, B2BInvoice.__table__, B2BInvoiceItem.__table__,
@@ -347,3 +361,98 @@ def test_costs_with_no_harvest_are_reported_not_silently_dropped():
     assert data["total_cost"] == 5000.0
     assert data["products"] == []
     assert any("nothing to spread them across" in w for w in data["warnings"])
+
+
+# ── Applying the cost price back onto products ───────────────────────────────
+
+def apply_costs(session, **kw):
+    from app.services.expense_service import apply_cost_allocation_to_products
+    params = dict(farm_id="1", date_from="2026-08-01", date_to="2026-08-31",
+                  allocation_method="quantity")
+    params.update(kw)
+    return run(apply_cost_allocation_to_products(
+        AsyncSessionAdapter(session),
+        SimpleNamespace(id=1, name="Admin", role="admin"),
+        **params,
+    ))
+
+
+def test_apply_writes_the_direct_cost_price_onto_the_product():
+    with make_session() as session:
+        seed_base(session)
+        result = apply_costs(session)
+
+        tomato = session.get(Product, 1)
+        session.refresh(tomato)
+
+    assert result["applied_count"] == 2
+    entry = next(p for p in result["applied"] if p["product_name"] == "Tomato")
+    assert entry["old_cost"] == 0.0
+    assert entry["new_cost"] == 17.78
+    assert float(tomato.cost) == 17.78
+
+
+def test_absorbed_basis_writes_the_higher_cost():
+    with make_session() as session:
+        seed_base(session)
+        session.add(Expense(id=90, category_id=1, farm_id=None, amount=Decimal("30000"),
+                            expense_date=date(2026, 8, 9), description="Head office"))
+        session.commit()
+        apply_costs(session, basis="absorbed")
+        tomato = session.get(Product, 1)
+        session.refresh(tomato)
+
+    assert float(tomato.cost) == 51.11
+
+
+def test_dry_run_reports_the_change_without_writing_it():
+    with make_session() as session:
+        seed_base(session)
+        result = apply_costs(session, dry_run=True)
+        tomato = session.get(Product, 1)
+        session.refresh(tomato)
+
+    assert result["dry_run"] is True
+    assert result["applied_count"] == 2
+    assert float(tomato.cost) == 0.0            # untouched
+
+
+def test_unit_mismatch_is_refused_not_silently_converted():
+    """The lettuce is delivered in pieces but priced per kg — writing a
+    per-piece cost onto a per-kg product would corrupt every margin."""
+    with make_session() as session:
+        seed_base(session)
+        lettuce = session.get(Product, 2)
+        lettuce.unit = "kg"                     # product now priced per kg
+        session.commit()
+        result = apply_costs(session)
+
+        session.refresh(lettuce)
+
+    assert float(lettuce.cost) == 0.0
+    skipped = next(s for s in result["skipped"] if s["product_name"] == "Lettuce")
+    assert "priced per kg" in skipped["reason"]
+    # The tomato, whose units do line up, still goes through
+    assert [p["product_name"] for p in result["applied"]] == ["Tomato"]
+
+
+def test_only_selected_products_are_updated():
+    with make_session() as session:
+        seed_base(session)
+        apply_costs(session, product_ids=[1])
+        tomato, lettuce = session.get(Product, 1), session.get(Product, 2)
+        session.refresh(tomato); session.refresh(lettuce)
+
+    assert float(tomato.cost) > 0
+    assert float(lettuce.cost) == 0.0
+
+
+def test_costs_are_recomputed_server_side_not_taken_from_the_caller():
+    """The caller passes only a scope — never an amount — so this route cannot
+    be used to set an arbitrary product cost."""
+    import inspect
+    from app.services.expense_service import apply_cost_allocation_to_products
+
+    params = set(inspect.signature(apply_cost_allocation_to_products).parameters)
+    assert {"farm_id", "date_from", "date_to", "basis"} <= params
+    assert not {"cost", "costs", "new_cost", "amount"} & params
