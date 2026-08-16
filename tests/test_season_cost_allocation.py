@@ -549,3 +549,59 @@ def test_piece_priced_product_can_have_its_cost_applied():
     assert entry["unit"] == "pcs"
     assert entry["new_cost"] == 8.89
     assert float(lettuce.cost) == 8.89
+
+
+# ── Diagnosing an implausible cost price ─────────────────────────────────────
+
+def test_unit_weight_entered_in_grams_is_called_out():
+    """500 kg per head of lettuce is grams in a kilogram field. It inflates the
+    total weight a thousandfold, so every crop's cost per kg collapses and the
+    mistyped product takes almost the entire cost share."""
+    with make_session() as session:
+        seed_base(session, lettuce_weight=Decimal("500"))
+        data = allocate(session)
+
+    assert data["suspicious_weights"] == [{
+        "product": "Lettuce", "unit": "pcs",
+        "unit_weight_kg": 500.0, "looks_like_grams": 0.5,
+    }]
+    warning = next(w for w in data["warnings"] if "Lettuce" in w and "grams" in w)
+    assert "enter 0.5 instead" in warning
+    # The symptom the warning explains
+    by_name = {p["product_name"]: p for p in data["products"]}
+    assert by_name["Lettuce"]["share_pct"] > 99
+    assert data["cost_per_kg"] < 0.2
+
+
+def test_plausible_unit_weights_are_not_flagged():
+    """A 20 kg crate is a legitimate unit weight and must not be nagged about."""
+    with make_session() as session:
+        seed_base(session, lettuce_weight=Decimal("20"))
+        data = allocate(session)
+
+    assert data["suspicious_weights"] == []
+    assert not any("grams" in w for w in data["warnings"])
+
+
+def test_cost_per_kg_exposes_the_two_inputs_behind_every_cost_price():
+    with make_session() as session:
+        seed_base(session)
+        data = allocate(session)
+
+    assert data["cost_per_kg"] == round(16000 / 900, 4)
+    # Under weight basis every crop's cost per kilogram IS this number
+    for p in data["products"]:
+        if p["total_kg"]:
+            assert round(p["allocated_cost"] / p["total_kg"], 2) == round(data["cost_per_kg"], 2)
+
+
+def test_cost_per_kg_absorbed_includes_the_overhead_share():
+    with make_session() as session:
+        seed_base(session)
+        session.add(Expense(id=95, category_id=1, farm_id=None, amount=Decimal("30000"),
+                            expense_date=date(2026, 8, 9), description="Head office"))
+        session.commit()
+        data = allocate(session)
+
+    assert data["cost_per_kg"] == round(16000 / 900, 4)
+    assert data["cost_per_kg_absorbed"] == round(46000 / 900, 4)

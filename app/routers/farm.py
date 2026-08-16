@@ -2322,6 +2322,12 @@ async function loadSeasonAnalysis(){
             <div class="stat-card" style="border-top:2px solid var(--danger)"><div class="stat-label">Total Cost to Absorb</div><div class="stat-value" style="font-size:20px;color:var(--danger)">${fmt(data.fully_absorbed_cost)} EGP</div></div>
             <div class="stat-card" style="border-top:2px solid var(--blue)"><div class="stat-label">Harvest Value${data.revenue_basis === "realised" ? "" : " (part list price)"}</div><div class="stat-value" style="font-size:20px;color:var(--blue)">${fmt(data.estimated_revenue)} EGP</div></div>
             <div class="stat-card lime"><div class="stat-label">Total Harvested</div><div class="stat-value lime" style="font-size:20px">${harvestLabel}</div></div>
+            ${data.cost_per_kg !== null && data.cost_per_kg !== undefined ? `
+            <div class="stat-card" style="border-top:2px solid var(--warn)">
+                <div class="stat-label">Cost per kg</div>
+                <div class="stat-value" style="font-size:20px;color:var(--warn)">${Number(data.cost_per_kg).toFixed(2)}</div>
+                <div style="font-size:10px;color:var(--muted);margin-top:4px">${fmt(data.total_cost)} ÷ ${Number(data.total_kg||0).toFixed(1)} kg</div>
+            </div>` : ""}
             <div class="stat-card teal"><div class="stat-label">Expenses Tagged</div><div class="stat-value teal" style="font-size:20px">${Number(data.expense_count || 0)}</div></div>
             <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Deliveries</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${Number(data.delivery_count || 0)}</div></div>
         `;

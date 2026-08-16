@@ -1421,6 +1421,10 @@ async def get_cost_allocation(
                     "product_name": product.name if product else f"#{item.product_id}",
                     "unit": item.unit or (product.unit if product else "kg"),
                     "product_unit": (product.unit if product else "") or "",
+                    "unit_weight_kg": (
+                        float(product.unit_weight_kg)
+                        if product is not None and product.unit_weight_kg else None
+                    ),
                     "units_seen": set(),
                     "list_price": float(product.price) if product else 0,
                     "sale_price": float(product.price) if product else 0,
@@ -1647,6 +1651,29 @@ async def get_cost_allocation(
             f"Split {('by sale value' if basis == 'value' else 'by weight' if basis == 'weight' else 'by raw quantity')} "
             f"instead — these products have {what}{detail}. {fix}"
         )
+    # A unit weight of 100 kg+ for a single piece/bunch is almost always grams
+    # typed into a kilogram field. One such entry inflates the total weight by
+    # a thousandfold, which collapses every crop's cost per kilogram and hands
+    # that product nearly the whole cost share — so it is worth calling out.
+    SUSPICIOUS_UNIT_WEIGHT_KG = 100.0
+    suspicious_weights = [
+        {
+            "product": info["product_name"],
+            "unit": info["product_unit"] or info["unit"],
+            "unit_weight_kg": info["unit_weight_kg"],
+            "looks_like_grams": round(info["unit_weight_kg"] / 1000.0, 4),
+        }
+        for info in quantity_by_product.values()
+        if info["unit_weight_kg"] and info["unit_weight_kg"] >= SUSPICIOUS_UNIT_WEIGHT_KG
+    ]
+    for suspect in suspicious_weights:
+        warnings.append(
+            f"{suspect['product']} is set to {suspect['unit_weight_kg']:,.0f} kg per "
+            f"{suspect['unit'] or 'unit'} — if that was meant to be grams, enter "
+            f"{suspect['looks_like_grams']:g} instead. As it stands this product takes "
+            "almost the whole cost share and pushes every cost price down."
+        )
+
     if basis == "quantity":
         distinct_units = {u for info in quantity_by_product.values() for u in info["units_seen"] if u}
         if len(distinct_units) > 1:
@@ -1780,6 +1807,14 @@ async def get_cost_allocation(
         ),
         "weight_basis_complete": weight_basis_complete,
         "value_basis_complete": value_basis_complete,
+        "suspicious_weights": suspicious_weights,
+        # The whole split in one number: pool ÷ total weight. Every crop's cost
+        # per kilogram equals this under weight basis, so seeing it makes an
+        # implausible result traceable to its two inputs.
+        "cost_per_kg": round(total_cost / total_kg, 4) if total_kg > 0 else None,
+        "cost_per_kg_absorbed": (
+            round((total_cost + shared_cost_allocated) / total_kg, 4) if total_kg > 0 else None
+        ),
         "products_missing_weight": sorted(set(missing_mass)),
         "products_missing_price": sorted(set(missing_value)),
         "products_missing_sales": sorted(set(missing_price)),
