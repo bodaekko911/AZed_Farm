@@ -103,3 +103,92 @@ async def get_b2b_client_top_products(db: AsyncSession) -> dict:
         client_products[client_id] = client_products[client_id][:5]
 
     return client_products
+
+
+# ── Client outstanding balance ───────────────────────────────────────────────
+# One definition, used by every screen that shows what a client owes. It used
+# to be re-derived in each place and they disagreed: the B2B clients list and
+# the accounting clients list both counted unpaid invoices only, so a refund
+# never showed up; the accounting invoices list read the stored
+# B2BClient.outstanding field, which drifts because not every path maintains
+# it. Refunds are credits against the account and must come off the balance.
+#
+#   outstanding = unpaid/partial invoice balances − refunds issued   (min 0)
+
+# Every status that is not fully settled. "consignment" belongs here: those
+# invoices track AR like any other, their amount_paid is maintained as the
+# client reports sales, and their unpaid balance is money owed — leaving them
+# out under-reported what consignment clients owe on every screen.
+UNPAID_INVOICE_STATUSES = ("unpaid", "partial", "consignment")
+
+
+def client_invoice_balance_subquery():
+    """Per-client sum of what is still owed on unpaid/partial invoices."""
+    return (
+        select(
+            B2BInvoice.client_id,
+            sa_func.coalesce(
+                sa_func.sum(B2BInvoice.total - B2BInvoice.amount_paid), 0
+            ).label("outstanding"),
+        )
+        .where(B2BInvoice.status.in_(UNPAID_INVOICE_STATUSES))
+        .group_by(B2BInvoice.client_id)
+        .subquery()
+    )
+
+
+def client_refund_subquery():
+    """Per-client total of refunds issued."""
+    from app.models.b2b import B2BRefund
+
+    return (
+        select(
+            B2BRefund.client_id,
+            sa_func.coalesce(sa_func.sum(B2BRefund.total), 0).label("refunded"),
+        )
+        .group_by(B2BRefund.client_id)
+        .subquery()
+    )
+
+
+async def client_outstanding_value(db: AsyncSession, client_id: int) -> float:
+    """What one client actually owes, by the definition above."""
+    from app.models.b2b import B2BRefund
+
+    invoiced = await db.execute(
+        select(sa_func.coalesce(sa_func.sum(B2BInvoice.total - B2BInvoice.amount_paid), 0))
+        .where(
+            B2BInvoice.client_id == client_id,
+            B2BInvoice.status.in_(UNPAID_INVOICE_STATUSES),
+        )
+    )
+    refunded = await db.execute(
+        select(sa_func.coalesce(sa_func.sum(B2BRefund.total), 0))
+        .where(B2BRefund.client_id == client_id)
+    )
+    return max(float(invoiced.scalar() or 0) - float(refunded.scalar() or 0), 0.0)
+
+
+async def client_outstanding_map(db: AsyncSession) -> dict[int, float]:
+    """{client_id: outstanding} for every client that has invoices or refunds.
+    Avoids a per-row query when rendering a list."""
+    from app.models.b2b import B2BRefund
+
+    invoiced = await db.execute(
+        select(
+            B2BInvoice.client_id,
+            sa_func.coalesce(sa_func.sum(B2BInvoice.total - B2BInvoice.amount_paid), 0),
+        )
+        .where(B2BInvoice.status.in_(UNPAID_INVOICE_STATUSES))
+        .group_by(B2BInvoice.client_id)
+    )
+    balances: dict[int, float] = {cid: float(amt or 0) for cid, amt in invoiced.all()}
+
+    refunded = await db.execute(
+        select(B2BRefund.client_id, sa_func.coalesce(sa_func.sum(B2BRefund.total), 0))
+        .group_by(B2BRefund.client_id)
+    )
+    for cid, amt in refunded.all():
+        balances[cid] = balances.get(cid, 0.0) - float(amt or 0)
+
+    return {cid: max(value, 0.0) for cid, value in balances.items()}

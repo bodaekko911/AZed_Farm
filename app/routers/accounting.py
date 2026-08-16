@@ -23,6 +23,12 @@ from app.models.expense import Expense, ExpenseCategory
 from app.models.user import User
 from app.models.invoice import Invoice
 from app.models.refund import RetailRefund
+from app.services.b2b_shared import (
+    client_invoice_balance_subquery,
+    client_outstanding_map,
+    client_outstanding_value,
+    client_refund_subquery,
+)
 from app.schemas.invoice import B2BPaymentRequest, ConsignmentSaleItemIn
 from decimal import Decimal
 
@@ -622,13 +628,17 @@ async def get_b2b_invoices(
         )
     result = await db.execute(stmt)
     invoices = result.scalars().all()
+    # One grouped query rather than one per row, and the same definition the
+    # clients list uses — this row used to read the stored client.outstanding,
+    # which drifts and ignores refunds.
+    outstanding_by_client = await client_outstanding_map(db)
     return [
         {
             "id":             i.id,
             "invoice_number": i.invoice_number,
             "client":         i.client.name if i.client else "—",
             "client_id":      i.client_id,
-            "client_outstanding": float(i.client.outstanding) if i.client else 0,
+            "client_outstanding": outstanding_by_client.get(i.client_id, 0.0),
             "invoice_type":   i.invoice_type,
             "status":         i.status,
             "subtotal":       float(i.subtotal),
@@ -657,18 +667,22 @@ async def get_accounting_b2b_clients(
     db: AsyncSession = Depends(get_async_session),
 ):
     q = " ".join(q.split()) if isinstance(q, str) and q.strip() else None
-    outstanding_sub = (
-        select(
-            B2BInvoice.client_id,
-            func.coalesce(func.sum(B2BInvoice.total - B2BInvoice.amount_paid), 0).label("outstanding"),
-        )
-        .where(B2BInvoice.status.in_(["unpaid", "partial"]))
-        .group_by(B2BInvoice.client_id)
-        .subquery()
-    )
+    # Outstanding = unpaid invoice balances LESS refunds issued — the shared
+    # definition, so this screen agrees with the B2B page and the statement.
+    # The refund leg used to be missing here, so a refund never moved the
+    # balance shown on this list.
+    outstanding_sub = client_invoice_balance_subquery()
+    refund_sub = client_refund_subquery()
     stmt = (
-        select(B2BClient, func.coalesce(outstanding_sub.c.outstanding, 0).label("computed_outstanding"))
+        select(
+            B2BClient,
+            (
+                func.coalesce(outstanding_sub.c.outstanding, 0)
+                - func.coalesce(refund_sub.c.refunded, 0)
+            ).label("computed_outstanding"),
+        )
         .outerjoin(outstanding_sub, outstanding_sub.c.client_id == B2BClient.id)
+        .outerjoin(refund_sub, refund_sub.c.client_id == B2BClient.id)
         .where(B2BClient.is_active == True)
         .options(selectinload(B2BClient.invoices))
         .order_by(B2BClient.name)
@@ -694,7 +708,7 @@ async def get_accounting_b2b_clients(
             "payment_terms": c.payment_terms,
             "credit_limit": float(c.credit_limit or 0),
             "discount_pct": float(c.discount_pct or 0),
-            "outstanding": float(computed_outstanding or 0),
+            "outstanding": max(float(computed_outstanding or 0), 0.0),
             "invoice_count": len(c.invoices),
             "is_consignment": (c.payment_terms or "").strip().lower() == "consignment",
         }
@@ -801,7 +815,7 @@ async def _record_consignment_client_payment(
     if not open_invoices:
         raise HTTPException(status_code=400, detail="This client has no open consignment invoices")
 
-    outstanding = round(float(client.outstanding or 0), 2)
+    outstanding = round(await client_outstanding_value(db, client.id), 2)
     open_balance_total = round(sum(float(inv.total) - float(inv.amount_paid) for inv in open_invoices), 2)
     if amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be greater than 0")

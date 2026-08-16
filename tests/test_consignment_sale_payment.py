@@ -14,7 +14,7 @@ from app.core.log import ActivityLog
 from app.database import Base
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.b2b import (
-    B2BClient, B2BInvoice, B2BInvoiceItem,
+    B2BClient, B2BInvoice, B2BInvoiceItem, B2BRefund,
     Consignment, ConsignmentItem, ConsignmentSale, ConsignmentSaleItem,
 )
 from app.models.product import Product
@@ -63,6 +63,9 @@ def make_session():
             B2BClient.__table__,
             B2BInvoice.__table__,
             B2BInvoiceItem.__table__,
+            # The outstanding balance nets off refunds, so this table is part
+            # of the schema any payment path touches.
+            B2BRefund.__table__,
             Consignment.__table__,
             ConsignmentItem.__table__,
             ConsignmentSale.__table__,

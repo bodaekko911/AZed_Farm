@@ -319,31 +319,11 @@ async def seed_accounts(db: AsyncSession = Depends(get_async_session), _: User =
 
 
 # ── CLIENT API ─────────────────────────────────────────
-def _client_refund_subquery():
-    """Total refunded per client. Refunds are credits against the account, so
-    they must come off the balance owed — see _client_outstanding_value."""
-    return (
-        select(
-            B2BRefund.client_id,
-            func.coalesce(func.sum(B2BRefund.total), 0).label("refunded"),
-        )
-        .group_by(B2BRefund.client_id)
-        .subquery()
-    )
-
-
-async def _client_outstanding_value(db: AsyncSession, client_id: int) -> float:
-    """What a single client actually owes, computed the same way the clients
-    list and the statement do: unpaid invoice balances less refunds issued."""
-    invoiced = await db.execute(
-        select(func.coalesce(func.sum(B2BInvoice.total - B2BInvoice.amount_paid), 0))
-        .where(B2BInvoice.client_id == client_id, B2BInvoice.status.in_(["unpaid", "partial"]))
-    )
-    refunded = await db.execute(
-        select(func.coalesce(func.sum(B2BRefund.total), 0))
-        .where(B2BRefund.client_id == client_id)
-    )
-    return max(float(invoiced.scalar() or 0) - float(refunded.scalar() or 0), 0.0)
+from app.services.b2b_shared import (
+    client_invoice_balance_subquery as _client_invoice_balance_subquery,
+    client_outstanding_value as _client_outstanding_value,
+    client_refund_subquery as _client_refund_subquery,
+)
 
 
 @router.get("/api/clients")
@@ -353,17 +333,7 @@ async def get_clients(q: str = "", db: AsyncSession = Depends(get_async_session)
     # refund leg used to be missing here, so issuing a refund left the balance
     # on this screen unchanged even though the statement and the client
     # analysis both already netted it off.
-    outstanding_sub = (
-        select(
-            B2BInvoice.client_id,
-            func.coalesce(
-                func.sum(B2BInvoice.total - B2BInvoice.amount_paid), 0
-            ).label("outstanding"),
-        )
-        .where(B2BInvoice.status.in_(["unpaid", "partial"]))
-        .group_by(B2BInvoice.client_id)
-        .subquery()
-    )
+    outstanding_sub = _client_invoice_balance_subquery()
     refund_sub = _client_refund_subquery()
     # Clamped to zero in Python, not SQL: a two-argument MAX is an aggregate in
     # Postgres (GREATEST is the scalar there) but a scalar in SQLite, so doing

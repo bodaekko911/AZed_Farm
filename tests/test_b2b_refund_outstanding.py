@@ -34,6 +34,7 @@ from app.models.b2b import (
 from app.models.inventory import StockMove
 from app.models.product import Product
 from app.models.user import User
+from app.schemas.invoice import B2BPaymentRequest
 
 
 class AsyncSessionAdapter:
@@ -265,3 +266,111 @@ def test_accounting_refund_requires_items():
             assert exc.status_code == 400
         else:
             raise AssertionError("an empty refund was accepted")
+
+
+# ── 3. Every screen agrees on what a client owes ─────────────────────────────
+
+def accounting_listed_outstanding(session, client_id=1):
+    rows = run(accounting.get_accounting_b2b_clients(q=None, db=AsyncSessionAdapter(session)))
+    return next(r["outstanding"] for r in rows if r["id"] == client_id)
+
+
+def accounting_invoice_outstanding(session, invoice_id=1):
+    # Query(None) defaults are not resolved when calling the handler
+    # directly, so pass the filter arguments explicitly.
+    rows = run(accounting.get_b2b_invoices(
+        invoice_type=None, status=None, search=None,
+        from_date=None, to_date=None, db=AsyncSessionAdapter(session),
+    ))
+    return next(r["client_outstanding"] for r in rows if r["id"] == invoice_id)
+
+
+def test_accounting_clients_list_reflects_refunds():
+    with make_session() as session:
+        seed(session)
+        assert accounting_listed_outstanding(session) == 1000.0
+        b2b_refund(session, qty=10, price=20)
+        after = accounting_listed_outstanding(session)
+
+    assert after == 800.0
+
+
+def test_accounting_invoices_list_reflects_refunds():
+    """This row read the stored client.outstanding, a third source that drifts
+    independently of the two lists."""
+    with make_session() as session:
+        seed(session)
+        client = session.get(B2BClient, 1)
+        client.outstanding = Decimal("4321")        # deliberately wrong
+        session.commit()
+
+        assert accounting_invoice_outstanding(session) == 1000.0   # not 4321
+        b2b_refund(session, qty=10, price=20)
+        after = accounting_invoice_outstanding(session)
+
+    assert after == 800.0
+
+
+def test_all_four_screens_report_the_same_balance():
+    with make_session() as session:
+        seed(session)
+        session.get(B2BClient, 1).outstanding = Decimal("999")     # stale field
+        session.commit()
+        b2b_refund(session, qty=10, price=20)
+
+        values = {
+            "b2b clients":          listed_outstanding(session),
+            "accounting clients":   accounting_listed_outstanding(session),
+            "accounting invoices":  accounting_invoice_outstanding(session),
+            "single lookup":        run(b2b._client_outstanding_value(
+                                        AsyncSessionAdapter(session), 1)),
+        }
+
+    assert len(set(values.values())) == 1, values
+    assert values["b2b clients"] == 800.0
+
+
+def test_consignment_payment_guard_uses_the_live_balance():
+    """It checked the stored field, so a stale zero blocked legitimate
+    payments and a stale high value let through more than was owed."""
+    from fastapi import HTTPException
+    with make_session() as session:
+        seed(session)
+        session.get(B2BClient, 1).outstanding = Decimal("0")       # stale
+        session.commit()
+        invoice = session.get(B2BInvoice, 1)
+        invoice.invoice_type = "consignment"
+        session.commit()
+
+        payload = B2BPaymentRequest(amount=100.0)
+        result = run(accounting.accounting_client_consignment_payment(
+            1, payload, AsyncSessionAdapter(session), USER,
+        ))
+        assert result["ok"] is True
+
+
+def test_consignment_balances_count_toward_outstanding():
+    """Consignment invoices track AR like any other and their unpaid balance is
+    money owed. Excluding the 'consignment' status under-reported what those
+    clients owed on every screen."""
+    with make_session() as session:
+        seed(session)
+        invoice = session.get(B2BInvoice, 1)
+        invoice.invoice_type = "consignment"
+        invoice.status = "consignment"
+        session.commit()
+
+        assert listed_outstanding(session) == 1000.0
+        assert accounting_listed_outstanding(session) == 1000.0
+
+
+def test_settled_consignment_invoice_leaves_nothing_outstanding():
+    with make_session() as session:
+        seed(session)
+        invoice = session.get(B2BInvoice, 1)
+        invoice.invoice_type = "consignment"
+        invoice.status = "consignment"
+        invoice.amount_paid = Decimal("1000")
+        session.commit()
+
+        assert listed_outstanding(session) == 0.0
