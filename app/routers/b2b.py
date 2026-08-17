@@ -68,6 +68,11 @@ class PaymentRecord(BaseModel):
     amount: float
     method: str = "transfer"
 
+class PaymentReversal(BaseModel):
+    # Omit amount to reverse the whole payment; supply one to reverse part of it.
+    amount: Optional[float] = None
+    reason: Optional[str] = None
+
 class ConsignmentSettle(BaseModel):
     items: List[dict]
 
@@ -774,6 +779,99 @@ async def record_payment(invoice_id: int, data: PaymentRecord, db: AsyncSession 
 
     await db.commit()
     return {"ok": True, "status": invoice.status}
+
+
+@router.post("/api/invoices/{invoice_id}/reverse-payment", dependencies=[Depends(require_action("b2b", "invoices", "approve"))])
+async def reverse_payment(
+    invoice_id: int,
+    data: Optional[PaymentReversal] = None,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Undo a payment collected against an invoice, in full or in part.
+
+    Posts a CONTRA journal rather than deleting the original. The original
+    entry stays on the ledger and the reversal sits beside it, so the history
+    shows what actually happened instead of pretending the payment never
+    existed — and the trial balance stays consistent either way.
+
+    The legs mirror record_payment exactly, including the deferred-revenue pair
+    that non-cash invoices carry, so reversing a payment in full leaves every
+    account exactly where it was before it was collected.
+    """
+    result = await db.execute(
+        select(B2BInvoice)
+        .where(B2BInvoice.id == invoice_id)
+        .options(selectinload(B2BInvoice.client))
+    )
+    invoice = result.scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+    already_paid = round(float(invoice.amount_paid or 0), 2)
+    if already_paid <= 0:
+        raise HTTPException(status_code=400, detail="This invoice has no payment to reverse")
+
+    requested = (data.amount if data and data.amount is not None else already_paid)
+    amount = round(float(requested), 2)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Reversal amount must be greater than 0")
+    if amount > already_paid + 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot reverse more than was paid: {already_paid:.2f}",
+        )
+
+    remaining = round(already_paid - amount, 2)
+    invoice.amount_paid = Decimal(str(remaining))
+    if remaining >= float(invoice.total) - 0.005:
+        invoice.status = "paid"
+    elif remaining > 0:
+        invoice.status = "partial"
+    else:
+        # Back to whatever it was before any payment. A status that is not a
+        # payment state (an imported "consignment", say) is left alone rather
+        # than being flattened to "unpaid".
+        invoice.status = invoice.status if invoice.status not in ("paid", "partial") else "unpaid"
+
+    client = invoice.client
+    if client is not None:
+        client.outstanding = Decimal(str(round(float(client.outstanding or 0) + amount, 2)))
+
+    reason = (data.reason if data else None) or ""
+    reason = reason.strip()
+    description = f"Payment reversed - {invoice.invoice_number}"
+    if reason:
+        description += f" - {reason}"
+
+    # Mirror image of the legs record_payment posted for this invoice type.
+    if invoice.invoice_type == "cash":
+        entries = [("1100", amount, 0), ("1000", 0, amount)]
+        ref_type = "b2b_collection_reversal"
+    else:
+        entries = [
+            ("1100", amount, 0), ("1000", 0, amount),
+            ("4000", amount, 0), ("2200", 0, amount),
+        ]
+        ref_type = "b2b_payment_reversal"
+    await _post_journal(db, description, ref_type, entries,
+                        user_id=current_user.id, ref_id=invoice.id)
+
+    record(db, "B2B", "reverse_payment",
+           f"Reversed {amount:.2f} of payment on {invoice.invoice_number}"
+           + (f" - {reason}" if reason else ""),
+           user=current_user, ref_type="b2b_invoice", ref_id=invoice.id)
+    await db.commit()
+
+    return {
+        "ok": True,
+        "invoice_number": invoice.invoice_number,
+        "reversed": amount,
+        "amount_paid": remaining,
+        "balance_due": round(float(invoice.total) - remaining, 2),
+        "status": invoice.status,
+        "client_outstanding": await _client_outstanding_value(db, invoice.client_id),
+    }
 
 
 # ── CONSIGNMENT API ────────────────────────────────────
@@ -2332,6 +2430,41 @@ td.name{color:var(--text);font-weight:600;}
     </div>
 </div>
 
+<!-- REVERSE PAYMENT MODAL -->
+<div class="modal-bg" id="reverse-modal">
+    <div class="modal" style="width:480px">
+        <div class="modal-title">Reverse Payment</div>
+        <div class="modal-sub" id="reverse-modal-sub"></div>
+        <div style="background:rgba(255,181,71,.08);border:1px solid rgba(255,181,71,.2);border-radius:10px;padding:11px 14px;margin:14px 0;font-size:12px;color:var(--warn);line-height:1.55">
+            A contra journal entry is posted — the original payment stays on the ledger and the
+            reversal sits beside it, so the accounts still reconcile.
+        </div>
+        <div class="fld" style="margin-bottom:12px">
+            <label>How much</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--sub);font-weight:400;cursor:pointer;margin-top:6px">
+                <input type="radio" name="reverse-mode" value="full" checked onchange="onReverseModeChange()"> Reverse the full payment
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--sub);font-weight:400;cursor:pointer;margin-top:4px">
+                <input type="radio" name="reverse-mode" value="partial" onchange="onReverseModeChange()"> Reverse part of it
+            </label>
+        </div>
+        <div class="fld" id="reverse-amount-wrap" style="margin-bottom:12px">
+            <label>Amount to reverse (ج.م.)</label>
+            <input id="reverse-amount" type="number" min="0.01" step="any"
+                style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:9px 12px;color:var(--text);font-family:var(--mono);font-size:14px;outline:none;width:100%">
+        </div>
+        <div class="fld">
+            <label>Reason (optional)</label>
+            <input id="reverse-reason" placeholder="e.g. Cheque bounced, entered against the wrong invoice"
+                style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:9px 12px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;width:100%">
+        </div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeReverseModal()">Cancel</button>
+            <button class="btn btn-warn" onclick="submitReversePayment()">Reverse Payment</button>
+        </div>
+    </div>
+</div>
+
 <!-- CLIENT PORTAL LINK MODAL -->
 <div class="modal-bg" id="portal-modal">
     <div class="modal" style="width:600px">
@@ -3490,6 +3623,7 @@ function renderInvoices(invoices){
         let actionBtns=`<div style="display:flex;gap:5px;flex-wrap:wrap">
             <button class="action-btn" onclick="window.open('/b2b/invoice/${i.id}/print','_blank')">🖨 Print</button>
             ${(editable && (isAdmin || hasPermission("action_b2b_invoices_update")))?`<button class="action-btn teal" onclick="openEditInvoice(${i.id})">✏ Edit</button>`:""}
+            ${(i.amount_paid > 0 && (isAdmin || hasPermission("action_b2b_collect")))?`<button class="action-btn warn" onclick="openReversePayment(${i.id},'${i.invoice_number.replace(/'/g,"\'")}',${i.amount_paid})" title="Undo a payment collected on this invoice">↩ Reverse Payment</button>`:""}
             ${(isAdmin || hasPermission("action_b2b_delete"))?`<button class="action-btn danger" onclick="deleteInvoice(${i.id},'${i.invoice_number}')">Delete</button>`:""}
         </div>`;
         return `<tr>
@@ -3509,6 +3643,62 @@ function renderInvoices(invoices){
 /* ── PAYMENT ── Removed: payment collection happens in Accounting → B2B Clients */
 
 /* ── CONSIGNMENT PAYMENT ── Removed: consignment payments are recorded on the client account in Accounting → B2B Clients */
+
+/* ── REVERSE PAYMENT ── */
+let reverseInvoiceId = null;
+let reverseInvoicePaid = 0;
+
+function closeReverseModal(){
+    const el = document.getElementById("reverse-modal");
+    if(el) el.classList.remove("open");
+}
+
+function openReversePayment(invoiceId, invoiceNumber, amountPaid){
+    reverseInvoiceId = invoiceId;
+    reverseInvoicePaid = Number(amountPaid || 0);
+    document.getElementById("reverse-modal-sub").innerText =
+        `${invoiceNumber} — ${reverseInvoicePaid.toFixed(2)} EGP has been collected on this invoice.`;
+    const amt = document.getElementById("reverse-amount");
+    amt.value = reverseInvoicePaid.toFixed(2);
+    amt.max = reverseInvoicePaid;
+    document.getElementById("reverse-reason").value = "";
+    document.querySelector('input[name="reverse-mode"][value="full"]').checked = true;
+    onReverseModeChange();
+    document.getElementById("reverse-modal").classList.add("open");
+}
+
+function onReverseModeChange(){
+    const full = document.querySelector('input[name="reverse-mode"]:checked').value === "full";
+    const amt = document.getElementById("reverse-amount");
+    amt.disabled = full;
+    if(full) amt.value = reverseInvoicePaid.toFixed(2);
+    document.getElementById("reverse-amount-wrap").style.opacity = full ? ".55" : "1";
+}
+
+async function submitReversePayment(){
+    const full = document.querySelector('input[name="reverse-mode"]:checked').value === "full";
+    const amount = full ? null : (parseFloat(document.getElementById("reverse-amount").value) || 0);
+    const reason = document.getElementById("reverse-reason").value.trim();
+    if(!full && (amount <= 0 || amount > reverseInvoicePaid + 0.01)){
+        showToast(`Enter an amount between 0 and ${reverseInvoicePaid.toFixed(2)}`);
+        return;
+    }
+    const label = full ? `all ${reverseInvoicePaid.toFixed(2)} EGP` : `${amount.toFixed(2)} EGP`;
+    if(!confirm(`Reverse ${label} of payment?
+
+A contra journal entry will be posted. The original payment stays on the ledger.`)) return;
+    const res = await fetch(`/b2b/api/invoices/${reverseInvoiceId}/reverse-payment`, {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        credentials: "same-origin",
+        body: JSON.stringify({amount, reason: reason || null}),
+    });
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok || data.detail){ showToast("Error: " + (data.detail || "Could not reverse the payment")); return; }
+    closeReverseModal();
+    showToast(`Reversed ${Number(data.reversed).toFixed(2)} EGP — ${data.invoice_number} is now ${data.status}`);
+    loadInvoices();
+    loadClients();
+}
 
 /* ── CONSIGNMENTS ── */
 async function loadConsignments(){
