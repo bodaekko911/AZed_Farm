@@ -16,6 +16,7 @@ from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.user import User
 from app.services.production_costing import cost_batch
+from app.services.spoilage_summary import spoilage_summary
 from app.models.production import (
     Recipe, RecipeInput, RecipeOutput,
     ProductionBatch, BatchInput, BatchOutput,
@@ -414,18 +415,50 @@ async def delete_batch(batch_id: int, db: AsyncSession = Depends(get_async_sessi
 
 # ── SPOILAGE API ───────────────────────────────────────
 @router.get("/api/spoilage")
-async def get_spoilage(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_async_session)):
-    cnt_r = await db.execute(select(func.count()).select_from(SpoilageRecord))
+async def get_spoilage(
+    skip: int = 0,
+    limit: int = 100,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    db: AsyncSession = Depends(get_async_session),
+):
+    from datetime import date as _date, timedelta as _timedelta
+
+    def _parse(value, fallback):
+        try:
+            return _date.fromisoformat(value) if value else fallback
+        except ValueError:
+            return fallback
+
+    today = _date.today()
+    d_to = _parse(date_to, today)
+    d_from = _parse(date_from, d_to - _timedelta(days=29))
+    if d_from > d_to:
+        d_from, d_to = d_to, d_from
+
+    scope = (
+        SpoilageRecord.spoilage_date >= d_from,
+        SpoilageRecord.spoilage_date <= d_to,
+    )
+    cnt_r = await db.execute(
+        select(func.count()).select_from(SpoilageRecord).where(*scope)
+    )
     total = cnt_r.scalar()
     rec_r = await db.execute(
         select(SpoilageRecord)
         .options(selectinload(SpoilageRecord.product), selectinload(SpoilageRecord.farm))
+        .where(*scope)
         .order_by(SpoilageRecord.spoilage_date.desc(), SpoilageRecord.created_at.desc())
         .offset(skip).limit(limit)
     )
     records = rec_r.scalars().all()
     return {
         "total": total,
+        "date_from": d_from.isoformat(),
+        "date_to": d_to.isoformat(),
+        # Header figures — computed over the whole filtered window, not just
+        # the page of rows below it.
+        "summary": await spoilage_summary(db, d_from=d_from, d_to=d_to),
         "records": [
             {
                 "id":            r.id,
@@ -622,6 +655,19 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;pa
 .action-btn.blue:hover{border-color:var(--blue);color:var(--blue);}
 .action-btn.danger:hover{border-color:var(--danger);color:var(--danger);}
 .table-wrap{background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;}
+.spl-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:14px;}
+.spl-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px;position:relative;overflow:hidden;}
+.spl-card::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--danger),transparent);}
+.spl-card.warn::before{background:linear-gradient(90deg,var(--warn),transparent);}
+.spl-card.teal::before{background:linear-gradient(90deg,var(--teal,#2dd4bf),transparent);}
+.spl-label{font-size:10px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;color:var(--muted);margin-bottom:6px;}
+.spl-value{font-family:var(--mono);font-size:21px;font-weight:700;}
+.spl-note{font-size:11px;color:var(--muted);margin-top:5px;line-height:1.45;}
+.spl-filter{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:12px 16px;margin-bottom:14px;}
+.spl-filter label{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);}
+.spl-filter input[type=date]{background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:7px 11px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;}
+.spl-chip{padding:6px 11px;border-radius:8px;border:1px solid var(--border2);background:transparent;color:var(--sub);font-family:var(--sans);font-size:12px;font-weight:700;cursor:pointer;}
+.spl-chip:hover{color:var(--text);border-color:var(--danger);}
 table{width:100%;border-collapse:collapse;}
 thead{background:var(--card2);}
 th{text-align:left;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:12px 16px;}
@@ -784,6 +830,18 @@ td.name{color:var(--text);font-weight:600;}
 
     <!-- SPOILAGE -->
     <div id="section-spoilage" style="display:none">
+        <div class="spl-filter">
+            <label>From</label><input type="date" id="spl-from">
+            <label>To</label><input type="date" id="spl-to">
+            <button class="spl-chip" onclick="loadSpoilage()" style="border-color:var(--danger);color:var(--danger)">Apply</button>
+            <button class="spl-chip" onclick="spoilageRange(30)">Last 30 days</button>
+            <button class="spl-chip" onclick="spoilageRange('mtd')">This month</button>
+            <button class="spl-chip" onclick="spoilageRange('ytd')">This year</button>
+            <div style="flex:1"></div>
+            <div style="font-size:11px;color:var(--muted)" id="spl-period"></div>
+        </div>
+        <div class="spl-stats" id="spl-stats"></div>
+        <div id="spl-warnings"></div>
         <div class="table-wrap">
             <table>
                 <thead><tr><th>Ref #</th><th>Product</th><th>Qty Lost</th><th>Reason</th><th>Farm Source</th><th>Date</th><th>Notes</th><th></th></tr></thead>
@@ -2026,16 +2084,72 @@ async function saveSpoilage(){
     loadSpoilage();
 }
 
+function spoilageRange(kind){
+    const today = new Date();
+    let start;
+    if(kind === "mtd")      start = new Date(today.getFullYear(), today.getMonth(), 1);
+    else if(kind === "ytd") start = new Date(today.getFullYear(), 0, 1);
+    else                    start = new Date(today.getTime() - (kind - 1) * 86400000);
+    document.getElementById("spl-from").value = start.toISOString().split("T")[0];
+    document.getElementById("spl-to").value   = today.toISOString().split("T")[0];
+    loadSpoilage();
+}
+
+function renderSpoilageStats(s){
+    const kg  = v => Number(v||0).toLocaleString(undefined,{maximumFractionDigits:2});
+    const top = s.top_item;
+    document.getElementById("spl-period").innerText = `${s.date_from} → ${s.date_to} · ${s.records} record${s.records===1?"":"s"}`;
+    document.getElementById("spl-stats").innerHTML = `
+        <div class="spl-card">
+            <div class="spl-label">Total Spoilage</div>
+            <div class="spl-value" style="color:var(--danger)">${kg(s.total_qty_kg)} kg</div>
+            <div class="spl-note">${s.records} record${s.records===1?"":"s"} in this period</div>
+        </div>
+        <div class="spl-card warn">
+            <div class="spl-label">Spoilage Cost</div>
+            <div class="spl-value" style="color:var(--warn)">${money(s.total_cost)}</div>
+            <div class="spl-note">${s.cost_is_complete?"EGP, at product cost":"EGP — some products have no cost set"}</div>
+        </div>
+        <div class="spl-card teal">
+            <div class="spl-label">Top Item</div>
+            <div class="spl-value" style="font-size:17px;color:var(--teal,#2dd4bf)">${top?top.product:"—"}</div>
+            <div class="spl-note">${top?`${money(top.cost)} EGP · ${top.cost_share_pct}% of the loss`:"Nothing recorded"}</div>
+        </div>
+        <div class="spl-card">
+            <div class="spl-label">Spoilage Rate</div>
+            <div class="spl-value" style="color:${s.spoilage_pct===null?"var(--muted)":s.spoilage_pct<5?"var(--green)":s.spoilage_pct<15?"var(--warn)":"var(--danger)"}">${s.spoilage_pct===null?"—":s.spoilage_pct+"%"}</div>
+            <div class="spl-note">${s.spoilage_pct===null?"Needs weights on the spoiled products":`of ${kg(s.delivered_kg)} kg harvested`}</div>
+        </div>`;
+
+    const warn = [];
+    if(s.products_missing_weight.length)
+        warn.push(`No weight set on ${s.products_missing_weight.join(", ")} — those are missing from the kg total and the rate.`);
+    if(s.products_missing_cost.length)
+        warn.push(`No cost set on ${s.products_missing_cost.join(", ")} — the spoilage cost is understated.`);
+    document.getElementById("spl-warnings").innerHTML = warn.length
+        ? warn.map(w=>`<div style="background:rgba(255,181,71,.08);border:1px solid rgba(255,181,71,.28);border-radius:10px;padding:10px 13px;font-size:12.5px;color:var(--warn);line-height:1.5;margin-bottom:10px">${w}</div>`).join("")
+        : "";
+}
+
 async function loadSpoilage(){
-    let data = await (await fetch("/production/api/spoilage")).json();
+    const from = (document.getElementById("spl-from")||{}).value || "";
+    const to   = (document.getElementById("spl-to")||{}).value || "";
+    let data = await (await fetch(`/production/api/spoilage?date_from=${from}&date_to=${to}`)).json();
     const reasonLabel = {
         mold:"Mold", overripe:"Overripe", damaged:"Damaged",
         pest:"Pest", heat:"Heat damage", water:"Water damage",
         expired:"Expired", other:"Other"
     };
+    if(data.summary){
+        renderSpoilageStats(data.summary);
+        if(!document.getElementById("spl-from").value){
+            document.getElementById("spl-from").value = data.date_from;
+            document.getElementById("spl-to").value   = data.date_to;
+        }
+    }
     if(!data.records.length){
         document.getElementById("spoilage-body").innerHTML =
-            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:60px">No spoilage recorded yet. Click "Log Spoilage" to start.</td></tr>`;
+            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:60px">No spoilage recorded in this period.</td></tr>`;
         return;
     }
     document.getElementById("spoilage-body").innerHTML = data.records.map(r => {

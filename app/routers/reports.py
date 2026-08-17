@@ -42,6 +42,7 @@ from app.models.hr import (
 from app.models.user import User
 from app.services.expense_service import SALARY_CATEGORY_NAME
 from app.services.production_costing import cost_batch
+from app.services.spoilage_summary import spoilage_summary
 
 router = APIRouter(
     prefix="/reports",
@@ -1779,11 +1780,35 @@ async def _build_spoilage_report(db, *, d_from, d_to, skip=0, limit=100, include
         rows.append({"ref":r.ref_number,"product":name,"qty":float(r.qty),"unit":unit,"reason":reason,"farm":r.farm.name if r.farm else "—","date":str(r.spoilage_date),"user_name":r.user.name if r.user else "—","notes":r.notes or ""})
     total_qty   = round(sum(float(r.qty) for r in records), 2)
     total_count = len(records)
+    # Cost, weight and the loss rate come from the shared summary, so the
+    # report and the spoilage screen cannot drift apart.
+    summary = await spoilage_summary(db, d_from=d_from.date(), d_to=d_to.date())
+    cost_by_product = {p["product"]: p for p in summary["by_product"]}
+    cost_by_reason = {p["reason"]: p for p in summary["by_reason"]}
+    for row in rows:
+        entry = cost_by_product.get(row["product"])
+        row["unit_cost"] = round(entry["cost"] / entry["qty"], 3) if entry and entry["qty"] else 0.0
+        row["cost"] = round(row["qty"] * row["unit_cost"], 2)
     if not include_all:
         rows = rows[skip : skip + limit]
     return {"records":rows,"total_qty":total_qty,"total_count":total_count,
-            "by_product":[{"name":k,"qty":round(v,2)} for k,v in sorted(by_product.items(),key=lambda x:x[1],reverse=True)[:8]],
-            "by_reason": [{"reason":k,"qty":round(v,2)} for k,v in sorted(by_reason.items(), key=lambda x:x[1],reverse=True)]}
+            "total_cost": summary["total_cost"],
+            "total_qty_kg": summary["total_qty_kg"],
+            "top_item": summary["top_item"],
+            "spoilage_pct": summary["spoilage_pct"],
+            "spoilage_pct_of_production": summary["spoilage_pct_of_production"],
+            "delivered_kg": summary["delivered_kg"],
+            "produced_kg": summary["produced_kg"],
+            "cost_is_complete": summary["cost_is_complete"],
+            "products_missing_cost": summary["products_missing_cost"],
+            "products_missing_weight": summary["products_missing_weight"],
+            "by_product":[{"name":k,"qty":round(v,2),
+                           "cost":cost_by_product.get(k,{}).get("cost",0.0),
+                           "kg":cost_by_product.get(k,{}).get("kg",0.0)}
+                          for k,v in sorted(by_product.items(),key=lambda x:x[1],reverse=True)[:8]],
+            "by_reason": [{"reason":k,"qty":round(v,2),
+                           "cost":cost_by_reason.get(k,{}).get("cost",0.0)}
+                          for k,v in sorted(by_reason.items(), key=lambda x:x[1],reverse=True)]}
 
 
 @router.get("/api/spoilage")
@@ -1798,14 +1823,24 @@ async def spoilage_report(date_from: Optional[str] = None, date_to: Optional[str
 async def export_spoilage(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     data = await _build_spoilage_report(db, d_from=d_from, d_to=d_to, include_all=True)
-    rows = [[r["ref"],r["product"],r["qty"],r["unit"],r["reason"],r["farm"],r["date"],r["user_name"],r["notes"]] for r in data["records"]]
+    rows = [[r["ref"],r["product"],r["qty"],r["unit"],r["unit_cost"],r["cost"],
+             r["reason"],r["farm"],r["date"],r["user_name"],r["notes"]] for r in data["records"]]
     buf = to_xlsx(
-        ["Ref #","Product","Qty","Unit","Reason","Farm","Date","Performed By","Notes"],
+        ["Ref #","Product","Qty","Unit","Unit Cost","Cost","Reason","Farm","Date","Performed By","Notes"],
         rows,
         "Spoilage",
         report_title="Spoilage Report",
-        metadata=[("Date Range", f"{d_from.strftime('%Y-%m-%d')} to {d_to.strftime('%Y-%m-%d')}"), ("Records", data["total_count"]), ("Total Qty", data["total_qty"])],
-        column_formats={"Qty": "qty", "Date": "date"},
+        metadata=[
+            ("Date Range", f"{d_from.strftime('%Y-%m-%d')} to {d_to.strftime('%Y-%m-%d')}"),
+            ("Records", data["total_count"]),
+            ("Total Qty", data["total_qty"]),
+            ("Total Weight (kg)", data["total_qty_kg"]),
+            ("Total Cost (EGP)", data["total_cost"]),
+            ("Top Item", data["top_item"]["product"] if data["top_item"] else "—"),
+            ("Spoilage Rate", f"{data['spoilage_pct']}% of {data['delivered_kg']} kg harvested"
+                              if data["spoilage_pct"] is not None else "n/a"),
+        ],
+        column_formats={"Qty": "qty", "Unit Cost": "money", "Cost": "money", "Date": "date"},
         wrap_columns={"Notes", "Reason"},
     )
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -4927,15 +4962,23 @@ td.mono{font-family:var(--mono);}
         </div>
         <div class="stats-row">
             <div class="stat-card sc-danger"><div class="stat-label">Total Records</div><div class="stat-value sv-danger" id="spl-count">—</div></div>
-            <div class="stat-card sc-orange"><div class="stat-label">Total Qty Lost</div><div class="stat-value sv-orange" id="spl-qty">—</div></div>
+            <div class="stat-card sc-orange"><div class="stat-label">Total Qty Lost</div><div class="stat-value sv-orange" id="spl-qty">—</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px" id="spl-kg"></div></div>
+            <div class="stat-card sc-danger"><div class="stat-label">Spoilage Cost</div><div class="stat-value sv-danger" id="spl-cost">—</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px" id="spl-cost-note"></div></div>
+            <div class="stat-card sc-teal"><div class="stat-label">Top Item</div><div class="stat-value sv-teal" style="font-size:17px" id="spl-top">—</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px" id="spl-top-note"></div></div>
+            <div class="stat-card sc-orange"><div class="stat-label">Spoilage Rate</div><div class="stat-value sv-orange" id="spl-rate">—</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px" id="spl-rate-note"></div></div>
         </div>
+        <div id="spl-warnings"></div>
         <div class="two-col">
             <div class="chart-card"><div class="chart-title">By Product</div><div id="spl-by-product"></div></div>
             <div class="chart-card"><div class="chart-title">By Reason</div> <div id="spl-by-reason"></div></div>
         </div>
         <div class="table-wrap">
             <div class="table-title">All Records</div>
-            <table><thead><tr><th>Ref #</th><th>Product</th><th>Qty</th><th>Reason</th><th>Farm</th><th>Date</th><th>By</th><th>Notes</th></tr></thead>
+            <table><thead><tr><th>Ref #</th><th>Product</th><th style="text-align:right">Qty</th><th style="text-align:right">Unit Cost</th><th style="text-align:right">Cost</th><th>Reason</th><th>Farm</th><th>Date</th><th>By</th><th>Notes</th></tr></thead>
             <tbody id="spl-body"></tbody></table>
         </div>
     </div>
@@ -6025,8 +6068,27 @@ async function loadFarm(){
 async function loadSpoilage(){
     let r = getRange("spl-from","spl-to");
     let data = await fetchReportJson(`/reports/api/spoilage?date_from=${r.from}&date_to=${r.to}`);
+    const splMoney = v => Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});
     document.getElementById("spl-count").innerText = data.total_count;
     document.getElementById("spl-qty").innerText   = data.total_qty.toFixed(2);
+    document.getElementById("spl-kg").innerText    = `${Number(data.total_qty_kg||0).toLocaleString(undefined,{maximumFractionDigits:2})} kg`;
+    document.getElementById("spl-cost").innerText  = splMoney(data.total_cost);
+    document.getElementById("spl-cost-note").innerText = data.cost_is_complete ? "EGP, at product cost" : "EGP — some products have no cost set";
+    document.getElementById("spl-top").innerText   = data.top_item ? data.top_item.product : "—";
+    document.getElementById("spl-top-note").innerText = data.top_item
+        ? `${splMoney(data.top_item.cost)} EGP · ${data.top_item.cost_share_pct}% of the loss` : "Nothing recorded";
+    document.getElementById("spl-rate").innerText  = data.spoilage_pct === null ? "—" : data.spoilage_pct + "%";
+    document.getElementById("spl-rate-note").innerText = data.spoilage_pct === null
+        ? "Needs weights on the spoiled products"
+        : `of ${Number(data.delivered_kg||0).toLocaleString(undefined,{maximumFractionDigits:1})} kg harvested`;
+    const splWarn = [];
+    if(data.products_missing_weight.length)
+        splWarn.push(`No weight set on ${data.products_missing_weight.join(", ")} — those are missing from the kg total and the rate.`);
+    if(data.products_missing_cost.length)
+        splWarn.push(`No cost set on ${data.products_missing_cost.join(", ")} — the spoilage cost is understated.`);
+    document.getElementById("spl-warnings").innerHTML = splWarn.length
+        ? splWarn.map(w=>`<div style="background:rgba(255,181,71,.08);border:1px solid rgba(255,181,71,.28);border-radius:10px;padding:11px 14px;font-size:12.5px;color:var(--warn);line-height:1.55;margin-bottom:10px">${w}</div>`).join("")
+        : "";
     setPrintDates("ph-spl-dates", r.from, r.to);
     let maxP = data.by_product.length ? data.by_product[0].qty : 1;
     document.getElementById("spl-by-product").innerHTML = data.by_product.length
@@ -6048,14 +6110,16 @@ async function loadSpoilage(){
         ? data.records.map(r=>`<tr>
             <td class="mono" style="font-size:11px;color:var(--danger)">${r.ref}</td>
             <td class="name">${r.product}</td>
-            <td class="mono" style="color:var(--danger)">-${r.qty.toFixed(2)} ${r.unit}</td>
+            <td class="mono" style="text-align:right;color:var(--danger)">-${r.qty.toFixed(2)} ${r.unit}</td>
+            <td class="mono" style="text-align:right;color:var(--muted)">${Number(r.unit_cost||0).toFixed(2)}</td>
+            <td class="mono" style="text-align:right;color:var(--danger)">${Number(r.cost||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
             <td style="font-size:12px">${r.reason}</td>
             <td style="font-size:12px;color:var(--muted)">${r.farm}</td>
             <td class="mono" style="font-size:12px">${r.date}</td>
             <td style="font-size:12px;color:var(--muted);white-space:nowrap">${r.user_name}</td>
             <td style="font-size:12px;color:var(--muted)">${r.notes}</td>
           </tr>`).join("")
-        : `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:30px">No spoilage in this period</td></tr>`;
+        : `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:30px">No spoilage in this period</td></tr>`;
 }
 
 /* ── PRODUCTION ── */

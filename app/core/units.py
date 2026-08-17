@@ -56,3 +56,35 @@ def units_match(left: str | None, right: str | None) -> bool:
     if not a or not b:
         return True
     return a == b
+
+
+def to_kilograms(qty, unit=None, product=None):
+    """Quantity expressed in kilograms, or None when there is no mass basis.
+
+    kg passes through, grams divide by 1000, and piece/box/pack units convert
+    only when the product carries a configured average weight — so pieces are
+    never silently counted as kilograms.
+
+    ``unit`` overrides the product's own unit, for records that store the unit
+    they were captured in (a delivery line, say). Pass ``product`` to allow the
+    piece-weight conversion.
+    """
+    try:
+        quantity = float(qty or 0)
+    except (TypeError, ValueError):
+        return None
+
+    name = canonical_unit(unit or getattr(product, "unit", None))
+    if name == "kg":
+        return quantity
+    if name == "gram":
+        return quantity / 1000.0
+
+    piece_kg = getattr(product, "unit_weight_kg", None)
+    try:
+        piece_kg = float(piece_kg) if piece_kg else 0.0
+    except (TypeError, ValueError):
+        piece_kg = 0.0
+    if piece_kg > 0:
+        return quantity * piece_kg
+    return None
