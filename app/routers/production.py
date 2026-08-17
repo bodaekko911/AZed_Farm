@@ -15,6 +15,7 @@ from app.core.navigation import render_app_header
 from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.user import User
+from app.services.production_costing import cost_batch
 from app.models.production import (
     Recipe, RecipeInput, RecipeOutput,
     ProductionBatch, BatchInput, BatchOutput,
@@ -233,6 +234,10 @@ async def get_batches(skip: int = 0, limit: int = 50, db: AsyncSession = Depends
                 "created_at":   b.created_at.strftime("%Y-%m-%d %H:%M") if b.created_at else "—",
                 "inputs":  [{"product": i.product.name, "product_id": i.product_id, "qty": float(i.qty), "unit": i.product.unit} for i in b.inputs],
                 "outputs": [{"product": o.product.name, "product_id": o.product_id, "qty": float(o.qty), "unit": o.product.unit} for o in b.outputs],
+                # Material cost of the batch and what that makes each output
+                # worth per unit. Labour/energy are not tracked per batch, so
+                # this is material cost only — the UI says so.
+                "costing": cost_batch(b.inputs, b.outputs),
             }
             for b in batches
         ],
@@ -747,8 +752,8 @@ td.name{color:var(--text);font-weight:600;}
     <div id="section-batches">
         <div class="table-wrap">
             <table>
-                <thead><tr><th>Batch #</th><th>Type</th><th>Recipe</th><th>Inputs</th><th>Outputs</th><th>Loss %</th><th>Date</th><th>Notes</th><th></th></tr></thead>
-                <tbody id="batches-body"><tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr></tbody>
+                <thead><tr><th>Batch #</th><th>Type</th><th>Recipe</th><th>Inputs</th><th>Outputs</th><th style="text-align:right">Material Cost</th><th>Loss %</th><th>Date</th><th>Notes</th><th></th></tr></thead>
+                <tbody id="batches-body"><tr><td colspan="10" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr></tbody>
             </table>
             <div class="pagination">
                 <span id="batch-page-info">-</span>
@@ -1662,6 +1667,8 @@ async function saveBatch(){
 }
 
 /* ── LOAD BATCHES ── */
+function money(v){ return Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2}); }
+
 async function loadBatches(){
     let data = await (await fetch(`/production/api/batches?skip=${batchPage*pageSize}&limit=${pageSize}`)).json();
     totalBatches = data.total;
@@ -1670,12 +1677,13 @@ async function loadBatches(){
     document.getElementById("prev-btn").disabled = batchPage===0;
     document.getElementById("next-btn").disabled = (batchPage+1)*pageSize>=totalBatches;
     if(!data.batches.length){
-        document.getElementById("batches-body").innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:60px">No batches yet.</td></tr>`;
+        document.getElementById("batches-body").innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:60px">No batches yet.</td></tr>`;
         return;
     }
     let html="";
     data.batches.forEach(b => {
         let isPkg = b.batch_number.startsWith("PKG");
+        let c = b.costing || {input_lines:[],output_lines:[],input_cost:0,cost_is_complete:false,products_missing_cost:[],allocation_basis:"single",allocation_basis_label:"",yield_pct:null,input_kg:0,output_kg:0};
         let lossColor = b.waste_pct<10?"var(--green)":b.waste_pct<25?"var(--warn)":"var(--danger)";
         let inSum  = b.inputs.slice(0,2).map(i=>`${i.qty.toFixed(0)}${i.unit} ${i.product.split(" ")[0]}`).join(", ")+(b.inputs.length>2?"...":"");
         let outSum = b.outputs.slice(0,2).map(o=>`${o.qty.toFixed(0)}${o.unit} ${o.product.split(" ")[0]}`).join(", ")+(b.outputs.length>2?"...":"");
@@ -1693,20 +1701,39 @@ async function loadBatches(){
             <td class="name">${b.recipe}</td>
             <td style="font-size:12px;color:var(--sub)">${inSum||"-"}</td>
             <td style="font-size:12px;color:var(--green)">${outSum||"-"}</td>
+            <td style="font-family:var(--mono);text-align:right;color:${c.cost_is_complete?"var(--text)":"var(--muted)"}" title="${c.cost_is_complete?"Material cost of the inputs":"Some inputs have no cost set"}">${money(c.input_cost)}${c.cost_is_complete?"":" *"}</td>
             <td style="font-family:var(--mono);color:${lossColor}">${b.waste_pct.toFixed(1)}%</td>
             <td style="font-size:12px;color:var(--muted)">${b.created_at}</td>
             <td style="font-size:12px;color:var(--muted);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.notes||"-"}</td>
             <td>${adminBtns}</td>
         </tr>
-        <tr><td colspan="9" style="padding:0;border:none">
+        <tr><td colspan="10" style="padding:0;border:none">
             <div class="batch-detail" id="det-${b.id}">
                 <div class="detail-grid">
-                    <div><div class="detail-section-title" style="color:var(--orange)">Inputs Used</div>
-                        ${b.inputs.map(i=>`<div class="detail-item"><span style="color:var(--sub)">${i.product}</span><span style="font-family:var(--mono);color:var(--orange)">-${i.qty.toFixed(2)} ${i.unit}</span></div>`).join("")}
+                    <div><div class="detail-section-title" style="color:var(--orange)">Inputs Used — what they cost</div>
+                        ${c.input_lines.map(i=>`<div class="detail-item">
+                            <span style="color:var(--sub)">${i.product}
+                                <span style="color:var(--muted);font-size:11px">${i.qty.toFixed(2)} ${i.unit} &times; ${money(i.unit_cost)}</span></span>
+                            <span style="font-family:var(--mono);color:var(--orange)">${money(i.line_cost)}</span>
+                        </div>`).join("")||`<div class="detail-item"><span style="color:var(--muted)">No inputs recorded</span></div>`}
+                        <div class="detail-item" style="border-top:1px solid var(--border);margin-top:6px;padding-top:6px;font-weight:700">
+                            <span>Total material cost</span>
+                            <span style="font-family:var(--mono);color:var(--orange)">${money(c.input_cost)}</span>
+                        </div>
                     </div>
-                    <div><div class="detail-section-title" style="color:var(--green)">Outputs Created</div>
-                        ${b.outputs.map(o=>`<div class="detail-item"><span style="color:var(--sub)">${o.product}</span><span style="font-family:var(--mono);color:var(--green)">+${o.qty.toFixed(2)} ${o.unit}</span></div>`).join("")}
+                    <div><div class="detail-section-title" style="color:var(--green)">Outputs — cost per unit</div>
+                        ${c.output_lines.map(o=>`<div class="detail-item">
+                            <span style="color:var(--sub)">${o.product}
+                                <span style="color:var(--muted);font-size:11px">${o.qty.toFixed(2)} ${o.unit}${c.allocation_basis!=="single"?` &middot; ${o.share_pct}% of cost`:""}</span></span>
+                            <span style="font-family:var(--mono);color:var(--green);text-align:right">${money(o.unit_cost)} / ${o.unit||"unit"}
+                                <div style="color:var(--muted);font-size:11px">${money(o.allocated_cost)} total${o.margin_pct!==null?` &middot; ${o.margin_pct}% margin`:""}</div></span>
+                        </div>`).join("")||`<div class="detail-item"><span style="color:var(--muted)">No outputs recorded</span></div>`}
                     </div>
+                </div>
+                <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.6;border-top:1px solid var(--border);padding-top:8px">
+                    ${c.allocation_basis_label}${c.yield_pct!==null?` &middot; yield ${c.yield_pct}% (${c.input_kg} kg in → ${c.output_kg} kg out)`:""}.
+                    Material cost only — labour, energy and overhead are not recorded against batches.
+                    ${c.products_missing_cost.length?`<br><span style="color:var(--warn)">No cost set on: ${c.products_missing_cost.join(", ")} — the batch cost is understated until those are filled in.</span>`:""}
                 </div>
             </div>
         </td></tr>`;

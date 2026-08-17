@@ -41,6 +41,7 @@ from app.models.hr import (
 )
 from app.models.user import User
 from app.services.expense_service import SALARY_CATEGORY_NAME
+from app.services.production_costing import cost_batch
 
 router = APIRouter(
     prefix="/reports",
@@ -1855,11 +1856,14 @@ async def _build_production_report(db, *, d_from, d_to, skip=0, limit=100, inclu
         is_pkg = b.batch_number.startswith("PKG")
         inputs  = [_production_line(i, i.product) for i in b.inputs]
         outputs = [_production_line(o, o.product) for o in b.outputs]
+        costing = cost_batch(b.inputs, b.outputs)
         rows.append({"batch_number":b.batch_number,"type":"Packaging" if is_pkg else "Processing",
             "recipe":b.recipe.name if b.recipe else "Custom","waste_pct":float(b.waste_pct),
             "notes":b.notes or "","date":b.created_at.strftime("%Y-%m-%d") if b.created_at else "—",
             "inputs":inputs,"outputs":outputs,
             "inputs_str":_production_lines_str(inputs),"outputs_str":_production_lines_str(outputs),
+            "input_cost":costing["input_cost"],"output_cost":costing["output_cost"],
+            "cost_complete":costing["cost_is_complete"],"costing":costing,
             "user_name":b.user.name if b.user else "—"})
         if is_pkg: total_pkg  += 1
         else:      total_proc += 1; losses.append(float(b.waste_pct))
@@ -1884,8 +1888,11 @@ async def _build_production_report(db, *, d_from, d_to, skip=0, limit=100, inclu
         stages = db_b.stages or []
         stage1 = stages[0] if stages else None
         last_closed = next((s for s in reversed(stages) if s.total_output_qty is not None), None)
-        inputs  = [_production_line(i, i.product) for i in (stage1.inputs if stage1 else [])]
-        outputs = [_production_line(o, o.product) for o in (last_closed.outputs if last_closed else [])]
+        drying_inputs  = list(stage1.inputs) if stage1 else []
+        drying_outputs = list(last_closed.outputs) if last_closed else []
+        inputs  = [_production_line(i, i.product) for i in drying_inputs]
+        outputs = [_production_line(o, o.product) for o in drying_outputs]
+        costing = cost_batch(drying_inputs, drying_outputs)
         yield_pct = float(last_closed.cumulative_yield_pct) if (last_closed and last_closed.cumulative_yield_pct is not None) else None
         waste_pct = (100.0 - yield_pct) if yield_pct is not None else 0.0
         rows.append({
@@ -1899,6 +1906,10 @@ async def _build_production_report(db, *, d_from, d_to, skip=0, limit=100, inclu
             "outputs": outputs,
             "inputs_str": _production_lines_str(inputs),
             "outputs_str": _production_lines_str(outputs),
+            "input_cost": costing["input_cost"],
+            "output_cost": costing["output_cost"],
+            "cost_complete": costing["cost_is_complete"],
+            "costing": costing,
             "user_name": db_b.started_by.name if db_b.started_by else "—",
         })
         if yield_pct is not None:
@@ -1945,6 +1956,10 @@ async def _build_production_report(db, *, d_from, d_to, skip=0, limit=100, inclu
     for row in rows:
         for direction, lines in (("Input", row["inputs"]), ("Output", row["outputs"])):
             for line in lines:
+                costing = row.get("costing") or {}
+                source = costing.get("input_lines" if direction == "Input" else "output_lines", [])
+                match = next((c for c in source if c.get("product_id") == line["product_id"]), None)
+                unit_cost = (match or {}).get("unit_cost", 0)
                 items.append({
                     "batch_number": row["batch_number"],
                     "type":         row["type"],
@@ -1954,6 +1969,8 @@ async def _build_production_report(db, *, d_from, d_to, skip=0, limit=100, inclu
                     "sku":          line["sku"],
                     "qty":          line["qty"],
                     "unit":         line["unit"],
+                    "unit_cost":    unit_cost,
+                    "line_cost":    round(line["qty"] * unit_cost, 2),
                 })
 
     paged = rows if include_all else rows[skip : skip + limit]
@@ -1978,11 +1995,13 @@ async def export_production(date_from: str = None, date_to: str = None, db: Asyn
         {
             "sheet_name": "Batches",
             "report_title": "Production Report — Batches",
-            "headers": ["Batch #", "Type", "Recipe", "Items In", "Items Out", "Loss %", "Date", "Performed By", "Notes"],
+            "headers": ["Batch #", "Type", "Recipe", "Items In", "Items Out", "Material Cost", "Loss %", "Date", "Performed By", "Notes"],
             "rows": [[b["batch_number"], b["type"], b["recipe"], len(b["inputs"]), len(b["outputs"]),
-                      b["waste_pct"], b["date"], b["user_name"], b["notes"]] for b in data["batches"]],
+                      b.get("input_cost", 0), b["waste_pct"], b["date"], b["user_name"], b["notes"]]
+                     for b in data["batches"]],
             "metadata": period,
-            "column_formats": {"Items In": "int", "Items Out": "int", "Loss %": "percent_value", "Date": "date"},
+            "column_formats": {"Items In": "int", "Items Out": "int", "Material Cost": "money",
+                               "Loss %": "percent_value", "Date": "date"},
             "wrap_columns": {"Notes"},
             "tab_color": "B45309",
         },
@@ -1991,11 +2010,13 @@ async def export_production(date_from: str = None, date_to: str = None, db: Asyn
             # the shape a pivot table or a stock reconciliation actually needs.
             "sheet_name": "Batch Items",
             "report_title": "Production Report — Item Detail",
-            "headers": ["Batch #", "Type", "Date", "Direction", "Item", "SKU", "Qty", "Unit"],
+            "headers": ["Batch #", "Type", "Date", "Direction", "Item", "SKU", "Qty", "Unit",
+                        "Unit Cost", "Line Cost"],
             "rows": [[i["batch_number"], i["type"], i["date"], i["direction"],
-                      i["product"], i["sku"], i["qty"], i["unit"]] for i in data["items"]],
+                      i["product"], i["sku"], i["qty"], i["unit"],
+                      i.get("unit_cost", 0), i.get("line_cost", 0)] for i in data["items"]],
             "metadata": period + [("Item Lines", len(data["items"]))],
-            "column_formats": {"Date": "date", "Qty": "qty"},
+            "column_formats": {"Date": "date", "Qty": "qty", "Unit Cost": "money", "Line Cost": "money"},
             "tab_color": "334155",
         },
         {
@@ -4970,7 +4991,7 @@ td.mono{font-family:var(--mono);}
                 <span style="color:var(--muted);font-weight:600;text-transform:none;letter-spacing:0">Click a batch to see its item detail</span>
             </div>
             <div style="overflow-x:auto">
-            <table><thead><tr><th style="width:26px"></th><th>Batch #</th><th>Type</th><th>Recipe</th><th style="text-align:right">Items In</th><th style="text-align:right">Items Out</th><th style="text-align:right">Loss %</th><th>Date</th><th>By</th></tr></thead>
+            <table><thead><tr><th style="width:26px"></th><th>Batch #</th><th>Type</th><th>Recipe</th><th style="text-align:right">Items In</th><th style="text-align:right">Items Out</th><th style="text-align:right">Material Cost</th><th style="text-align:right">Loss %</th><th>Date</th><th>By</th></tr></thead>
             <tbody id="prod-body"></tbody></table>
             </div>
         </div>
@@ -6094,18 +6115,19 @@ async function loadProduction(){
             <td class="name" style="font-size:12px">${b.recipe}</td>
             <td class="mono" style="text-align:right;color:var(--orange)">${b.inputs.length}</td>
             <td class="mono" style="text-align:right;color:var(--green)">${b.outputs.length}</td>
+            <td class="mono" style="text-align:right;color:${b.cost_complete?"var(--text)":"var(--muted)"}" title="${b.cost_complete?"Material cost of the inputs":"Some inputs have no cost set"}">${Number(b.input_cost||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}${b.cost_complete?"":" *"}</td>
             <td class="mono" style="text-align:right;color:${b.waste_pct<10?"var(--green)":b.waste_pct<25?"var(--warn)":"var(--danger)"}">${b.waste_pct.toFixed(1)}%</td>
             <td class="mono" style="font-size:12px;color:var(--muted)">${b.date}</td>
             <td style="font-size:12px;color:var(--muted);white-space:nowrap">${b.user_name}</td>
           </tr>
-          <tr id="prod-detail-${i}" style="display:none"><td colspan="9" style="padding:0;background:var(--bg)">
+          <tr id="prod-detail-${i}" style="display:none"><td colspan="10" style="padding:0;background:var(--bg)">
             <div class="two-col" style="gap:12px;padding:12px 16px">
               <div><div class="chart-title" style="margin-bottom:6px">Inputs — consumed</div>${lineTable(b.inputs,"var(--orange)")}</div>
               <div><div class="chart-title" style="margin-bottom:6px">Outputs — produced</div>${lineTable(b.outputs,"var(--green)")}</div>
             </div>
             ${b.notes?`<div style="padding:0 16px 12px;font-size:12px;color:var(--muted)">Note: ${b.notes}</div>`:""}
           </td></tr>`;}).join("")
-        : `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:30px">No batches in this period</td></tr>`;
+        : `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:30px">No batches in this period</td></tr>`;
 
     /* Flat item list — one row per material, every field in its own column */
     document.getElementById("prod-items-count").innerText =

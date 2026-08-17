@@ -217,3 +217,46 @@ def test_excel_export_splits_items_into_their_own_sheets():
     first_qty = items.cell(row=header_row + 1, column=7).value
     assert isinstance(first_item, str)
     assert isinstance(first_qty, (int, float))
+
+
+def test_report_carries_batch_material_cost():
+    with make_session() as session:
+        seed(session)
+        # Give the raw materials a cost so the batch has one
+        session.get(Product, 1).cost = Decimal("10")     # Tomato
+        session.get(Product, 3).cost = Decimal("2")      # Glass Jar
+        session.commit()
+        data = build(session)
+
+    batch = next(b for b in data["batches"] if b["batch_number"] == "PRD-0001")
+    assert batch["input_cost"] == 1080.0             # 100×10 + 40×2
+    assert batch["output_cost"] == 1080.0            # single output takes it all
+    assert batch["cost_complete"] is True
+    out = batch["costing"]["output_lines"][0]
+    assert out["unit_cost"] == round(1080 / 87.5, 3)
+
+
+def test_report_flags_batches_with_uncosted_inputs():
+    with make_session() as session:
+        seed(session)
+        session.get(Product, 1).cost = Decimal("10")     # jar left at 0
+        session.commit()
+        data = build(session)
+
+    batch = next(b for b in data["batches"] if b["batch_number"] == "PRD-0001")
+    assert batch["cost_complete"] is False
+    assert batch["costing"]["products_missing_cost"] == ["Glass Jar"]
+
+
+def test_item_lines_carry_unit_and_line_cost():
+    with make_session() as session:
+        seed(session)
+        session.get(Product, 1).cost = Decimal("10")
+        session.get(Product, 3).cost = Decimal("2")
+        session.commit()
+        data = build(session)
+
+    tomato_in = next(i for i in data["items"]
+                     if i["product"] == "Tomato" and i["batch_number"] == "PRD-0001")
+    assert tomato_in["unit_cost"] == 10.0
+    assert tomato_in["line_cost"] == 1000.0
