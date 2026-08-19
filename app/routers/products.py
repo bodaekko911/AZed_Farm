@@ -1,7 +1,8 @@
+from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, or_, select
 
@@ -13,7 +14,9 @@ from app.models.supplier import Supplier
 from app.models.user import User
 from app.core.log import record
 from app.core.navigation import render_app_header
+from app.core.xlsx import to_xlsx
 from app.core.product_types import (
+    ITEM_TYPE_LABELS,
     is_stock_tracked_product,
     normalize_item_type,
     stock_tracked_product_condition,
@@ -155,16 +158,9 @@ async def delete_category(
     return {"ok": True, "product_count": product_count}
 
 
-@router.get("/api/list")
-async def get_products(
-    q:         str  = "",
-    low_stock: bool = False,
-    category:  str  = "",
-    item_type: str  = "",
-    skip:      int  = 0,
-    limit:     int  = 50,
-    db: AsyncSession = Depends(get_async_session),
-):
+def _product_filters(q: str, low_stock: bool, category: str, item_type: str):
+    """Conditions behind the products list — shared by the table and the export
+    so what you download is exactly what the filters show."""
     conditions = [or_(Product.is_active.is_(True), Product.is_active.is_(None))]
     low_stock_threshold = func.coalesce(Product.reorder_level, Product.min_stock)
     if q:
@@ -178,6 +174,20 @@ async def get_products(
         conditions.append(Product.category == category)
     if item_type:
         conditions.append(Product.item_type == normalize_item_type(item_type))
+    return conditions
+
+
+@router.get("/api/list")
+async def get_products(
+    q:         str  = "",
+    low_stock: bool = False,
+    category:  str  = "",
+    item_type: str  = "",
+    skip:      int  = 0,
+    limit:     int  = 50,
+    db: AsyncSession = Depends(get_async_session),
+):
+    conditions = _product_filters(q, low_stock, category, item_type)
 
     cnt_result = await db.execute(
         select(func.count()).select_from(Product).where(*conditions)
@@ -215,6 +225,72 @@ async def get_products(
             for p in items
         ],
     }
+
+
+@router.get("/api/export.xlsx", dependencies=[Depends(require_permission("action_export_excel"))])
+async def export_products_excel(
+    q:         str  = "",
+    low_stock: bool = False,
+    category:  str  = "",
+    item_type: str  = "",
+    db: AsyncSession = Depends(get_async_session),
+):
+    """The filtered catalogue as a spreadsheet — every matching row, not just
+    the page on screen."""
+    conditions = _product_filters(q, low_stock, category, item_type)
+    result = await db.execute(
+        select(Product, Supplier.name)
+        .outerjoin(Supplier, Product.preferred_supplier_id == Supplier.id)
+        .where(*conditions)
+        .order_by(Product.name)
+        .limit(10000)
+    )
+    rows_data = result.all()
+
+    headers = [
+        "SKU",
+        "Name",
+        "Category",
+        "Type",
+        "Price",
+        "Cost",
+        "Stock",
+        "Unit",
+        "Unit Weight (kg)",
+        "Min Stock",
+        "Reorder Level",
+        "Reorder Qty",
+        "Preferred Supplier",
+        "Low Stock",
+    ]
+    rows = []
+    for product, supplier_name in rows_data:
+        tracked = is_stock_tracked_product(product)
+        threshold = product.reorder_level if product.reorder_level is not None else (product.min_stock or 0)
+        low = tracked and float(product.stock or 0) <= float(threshold or 0)
+        rows.append([
+            product.sku,
+            product.name,
+            product.category or "",
+            ITEM_TYPE_LABELS.get(normalize_item_type(product.item_type), normalize_item_type(product.item_type)),
+            float(product.price or 0),
+            float(product.cost or 0),
+            float(product.stock or 0) if tracked else "",
+            product.unit,
+            float(product.unit_weight_kg) if product.unit_weight_kg is not None else "",
+            float(product.min_stock or 0),
+            float(product.reorder_level) if product.reorder_level is not None else "",
+            float(product.reorder_qty) if product.reorder_qty is not None else "",
+            supplier_name or "",
+            "Yes" if low else "No",
+        ])
+
+    buf = to_xlsx(headers, rows, "Products")
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=products_{date.today()}.xlsx"},
+    )
 
 
 @router.post("/api/add", dependencies=[Depends(require_permission("action_products_create"))])
@@ -403,6 +479,10 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;pa
 .search-box input::placeholder{color:var(--muted);}
 .filter-sel{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:10px 13px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;}
 .filter-sel:focus{border-color:var(--blue);}
+.btn-export{display:flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:10px 15px;color:var(--sub);font-family:var(--sans);font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;white-space:nowrap;}
+.btn-export:hover{border-color:var(--green);color:var(--green);}
+.btn-export:disabled{opacity:.5;cursor:not-allowed;}
+@keyframes spin{to{transform:rotate(360deg)}}
 .btn{display:flex;align-items:center;gap:7px;padding:10px 16px;border-radius:var(--r);font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer;border:none;transition:all .2s;white-space:nowrap;}
 .btn-blue{background:linear-gradient(135deg,var(--blue),var(--purple));color:white;}
 .btn-blue:hover{filter:brightness(1.1);transform:translateY(-1px);}
@@ -508,6 +588,10 @@ tr:hover td{background:rgba(255,255,255,.02);}
                 <option value="ingredient">Ingredient</option>
                 <option value="service">Service</option>
             </select>
+            <button class="btn-export" id="export-btn" onclick="exportProductsXLSX()" title="Export the filtered product list as Excel">
+                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export Excel
+            </button>
         </div>
         <div class="table-wrap">
             <table>
@@ -701,6 +785,8 @@ async function logout(){
       return role === "admin" || perms.has(permission);
   }
   function applyProductActionPermissions(u){
+      const exportBtn = document.getElementById("export-btn");
+      if(exportBtn) exportBtn.style.display = hasPermission("action_export_excel", u) ? "" : "none";
       if(hasPermission("action_products_edit", u) && hasPermission("action_products_delete", u)) return;
       document.querySelectorAll("#table-body tr td:last-child").forEach(cell => {
           cell.querySelectorAll("button").forEach(btn => {
@@ -912,6 +998,44 @@ async function loadProducts(){
     </tr>`;
     }).join("");
     applyProductActionPermissions(currentUser);
+}
+
+/* Downloads every row the current filters match, not just the page shown. */
+async function exportProductsXLSX(){
+    const btn = document.getElementById("export-btn");
+    if(!btn) return;
+    const label = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = `<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24" style="animation:spin .8s linear infinite;flex-shrink:0"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Exporting…`;
+    try{
+        const q    = document.getElementById("search").value.trim();
+        const cat  = document.getElementById("cat-filter").value;
+        const type = document.getElementById("type-filter").value;
+        let url = "/products/api/export.xlsx?";
+        if(q)    url += `&q=${encodeURIComponent(q)}`;
+        if(cat)  url += `&category=${encodeURIComponent(cat)}`;
+        if(type) url += `&item_type=${encodeURIComponent(type)}`;
+
+        const response = await fetch(url);
+        if(!response.ok){
+            showToast(response.status === 403 ? "Excel export permission required" : "Excel export failed");
+            return;
+        }
+        const blob = await response.blob();
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        const disposition = response.headers.get("Content-Disposition") || "";
+        const match = disposition.match(/filename="?([^"]+)"?/i);
+        link.download = match ? match[1] : `products_${new Date().toISOString().slice(0,10)}.xlsx`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+        showToast("Products exported");
+    } catch(e){
+        showToast("Excel export failed");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = label;
+    }
 }
 
 let searchTimer = null;
