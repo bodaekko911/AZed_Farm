@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from typing import Optional, List
 from pydantic import BaseModel
 from decimal import Decimal
@@ -208,18 +208,44 @@ async def delete_recipe(recipe_id: int, db: AsyncSession = Depends(get_async_ses
 
 # ── BATCH API ──────────────────────────────────────────
 @router.get("/api/batches")
-async def get_batches(skip: int = 0, limit: int = 50, db: AsyncSession = Depends(get_async_session)):
-    cnt_result = await db.execute(select(func.count()).select_from(ProductionBatch))
-    total = cnt_result.scalar()
-    result = await db.execute(
+async def get_batches(
+    skip: int = 0,
+    limit: int = 50,
+    batch_type: str = "all",
+    db: AsyncSession = Depends(get_async_session),
+):
+    kind = (batch_type or "all").strip().lower()
+    if kind not in ("all", "processing", "packaging"):
+        raise HTTPException(status_code=400, detail="batch_type must be all, processing or packaging")
+
+    # Packaging runs are numbered PKG-…, processing batches BATCH-… — the
+    # prefix is the only thing separating the two lists.
+    type_filter = None
+    if kind == "packaging":
+        type_filter = ProductionBatch.batch_number.like("PKG%")
+    elif kind == "processing":
+        type_filter = or_(
+            ProductionBatch.batch_number.is_(None),
+            ProductionBatch.batch_number.notlike("PKG%"),
+        )
+
+    cnt_stmt = select(func.count()).select_from(ProductionBatch)
+    list_stmt = (
         select(ProductionBatch)
         .options(
             selectinload(ProductionBatch.inputs).selectinload(BatchInput.product),
             selectinload(ProductionBatch.outputs).selectinload(BatchOutput.product),
             selectinload(ProductionBatch.recipe),
         )
-        .order_by(ProductionBatch.created_at.desc()).offset(skip).limit(limit)
+        .order_by(ProductionBatch.created_at.desc())
     )
+    if type_filter is not None:
+        cnt_stmt = cnt_stmt.where(type_filter)
+        list_stmt = list_stmt.where(type_filter)
+
+    cnt_result = await db.execute(cnt_stmt)
+    total = cnt_result.scalar()
+    result = await db.execute(list_stmt.offset(skip).limit(limit))
     batches = result.scalars().all()
     return {
         "total": total,
@@ -779,13 +805,14 @@ td.name{color:var(--text);font-weight:600;}
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
         <div class="tabs">
             <button class="tab active" id="tab-batches"  onclick="switchTab('batches')">All Batches</button>
+            <button class="tab"        id="tab-processing" onclick="switchTab('processing')">Processing</button>
             <button class="tab"        id="tab-packaging" onclick="switchTab('packaging')">Packaging</button>
             <button class="tab"        id="tab-recipes"   onclick="switchTab('recipes')">Recipes</button>
             <button class="tab"        id="tab-spoilage"  onclick="switchTab('spoilage')">Spoilage</button>
             <button class="tab"        id="tab-drying"    onclick="switchTab('drying')">Drying</button>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
-            <button class="btn btn-orange" id="btn-batch"      onclick="openBatchModal()">New Processing Batch</button>
+            <button class="btn btn-orange" id="btn-batch"      onclick="openBatchModal()"           style="display:none">New Processing Batch</button>
             <button class="btn btn-teal"   id="btn-pkg"        onclick="openPkgModal()"            style="display:none">New Packaging Run</button>
             <button class="btn btn-blue"   id="btn-recipe"     onclick="openRecipeModal(false)"    style="display:none">+ Processing Recipe</button>
             <button class="btn btn-blue"   id="btn-pkg-recipe" onclick="openRecipeModal(true)"     style="display:none">+ Packaging Recipe</button>
@@ -798,14 +825,31 @@ td.name{color:var(--text);font-weight:600;}
     <div id="section-batches">
         <div class="table-wrap">
             <table>
-                <thead><tr><th>Batch #</th><th>Type</th><th>Recipe</th><th>Inputs</th><th>Outputs</th><th style="text-align:right">Material Cost</th><th>Loss %</th><th>Date</th><th>Notes</th><th></th></tr></thead>
-                <tbody id="batches-body"><tr><td colspan="10" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr></tbody>
+                <thead><tr><th>Batch #</th><th>Type</th><th>Recipe</th><th>Inputs</th><th>Outputs</th><th style="text-align:right">Material Cost</th><th>Loss %</th><th>Date</th><th>Notes</th></tr></thead>
+                <tbody id="batches-body"><tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr></tbody>
             </table>
             <div class="pagination">
                 <span id="batch-page-info">-</span>
                 <div class="page-btns">
                     <button class="page-btn" id="prev-btn" onclick="prevPage()">Prev</button>
                     <button class="page-btn" id="next-btn" onclick="nextPage()">Next</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- PROCESSING -->
+    <div id="section-processing" style="display:none">
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Batch #</th><th>Recipe</th><th>Inputs</th><th>Outputs</th><th style="text-align:right">Material Cost</th><th>Loss %</th><th>Date</th><th>Notes</th><th></th></tr></thead>
+                <tbody id="processing-body"><tr><td colspan="9" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr></tbody>
+            </table>
+            <div class="pagination">
+                <span id="proc-page-info">-</span>
+                <div class="page-btns">
+                    <button class="page-btn" id="proc-prev-btn" onclick="prevProcPage()">Prev</button>
+                    <button class="page-btn" id="proc-next-btn" onclick="nextProcPage()">Next</button>
                 </div>
             </div>
         </div>
@@ -1191,6 +1235,7 @@ async function logout(){
   function configureProductionPermissions(u){
       const tabMap = [
           {id:"tab-batches", permission:"tab_production_batches", tab:"batches"},
+          {id:"tab-processing", permission:"tab_production_batches", tab:"processing"},
           {id:"tab-packaging", permission:"tab_production_packaging", tab:"packaging"},
           {id:"tab-recipes", permission:"tab_production_recipes", tab:"recipes"},
           {id:"tab-spoilage", permission:"tab_production_spoilage", tab:"spoilage"},
@@ -1221,6 +1266,8 @@ let allFarms      = [];
 let batchPage     = 0;
 let pageSize      = 20;
 let totalBatches  = 0;
+let procPage      = 0;
+let totalProcBatches = 0;
 let isPackagingRecipe = false;
 let editingBatchId    = null;
 let editingRecipeId   = null;
@@ -1257,22 +1304,24 @@ function fillSel(selId, recipes){
 function switchTab(tab){
     const required = {
         batches: "tab_production_batches",
+        processing: "tab_production_batches",
         packaging: "tab_production_packaging",
         recipes: "tab_production_recipes",
         spoilage: "tab_production_spoilage",
         drying: "action_drying_start_batch",
     };
     if(required[tab] && !hasPermission(required[tab])) return;
-    ["batches","packaging","recipes","spoilage","drying"].forEach(t => {
+    ["batches","processing","packaging","recipes","spoilage","drying"].forEach(t => {
         document.getElementById("section-"+t).style.display = t===tab ? "" : "none";
         document.getElementById("tab-"+t).classList.toggle("active", t===tab);
     });
-    document.getElementById("btn-batch").style.display      = tab==="batches"  ? "" : "none";
+    document.getElementById("btn-batch").style.display      = tab==="processing" ? "" : "none";
     document.getElementById("btn-pkg").style.display        = tab==="packaging" ? "" : "none";
     document.getElementById("btn-recipe").style.display     = tab==="recipes"  ? "" : "none";
     document.getElementById("btn-pkg-recipe").style.display = tab==="recipes"  ? "" : "none";
     document.getElementById("btn-spoilage").style.display   = tab==="spoilage" ? "" : "none";
     document.getElementById("btn-drying").style.display     = tab==="drying" && hasPermission("action_drying_start_batch") ? "" : "none";
+    if(tab==="processing") loadProcessingBatches();
     if(tab==="packaging") loadPkgBatches();
     if(tab==="recipes")   loadRecipes();
     if(tab==="spoilage")  loadSpoilage();
@@ -1696,7 +1745,7 @@ async function deleteBatch(id, number){
     if(data.detail){ showToast("Error: "+data.detail); return; }
     showToast(`${number} deleted - stock reversed`);
     allProducts = await (await fetch("/production/api/products-list")).json();
-    loadBatches();
+    refreshBatchViews();
 }
 
 async function saveBatch(){
@@ -1721,87 +1770,128 @@ async function saveBatch(){
     let lossMsg = data.waste_pct > 0 ? ` | Loss: ${data.waste_pct.toFixed(1)}%` : "";
     showToast(`${data.batch_number} ${editingBatchId?"updated":"completed"}${lossMsg}`);
     allProducts = await (await fetch("/production/api/products-list")).json();
-    loadBatches();
+    refreshBatchViews();
 }
 
 /* ── LOAD BATCHES ── */
 function money(v){ return Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2}); }
 
-async function loadBatches(){
-    let data = await (await fetch(`/production/api/batches?skip=${batchPage*pageSize}&limit=${pageSize}`)).json();
-    totalBatches = data.total;
-    document.getElementById("batch-page-info").innerText =
-        `${Math.min(batchPage*pageSize+1,totalBatches)}-${Math.min((batchPage+1)*pageSize,totalBatches)} of ${totalBatches}`;
-    document.getElementById("prev-btn").disabled = batchPage===0;
-    document.getElementById("next-btn").disabled = (batchPage+1)*pageSize>=totalBatches;
-    if(!data.batches.length){
-        document.getElementById("batches-body").innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:60px">No batches yet.</td></tr>`;
-        return;
-    }
-    let html="";
-    data.batches.forEach(b => {
-        let isPkg = b.batch_number.startsWith("PKG");
-        let c = b.costing || {input_lines:[],output_lines:[],input_cost:0,cost_is_complete:false,products_missing_cost:[],allocation_basis:"single",allocation_basis_label:"",yield_pct:null,input_kg:0,output_kg:0};
-        let lossColor = b.waste_pct<10?"var(--green)":b.waste_pct<25?"var(--warn)":"var(--danger)";
-        let inSum  = b.inputs.slice(0,2).map(i=>`${i.qty.toFixed(0)}${i.unit} ${i.product.split(" ")[0]}`).join(", ")+(b.inputs.length>2?"...":"");
-        let outSum = b.outputs.slice(0,2).map(o=>`${o.qty.toFixed(0)}${o.unit} ${o.product.split(" ")[0]}`).join(", ")+(b.outputs.length>2?"...":"");
-        let adminBtns = isAdmin && !isPkg
+function isSectionVisible(name){
+    let el = document.getElementById("section-"+name);
+    return !!el && el.style.display !== "none";
+}
+
+/* Reload only the batch lists the user is actually looking at. */
+function refreshBatchViews(){
+    if(isSectionVisible("batches"))    loadBatches();
+    if(isSectionVisible("processing")) loadProcessingBatches();
+    if(isSectionVisible("packaging"))  loadPkgBatches();
+}
+
+function setPageInfo(infoId, prevId, nextId, page, total){
+    document.getElementById(infoId).innerText =
+        `${Math.min(page*pageSize+1,total)}-${Math.min((page+1)*pageSize,total)} of ${total}`;
+    document.getElementById(prevId).disabled = page===0;
+    document.getElementById(nextId).disabled = (page+1)*pageSize>=total;
+}
+
+/* One batch row plus its expandable costing detail.
+   withType    -> the Processing / Packaging pill (All Batches overview only)
+   withActions -> admin edit / delete buttons (the per-type tabs) */
+function batchRowHtml(b, {idPrefix, colspan, withType, withActions}){
+    let isPkg = b.batch_number.startsWith("PKG");
+    let c = b.costing || {input_lines:[],output_lines:[],input_cost:0,cost_is_complete:false,products_missing_cost:[],allocation_basis:"single",allocation_basis_label:"",yield_pct:null,input_kg:0,output_kg:0};
+    let lossColor = b.waste_pct<10?"var(--green)":b.waste_pct<25?"var(--warn)":"var(--danger)";
+    let inSum  = b.inputs.slice(0,2).map(i=>`${i.qty.toFixed(0)}${i.unit} ${i.product.split(" ")[0]}`).join(", ")+(b.inputs.length>2?"...":"");
+    let outSum = b.outputs.slice(0,2).map(o=>`${o.qty.toFixed(0)}${o.unit} ${o.product.split(" ")[0]}`).join(", ")+(b.outputs.length>2?"...":"");
+    let adminBtns = "";
+    if(withActions && isAdmin){
+        adminBtns = !isPkg
             ? `<div style="display:flex;gap:6px">
                 <button class="action-btn blue" onclick="event.stopPropagation();openEditBatch(${b.id})">Edit</button>
                 <button class="action-btn danger" onclick="event.stopPropagation();deleteBatch(${b.id},'${b.batch_number}')">Delete</button>
                </div>`
-            : (isAdmin ? `<button class="action-btn danger" onclick="event.stopPropagation();deleteBatch(${b.id},'${b.batch_number}')">Delete</button>` : "");
-        html += `<tr class="batch-row" onclick="toggleDet('det-${b.id}')">
-            <td style="font-family:var(--mono);font-size:12px;color:${isPkg?"var(--teal)":"var(--orange)"}">${b.batch_number}</td>
-            <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:${isPkg?"rgba(45,212,191,.1)":"rgba(251,146,60,.1)"};color:${isPkg?"var(--teal)":"var(--orange)"}">
-                ${isPkg?"Packaging":"Processing"}
-            </span></td>
-            <td class="name">${b.recipe}</td>
-            <td style="font-size:12px;color:var(--sub)">${inSum||"-"}</td>
-            <td style="font-size:12px;color:var(--green)">${outSum||"-"}</td>
-            <td style="font-family:var(--mono);text-align:right;color:${c.cost_is_complete?"var(--text)":"var(--muted)"}" title="${c.cost_is_complete?"Material cost of the inputs":"Some inputs have no cost set"}">${money(c.input_cost)}${c.cost_is_complete?"":" *"}</td>
-            <td style="font-family:var(--mono);color:${lossColor}">${b.waste_pct.toFixed(1)}%</td>
-            <td style="font-size:12px;color:var(--muted)">${b.created_at}</td>
-            <td style="font-size:12px;color:var(--muted);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.notes||"-"}</td>
-            <td>${adminBtns}</td>
-        </tr>
-        <tr><td colspan="10" style="padding:0;border:none">
-            <div class="batch-detail" id="det-${b.id}">
-                <div class="detail-grid">
-                    <div><div class="detail-section-title" style="color:var(--orange)">Inputs Used — what they cost</div>
-                        ${c.input_lines.map(i=>`<div class="detail-item">
-                            <span style="color:var(--sub)">${i.product}
-                                <span style="color:var(--muted);font-size:11px">${i.qty.toFixed(2)} ${i.unit} &times; ${money(i.unit_cost)}</span></span>
-                            <span style="font-family:var(--mono);color:var(--orange)">${money(i.line_cost)}</span>
-                        </div>`).join("")||`<div class="detail-item"><span style="color:var(--muted)">No inputs recorded</span></div>`}
-                        <div class="detail-item" style="border-top:1px solid var(--border);margin-top:6px;padding-top:6px;font-weight:700">
-                            <span>Total material cost</span>
-                            <span style="font-family:var(--mono);color:var(--orange)">${money(c.input_cost)}</span>
-                        </div>
-                    </div>
-                    <div><div class="detail-section-title" style="color:var(--green)">Outputs — cost per unit</div>
-                        ${c.output_lines.map(o=>`<div class="detail-item">
-                            <span style="color:var(--sub)">${o.product}
-                                <span style="color:var(--muted);font-size:11px">${o.qty.toFixed(2)} ${o.unit}${c.allocation_basis!=="single"?` &middot; ${o.share_pct}% of cost`:""}</span></span>
-                            <span style="font-family:var(--mono);color:var(--green);text-align:right">${money(o.unit_cost)} / ${o.unit||"unit"}
-                                <div style="color:var(--muted);font-size:11px">${money(o.allocated_cost)} total${o.margin_pct!==null?` &middot; ${o.margin_pct}% margin`:""}</div></span>
-                        </div>`).join("")||`<div class="detail-item"><span style="color:var(--muted)">No outputs recorded</span></div>`}
+            : `<button class="action-btn danger" onclick="event.stopPropagation();deleteBatch(${b.id},'${b.batch_number}')">Delete</button>`;
+    }
+    let detId = `${idPrefix}${b.id}`;
+    return `<tr class="batch-row" onclick="toggleDet('${detId}')">
+        <td style="font-family:var(--mono);font-size:12px;color:${isPkg?"var(--teal)":"var(--orange)"}">${b.batch_number}</td>
+        ${withType?`<td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:${isPkg?"rgba(45,212,191,.1)":"rgba(251,146,60,.1)"};color:${isPkg?"var(--teal)":"var(--orange)"}">
+            ${isPkg?"Packaging":"Processing"}
+        </span></td>`:""}
+        <td class="name">${b.recipe}</td>
+        <td style="font-size:12px;color:var(--sub)">${inSum||"-"}</td>
+        <td style="font-size:12px;color:var(--green)">${outSum||"-"}</td>
+        <td style="font-family:var(--mono);text-align:right;color:${c.cost_is_complete?"var(--text)":"var(--muted)"}" title="${c.cost_is_complete?"Material cost of the inputs":"Some inputs have no cost set"}">${money(c.input_cost)}${c.cost_is_complete?"":" *"}</td>
+        <td style="font-family:var(--mono);color:${lossColor}">${b.waste_pct.toFixed(1)}%</td>
+        <td style="font-size:12px;color:var(--muted)">${b.created_at}</td>
+        <td style="font-size:12px;color:var(--muted);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.notes||"-"}</td>
+        ${withActions?`<td>${adminBtns}</td>`:""}
+    </tr>
+    <tr><td colspan="${colspan}" style="padding:0;border:none">
+        <div class="batch-detail" id="${detId}">
+            <div class="detail-grid">
+                <div><div class="detail-section-title" style="color:var(--orange)">Inputs Used &mdash; what they cost</div>
+                    ${c.input_lines.map(i=>`<div class="detail-item">
+                        <span style="color:var(--sub)">${i.product}
+                            <span style="color:var(--muted);font-size:11px">${i.qty.toFixed(2)} ${i.unit} &times; ${money(i.unit_cost)}</span></span>
+                        <span style="font-family:var(--mono);color:var(--orange)">${money(i.line_cost)}</span>
+                    </div>`).join("")||`<div class="detail-item"><span style="color:var(--muted)">No inputs recorded</span></div>`}
+                    <div class="detail-item" style="border-top:1px solid var(--border);margin-top:6px;padding-top:6px;font-weight:700">
+                        <span>Total material cost</span>
+                        <span style="font-family:var(--mono);color:var(--orange)">${money(c.input_cost)}</span>
                     </div>
                 </div>
-                <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.6;border-top:1px solid var(--border);padding-top:8px">
-                    ${c.allocation_basis_label}${c.yield_pct!==null?` &middot; yield ${c.yield_pct}% (${c.input_kg} kg in → ${c.output_kg} kg out)`:""}.
-                    Material cost only — labour, energy and overhead are not recorded against batches.
-                    ${c.products_missing_cost.length?`<br><span style="color:var(--warn)">No cost set on: ${c.products_missing_cost.join(", ")} — the batch cost is understated until those are filled in.</span>`:""}
+                <div><div class="detail-section-title" style="color:var(--green)">Outputs &mdash; cost per unit</div>
+                    ${c.output_lines.map(o=>`<div class="detail-item">
+                        <span style="color:var(--sub)">${o.product}
+                            <span style="color:var(--muted);font-size:11px">${o.qty.toFixed(2)} ${o.unit}${c.allocation_basis!=="single"?` &middot; ${o.share_pct}% of cost`:""}</span></span>
+                        <span style="font-family:var(--mono);color:var(--green);text-align:right">${money(o.unit_cost)} / ${o.unit||"unit"}
+                            <div style="color:var(--muted);font-size:11px">${money(o.allocated_cost)} total${o.margin_pct!==null?` &middot; ${o.margin_pct}% margin`:""}</div></span>
+                    </div>`).join("")||`<div class="detail-item"><span style="color:var(--muted)">No outputs recorded</span></div>`}
                 </div>
             </div>
-        </td></tr>`;
-    });
-    document.getElementById("batches-body").innerHTML = html;
+            <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.6;border-top:1px solid var(--border);padding-top:8px">
+                ${c.allocation_basis_label}${c.yield_pct!==null?` &middot; yield ${c.yield_pct}% (${c.input_kg} kg in → ${c.output_kg} kg out)`:""}.
+                Material cost only &mdash; labour, energy and overhead are not recorded against batches.
+                ${c.products_missing_cost.length?`<br><span style="color:var(--warn)">No cost set on: ${c.products_missing_cost.join(", ")} &mdash; the batch cost is understated until those are filled in.</span>`:""}
+            </div>
+        </div>
+    </td></tr>`;
+}
+
+/* All Batches - read-only overview of processing runs and packaging runs
+   together. Creating / editing happens on the per-type tabs. */
+async function loadBatches(){
+    let data = await (await fetch(`/production/api/batches?skip=${batchPage*pageSize}&limit=${pageSize}`)).json();
+    totalBatches = data.total;
+    setPageInfo("batch-page-info", "prev-btn", "next-btn", batchPage, totalBatches);
+    if(!data.batches.length){
+        document.getElementById("batches-body").innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:60px">No batches yet.</td></tr>`;
+        return;
+    }
+    document.getElementById("batches-body").innerHTML =
+        data.batches.map(b => batchRowHtml(b, {idPrefix:"det-", colspan:9, withType:true, withActions:false})).join("");
+}
+
+/* Processing - its own list, its own paging, its own New Processing Batch. */
+async function loadProcessingBatches(){
+    let data = await (await fetch(`/production/api/batches?batch_type=processing&skip=${procPage*pageSize}&limit=${pageSize}`)).json();
+    totalProcBatches = data.total;
+    setPageInfo("proc-page-info", "proc-prev-btn", "proc-next-btn", procPage, totalProcBatches);
+    if(!data.batches.length){
+        document.getElementById("processing-body").innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:60px">No processing batches yet.</td></tr>`;
+        return;
+    }
+    document.getElementById("processing-body").innerHTML =
+        data.batches.map(b => batchRowHtml(b, {idPrefix:"prdet-", colspan:9, withType:false, withActions:true})).join("");
 }
 
 function toggleDet(id){ let el=document.getElementById(id); if(el) el.classList.toggle("open"); }
 function prevPage(){ if(batchPage>0){ batchPage--; loadBatches(); } }
 function nextPage(){ if((batchPage+1)*pageSize<totalBatches){ batchPage++; loadBatches(); } }
+function prevProcPage(){ if(procPage>0){ procPage--; loadProcessingBatches(); } }
+function nextProcPage(){ if((procPage+1)*pageSize<totalProcBatches){ procPage++; loadProcessingBatches(); } }
 
 /* ── PACKAGING ── */
 function openPkgModal(){
@@ -1861,8 +1951,8 @@ async function savePkgBatch(){
 }
 
 async function loadPkgBatches(){
-    let data = await (await fetch("/production/api/batches?limit=200")).json();
-    let pkgB = data.batches.filter(b => b.batch_number.startsWith("PKG"));
+    let data = await (await fetch("/production/api/batches?batch_type=packaging&limit=200")).json();
+    let pkgB = data.batches;
     if(!pkgB.length){
         document.getElementById("pkg-body").innerHTML=`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:60px">No packaging runs yet.</td></tr>`;
         return;
@@ -2012,7 +2102,7 @@ async function saveRecipe(){
     if(document.getElementById("section-recipes").style.display!=="none") loadRecipes();
 }
 
-function quickUseProc(id){ switchTab("batches"); openBatchModal(); document.getElementById("batch-recipe-sel").value=id; loadRecipeIntoForm(); }
+function quickUseProc(id){ switchTab("processing"); openBatchModal(); document.getElementById("batch-recipe-sel").value=id; loadRecipeIntoForm(); }
 function quickUsePkg(id)  { switchTab("packaging"); openPkgModal(); setTimeout(()=>{ document.getElementById("pkg-recipe-sel").value=id; },100); }
 
 async function deleteRecipe(id,name){

@@ -596,6 +596,7 @@
     "No batches yet.": "لا توجد دفعات بعد.",
     "No drying batches yet.": "لا توجد دفعات تجفيف بعد.",
     "No packaging runs yet.": "لا توجد تشغيلات تعبئة بعد.",
+    "No processing batches yet.": "لا توجد دفعات تصنيع بعد.",
     "Save a reusable formula": "حفظ تركيبة قابلة لإعادة الاستخدام",
     "Save a standard processing formula": "حفظ تركيبة تصنيع قياسية",
     "Define inputs and outputs PER 1 PACK": "حدد المدخلات والمخرجات لكل عبوة واحدة",
