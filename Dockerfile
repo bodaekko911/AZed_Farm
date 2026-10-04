@@ -22,11 +22,15 @@ RUN pip install --upgrade pip \
 
 FROM python:3.12-slim AS runtime
 
+# MALLOC_ARENA_MAX=2 — glibc gives each thread its own memory arena and rarely
+# returns freed memory from them to the OS, so a long-running worker's RAM
+# creeps up. Capping arenas at 2 is the standard fix for Python web servers.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     VIRTUAL_ENV=/opt/venv \
-    PATH="/opt/venv/bin:$PATH"
+    PATH="/opt/venv/bin:$PATH" \
+    MALLOC_ARENA_MAX=2
 
 WORKDIR /app
 
