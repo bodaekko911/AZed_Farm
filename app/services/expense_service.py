@@ -1794,8 +1794,11 @@ async def get_cost_allocation(
                 # untagged head-office costs.
                 "allocated_cost": round(direct_cost, 2),
                 "allocated_cost_absorbed": round(absorbed_cost, 2),
-                "cost_per_unit": round(cost_per_unit, 2),
-                "cost_per_unit_absorbed": round(cost_per_unit_absorbed, 2),
+                # Three decimals — the product cost's own precision. Most
+                # products are per gram, where two decimals turn 0.006 into
+                # 0.01 and every downstream batch cost inherits the error.
+                "cost_per_unit": round(cost_per_unit, 3),
+                "cost_per_unit_absorbed": round(cost_per_unit_absorbed, 3),
                 "cost_per_kg": round(cost_per_kg, 2) if cost_per_kg is not None else None,
                 "sale_price": round(sale_price, 2),
                 "list_price": round(info["list_price"], 2),
@@ -1803,8 +1806,8 @@ async def get_cost_allocation(
                 "price_imputed": bool(info.get("price_imputed")),
                 "qty_sold": info["qty_sold"],
                 "revenue_actual": info["revenue_actual"],
-                "profit_per_unit": round(profit_per_unit, 2),
-                "profit_per_unit_absorbed": round(profit_per_unit_absorbed, 2),
+                "profit_per_unit": round(profit_per_unit, 3),
+                "profit_per_unit_absorbed": round(profit_per_unit_absorbed, 3),
                 "profit_margin_pct": round(
                     (profit_per_unit / sale_price * 100) if sale_price > 0 else 0, 1
                 ),

@@ -1515,14 +1515,19 @@ async function submitBatch(e) {
   };
 
   try {
-    const r = await fetch('/receive/api/receive-batch', {
+    const send = () => fetch('/receive/api/receive-batch', {
       method:  'POST',
       headers: {'Content-Type': 'application/json'},
       body:    JSON.stringify(payload),
     });
+    let r = await send();
+    if (r.status === 409 && await confirmCostCheck(r)) {
+      payload.confirm_cost = true;
+      r = await send();
+    }
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      showToast(err.detail || 'Receive failed', 'err');
+      showToast((err.detail && err.detail.message) || err.detail || 'Receive failed', 'err');
     } else {
       const data = await r.json();
       const expCount = data.receipts.filter(r => r.expense_ref).length;
@@ -1661,14 +1666,19 @@ async function saveEditReceipt() {
   payload.unit_cost = costValue === '' ? null : parseFloat(costValue);
 
   try {
-    const r = await fetch(`/receive/api/receipt/${_editingReceipt.id}`, {
+    const send = () => fetch(`/receive/api/receipt/${_editingReceipt.id}`, {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(payload),
     });
+    let r = await send();
+    if (r.status === 409 && await confirmCostCheck(r)) {
+      payload.confirm_cost = true;
+      r = await send();
+    }
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
-      showToast(data.detail || 'Could not update receipt', 'err');
+      showToast((data.detail && data.detail.message) || data.detail || 'Could not update receipt', 'err');
       return;
     }
     closeEditModal();
@@ -1681,6 +1691,18 @@ async function saveEditReceipt() {
     btn.disabled = false;
     btn.textContent = 'Save Changes';
   }
+}
+
+// The server holds back a unit cost that looks like a unit mix-up (a per-kg
+// price on a per-gram product). Show why and let the user confirm or go back.
+async function confirmCostCheck(response) {
+  const body = await response.clone().json().catch(() => ({}));
+  const d = body && body.detail;
+  if (!d || d.code !== 'cost_check') return false;
+  return window.confirm(
+    `${d.message}\\n\\n• ${(d.problems || []).join('\\n• ')}\\n\\n` +
+    'Press OK to save it anyway, or Cancel to correct the cost.'
+  );
 }
 
 async function deleteReceipt(receiptId) {

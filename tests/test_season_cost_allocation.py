@@ -249,9 +249,9 @@ def test_direct_and_absorbed_cost_prices_are_both_returned():
 
     tomato = next(p for p in data["products"] if p["product_name"] == "Tomato")
     # 88.9% of 16,000 = 14,222 over 800 kg ⇒ 17.78/kg direct
-    assert tomato["cost_per_unit"] == 17.78
+    assert tomato["cost_per_unit"] == 17.778
     # 88.9% of 46,000 = 40,889 over 800 kg ⇒ 51.11/kg absorbed
-    assert tomato["cost_per_unit_absorbed"] == 51.11
+    assert tomato["cost_per_unit_absorbed"] == 51.111
     assert tomato["cost_per_unit_absorbed"] > tomato["cost_per_unit"]
     assert tomato["profit_per_unit"] > tomato["profit_per_unit_absorbed"]
 
@@ -287,7 +287,7 @@ def test_animal_expenses_do_not_inflate_crop_cost_prices():
     assert data["total_cost"] == 16000.0            # unchanged by the 10,000 of animal cost
     assert data["animal_cost_excluded"] == 10000.0
     tomato = next(p for p in data["products"] if p["product_name"] == "Tomato")
-    assert tomato["cost_per_unit"] == 17.78         # not 28.89
+    assert tomato["cost_per_unit"] == 17.778        # not 28.89
 
 
 def test_untagged_animal_costs_do_not_reach_crops_through_overhead():
@@ -403,8 +403,8 @@ def test_apply_writes_the_direct_cost_price_onto_the_product():
     assert result["applied_count"] == 2
     entry = next(p for p in result["applied"] if p["product_name"] == "Tomato")
     assert entry["old_cost"] == 0.0
-    assert entry["new_cost"] == 17.78
-    assert float(tomato.cost) == 17.78
+    assert entry["new_cost"] == 17.778
+    assert float(tomato.cost) == 17.778
 
 
 def test_absorbed_basis_writes_the_higher_cost():
@@ -417,7 +417,7 @@ def test_absorbed_basis_writes_the_higher_cost():
         tomato = session.get(Product, 1)
         session.refresh(tomato)
 
-    assert float(tomato.cost) == 51.11
+    assert float(tomato.cost) == 51.111
 
 
 def test_dry_run_reports_the_change_without_writing_it():
@@ -585,8 +585,8 @@ def test_piece_priced_product_can_have_its_cost_applied():
 
     entry = next(p for p in result["applied"] if p["product_name"] == "Lettuce")
     assert entry["unit"] == "pcs"
-    assert entry["new_cost"] == 8.89
-    assert float(lettuce.cost) == 8.89
+    assert entry["new_cost"] == 8.889
+    assert float(lettuce.cost) == 8.889
 
 
 # ── Diagnosing an implausible cost price ─────────────────────────────────────

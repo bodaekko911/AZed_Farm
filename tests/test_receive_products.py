@@ -237,9 +237,9 @@ def test_create_receipt_updates_product_cost():
                          supplier_ref="Acme", notes="Bulk order")
     asyncio.run(create_receipt(db, data, user))
 
-    # cost should be updated to the received unit cost
+    # Weighted average: 10 on hand at 4.00 plus 5 received at 6.50.
     from decimal import Decimal
-    assert product.cost == Decimal("6.50")
+    assert product.cost == Decimal("4.833")
 
 
 # ── create_receipt: with-cost path ───────────────────────────────────────────
@@ -423,6 +423,7 @@ def test_batch_receive_single_commit_even_with_cost():
     cash_acc = Account(id=21, code="1000", name="Cash",           type="asset",   balance=100)
 
     db = FakeReceiveSession([
+        FakeScalarResult(product), # cost check before anything is written
         FakeScalarResult(product),
         FakeScalarResult(None),    # max receipt id
         FakeScalarResult(None),    # StockLocation by code → auto-create default

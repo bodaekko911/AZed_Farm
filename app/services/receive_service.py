@@ -43,6 +43,9 @@ from app.services.location_inventory_service import (
 
 _MONEY = Decimal("0.01")
 _QTY   = Decimal("0.001")
+# Unit cost keeps three decimals (the column's precision): most products are
+# priced per gram, where 0.006 rounded to 0.01 would be a 67% error.
+_COST  = Decimal("0.001")
 
 STOCK_PURCHASE_ACCOUNT_CODE  = "5011"
 STOCK_PURCHASE_CATEGORY_NAME = "Products"
@@ -82,6 +85,7 @@ class ReceiptCreate(BaseModel):
     farm_id:      Optional[int]   = Field(None, ge=1)  # cost allocation: farm
     is_animal_expense: bool       = False              # cost allocation: 🐾 Animals bucket
     expense_category_id: Optional[int] = Field(None, ge=1)  # override auto category
+    confirm_cost: bool            = False  # the user saw the cost check and confirmed
 
 
 class BatchReceiptItem(BaseModel):
@@ -116,6 +120,7 @@ class BatchReceiptCreate(BaseModel):
     farm_id:      Optional[int] = Field(None, ge=1)
     is_animal_expense: bool     = False
     expense_category_id: Optional[int] = Field(None, ge=1)
+    confirm_cost: bool          = False
     items:        list[BatchReceiptItem] = Field(..., min_length=1)
 
 
@@ -132,6 +137,7 @@ class ReceiptUpdate(BaseModel):
     receive_date: date_type
     supplier_ref: Optional[str]   = Field(None, max_length=150)
     notes:        Optional[str]   = None
+    confirm_cost: bool            = False
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
@@ -369,9 +375,58 @@ def _quantize_receipt_values(
     unit_cost: Optional[Decimal] = None
     total_cost: Optional[Decimal] = None
     if unit_cost_value is not None and unit_cost_value > 0:
-        unit_cost = Decimal(str(unit_cost_value)).quantize(_MONEY, rounding=ROUND_HALF_UP)
+        unit_cost = Decimal(str(unit_cost_value)).quantize(_COST, rounding=ROUND_HALF_UP)
         total_cost = (qty * unit_cost).quantize(_MONEY, rounding=ROUND_HALF_UP)
     return qty, unit_cost, total_cost
+
+
+def cost_check_message(product: Product, unit_cost: Optional[Decimal]) -> Optional[str]:
+    """Why a receipt's unit cost looks like a unit mix-up, or None.
+
+    The cost is per the product's own unit. A per-kg price typed on a product
+    sold per gram is 1 000× too high, and every margin, batch cost and stock
+    value built on it inherits the error — so it is checked before it lands.
+    """
+    if unit_cost is None or unit_cost <= 0:
+        return None
+    unit = product.unit or "unit"
+    current = Decimal(str(product.cost or 0))
+    price = Decimal(str(product.price or 0))
+    if current > 0 and (unit_cost > current * 5 or unit_cost * 5 < current):
+        return (f"{product.name}: {unit_cost:f} per {unit} is far from its current cost "
+                f"of {current:f} per {unit}")
+    if price > 0 and unit_cost > price * 3:
+        return (f"{product.name}: {unit_cost:f} per {unit} is more than 3× its selling "
+                f"price of {price:f} per {unit}")
+    return None
+
+
+def _raise_cost_check(problems: list[str]) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "cost_check",
+            "message": "Check the unit cost — the cost is per the product's own unit (per gram, per kg, per piece).",
+            "problems": problems,
+        },
+    )
+
+
+def blended_cost(
+    stock_before: Decimal, cost_before: Decimal, qty: Decimal, unit_cost: Decimal,
+) -> Decimal:
+    """Weighted-average cost after receiving ``qty`` at ``unit_cost``.
+
+    The stock already on hand keeps the cost it came in at, so one receipt
+    no longer replaces the cost of everything in the store. With no stock on
+    hand, or no cost on it yet, the new receipt's cost is the cost.
+    """
+    on_hand = max(Decimal(str(stock_before or 0)), Decimal("0"))
+    cost_before = Decimal(str(cost_before or 0))
+    if on_hand <= 0 or cost_before <= 0 or qty <= 0:
+        return unit_cost
+    blended = (on_hand * cost_before + qty * unit_cost) / (on_hand + qty)
+    return blended.quantize(_COST, rounding=ROUND_HALF_UP)
 
 
 async def _get_receipt_move(db: AsyncSession, receipt_id: int) -> StockMove | None:
@@ -600,8 +655,13 @@ async def _create_receipt_core(
     unit_cost:  Optional[Decimal] = None
     total_cost: Optional[Decimal] = None
     if data.unit_cost is not None and data.unit_cost > 0:
-        unit_cost  = Decimal(str(data.unit_cost)).quantize(_MONEY, rounding=ROUND_HALF_UP)
+        unit_cost  = Decimal(str(data.unit_cost)).quantize(_COST, rounding=ROUND_HALF_UP)
         total_cost = (qty * unit_cost).quantize(_MONEY, rounding=ROUND_HALF_UP)
+
+    if not data.confirm_cost:
+        problem = cost_check_message(product, unit_cost)
+        if problem:
+            _raise_cost_check([problem])
 
     # Resolve supplier + payment split
     supplier = await _resolve_supplier(db, data.supplier_id)
@@ -632,7 +692,10 @@ async def _create_receipt_core(
     if data.affect_stock:
         product.stock = qty_after
     if unit_cost is not None:
-        product.cost = unit_cost
+        product.cost = (
+            blended_cost(qty_before, product.cost, qty, unit_cost)
+            if data.affect_stock else unit_cost
+        )
 
     # ── Resolve destination storage ───────────────────────────────────
     # If caller didn't pick a location, fall back to the default
@@ -802,7 +865,13 @@ async def update_receipt(
     if new_stock < 0:
         raise HTTPException(status_code=400, detail="Cannot reduce receipt below current available stock")
 
+    if not data.confirm_cost:
+        problem = cost_check_message(product, unit_cost)
+        if problem:
+            _raise_cost_check([problem])
+
     product.stock = new_stock
+    # An edit corrects this receipt, so its cost is taken as given.
     if unit_cost is not None:
         product.cost = unit_cost
 
@@ -822,6 +891,15 @@ async def update_receipt(
         move.qty = new_qty
         move.qty_after = new_stock
         move.note = f"Receipt {receipt.ref_number}"
+        # Per-storage stock moves with the total, or the two drift apart.
+        if qty_delta != 0:
+            location_id = receipt.location_id
+            if location_id is None:
+                location_id = (await ensure_default_stock_location(db)).id
+            loc_stock = await get_or_create_location_stock(
+                db, location_id=location_id, product_id=product.id
+            )
+            loc_stock.qty = quantize_qty(loc_stock.qty or 0) + qty_delta
 
     expense_ref = await _sync_receipt_expense(
         db,
@@ -983,6 +1061,26 @@ async def create_receipt_batch(
     else:
         per_line_paid = [Decimal("0")] * len(line_totals)
 
+    # Check every line's cost before writing anything, so the user sees all
+    # suspect lines at once rather than one per attempt.
+    if not data.confirm_cost:
+        problems = []
+        for item in data.items:
+            if item.unit_cost is None or item.unit_cost <= 0:
+                continue
+            product = (await db.execute(
+                select(Product).where(Product.id == item.product_id)
+            )).scalar_one_or_none()
+            if product is None:
+                continue
+            problem = cost_check_message(
+                product, Decimal(str(item.unit_cost)).quantize(_COST, rounding=ROUND_HALF_UP)
+            )
+            if problem:
+                problems.append(problem)
+        if problems:
+            _raise_cost_check(problems)
+
     receipts: list[dict[str, Any]] = []
     for idx, item in enumerate(data.items):
         paid_for_line = float(per_line_paid[idx]) if line_totals[idx] > 0 else None
@@ -1000,6 +1098,7 @@ async def create_receipt_batch(
             farm_id=data.farm_id,
             is_animal_expense=data.is_animal_expense,
             expense_category_id=data.expense_category_id,
+            confirm_cost=True,   # checked above
         )
         receipts.append(await _create_receipt_core(db, line, current_user))
 

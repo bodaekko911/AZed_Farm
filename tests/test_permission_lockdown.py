@@ -161,6 +161,24 @@ def test_production_create_batch_requires_explicit_permission() -> None:
     _denied(r, "action_production_create_batch", db)
 
 
+def test_production_edit_batch_requires_explicit_permission() -> None:
+    # Editing a batch rewrites stock both ways, so the page alone is not enough.
+    client, db = _make_client(_viewer_with("page_production"))
+    r = client.put("/production/api/batches/1", json={
+        "inputs": [{"product_id": 1, "qty": 1}], "outputs": [{"product_id": 2, "qty": 1}],
+    })
+    _denied(r, "action_production_update_batch", db)
+
+
+def test_production_apply_costs_requires_explicit_permission() -> None:
+    # Writing batch costs onto products changes every margin downstream.
+    client, db = _make_client(_viewer_with("page_production"))
+    r = client.post("/production/api/costs/apply", json={
+        "date_from": "2026-01-01", "date_to": "2026-01-31", "product_ids": [1],
+    })
+    _denied(r, "action_production_apply_cost", db)
+
+
 def test_production_delete_batch_requires_explicit_permission() -> None:
     client, db = _make_client(_viewer_with("page_production"))
     r = client.delete("/production/api/batches/1")

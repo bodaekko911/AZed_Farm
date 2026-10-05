@@ -2446,9 +2446,9 @@ async function loadSeasonAnalysis(){
                     <td style="${mono}">${harvested}</td>
                     <td style="${mono};color:var(--muted)">${p.share_pct}%</td>
                     <td style="${mono};color:var(--orange)">${fmt(p.allocated_cost)}</td>
-                    <td style="${mono};color:var(--warn);font-weight:700">${p.cost_per_unit.toFixed(2)}<div style="font-size:10px;color:var(--muted);font-weight:400">per ${p.unit}</div></td>
+                    <td style="${mono};color:var(--warn);font-weight:700">${p.cost_per_unit.toFixed(3)}<div style="font-size:10px;color:var(--muted);font-weight:400">per ${p.unit}</div></td>
                     <td style="${mono};color:var(--orange)">${fmt(p.allocated_cost_absorbed)}</td>
-                    <td style="${mono};color:var(--danger);font-weight:700">${p.cost_per_unit_absorbed.toFixed(2)}<div style="font-size:10px;color:var(--muted);font-weight:400">per ${p.unit}</div></td>
+                    <td style="${mono};color:var(--danger);font-weight:700">${p.cost_per_unit_absorbed.toFixed(3)}<div style="font-size:10px;color:var(--muted);font-weight:400">per ${p.unit}</div></td>
                     <td style="${mono};color:var(--blue)">${p.sale_price.toFixed(2)}${soldNote}</td>
                     <td style="${mono};font-weight:700;color:${profitColor}">${p.profit_per_unit.toFixed(2)}</td>
                     <td style="${mono};font-weight:700;color:${marginColor}">${p.profit_margin_pct}%</td>
