@@ -26,7 +26,9 @@ from app.models.animal import AnimalGroup, FeedingLog, MortalityLog, AnimalIntak
 from app.models.spoilage import SpoilageRecord
 from app.models.refund import RetailRefund, RetailRefundItem
 from app.models.production import ProductionBatch, BatchInput, BatchOutput
-from app.models.drying import DryingBatch, DryingBatchStage, DryingBatchStageInput, DryingBatchStageOutput
+from app.models.drying import (
+    DryingBatch, DryingBatchSpoilage, DryingBatchStage, DryingBatchStageInput, DryingBatchStageOutput,
+)
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.carbon import CarbonEmissionFactor, CarbonLog, CarbonTarget
 from app.models.receipt import ProductReceipt
@@ -41,6 +43,7 @@ from app.models.hr import (
 )
 from app.models.user import User
 from app.services.expense_service import SALARY_CATEGORY_NAME
+from app.services.product_profitability import ProfitabilityLedger
 from app.services.production_costing import cost_batch
 from app.services.spoilage_summary import spoilage_summary
 
@@ -2331,6 +2334,186 @@ async def _build_pl_report(db, *, d_from, d_to):
         "used_balance_fallback": False,
         "warning":        None,
     }
+
+
+# ── PRODUCT PROFITABILITY ──────────────────────────────
+@router.get("/api/profitability")
+async def profitability_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_profitability"))):
+    d_from, d_to = parse_dates(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    return await _build_profitability_report(db, d_from=d_from, d_to=d_to)
+
+
+def _scaled(lines_total: float, target: float) -> float:
+    """Ratio that scales gross line totals to the document's net total."""
+    return target / lines_total if lines_total > 0 else 0.0
+
+
+async def _build_profitability_report(db, *, d_from, d_to):
+    """Revenue, cost of sales and losses per product — see
+    app/services/product_profitability.py for the definitions."""
+    from app.core.time_utils import app_tz
+
+    tz = app_tz()
+    local_from = d_from.astimezone(tz).date()
+    local_to = d_to.astimezone(tz).date()
+    ledger = ProfitabilityLedger()
+
+    # ── Sales: same sources and dates as the Sales report ──
+    # Line totals are before the invoice discount; scale them to the invoice
+    # total so the discount comes off the products it was given on.
+    pos_res = await db.execute(
+        select(Invoice)
+        .where(Invoice.created_at >= d_from, Invoice.created_at <= d_to, Invoice.status == "paid")
+        .options(selectinload(Invoice.items).selectinload(InvoiceItem.product))
+    )
+    for inv in pos_res.scalars().all():
+        lines_total = sum(_num(i.total) for i in inv.items)
+        if lines_total <= 0:
+            ledger.add_unattributed(inv.total)
+            continue
+        ratio = _scaled(lines_total, _num(inv.total))
+        for item in inv.items:
+            ledger.add_sale(item.product_id, item.product, item.qty, _num(item.total) * ratio, "pos")
+
+    payments = await _load_b2b_client_payment_records(db, d_from=d_from, d_to=d_to)
+    invoice_ids = {p["invoice_id"] for p in payments if p.get("invoice_id") is not None and not p.get("sale_items")}
+    b2b_invoices = {}
+    if invoice_ids:
+        b2b_res = await db.execute(
+            select(B2BInvoice)
+            .where(B2BInvoice.id.in_(invoice_ids))
+            .options(selectinload(B2BInvoice.items).selectinload(B2BInvoiceItem.product))
+        )
+        b2b_invoices = {inv.id: inv for inv in b2b_res.scalars().all()}
+
+    for payment in payments:
+        amount = _num(payment["amount"])
+        sale_items = payment.get("sale_items") or []
+        if sale_items:
+            # Consignment collection: the client's reported sold items, at
+            # gross price — scale to the cash taken, quantities as reported.
+            ratio = _scaled(_num(payment.get("sale_subtotal")), amount)
+            for line in sale_items:
+                product = line.get("product")
+                ledger.add_sale(getattr(product, "id", None), product, line.get("qty"),
+                                _num(line.get("total")) * ratio, "b2b")
+            continue
+        invoice = b2b_invoices.get(payment.get("invoice_id"))
+        lines_total = sum(_num(i.total) for i in invoice.items) if invoice else 0.0
+        if not invoice or lines_total <= 0 or _num(invoice.total) <= 0:
+            ledger.add_unattributed(amount)
+            continue
+        # A part payment sells that part of every line.
+        qty_ratio = amount / _num(invoice.total)
+        money_ratio = _scaled(lines_total, amount)
+        for item in invoice.items:
+            ledger.add_sale(item.product_id, item.product, _num(item.qty) * qty_ratio,
+                            _num(item.total) * money_ratio, "b2b")
+
+    for model, item_model in ((RetailRefund, RetailRefundItem), (B2BRefund, B2BRefundItem)):
+        ref_res = await db.execute(
+            select(model)
+            .where(model.created_at >= d_from, model.created_at <= d_to)
+            .options(selectinload(model.items).selectinload(item_model.product))
+        )
+        for refund in ref_res.scalars().all():
+            lines_total = sum(_num(i.total) for i in refund.items)
+            if lines_total <= 0:
+                ledger.add_unattributed(-_num(refund.total))
+                continue
+            ratio = _scaled(lines_total, _num(refund.total))
+            for item in refund.items:
+                ledger.add_refund(item.product_id, item.product, item.qty, _num(item.total) * ratio)
+
+    # ── Losses ──
+    spl_res = await db.execute(
+        select(SpoilageRecord)
+        .where(SpoilageRecord.spoilage_date >= local_from, SpoilageRecord.spoilage_date <= local_to)
+        .options(selectinload(SpoilageRecord.product))
+    )
+    for rec in spl_res.scalars().all():
+        ledger.add_loss(rec.product_id, rec.product, rec.qty)
+
+    dry_spl_res = await db.execute(
+        select(DryingBatchSpoilage, Product)
+        .join(Product, Product.id == DryingBatchSpoilage.product_id)
+        .where(DryingBatchSpoilage.logged_at >= d_from, DryingBatchSpoilage.logged_at <= d_to)
+    )
+    for rec, product in dry_spl_res.all():
+        ledger.add_loss(rec.product_id, product, rec.qty)
+
+    # ── Batch cost: same batches and costing as the Production report ──
+    batch_res = await db.execute(
+        select(ProductionBatch)
+        .where(ProductionBatch.created_at >= d_from, ProductionBatch.created_at <= d_to)
+        .options(selectinload(ProductionBatch.inputs).selectinload(BatchInput.product),
+                 selectinload(ProductionBatch.outputs).selectinload(BatchOutput.product))
+    )
+    for batch in batch_res.scalars().all():
+        ledger.add_batch_costing(cost_batch(batch.inputs, batch.outputs),
+                                 {o.product_id: o.product for o in batch.outputs})
+
+    drying_res = await db.execute(
+        select(DryingBatch)
+        .where(DryingBatch.started_at >= d_from, DryingBatch.started_at <= d_to,
+               DryingBatch.status != "cancelled")
+        .options(
+            selectinload(DryingBatch.stages).selectinload(DryingBatchStage.inputs).selectinload(DryingBatchStageInput.product),
+            selectinload(DryingBatch.stages).selectinload(DryingBatchStage.outputs).selectinload(DryingBatchStageOutput.product),
+        )
+    )
+    for batch in drying_res.scalars().all():
+        stages = batch.stages or []
+        last_closed = next((s for s in reversed(stages) if s.total_output_qty is not None), None)
+        if not stages or not last_closed:
+            continue
+        outputs = list(last_closed.outputs)
+        ledger.add_batch_costing(cost_batch(list(stages[0].inputs), outputs),
+                                 {o.product_id: o.product for o in outputs})
+
+    data = ledger.result()
+    data["date_from"] = local_from.isoformat()
+    data["date_to"] = local_to.isoformat()
+    return data
+
+
+@router.get("/export/profitability", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_profitability"))])
+async def export_profitability(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+    d_from, d_to = parse_dates(date_from, date_to)
+    if (d_to - d_from).days > 366:
+        raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
+    data = await _build_profitability_report(db, d_from=d_from, d_to=d_to)
+    source_label = {"batch": "Batch cost", "product": "Product cost", "missing": "Not set"}
+    rows = [[p["name"], p["sku"], p["category"], p["qty_sold"], p["unit"], p["revenue"],
+             p["unit_cost"], source_label[p["cost_source"]], p["cogs"], p["gross_profit"],
+             p["gross_margin_pct"], p["loss_qty"], p["loss_cost"], p["profit"], p["margin_pct"]]
+            for p in data["products"]]
+    t = data["totals"]
+    buf = to_xlsx(
+        ["Product", "SKU", "Category", "Qty Sold", "Unit", "Revenue", "Unit Cost", "Cost Basis",
+         "Cost of Sales", "Gross Profit", "Gross Margin %", "Qty Lost", "Loss Cost", "Profit", "Margin %"],
+        rows,
+        "Profitability",
+        report_title="Product Profitability",
+        metadata=[
+            ("Date Range", f"{data['date_from']} to {data['date_to']}"),
+            ("Revenue (EGP)", t["revenue"]),
+            ("Cost of Sales (EGP)", t["cogs"]),
+            ("Losses (EGP)", t["loss_cost"]),
+            ("Profit (EGP)", t["profit"]),
+            ("Not traced to products (EGP)", t["unattributed_revenue"]),
+            ("Products losing money", data["losing_count"]),
+            ("Note", "Cost is material cost from batches where available, else the product card cost; "
+                     "labour and overhead are not included."),
+        ],
+        column_formats={"Qty Sold": "qty", "Revenue": "money", "Unit Cost": "money", "Cost of Sales": "money",
+                        "Gross Profit": "money", "Gross Margin %": "percent_value", "Qty Lost": "qty",
+                        "Loss Cost": "money", "Profit": "money", "Margin %": "percent_value"},
+    )
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=profitability_{date.today()}.xlsx"})
 
 
 # ── Utilities (Water / Gas / Electricity / Fuel ...) ───────────────────
@@ -4756,6 +4939,7 @@ td.mono{font-family:var(--mono);}
         <button class="tab"        onclick="switchTab('utilities')">💧 Utilities</button>
         <button class="tab"        onclick="switchTab('carbon')">🌍 Carbon Footprint</button>
         <button class="tab"        onclick="switchTab('pl')">💰 P&amp;L</button>
+        <button class="tab"        onclick="switchTab('profitability')">💹 Profitability</button>
         <button class="tab"        onclick="switchTab('animals')">🐄 Animals</button>
     </div>
 
@@ -5263,6 +5447,55 @@ td.mono{font-family:var(--mono);}
         <div id="pl-content"></div>
     </div>
 
+    <!-- ──────────── PRODUCT PROFITABILITY ──────────── -->
+    <div id="section-profitability" class="section">
+        <div class="print-header">
+            <div style="display:flex;align-items:center;gap:14px">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
+                <div>
+                    <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
+                    <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
+                </div>
+            </div>
+            <div style="text-align:right">
+                <div style="font-size:18px;font-weight:800;color:#2a7a2a">Product Profitability</div>
+                <div style="font-size:12px;color:#666;margin-top:4px" id="ph-prof-dates"></div>
+            </div>
+        </div>
+        <div class="filter-bar no-print">
+            <label>From</label><input type="date" id="prof-from">
+            <label>To</label>  <input type="date" id="prof-to">
+            <div class="filter-sep"></div>
+            <button class="btn btn-lime"  onclick="loadProfitability()">Apply</button>
+            <button class="btn btn-excel" onclick="exportSection('profitability')">⬇ Excel</button>
+            <button class="btn btn-print" onclick="window.print()">🖨 Print</button>
+        </div>
+        <div class="stats-row">
+            <div class="stat-card sc-blue"><div class="stat-label">Revenue</div><div class="stat-value sv-blue" id="prof-revenue">—</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px" id="prof-revenue-note"></div></div>
+            <div class="stat-card sc-orange"><div class="stat-label">Cost of Sales</div><div class="stat-value sv-orange" id="prof-cogs">—</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px" id="prof-cogs-note"></div></div>
+            <div class="stat-card sc-danger"><div class="stat-label">Losses</div><div class="stat-value sv-danger" id="prof-losses">—</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px">spoilage, at cost</div></div>
+            <div class="stat-card sc-green"><div class="stat-label">Product Profit</div><div class="stat-value" id="prof-profit">—</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px" id="prof-profit-note"></div></div>
+            <div class="stat-card sc-teal"><div class="stat-label">Losing Money</div><div class="stat-value sv-teal" id="prof-losing">—</div>
+                <div style="font-size:11px;color:var(--muted);margin-top:5px" id="prof-losing-note"></div></div>
+        </div>
+        <div id="prof-warnings"></div>
+        <div class="two-col" style="margin:14px 0">
+            <div class="chart-card"><div class="chart-title">Top Earners</div><div id="prof-top"></div></div>
+            <div class="chart-card"><div class="chart-title">Losing Money</div><div id="prof-bottom"></div></div>
+        </div>
+        <div class="table-wrap">
+            <div class="table-title"><span>By Product</span><span style="text-transform:none;letter-spacing:0;font-weight:500">Material cost &mdash; labour and overhead are in the P&amp;L, not here</span></div>
+            <div style="overflow-x:auto">
+            <table><thead><tr><th>Product</th><th style="text-align:right">Qty Sold</th><th style="text-align:right">Revenue</th><th style="text-align:right">Unit Cost</th><th style="text-align:right">Cost of Sales</th><th style="text-align:right">Gross Margin</th><th style="text-align:right">Losses</th><th style="text-align:right">Profit</th><th style="text-align:right">Margin</th><th style="text-align:right">Share</th></tr></thead>
+            <tbody id="prof-body"></tbody></table>
+            </div>
+        </div>
+    </div>
+
 </div><!-- end .content -->
 <div class="toast" id="toast"></div>
 
@@ -5339,7 +5572,7 @@ function switchTab(tab){
     const section = document.getElementById("section-"+tab);
     if(!section) return;
     section.classList.add("active");
-    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, utilities:loadUtilities, carbon:loadCarbon, pl:loadPL, animals:loadAnimals};
+    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, utilities:loadUtilities, carbon:loadCarbon, pl:loadPL, profitability:loadProfitability, animals:loadAnimals};
     if(loaders[tab]){
         loaders[tab]();
     } else {
@@ -5359,7 +5592,7 @@ function showToast(msg){
     clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove("show"),3000);
 }
 
-const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","hr","utilities","carbon","pl","animals"];
+const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","hr","utilities","carbon","pl","profitability","animals"];
 const REPORT_TAB_PERMISSIONS = {
     sales: "tab_reports_sales",
     transactions: "tab_reports_transactions",
@@ -5372,6 +5605,7 @@ const REPORT_TAB_PERMISSIONS = {
     utilities: "tab_reports_utilities",
     carbon: "tab_reports_carbon",
     pl: "tab_reports_pl",
+    profitability: "tab_reports_profitability",
     animals: "tab_reports_animals",
 };
 
@@ -5581,6 +5815,7 @@ async function exportSection(tab){
         utilities:  ()=>{ let r=getRange("util-from","util-to"); return `/reports/export/utilities?date_from=${r.from}&date_to=${r.to}`; },
         carbon:     ()=>{ let r=getRange("carbon-from","carbon-to"); return `/reports/export/carbon?date_from=${r.from}&date_to=${r.to}`; },
         pl:           ()=>{ let r=getRange("pl-from","pl-to");   return `/reports/export/pl?date_from=${r.from}&date_to=${r.to}`; },
+        profitability:()=>{ let r=getRange("prof-from","prof-to"); return `/reports/export/profitability?date_from=${r.from}&date_to=${r.to}`; },
         animals:      ()=>{ let r=getRange("animals-from","animals-to"); return `/reports/export/animals?date_from=${r.from}&date_to=${r.to}`; },
         transactions: ()=>{ let r=getRange("tx-from","tx-to"); let s=document.getElementById("tx-source").value; return `/reports/export/transactions?date_from=${r.from}&date_to=${r.to}${s?"&source="+s:""}`; },
     };
@@ -6781,6 +7016,77 @@ async function loadPL(){
         </div>`;
 }
 
+/* ── PRODUCT PROFITABILITY ── */
+async function loadProfitability(){
+    let r = getRange("prof-from","prof-to");
+    let data = await fetchReportJson(`/reports/api/profitability?date_from=${r.from}&date_to=${r.to}`);
+    const m = v => Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});
+    const pct = v => v === null || v === undefined ? "—" : v + "%";
+    const signColor = v => Number(v) < 0 ? "var(--danger)" : "var(--green)";
+    const t = data.totals;
+    setPrintDates("ph-prof-dates", r.from, r.to);
+
+    document.getElementById("prof-revenue").innerText = m(t.revenue);
+    document.getElementById("prof-revenue-note").innerText = `EGP · ${data.product_count} products`;
+    document.getElementById("prof-cogs").innerText = m(t.cogs);
+    document.getElementById("prof-cogs-note").innerText = t.gross_margin_pct === null ? "" : `gross margin ${t.gross_margin_pct}%`;
+    document.getElementById("prof-losses").innerText = m(t.loss_cost);
+    const profitEl = document.getElementById("prof-profit");
+    profitEl.innerText = m(t.profit);
+    profitEl.style.color = signColor(t.profit);
+    document.getElementById("prof-profit-note").innerText = t.margin_pct === null ? "after losses" : `${t.margin_pct}% margin after losses`;
+    document.getElementById("prof-losing").innerText = data.losing_count;
+    document.getElementById("prof-losing-note").innerText = data.biggest_drain
+        ? `worst: ${data.biggest_drain.name} (${m(data.biggest_drain.profit)})` : "none in this period";
+
+    const warn = [];
+    if(data.products_missing_cost.length)
+        warn.push(`No cost set on ${data.products_missing_cost.join(", ")} — their profit is overstated until a cost is entered.`);
+    if(data.products_stale_cost.length)
+        warn.push(`The product card cost is more than 10% off what batches say it costs to make for ${data.products_stale_cost.join(", ")} — spoilage and stock value use the card cost, so they are off too.`);
+    if(Math.abs(t.unattributed_revenue) >= 0.01)
+        warn.push(`${m(t.unattributed_revenue)} EGP of sales could not be traced to products (collections without invoice lines). Net sales including it: ${m(t.net_sales)}.`);
+    document.getElementById("prof-warnings").innerHTML = warn
+        .map(w=>`<div style="background:rgba(255,181,71,.08);border:1px solid rgba(255,181,71,.28);border-radius:10px;padding:11px 14px;font-size:12.5px;color:var(--warn);line-height:1.55;margin:12px 0 0">${w}</div>`).join("");
+
+    const bars = (rows, color, empty) => {
+        if(!rows.length) return `<div style="color:var(--muted);font-size:13px">${empty}</div>`;
+        const max = Math.max(...rows.map(p=>Math.abs(p.profit))) || 1;
+        return rows.map(p=>`<div class="bar-row">
+            <div class="bar-label" title="${p.name}">${p.name}</div>
+            <div class="bar-track"><div class="bar-fill" style="width:${(Math.abs(p.profit)/max*100).toFixed(1)}%;background:${color}"></div></div>
+            <div class="bar-val" style="color:${signColor(p.profit)}">${m(p.profit)}</div>
+          </div>`).join("");
+    };
+    document.getElementById("prof-top").innerHTML = bars(
+        data.products.filter(p=>p.profit > 0).slice(0, 8),
+        "linear-gradient(90deg,var(--green),var(--teal))", "No profitable products in this period");
+    document.getElementById("prof-bottom").innerHTML = bars(
+        data.products.filter(p=>p.profit < 0).reverse().slice(0, 8),
+        "linear-gradient(90deg,var(--danger),var(--orange))", "Nothing is losing money");
+
+    // No cost means no cost of sales, so its margin would read as 100% — show
+    // the money but not a margin it has not earned.
+    const noCost = p => p.cost_source === "missing";
+    const sourceTag = s => s === "batch"
+        ? `<span class="badge badge-ok" title="Material cost from production / drying batches in this period">batch</span>`
+        : s === "missing" ? `<span class="badge badge-low" title="No cost on the product card">not set</span>` : "";
+    document.getElementById("prof-body").innerHTML = data.products.length
+        ? data.products.map(p=>`<tr>
+            <td class="name">${p.name}${p.category?`<div style="font-size:11px;color:var(--muted);font-weight:400">${p.category}</div>`:""}</td>
+            <td class="mono" style="text-align:right">${Number(p.qty_sold).toLocaleString(undefined,{maximumFractionDigits:2})} ${p.unit}</td>
+            <td class="mono" style="text-align:right">${m(p.revenue)}</td>
+            <td class="mono" style="text-align:right;white-space:nowrap">${m(p.unit_cost)} ${sourceTag(p.cost_source)}</td>
+            <td class="mono" style="text-align:right;color:var(--orange)">${m(p.cogs)}</td>
+            <td class="mono" style="text-align:right">${noCost(p)?"—":pct(p.gross_margin_pct)}</td>
+            <td class="mono" style="text-align:right;color:${p.loss_cost>0?"var(--danger)":"var(--muted)"}" title="${p.loss_qty} ${p.unit} lost">${p.loss_cost>0?m(p.loss_cost):"—"}</td>
+            <td class="mono" style="text-align:right;font-weight:700;color:${noCost(p)?"var(--muted)":signColor(p.profit)}" title="${noCost(p)?"Overstated — no cost set":""}">${m(p.profit)}</td>
+            <td class="mono" style="text-align:right;color:${signColor(p.profit)}">${noCost(p)?"—":pct(p.margin_pct)}</td>
+            <td class="mono" style="text-align:right;color:var(--muted)">${pct(p.profit_share_pct)}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:30px">No sales or losses in this period</td></tr>`;
+}
+
 const __rawReportLoaders = {
     sales: loadSales,
     transactions: loadTransactions,
@@ -6793,6 +7099,7 @@ const __rawReportLoaders = {
     utilities: loadUtilities,
     carbon: loadCarbon,
     pl: loadPL,
+    profitability: loadProfitability,
 };
 
 loadSales = () => runReportLoader("sales", __rawReportLoaders.sales);
@@ -6806,6 +7113,7 @@ loadHR = () => runReportLoader("hr", __rawReportLoaders.hr);
 loadUtilities = () => runReportLoader("utilities", __rawReportLoaders.utilities);
 loadCarbon = () => runReportLoader("carbon", __rawReportLoaders.carbon);
 loadPL = () => runReportLoader("pl", __rawReportLoaders.pl);
+loadProfitability = () => runReportLoader("profitability", __rawReportLoaders.profitability);
 
 function togglePLDetail(id){
     let el   = document.getElementById(id);
@@ -6830,6 +7138,7 @@ function togglePLDetail(id){
     setEl("util-from",  m); setEl("util-to",   t);
     setEl("carbon-from",m); setEl("carbon-to", t);
     setEl("pl-from",    y); setEl("pl-to",     t);
+    setEl("prof-from",  m); setEl("prof-to",   t);
     setEl("animals-from", m); setEl("animals-to", t);
     const invMode = document.getElementById("inv-mode");
     const invFrom = document.getElementById("inv-from");

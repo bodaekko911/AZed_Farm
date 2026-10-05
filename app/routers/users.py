@@ -1009,6 +1009,7 @@ const LEGACY_PAGE_TREE = [
     { page: "page_reports",    icon: "📈", label: "Reports",     children: [
         {value:"tab_reports_sales",      label:"Sales tab"},
         {value:"tab_reports_pl",         label:"P&L tab"},
+        {value:"tab_reports_profitability", label:"Product Profitability tab"},
         {value:"tab_reports_inventory",  label:"Inventory tab"},
         {value:"tab_reports_transactions",label:"Transactions tab"},
         {value:"tab_reports_hr",         label:"HR report tab"},
