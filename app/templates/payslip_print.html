@@ -1,0 +1,108 @@
+{% extends "base_print.html" %}
+{# One payslip per page. Labels in English with Arabic beside them, since
+   most staff read Arabic. Figures come from the payroll run (hr._payslip). #}
+
+{% block page_title %}{% if slips|length == 1 %}Payslip — {{ slips[0].employee }} — {{ slips[0].period }}{% else %}Payslips — {{ slips[0].period }}{% endif %}{% endblock %}
+{% block print_button_label %}Print {{ "payslip" if slips|length == 1 else slips|length ~ " payslips" }}{% endblock %}
+
+{% block extra_styles %}
+.slip { page-break-after: always; break-after: page; padding-bottom: 8px; }
+.slip:last-of-type { page-break-after: auto; break-after: auto; }
+.slip + .slip { margin-top: 40px; padding-top: 30px; border-top: 2px dashed #ccc; }
+.slip-title { text-align: center; margin: 4px 0 18px; }
+.slip-title .en { font-size: 17px; font-weight: 800; letter-spacing: 1px; }
+.slip-title .ar { font-size: 15px; font-weight: 700; color: #444; direction: rtl; }
+.ar { direction: rtl; unicode-bidi: isolate; font-family: Tahoma, Arial, sans-serif; }
+table.who { width: 100%; border-collapse: collapse; margin-bottom: 16px; font-size: 13px; }
+table.who td { padding: 4px 8px; border-bottom: 1px solid #eee; }
+table.who td.k { color: #666; width: 18%; }
+table.who td.v { font-weight: 700; width: 32%; }
+table.lines { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
+table.lines th { background: {{ BRAND.primary_color }}; color: #fff; padding: 7px 10px; font-size: 12px; text-align: left; }
+table.lines th.ar { text-align: right; }
+table.lines td { padding: 7px 10px; border-bottom: 1px solid #e6e6e6; font-size: 13px; vertical-align: top; }
+table.lines td.amt { text-align: right; font-family: monospace; white-space: nowrap; width: 120px; }
+table.lines td.ar { text-align: right; color: #333; }
+table.lines .note { font-size: 11px; color: #777; }
+table.lines tr.sum td { font-weight: 700; background: #f4f4f4; }
+.minus { color: #b03030; }
+.net { display: flex; justify-content: space-between; align-items: center; background: {{ BRAND.primary_color }};
+       color: #fff; padding: 12px 16px; border-radius: 6px; margin: 6px 0 12px; }
+.net .label { font-size: 15px; font-weight: 700; }
+.net .amount { font-size: 22px; font-weight: 900; font-family: monospace; }
+.status { font-size: 13px; padding: 8px 12px; border-radius: 6px; margin-bottom: 6px; }
+.status.paid { background: #e9f7ec; color: #1f6b2c; }
+.status.unpaid { background: #fff4e0; color: #8a5a00; }
+.loan { font-size: 13px; color: #444; margin-top: 4px; }
+{% endblock %}
+
+{% block content %}
+{% for s in slips %}
+<div class="slip">
+    <div class="header-top">
+        <table class="inv-meta">
+            <tr><td class="label">Period</td><td><strong>{{ s.period_en }}</strong></td></tr>
+            <tr><td class="label ar">الشهر</td><td class="ar">{{ s.period_ar }}</td></tr>
+        </table>
+        <div class="logo-block">
+            <img src="{{ BRAND.logo_path }}" alt="">
+            <div class="company-name">{{ BRAND.company_name }}</div>
+            <div class="company-sub">Commercial registry {{ BRAND.commercial_registry }} · Tax ID {{ BRAND.tax_id }}</div>
+        </div>
+        <div style="width:140px"></div>
+    </div>
+
+    <div class="slip-title"><div class="en">PAYSLIP</div><div class="ar">قسيمة راتب</div></div>
+
+    <table class="who">
+        <tr><td class="k">Employee / <span class="ar">الاسم</span></td><td class="v">{{ s.employee }}</td>
+            <td class="k">Position / <span class="ar">الوظيفة</span></td><td class="v">{{ s.position or "—" }}</td></tr>
+        <tr><td class="k">Farm / <span class="ar">المزرعة</span></td><td class="v">{{ s.farm or "—" }}</td>
+            <td class="k">Department / <span class="ar">القسم</span></td><td class="v">{{ s.department or "—" }}</td></tr>
+        <tr><td class="k">Days worked / <span class="ar">أيام العمل</span></td><td class="v">{{ s.days_worked }} / {{ s.working_days }}</td>
+            <td class="k">Daily rate / <span class="ar">أجر اليوم</span></td><td class="v">{{ "{:,.2f}".format(s.daily_rate) }}</td></tr>
+    </table>
+
+    <table class="lines">
+        <tr><th>Earnings</th><th class="ar">المستحقات</th><th style="text-align:right">EGP</th></tr>
+        {% for e in s.earnings %}
+        <tr><td>{{ e.label }}</td><td class="ar">{{ e.label_ar }}</td><td class="amt">{{ "{:,.2f}".format(e.amount) }}</td></tr>
+        {% endfor %}
+        <tr class="sum"><td>Total earnings</td><td class="ar">إجمالي المستحقات</td><td class="amt">{{ "{:,.2f}".format(s.gross) }}</td></tr>
+    </table>
+
+    {% if s.deductions %}
+    <table class="lines">
+        <tr><th>Deductions</th><th class="ar">الخصومات</th><th style="text-align:right">EGP</th></tr>
+        {% for d in s.deductions %}
+        <tr><td>{{ d.label }}{% if d.note %}<div class="note">{{ d.note }}</div>{% endif %}</td>
+            <td class="ar">{{ d.label_ar }}</td><td class="amt minus">-{{ "{:,.2f}".format(d.amount) }}</td></tr>
+        {% endfor %}
+        <tr class="sum"><td>Total deductions</td><td class="ar">إجمالي الخصومات</td><td class="amt minus">-{{ "{:,.2f}".format(s.total_deductions) }}</td></tr>
+    </table>
+    {% endif %}
+
+    <div class="net"><span class="label">Net pay &nbsp;/&nbsp; <span class="ar">صافي الراتب</span></span>
+        <span class="amount">{{ "{:,.2f}".format(s.net) }} EGP</span></div>
+
+    {% if s.paid %}
+    <div class="status paid">
+        ✓ Paid {{ "{:,.2f}".format(s.paid_amount) }} EGP{% if s.paid_on %} on {{ s.paid_on }}{% endif %}
+        &nbsp;·&nbsp; <span class="ar">تم الصرف</span>
+        {% if s.unpaid_remainder > 0 %}<br>Remaining {{ "{:,.2f}".format(s.unpaid_remainder) }} EGP{% if s.days_off_credited %} taken as {{ "{:g}".format(s.days_off_credited) }} days off added to leave balance{% endif %}{% endif %}
+    </div>
+    {% else %}
+    <div class="status unpaid">Not paid yet &nbsp;·&nbsp; <span class="ar">لم يُصرف بعد</span></div>
+    {% endif %}
+    {% if s.loan_balance > 0 %}
+    <div class="loan">Loan balance still owed after this payslip: <strong>{{ "{:,.2f}".format(s.loan_balance) }} EGP</strong>
+        &nbsp;·&nbsp; <span class="ar">رصيد السلفة المتبقي</span></div>
+    {% endif %}
+
+    <div class="footer-sign">
+        <div class="sign-block"><div class="sign-line"></div>Employee signature / <span class="ar">توقيع الموظف</span></div>
+        <div class="sign-block"><div class="sign-line"></div>Approved by / <span class="ar">اعتماد</span></div>
+    </div>
+</div>
+{% endfor %}
+{% endblock %}

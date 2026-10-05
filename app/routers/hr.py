@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends, HTTPException
+﻿from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 import re
 from decimal import Decimal, ROUND_HALF_UP
@@ -14,6 +14,7 @@ from app.database import get_async_session
 from app.core.permissions import get_current_user, has_permission, require_permission
 from app.core.log import record
 from app.core.navigation import render_app_header
+from app.core.templates import templates
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.expense import Expense
 from app.models.hr import (
@@ -2178,6 +2179,184 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
         })
     return out
 
+# ── PAYSLIPS ───────────────────────────────────────────
+_AR_MONTHS = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
+              "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
+_EN_MONTHS = ["January", "February", "March", "April", "May", "June",
+              "July", "August", "September", "October", "November", "December"]
+
+
+def _whatsapp_number(phone: Optional[str]) -> Optional[str]:
+    """International digits for a wa.me link, or None. Egyptian mobiles are
+    stored as 01xxxxxxxxx; WhatsApp needs 201xxxxxxxxx."""
+    digits = re.sub(r"\D", "", phone or "")
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if len(digits) == 11 and digits.startswith("01"):
+        digits = "2" + digits
+    if len(digits) == 10 and digits.startswith("1"):
+        digits = "20" + digits
+    return digits if 10 <= len(digits) <= 15 else None
+
+
+def _payslip_whatsapp_text(slip: dict) -> str:
+    """The payslip as a short Arabic message — what an employee reads on a phone."""
+    f = lambda v: f"{v:,.2f}"
+    lines = [f"قسيمة راتب — {slip['period_ar']}", f"الاسم: {slip['employee']}",
+             f"أيام العمل: {slip['days_worked']:g} من {slip['working_days']:g}", ""]
+    for item in slip["earnings"]:
+        lines.append(f"{item['label_ar']}: {f(item['amount'])}")
+    for item in slip["deductions"]:
+        note = f" ({item['note']})" if item.get("note") else ""
+        lines.append(f"{item['label_ar']}{note}: -{f(item['amount'])}")
+    lines += ["", f"صافي الراتب: {f(slip['net'])} ج.م"]
+    if slip["paid"]:
+        paid_on = f" بتاريخ {slip['paid_on']}" if slip["paid_on"] else ""
+        lines.append(f"تم الصرف: {f(slip['paid_amount'])} ج.م{paid_on}")
+        if slip["days_off_credited"]:
+            lines.append(f"أيام راحة مضافة لرصيدك بدل الباقي: {slip['days_off_credited']:g}")
+    else:
+        lines.append("لم يُصرف بعد")
+    if slip["loan_balance"] > 0:
+        lines.append(f"رصيد السلفة المتبقي: {f(slip['loan_balance'])} ج.م")
+    lines += ["", "Habiba Organic Farm"]
+    return "\n".join(lines)
+
+
+async def _payslip(db: AsyncSession, payroll: Payroll) -> dict:
+    """Everything one payslip shows, from the same calculations as the payroll
+    list — so the slip and the payroll screen can never disagree."""
+    from calendar import monthrange
+    from urllib.parse import quote
+
+    emp = payroll.employee
+    year, month = int(payroll.period[:4]), int(payroll.period[5:7])
+    period_end = date(year, month, monthrange(year, month)[1])
+    working_days = int(payroll.working_days or 30) or 30
+    days_worked = int(payroll.days_worked or 0)
+
+    # Allowance: food earned for the days worked + transport in full, less any
+    # allowance advance paid early and recovered on this run.
+    food = _money(getattr(emp, "food_allowance", 0) or 0)
+    transport = _money(getattr(emp, "transportation_allowance", 0) or 0)
+    earned_food = _money(_money(food / Decimal(str(working_days))) * _dec(days_worked)) if working_days else Decimal("0")
+    allowance = await _earned_allowance_for_payroll(db, payroll)
+    advance_recovered = _money(earned_food + transport - allowance)
+
+    earnings = [{"label": f"Salary for {days_worked} of {working_days} days", "label_ar": "الراتب عن أيام العمل",
+                 "amount": _money(payroll.base_salary or 0)}]
+    if earned_food > 0:
+        earnings.append({"label": "Food allowance", "label_ar": "بدل طعام", "amount": earned_food})
+    if transport > 0:
+        earnings.append({"label": "Transport allowance", "label_ar": "بدل مواصلات", "amount": transport})
+    if _money(payroll.bonuses or 0) > 0:
+        earnings.append({"label": "Bonus", "label_ar": "مكافأة", "amount": _money(payroll.bonuses)})
+    gross = _money(sum((e["amount"] for e in earnings), Decimal("0")))
+
+    rows = (await db.execute(
+        select(EmployeePayrollDeduction).where(EmployeePayrollDeduction.payroll_id == payroll.id)
+        .order_by(EmployeePayrollDeduction.deduction_date, EmployeePayrollDeduction.id)
+    )).scalars().all()
+    day_notes = "; ".join(r.note for r in rows if r.type == "day_deduction" and r.note)
+    manual_notes = "; ".join(r.note for r in rows if r.type == "manual" and r.note)
+    repayments = (await db.execute(
+        select(EmployeeLoanRepayment).where(EmployeeLoanRepayment.payroll_id == payroll.id)
+    )).scalars().all()
+
+    deductions = []
+    if advance_recovered > 0:
+        deductions.append({"label": "Allowance advance recovered", "label_ar": "استرداد سلفة البدل",
+                           "amount": advance_recovered, "note": ""})
+    day_days = float(_days(getattr(payroll, "day_deduction_days", 0) or 0))
+    if _money(payroll.day_deductions or 0) > 0:
+        deductions.append({"label": f"Day deductions ({day_days:g} day{'' if day_days == 1 else 's'})", "label_ar": f"خصم أيام ({day_days:g} يوم)",
+                           "amount": _money(payroll.day_deductions), "note": day_notes})
+    if _money(payroll.manual_deductions or 0) > 0:
+        deductions.append({"label": "Other deductions", "label_ar": "خصومات أخرى",
+                           "amount": _money(payroll.manual_deductions), "note": manual_notes})
+    if _money(payroll.loan_deductions or 0) > 0:
+        deductions.append({"label": "Loan repayment", "label_ar": "قسط سلفة",
+                           "amount": _money(payroll.loan_deductions),
+                           "note": "; ".join(r.note for r in repayments if r.note)})
+    total_deductions = _money(sum((d["amount"] for d in deductions), Decimal("0")))
+
+    net = _money(payroll.net_salary or 0) if payroll.paid else await _payable_net_salary(db, payroll)
+    paid_amount = _money(payroll.paid_amount) if payroll.paid_amount is not None else (net if payroll.paid else Decimal("0"))
+
+    # Loans still owed as of the end of this payroll month.
+    loans = (await db.execute(select(EmployeeLoan).where(
+        EmployeeLoan.employee_id == emp.id, EmployeeLoan.status != "cancelled",
+        EmployeeLoan.loan_date <= period_end,
+    ))).scalars().all()
+    repaid = (await db.execute(select(func.coalesce(func.sum(EmployeeLoanRepayment.amount), 0)).where(
+        EmployeeLoanRepayment.loan_id.in_([l.id for l in loans] or [0]),
+        EmployeeLoanRepayment.repayment_date <= period_end,
+    ))).scalar() or 0
+    loan_balance = max(_money(sum((_money(l.amount) for l in loans), Decimal("0")) - _money(repaid)), Decimal("0"))
+
+    slip = {
+        "payroll_id": payroll.id,
+        "employee": emp.name,
+        "position": emp.position or "",
+        "department": emp.department or "",
+        "farm": emp.farm.name if getattr(emp, "farm", None) else "",
+        "phone": emp.phone or "",
+        "period": payroll.period,
+        "period_en": f"{_EN_MONTHS[month - 1]} {year}",
+        "period_ar": f"{_AR_MONTHS[month - 1]} {year}",
+        "days_worked": days_worked,
+        "working_days": working_days,
+        "daily_rate": _as_float(_paid_days_and_rate(emp, working_days)[1]),
+        "earnings": [{**e, "amount": _as_float(e["amount"])} for e in earnings],
+        "deductions": [{**d, "amount": _as_float(d["amount"])} for d in deductions],
+        "gross": _as_float(gross),
+        "total_deductions": _as_float(total_deductions),
+        "net": _as_float(net),
+        "paid": bool(payroll.paid),
+        "paid_amount": _as_float(paid_amount),
+        "paid_on": payroll.paid_at.strftime("%Y-%m-%d") if payroll.paid_at else "",
+        "unpaid_remainder": _as_float(max(net - paid_amount, Decimal("0"))) if payroll.paid else 0.0,
+        "days_off_credited": float(payroll.days_off_credited or 0),
+        "loan_balance": _as_float(loan_balance),
+    }
+    slip["whatsapp_text"] = _payslip_whatsapp_text(slip)
+    number = _whatsapp_number(emp.phone)
+    slip["whatsapp_url"] = f"https://wa.me/{number}?text={quote(slip['whatsapp_text'])}" if number else None
+    return slip
+
+
+async def _load_payrolls(db: AsyncSession, *, payroll_id: Optional[int] = None, period: Optional[str] = None):
+    stmt = select(Payroll).options(selectinload(Payroll.employee).selectinload(Employee.farm))
+    if payroll_id is not None:
+        stmt = stmt.where(Payroll.id == payroll_id)
+    if period is not None:
+        stmt = stmt.where(Payroll.period == _validate_period(period))
+    rows = (await db.execute(stmt.order_by(Payroll.id))).scalars().all()
+    return sorted((r for r in rows if r.employee), key=lambda r: r.employee.name.lower())
+
+
+@router.get("/api/payroll/{payroll_id}/payslip", dependencies=[Depends(require_permission("tab_hr_payroll"))])
+async def get_payslip(payroll_id: int, db: AsyncSession = Depends(get_async_session)):
+    rows = await _load_payrolls(db, payroll_id=payroll_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Payroll record not found")
+    return await _payslip(db, rows[0])
+
+
+@router.get("/payslips/print", response_class=HTMLResponse, dependencies=[Depends(require_permission("tab_hr_payroll"))])
+async def print_payslips(request: Request, payroll_id: Optional[int] = None, period: Optional[str] = None,
+                         db: AsyncSession = Depends(get_async_session)):
+    """One payslip (?payroll_id=) or every payslip of a month (?period=YYYY-MM),
+    one per printed page."""
+    if payroll_id is None and not period:
+        raise HTTPException(status_code=400, detail="Give a payroll_id or a period")
+    rows = await _load_payrolls(db, payroll_id=payroll_id, period=None if payroll_id is not None else period)
+    if not rows:
+        raise HTTPException(status_code=404, detail="No payroll records found")
+    slips = [await _payslip(db, r) for r in rows]
+    return templates.TemplateResponse(request, "payslip_print.html", {"slips": slips})
+
+
 @router.get("/api/payroll/preview")
 async def preview_payroll(
     period: str,
@@ -3202,6 +3381,9 @@ td.mono { font-family: var(--mono); color: var(--green); }
 
         <!-- PAYROLL RECORDS -->
         <div class="table-wrap" id="payroll-records-wrap" style="display:none">
+            <div style="display:flex;justify-content:flex-end;padding:10px 14px;border-bottom:1px solid var(--border)">
+                <button class="action-btn" id="btn-print-payslips" onclick="printAllPayslips()" title="Every payslip of this month, one per page">🖨 Print all payslips</button>
+            </div>
             <table>
                 <thead><tr><th>Employee</th><th>Period</th><th>Base Salary</th><th>Days</th><th>Bonuses</th><th>Allowance</th><th>Loan</th><th>Day Ded.</th><th>Manual</th><th>Total Ded.</th><th>Net Salary</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody id="pay-body"></tbody>
@@ -4685,6 +4867,8 @@ async function loadPayrollRecords(){
             <td style="display:flex;gap:6px">
                 <button class="action-btn purple" onclick="openEditPayFromButton(this)" data-id="${numberValue(r.id)}" data-employee="${escapeHtml(normalizeDashFallback(r.employee))}" data-bonuses="${numberValue(r.bonuses)}" data-deductions="${numberValue(r.manual_deductions)}">Edit</button>
                 ${!r.paid && hasPermission("action_hr_mark_paid")?`<button class="action-btn green" onclick="markPaid(${numberValue(r.id)})">Mark Paid</button>`:""}
+                <button class="action-btn" title="Print payslip" onclick="printPayslip(${numberValue(r.id)})">🖨 Payslip</button>
+                <button class="action-btn green" title="Send payslip on WhatsApp" onclick="sendPayslipWhatsApp(${numberValue(r.id)})">WhatsApp</button>
             </td>
         </tr>`).join("") +
         `<tr style="background:var(--card2)">
@@ -4692,6 +4876,35 @@ async function loadPayrollRecords(){
             <td style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--green)">${money(totalNet)}</td>
             <td colspan="2"></td>
         </tr>`;
+}
+
+/* ── Payslips ── */
+function printPayslip(id){
+    window.open(`/hr/payslips/print?payroll_id=${numberValue(id)}`, "_blank");
+}
+function printAllPayslips(){
+    const period = document.getElementById("pay-period").value
+        || ((window._payrollRecords||[])[0] || {}).period;
+    if(!period){ showToast("Pick the payroll month first"); return; }
+    window.open(`/hr/payslips/print?period=${encodeURIComponent(period)}`, "_blank");
+}
+// Opens WhatsApp with the payslip written out in Arabic, addressed to the
+// employee's phone; the user presses send. Without a usable phone number the
+// text is copied so it can be pasted into any chat.
+async function sendPayslipWhatsApp(id){
+    const res = await fetch(`/hr/api/payroll/${numberValue(id)}/payslip`);
+    const slip = await res.json().catch(()=>({}));
+    if(!res.ok){ showToast("Error: " + (slip.detail || "Could not load the payslip")); return; }
+    if(slip.whatsapp_url){
+        window.open(slip.whatsapp_url, "_blank");
+        return;
+    }
+    try{
+        await navigator.clipboard.writeText(slip.whatsapp_text);
+        showToast(`No WhatsApp number on ${slip.employee}'s record — payslip text copied, paste it into the chat`);
+    }catch(e){
+        showToast(`No WhatsApp number on ${slip.employee}'s record — add a phone on the Employees tab`);
+    }
 }
 
 function openEditPayFromButton(btn){
