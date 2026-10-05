@@ -691,12 +691,13 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
       </div>
       <div class="field">
         <label>Quantity *</label>
-        <input type="number" id="edit-qty" min="0.001" step="0.001" required>
+        <input type="number" id="edit-qty" min="0.001" step="any" required oninput="updateEditPreview()">
       </div>
       <div class="field">
         <label>Unit Cost</label>
-        <input type="number" id="edit-cost" min="0" step="0.01">
+        <input type="number" id="edit-cost" min="0" step="any" oninput="updateEditPreview()">
       </div>
+      <div class="field full" id="edit-preview" style="font-family:var(--mono);font-size:13px;color:var(--sub);margin-top:-6px"></div>
       <div class="field full">
         <label>Supplier / Reference</label>
         <input type="text" id="edit-supplier" maxlength="150">
@@ -1324,7 +1325,7 @@ function renderPickerList(id, query) {
            onmousedown="selectProduct(event,${id},${p.id},'${esc(p.name)}','${esc(p.sku)}','${esc(p.unit)}',${p.cost},${p.stock})">
         <span>${esc(p.name)}</span>
         <span class="sku">${esc(p.sku)}</span>
-        <span class="stock">${p.stock.toFixed(3)}&thinsp;${esc(p.unit)}</span>
+        <span class="stock">${fmtQty(p.stock)}&thinsp;${esc(p.unit)}</span>
       </div>`).join('');
   }
   list.classList.add('open');
@@ -1608,8 +1609,8 @@ async function loadHistory() {
       <div style="font-weight:600">${esc(row.product_name||'')}</div>
       <div style="font-family:var(--mono);font-size:11px;color:var(--muted)">${esc(row.product_sku||'')}</div>
     </td>
-    <td style="font-family:var(--mono)">${parseFloat(row.qty).toFixed(3)}</td>
-    <td style="font-family:var(--mono)">${row.unit_cost!=null ? parseFloat(row.unit_cost).toFixed(2) : '<span style="color:var(--muted)">—</span>'}</td>
+    <td style="font-family:var(--mono)">${fmtQty(row.qty)}${row.product_unit ? `&thinsp;<span style="color:var(--muted)">${esc(row.product_unit)}</span>` : ''}</td>
+    <td style="font-family:var(--mono)">${row.unit_cost!=null ? fmtCost(row.unit_cost) : '<span style="color:var(--muted)">—</span>'}</td>
     <td style="font-family:var(--mono);color:var(--amber)">${row.total_cost!=null ? parseFloat(row.total_cost).toFixed(2) : '<span style="color:var(--muted)">—</span>'}</td>
     <td style="color:var(--sub)">${row.location_name ? esc(row.location_name) : '<span style="color:var(--muted)">—</span>'}</td>
     <td>${row.expense_ref ? `<span class="badge badge-exp">${esc(row.expense_ref)}</span>` : '<span class="badge badge-none">—</span>'}</td>
@@ -1639,10 +1640,13 @@ function openEditModal(receiptId) {
   document.getElementById('edit-modal-sub').textContent = `Editing ${receipt.ref_number}`;
   document.getElementById('edit-product').value = receipt.product_name || '';
   document.getElementById('edit-date').value = receipt.receive_date || todayIso();
-  document.getElementById('edit-qty').value = parseFloat(receipt.qty || 0).toFixed(3);
-  document.getElementById('edit-cost').value = receipt.unit_cost != null ? parseFloat(receipt.unit_cost).toFixed(2) : '';
+  // Plain numbers in the inputs: "50.000" reads as fifty thousand where the
+  // dot is the thousands separator, but it is fifty.
+  document.getElementById('edit-qty').value = String(parseFloat(receipt.qty || 0));
+  document.getElementById('edit-cost').value = receipt.unit_cost != null ? String(parseFloat(receipt.unit_cost)) : '';
   document.getElementById('edit-supplier').value = receipt.supplier_ref || '';
   document.getElementById('edit-notes').value = receipt.notes || '';
+  updateEditPreview();
   document.getElementById('edit-modal').classList.add('open');
 }
 
@@ -1733,6 +1737,27 @@ function exportReceipts() {
   if (!hasPermission('action_receive_products_export')) return;
   showToast('Preparing Excel export...', 'ok');
   window.location.href = '/receive/api/export.xlsx';
+}
+
+// Quantities with a comma for thousands and no padding zeros:
+// 50 → "50", 50000 → "50,000", 0.14 → "0.14".
+function fmtQty(v) {
+  return Number(v || 0).toLocaleString('en-US', {maximumFractionDigits: 3});
+}
+function fmtCost(v) {
+  return Number(v || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 3});
+}
+// Spells out what the edit will save, so 50 vs 50,000 is never a guess.
+function updateEditPreview() {
+  const el = document.getElementById('edit-preview');
+  if (!el || !_editingReceipt) return;
+  const qty  = parseFloat(document.getElementById('edit-qty').value);
+  const cost = parseFloat(document.getElementById('edit-cost').value);
+  const unit = esc(_editingReceipt.product_unit || 'unit');
+  if (!(qty > 0)) { el.innerHTML = ''; return; }
+  el.innerHTML = cost > 0
+    ? `<div>= <b style="color:var(--text)">${fmtQty(qty)} ${unit}</b> × ${fmtCost(cost)} per ${unit} = <b style="color:var(--amber)">${fmtCost(qty * cost)}</b> total</div>`
+    : `<div>= <b style="color:var(--text)">${fmtQty(qty)} ${unit}</b></div>`;
 }
 
 function todayIso() { return new Date().toISOString().slice(0, 10); }

@@ -1158,6 +1158,7 @@ async def list_receipts(
             "product_id":     r.product_id,
             "product_name":   r.product.name if r.product else None,
             "product_sku":    r.product.sku  if r.product else None,
+            "product_unit":   r.product.unit if r.product else None,
             "receive_date":   r.receive_date.isoformat() if r.receive_date else None,
             "qty":            float(r.qty),
             "unit_cost":      float(r.unit_cost) if r.unit_cost is not None else None,
