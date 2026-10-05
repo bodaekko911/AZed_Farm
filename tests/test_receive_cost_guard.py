@@ -140,3 +140,38 @@ def test_correcting_the_receipt_needs_confirmation_then_fixes_cost_and_every_sto
     assert product.stock == Decimal("51000")              # 1 000 before + 50 000
     assert loc.qty == Decimal("51000")                    # storage moves with it
     assert (move.qty, move.qty_after) == (Decimal("50000"), Decimal("51000"))
+
+
+# ── Searching receipt history ────────────────────────────────────────────────
+
+def test_history_search_finds_receipts_by_number_product_supplier_or_reference():
+    from app.models.supplier import Supplier
+    from app.services.receive_service import list_receipts
+
+    with make_session() as session:
+        session.add_all([
+            Product(id=1, sku="MEJ", name="Mejdool A (1g)", unit="gram", price=Decimal("0.4"), cost=0, stock=0),
+            Product(id=2, sku="EGG", name="Baladi Eggs", unit="piece", price=Decimal("12"), cost=0, stock=0),
+            Supplier(id=1, name="Siwa Dates Co."),
+            ProductReceipt(id=106, ref_number="RCV-00106", product_id=1, receive_date=date(2025, 10, 14),
+                           qty=Decimal("0.14"), unit_cost=Decimal("70000"), supplier_id=1),
+            ProductReceipt(id=163, ref_number="RCV-00163", product_id=1, receive_date=date(2026, 9, 8),
+                           qty=Decimal("50000"), unit_cost=Decimal("0.19"), supplier_ref="INV-2026-114"),
+            ProductReceipt(id=111, ref_number="RCV-00111", product_id=2, receive_date=date(2026, 1, 3),
+                           qty=Decimal("10"), unit_cost=Decimal("120")),
+        ])
+        session.commit()
+        db = AsyncSessionAdapter(session)
+
+        def refs(q):
+            return [r["ref_number"] for r in asyncio.run(list_receipts(db, limit=100, q=q))["items"]]
+
+        assert refs("RCV-00106") == ["RCV-00106"]
+        assert refs("106") == ["RCV-00106"]                   # digits alone find the number
+        assert refs("rcv-0016") == ["RCV-00163"]              # partial, any case
+        assert refs("mejdool") == ["RCV-00163", "RCV-00106"]  # newest first
+        assert refs("siwa") == ["RCV-00106"]                  # supplier
+        assert refs("INV-2026") == ["RCV-00163"]              # supplier reference
+        assert refs("EGG") == ["RCV-00111"]                   # SKU
+        assert refs("nothing like this") == []
+        assert len(refs("")) == 3

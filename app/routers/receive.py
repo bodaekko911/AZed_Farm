@@ -193,9 +193,10 @@ async def get_receipt_history(
     skip:       int           = 0,
     limit:      int           = 50,
     product_id: Optional[int] = None,
+    q:          Optional[str] = None,
     db: AsyncSession = Depends(get_async_session),
 ):
-    return await list_receipts(db, skip=skip, limit=limit, product_id=product_id)
+    return await list_receipts(db, skip=skip, limit=limit, product_id=product_id, q=q)
 
 
 @router.put("/api/receipt/{receipt_id}")
@@ -655,7 +656,12 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
   <div class="card">
     <div class="section-head">
       <div class="section-title">Recent Received Products</div>
-      <button type="button" class="action-btn export" id="export-btn" onclick="exportReceipts()" style="display:none">Export Excel</button>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="search" id="history-search" placeholder="Search RCV #, product, supplier…" autocomplete="off"
+               oninput="onHistorySearch()"
+               style="width:260px;max-width:100%;background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:7px 11px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none">
+        <button type="button" class="action-btn export" id="export-btn" onclick="exportReceipts()" style="display:none">Export Excel</button>
+      </div>
     </div>
     <div class="table-wrap">
       <table class="hist">
@@ -1581,17 +1587,28 @@ function resetForm() {
 }
 
 // ── History ─────────────────────────────────────────────────────────────────
+// Search runs on the server so older receipts are found too, not just the
+// latest 100 already on the page.
+let _historySearchTimer = null;
+function onHistorySearch() {
+  clearTimeout(_historySearchTimer);
+  _historySearchTimer = setTimeout(loadHistory, 300);
+}
+
 async function loadHistory() {
-  const r     = await fetch('/receive/api/history?limit=100');
+  const q     = (document.getElementById('history-search')?.value || '').trim();
+  const r     = await fetch('/receive/api/history?limit=100' + (q ? '&q=' + encodeURIComponent(q) : ''));
   const tbody = document.getElementById('history-body');
   if (!r.ok) { tbody.innerHTML = `<tr><td colspan="14" class="empty-row">Could not load.</td></tr>`; return; }
   const data  = await r.json();
+  // A slower, older search must not overwrite the result of a newer one.
+  if (q !== (document.getElementById('history-search')?.value || '').trim()) return;
   _historyItems = data.items || [];
   const canUpdate = hasPermission('action_receive_products_update');
   const canDelete = hasPermission('action_receive_products_delete');
   const canManage = canUpdate || canDelete;
   if (!_historyItems.length) {
-    tbody.innerHTML = `<tr><td colspan="14" class="empty-row">No receipts yet.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="14" class="empty-row">${q ? `No receipts match “${esc(q)}”.` : 'No receipts yet.'}</td></tr>`;
     return;
   }
   tbody.innerHTML = _historyItems.map(row => {
@@ -1617,7 +1634,7 @@ async function loadHistory() {
     </td>
     <td style="font-family:var(--mono)">${fmtQty(row.qty)}${row.product_unit ? `&thinsp;<span style="color:var(--muted)">${esc(row.product_unit)}</span>` : ''}</td>
     <td style="font-family:var(--mono)">${row.unit_cost!=null ? fmtCost(row.unit_cost) : '<span style="color:var(--muted)">—</span>'}</td>
-    <td style="font-family:var(--mono);color:var(--amber)">${row.total_cost!=null ? parseFloat(row.total_cost).toFixed(2) : '<span style="color:var(--muted)">—</span>'}</td>
+    <td style="font-family:var(--mono);color:var(--amber)">${row.total_cost!=null ? Number(row.total_cost).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '<span style="color:var(--muted)">—</span>'}</td>
     <td style="color:var(--sub)">${row.location_name ? esc(row.location_name) : '<span style="color:var(--muted)">—</span>'}</td>
     <td>${row.expense_ref ? `<span class="badge badge-exp">${esc(row.expense_ref)}</span>` : '<span class="badge badge-none">—</span>'}</td>
     <td style="color:var(--sub)">${row.supplier_name ? esc(row.supplier_name) : '<span style="color:var(--muted)">—</span>'}</td>

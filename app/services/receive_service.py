@@ -23,7 +23,7 @@ from typing import Any, Literal, Optional
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -1123,11 +1123,34 @@ async def list_receipts(
     skip: int = 0,
     limit: int = 50,
     product_id: Optional[int] = None,
+    q:          Optional[str] = None,
 ) -> dict[str, Any]:
-    """Paginated receipt history with product, user, supplier, and expense refs."""
+    """Paginated receipt history with product, user, supplier, and expense refs.
+
+    ``q`` searches the receipt number, product name or SKU, supplier and
+    supplier reference. Digits alone also find the receipt by number, so
+    "106" finds RCV-00106.
+    """
     base = select(ProductReceipt)
     if product_id is not None:
         base = base.where(ProductReceipt.product_id == product_id)
+    term = (q or "").strip()
+    if term:
+        like = f"%{term}%"
+        conditions = [
+            ProductReceipt.ref_number.ilike(like),
+            ProductReceipt.supplier_ref.ilike(like),
+            Product.name.ilike(like),
+            Product.sku.ilike(like),
+            Supplier.name.ilike(like),
+        ]
+        if term.isdigit():
+            conditions.append(ProductReceipt.ref_number == f"RCV-{int(term):05d}")
+        base = (
+            base.outerjoin(Product, Product.id == ProductReceipt.product_id)
+            .outerjoin(Supplier, Supplier.id == ProductReceipt.supplier_id)
+            .where(or_(*conditions))
+        )
 
     count_result = await db.execute(
         select(func.count()).select_from(base.subquery())
