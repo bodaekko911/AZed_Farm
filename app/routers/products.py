@@ -177,6 +177,28 @@ def _product_filters(q: str, low_stock: bool, category: str, item_type: str):
     return conditions
 
 
+# Columns the product list can be sorted by. Anything else falls back to name,
+# so a request can never order by an arbitrary column.
+_SORT_COLUMNS = {
+    "sku": Product.sku,
+    "name": Product.name,
+    "category": Product.category,
+    "type": Product.item_type,
+    "price": Product.price,
+    "cost": Product.cost,
+    "stock": Product.stock,
+    "unit": Product.unit,
+}
+
+
+def _product_order(sort: str, direction: str):
+    column = _SORT_COLUMNS.get((sort or "").lower(), Product.name)
+    ordered = column.desc() if (direction or "").lower() == "desc" else column.asc()
+    # Empty values last either way; name then id keep ties in a stable order
+    # so paging never shows a product twice or skips one.
+    return [ordered.nulls_last(), Product.name.asc(), Product.id.asc()]
+
+
 @router.get("/api/list")
 async def get_products(
     q:         str  = "",
@@ -185,6 +207,8 @@ async def get_products(
     item_type: str  = "",
     skip:      int  = 0,
     limit:     int  = 50,
+    sort:      str  = "name",
+    dir:       str  = "asc",
     db: AsyncSession = Depends(get_async_session),
 ):
     conditions = _product_filters(q, low_stock, category, item_type)
@@ -195,7 +219,7 @@ async def get_products(
     total = cnt_result.scalar()
 
     result = await db.execute(
-        select(Product).where(*conditions).order_by(Product.name).offset(skip).limit(limit)
+        select(Product).where(*conditions).order_by(*_product_order(sort, dir)).offset(skip).limit(limit)
     )
     items = result.scalars().all()
     return {
@@ -233,16 +257,18 @@ async def export_products_excel(
     low_stock: bool = False,
     category:  str  = "",
     item_type: str  = "",
+    sort:      str  = "name",
+    dir:       str  = "asc",
     db: AsyncSession = Depends(get_async_session),
 ):
     """The filtered catalogue as a spreadsheet — every matching row, not just
-    the page on screen."""
+    the page on screen, in the order the page is sorted."""
     conditions = _product_filters(q, low_stock, category, item_type)
     result = await db.execute(
         select(Product, Supplier.name)
         .outerjoin(Supplier, Product.preferred_supplier_id == Supplier.id)
         .where(*conditions)
-        .order_by(Product.name)
+        .order_by(*_product_order(sort, dir))
         .limit(10000)
     )
     rows_data = result.all()
@@ -492,6 +518,12 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;pa
 table{width:100%;border-collapse:collapse;}
 thead{background:var(--card2);}
 th{text-align:left;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:12px 16px;}
+th.sortable{cursor:pointer;user-select:none;white-space:nowrap;}
+th.sortable:hover{color:var(--text);}
+th.sortable::after{content:"↕";margin-left:5px;opacity:.35;}
+th.sortable.asc,th.sortable.desc{color:var(--text);}
+th.sortable.asc::after{content:"▲";opacity:1;}
+th.sortable.desc::after{content:"▼";opacity:1;}
 td{padding:12px 16px;border-top:1px solid var(--border);color:var(--sub);font-size:13px;}
 td.name{color:var(--text);font-weight:600;}
 td.sku{font-family:var(--mono);font-size:12px;color:var(--muted);}
@@ -597,8 +629,15 @@ tr:hover td{background:rgba(255,255,255,.02);}
             <table>
                 <thead>
                     <tr>
-                        <th>SKU</th><th>Name</th><th>Category</th><th>Type</th>
-                        <th>Price</th><th>Cost</th><th>Stock</th><th>Unit</th><th>Actions</th>
+                        <th class="sortable" data-sort="sku" onclick="sortBy('sku')">SKU</th>
+                        <th class="sortable" data-sort="name" onclick="sortBy('name')">Name</th>
+                        <th class="sortable" data-sort="category" onclick="sortBy('category')">Category</th>
+                        <th class="sortable" data-sort="type" onclick="sortBy('type')">Type</th>
+                        <th class="sortable" data-sort="price" onclick="sortBy('price')">Price</th>
+                        <th class="sortable" data-sort="cost" onclick="sortBy('cost')">Cost</th>
+                        <th class="sortable" data-sort="stock" onclick="sortBy('stock')">Stock</th>
+                        <th class="sortable" data-sort="unit" onclick="sortBy('unit')">Unit</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody id="table-body">
@@ -804,6 +843,12 @@ let categories  = [];
 let editingId   = null;
 let page        = 0;
 let pageSize    = 50;
+// Sort order, remembered on this browser. Numbers start highest-first —
+// "which products have the most stock / highest cost" is the usual question.
+const NUMERIC_SORTS = ["price", "cost", "stock"];
+let sortState = {sort: "name", dir: "asc"};
+try{ const saved = JSON.parse(localStorage.getItem("products_sort") || "null");
+     if(saved && saved.sort) sortState = saved; }catch(e){}
 let totalItems  = 0;
 let toastTimer  = null;
 const ITEM_TYPE_LABELS = {
@@ -958,7 +1003,8 @@ async function loadProducts(){
     let q    = document.getElementById("search").value.trim();
     let cat  = document.getElementById("cat-filter").value;
     let type = document.getElementById("type-filter").value;
-    let url  = `/products/api/list?skip=${page*pageSize}&limit=${pageSize}`;
+    let url  = `/products/api/list?skip=${page*pageSize}&limit=${pageSize}&sort=${sortState.sort}&dir=${sortState.dir}`;
+    showSortState();
     if(q)    url += `&q=${encodeURIComponent(q)}`;
     if(cat)  url += `&category=${encodeURIComponent(cat)}`;
     if(type) url += `&item_type=${type}`;
@@ -1011,7 +1057,7 @@ async function exportProductsXLSX(){
         const q    = document.getElementById("search").value.trim();
         const cat  = document.getElementById("cat-filter").value;
         const type = document.getElementById("type-filter").value;
-        let url = "/products/api/export.xlsx?";
+        let url = `/products/api/export.xlsx?sort=${sortState.sort}&dir=${sortState.dir}`;
         if(q)    url += `&q=${encodeURIComponent(q)}`;
         if(cat)  url += `&category=${encodeURIComponent(cat)}`;
         if(type) url += `&item_type=${encodeURIComponent(type)}`;
@@ -1036,6 +1082,23 @@ async function exportProductsXLSX(){
         btn.disabled = false;
         btn.innerHTML = label;
     }
+}
+
+function sortBy(column){
+    if(sortState.sort === column){
+        sortState.dir = sortState.dir === "asc" ? "desc" : "asc";
+    } else {
+        sortState = {sort: column, dir: NUMERIC_SORTS.includes(column) ? "desc" : "asc"};
+    }
+    try{ localStorage.setItem("products_sort", JSON.stringify(sortState)); }catch(e){}
+    page = 0;
+    loadProducts();
+}
+function showSortState(){
+    document.querySelectorAll("th.sortable").forEach(th=>{
+        th.classList.toggle("asc",  th.dataset.sort === sortState.sort && sortState.dir === "asc");
+        th.classList.toggle("desc", th.dataset.sort === sortState.sort && sortState.dir === "desc");
+    });
 }
 
 let searchTimer = null;
