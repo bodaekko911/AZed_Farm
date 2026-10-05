@@ -249,3 +249,53 @@ def test_report_joins_sales_batches_and_losses_per_product():
     assert totals["profit"] == 845.0
     # Same money as the Sales report — nothing gained or lost in the split.
     assert totals["net_sales"] == sales["net_sales"] == 1475.0
+
+
+def test_batch_cost_far_above_the_selling_price_is_flagged_and_explained():
+    ledger = ProfitabilityLedger()
+    dates = product("Mejdool (250g)", cost=40, unit="piece")
+    # 50 000 typed into a kg input instead of 50 kg: 50 000 × 160 over 200 packs.
+    ledger.add_batch_costing(
+        {"cost_is_complete": True, "allocation_basis": "single", "input_cost": 8_000_000,
+         "input_lines": [{"product": "Mejdool bulk", "qty": 50000, "unit": "kg", "unit_cost": 160, "line_cost": 8_000_000}],
+         "output_lines": [{"product_id": 9, "product": "Mejdool (250g)", "qty": 200,
+                           "share_pct": 100.0, "allocated_cost": 8_000_000, "unit_cost": 40000}]},
+        {9: dates}, "PKG-0007",
+    )
+    ledger.add_sale(9, dates, 10, 1500, "pos")
+
+    result = ledger.result()
+    row = by_name(result)["Mejdool (250g)"]
+
+    assert [x["name"] for x in result["products_suspect_cost"]] == ["Mejdool (250g)"]
+    assert result["products_suspect_cost"][0]["source"] == "batch"
+    assert row["batches"][0]["batch_number"] == "PKG-0007"
+    assert row["batches"][0]["inputs"][0]["qty"] == 50000
+
+
+def test_a_per_kg_cost_on_a_per_gram_product_is_flagged():
+    ledger = ProfitabilityLedger()
+    # The live case: sold at 0.40 a gram, cost typed as 190 (the per-kg cost).
+    ledger.add_sale(1, product("Mejdool A (1g)", cost=190, unit="gram"), 1000, 400, "pos")
+
+    suspect = ledger.result()["products_suspect_cost"]
+
+    assert suspect == [{"name": "Mejdool A (1g)", "source": "product", "unit": "gram",
+                        "unit_cost": 190.0, "avg_price": 0.4}]
+
+
+def test_services_are_kept_out_of_product_profit_but_in_net_sales():
+    ledger = ProfitabilityLedger()
+    delivery = SimpleNamespace(name="Delivery", cost=0, unit="piece", sku="", category="Delivery", item_type="service")
+    ledger.add_sale(1, delivery, 3, 300, "pos")
+    ledger.add_sale(2, product("Honey", cost=50), 2, 200, "pos")
+
+    result = ledger.result()
+
+    assert [p["name"] for p in result["products"]] == ["Honey"]
+    assert result["services"] == [{"product_id": 1, "name": "Delivery", "category": "Delivery",
+                                   "unit": "piece", "qty_sold": 3.0, "revenue": 300.0}]
+    assert result["products_missing_cost"] == []
+    assert result["totals"]["revenue"] == 200.0
+    assert result["totals"]["services_revenue"] == 300.0
+    assert result["totals"]["net_sales"] == 500.0

@@ -2453,7 +2453,7 @@ async def _build_profitability_report(db, *, d_from, d_to):
     )
     for batch in batch_res.scalars().all():
         ledger.add_batch_costing(cost_batch(batch.inputs, batch.outputs),
-                                 {o.product_id: o.product for o in batch.outputs})
+                                 {o.product_id: o.product for o in batch.outputs}, batch.batch_number)
 
     drying_res = await db.execute(
         select(DryingBatch)
@@ -2471,7 +2471,7 @@ async def _build_profitability_report(db, *, d_from, d_to):
             continue
         outputs = list(last_closed.outputs)
         ledger.add_batch_costing(cost_batch(list(stages[0].inputs), outputs),
-                                 {o.product_id: o.product for o in outputs})
+                                 {o.product_id: o.product for o in outputs}, batch.batch_number)
 
     data = ledger.result()
     data["date_from"] = local_from.isoformat()
@@ -2503,6 +2503,7 @@ async def export_profitability(date_from: str = None, date_to: str = None, db: A
             ("Cost of Sales (EGP)", t["cogs"]),
             ("Losses (EGP)", t["loss_cost"]),
             ("Profit (EGP)", t["profit"]),
+            ("Services & fees (EGP, not in profit)", t["services_revenue"]),
             ("Not traced to products (EGP)", t["unattributed_revenue"]),
             ("Products losing money", data["losing_count"]),
             ("Note", "Cost is material cost from batches where available, else the product card cost; "
@@ -5494,6 +5495,13 @@ td.mono{font-family:var(--mono);}
             <tbody id="prof-body"></tbody></table>
             </div>
         </div>
+        <div class="table-wrap" id="prof-services-wrap" style="margin-top:14px;display:none">
+            <div class="table-title"><span>Services &amp; Fees</span><span style="text-transform:none;letter-spacing:0;font-weight:500" id="prof-services-total"></span></div>
+            <div style="overflow-x:auto">
+            <table><thead><tr><th>Item</th><th>Category</th><th style="text-align:right">Qty</th><th style="text-align:right">Revenue</th></tr></thead>
+            <tbody id="prof-services-body"></tbody></table>
+            </div>
+        </div>
     </div>
 
 </div><!-- end .content -->
@@ -7040,6 +7048,9 @@ async function loadProfitability(){
         ? `worst: ${data.biggest_drain.name} (${m(data.biggest_drain.profit)})` : "none in this period";
 
     const warn = [];
+    data.products_suspect_cost.forEach(x=>warn.push(x.source === "batch"
+        ? `<b>Check ${x.name}:</b> its batch cost (${m(x.unit_cost)} per ${x.unit}) is more than 3× what it sells for (${m(x.avg_price)}). Usually one of its batch inputs has a cost or quantity in the wrong unit — click it below to see each batch's inputs.`
+        : `<b>Check ${x.name}:</b> the cost on the product (${m(x.unit_cost)} per ${x.unit}) is more than 3× what it sells for (${m(x.avg_price)}). Is that cost per kg on a product sold per gram? Any product packed from it inherits the error.`));
     if(data.products_missing_cost.length)
         warn.push(`No cost set on ${data.products_missing_cost.join(", ")} — their profit is overstated until a cost is entered.`);
     if(data.products_stale_cost.length)
@@ -7072,8 +7083,8 @@ async function loadProfitability(){
         ? `<span class="badge badge-ok" title="Material cost from production / drying batches in this period">batch</span>`
         : s === "missing" ? `<span class="badge badge-low" title="No cost on the product card">not set</span>` : "";
     document.getElementById("prof-body").innerHTML = data.products.length
-        ? data.products.map(p=>`<tr>
-            <td class="name">${p.name}${p.category?`<div style="font-size:11px;color:var(--muted);font-weight:400">${p.category}</div>`:""}</td>
+        ? data.products.map((p, i)=>`<tr${p.batches.length?` style="cursor:pointer" onclick="toggleProfBatches(${i})" title="Show the batches behind this cost"`:""}>
+            <td class="name">${p.batches.length?`<span id="prof-caret-${i}" style="display:inline-block;color:var(--muted);font-size:10px;margin-right:6px;transition:transform .2s">▶</span>`:""}${p.name}${p.category?`<div style="font-size:11px;color:var(--muted);font-weight:400">${p.category}</div>`:""}</td>
             <td class="mono" style="text-align:right">${Number(p.qty_sold).toLocaleString(undefined,{maximumFractionDigits:2})} ${p.unit}</td>
             <td class="mono" style="text-align:right">${m(p.revenue)}</td>
             <td class="mono" style="text-align:right;white-space:nowrap">${m(p.unit_cost)} ${sourceTag(p.cost_source)}</td>
@@ -7083,8 +7094,45 @@ async function loadProfitability(){
             <td class="mono" style="text-align:right;font-weight:700;color:${noCost(p)?"var(--muted)":signColor(p.profit)}" title="${noCost(p)?"Overstated — no cost set":""}">${m(p.profit)}</td>
             <td class="mono" style="text-align:right;color:${signColor(p.profit)}">${noCost(p)?"—":pct(p.margin_pct)}</td>
             <td class="mono" style="text-align:right;color:var(--muted)">${pct(p.profit_share_pct)}</td>
-          </tr>`).join("")
+          </tr>${p.batches.length?`<tr id="prof-batches-${i}" style="display:none"><td colspan="10" style="background:var(--card2);padding:12px 16px">${profBatchDetail(p, m)}</td></tr>`:""}`).join("")
         : `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:30px">No sales or losses in this period</td></tr>`;
+
+    // Items typed as Service on the product: no cost of goods, so they are
+    // listed apart instead of showing as 100%-margin products.
+    document.getElementById("prof-services-wrap").style.display = data.services.length ? "" : "none";
+    document.getElementById("prof-services-total").innerText =
+        `${m(t.services_revenue)} EGP · not in product profit · items typed "Service" on the product`;
+    document.getElementById("prof-services-body").innerHTML = data.services.map(sv=>`<tr>
+        <td class="name">${sv.name}</td><td style="color:var(--muted)">${sv.category||"—"}</td>
+        <td class="mono" style="text-align:right">${Number(sv.qty_sold).toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+        <td class="mono" style="text-align:right">${m(sv.revenue)}</td></tr>`).join("");
+}
+
+function profBatchDetail(p, m){
+    const used = p.cost_source === "batch";
+    const head = used
+        ? `Unit cost ${m(p.unit_cost)} per ${p.unit||"unit"} = total allocated cost ÷ total output of these batches.`
+        : `Not used — at least one batch has inputs with no cost, so the product card cost (${m(p.card_cost)}) is used instead.`;
+    return `<div style="font-size:12px;color:var(--muted);margin-bottom:8px">${head} Check input quantities and units — one mistyped line moves the whole product.</div>`
+        + p.batches.map(b=>`<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+            <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:12px;margin-bottom:6px">
+                <span style="font-weight:700;color:var(--text)">${b.batch_number}${b.complete?"":` <span class="badge badge-low">inputs missing cost</span>`}</span>
+                <span class="mono">${Number(b.output_qty).toLocaleString()} ${p.unit} out${b.share_pct!=null&&b.share_pct<100?` · ${b.share_pct}% of batch cost`:""} → ${m(b.allocated_cost)} = <b style="color:var(--orange)">${m(b.unit_cost)}/${p.unit||"unit"}</b></span>
+            </div>
+            ${b.inputs.map(x=>`<div style="display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:2px 0">
+                <span>${x.product}</span>
+                <span class="mono">${Number(x.qty).toLocaleString()} ${x.unit} × ${m(x.unit_cost)} = ${m(x.line_cost)}</span></div>`).join("")}
+            <div style="display:flex;justify-content:space-between;font-size:12px;border-top:1px solid var(--border);margin-top:4px;padding-top:4px">
+                <span>Batch input cost</span><span class="mono">${m(b.input_cost)}</span></div>
+          </div>`).join("");
+}
+function toggleProfBatches(i){
+    const row = document.getElementById(`prof-batches-${i}`);
+    const caret = document.getElementById(`prof-caret-${i}`);
+    if(!row) return;
+    const open = row.style.display === "none";
+    row.style.display = open ? "" : "none";
+    if(caret) caret.style.transform = open ? "rotate(90deg)" : "";
 }
 
 const __rawReportLoaders = {

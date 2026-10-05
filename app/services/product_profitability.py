@@ -31,11 +31,17 @@ Unit cost, in order of preference:
 Sales lines do not store the cost at the time of sale, so the cost is the one
 known now, applied to the whole period. Batch cost is material only — labour,
 energy and overhead are not recorded against batches.
+
+Items typed as a Service (delivery, tours) have no cost of goods; they are
+reported apart from the products so they neither show as 100% margin goods
+nor raise "no cost set" warnings, and still count toward net sales.
 """
 
 from __future__ import annotations
 
 from typing import Any, Optional
+
+from app.core.product_types import is_service_item_type
 
 
 def _num(value) -> float:
@@ -66,6 +72,7 @@ class ProfitabilityLedger:
                 "revenue_pos": 0.0, "revenue_b2b": 0.0, "refunds": 0.0,
                 "loss_qty": 0.0,
                 "batch_qty": 0.0, "batch_cost": 0.0, "batch_incomplete": False,
+                "batches": [],
             }
         return row
 
@@ -85,7 +92,7 @@ class ProfitabilityLedger:
     def add_unattributed(self, amount) -> None:
         self.unattributed_revenue += _num(amount)
 
-    def add_batch_costing(self, costing: dict, products_by_id: dict) -> None:
+    def add_batch_costing(self, costing: dict, products_by_id: dict, batch_number: str = "") -> None:
         """Fold one batch's ``cost_batch`` result into its outputs' unit cost."""
         complete = bool(costing.get("cost_is_complete"))
         for line in costing.get("output_lines", []):
@@ -94,6 +101,22 @@ class ProfitabilityLedger:
                 continue
             pid = line.get("product_id")
             row = self._row(pid, products_by_id.get(pid), line.get("product"))
+            # Kept so the report can show where a batch cost came from —
+            # one mistyped input quantity or cost moves the whole product.
+            row["batches"].append({
+                "batch_number": batch_number,
+                "complete": complete,
+                "allocation_basis": costing.get("allocation_basis"),
+                "inputs": [
+                    {k: i.get(k) for k in ("product", "qty", "unit", "unit_cost", "line_cost")}
+                    for i in costing.get("input_lines", [])
+                ],
+                "input_cost": costing.get("input_cost"),
+                "output_qty": line.get("qty"),
+                "share_pct": line.get("share_pct"),
+                "allocated_cost": line.get("allocated_cost"),
+                "unit_cost": line.get("unit_cost"),
+            })
             if not complete:
                 # One batch with uncosted inputs would drag the average down,
                 # so it disqualifies the batch basis for this product.
@@ -113,7 +136,7 @@ class ProfitabilityLedger:
         return 0.0, "missing"
 
     def result(self) -> dict:
-        lines = []
+        lines, services = [], []
         for row in self._rows.values():
             product = self._products.get(row["product_id"])
             net_qty = row["qty_sold"] - row["qty_refunded"]
@@ -121,6 +144,16 @@ class ProfitabilityLedger:
             # A product only produced in the window, never sold or lost,
             # has nothing to say about profit.
             if abs(net_qty) < 1e-9 and abs(revenue) < 0.005 and row["loss_qty"] <= 0:
+                continue
+            if is_service_item_type(getattr(product, "item_type", None)):
+                services.append({
+                    "product_id": row["product_id"],
+                    "name": row["name"],
+                    "category": getattr(product, "category", None) or "",
+                    "unit": getattr(product, "unit", None) or "",
+                    "qty_sold": round(net_qty, 3),
+                    "revenue": round(revenue, 2),
+                })
                 continue
             unit_cost, source = self._unit_cost(row)
             card_cost = _num(getattr(product, "cost", 0))
@@ -150,6 +183,7 @@ class ProfitabilityLedger:
                 "loss_cost": round(loss_cost, 2),
                 "profit": round(profit, 2),
                 "margin_pct": round(profit / revenue * 100, 1) if revenue > 0 else None,
+                "batches": row["batches"],
             })
 
         lines.sort(key=lambda r: (-r["profit"], r["name"].lower()))
@@ -173,8 +207,23 @@ class ProfitabilityLedger:
             and abs(r["card_cost"] - r["unit_cost"]) / r["unit_cost"] > 0.10
         )
 
+        # A cost several times the selling price is almost always a unit
+        # mix-up — a per-kg cost on a per-gram product, or grams typed into a
+        # kg batch input — not a real cost.
+        suspect = sorted(
+            ({"name": r["name"], "source": r["cost_source"], "unit": r["unit"],
+              "unit_cost": r["unit_cost"], "avg_price": r["avg_price"]}
+             for r in lines
+             if r["cost_source"] != "missing" and r["avg_price"] and r["unit_cost"] > 3 * r["avg_price"]),
+            key=lambda s: s["name"],
+        )
+        services.sort(key=lambda r: -r["revenue"])
+        services_revenue = sum(r["revenue"] for r in services)
+
         return {
             "products": lines,
+            "services": services,
+            "products_suspect_cost": suspect,
             "totals": {
                 "revenue": round(revenue, 2),
                 "cogs": round(cogs, 2),
@@ -183,8 +232,9 @@ class ProfitabilityLedger:
                 "loss_cost": round(loss_cost, 2),
                 "profit": round(profit, 2),
                 "margin_pct": round(profit / revenue * 100, 1) if revenue > 0 else None,
+                "services_revenue": round(services_revenue, 2),
                 "unattributed_revenue": round(self.unattributed_revenue, 2),
-                "net_sales": round(revenue + self.unattributed_revenue, 2),
+                "net_sales": round(revenue + services_revenue + self.unattributed_revenue, 2),
             },
             "product_count": len(lines),
             "losing_count": len(losing),
