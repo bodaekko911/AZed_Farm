@@ -46,3 +46,7 @@ Thumbs.db
 Thunder/
 
 pytest-cache-files-*/
+
+# Local review / test-run leftovers
+pr_*.txt
+test-results/
