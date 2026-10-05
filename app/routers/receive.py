@@ -698,9 +698,15 @@ body.light table.hist tr:hover td{background:rgba(0,0,0,.03)}
         <input type="number" id="edit-cost" min="0" step="any" oninput="updateEditPreview()">
       </div>
       <div class="field full" id="edit-preview" style="font-family:var(--mono);font-size:13px;color:var(--sub);margin-top:-6px"></div>
-      <div class="field full">
-        <label>Supplier / Reference</label>
-        <input type="text" id="edit-supplier" maxlength="150">
+      <div class="field">
+        <label>Supplier</label>
+        <input type="text" id="edit-supplier-name" readonly
+               title="The supplier and what was paid are set when stock is received. To change them, delete and re-receive; record later payments on the Suppliers page.">
+        <div id="edit-supplier-pay" style="font-size:12px;margin-top:4px"></div>
+      </div>
+      <div class="field">
+        <label>Supplier Ref / Invoice</label>
+        <input type="text" id="edit-supplier" maxlength="150" placeholder="e.g. INV-2026-001">
       </div>
       <div class="field full">
         <label>Notes</label>
@@ -1645,6 +1651,13 @@ function openEditModal(receiptId) {
   document.getElementById('edit-qty').value = String(parseFloat(receipt.qty || 0));
   document.getElementById('edit-cost').value = receipt.unit_cost != null ? String(parseFloat(receipt.unit_cost)) : '';
   document.getElementById('edit-supplier').value = receipt.supplier_ref || '';
+  document.getElementById('edit-supplier-name').value = receipt.supplier_name || 'No supplier — cash purchase';
+  const owed = parseFloat(receipt.amount_unpaid || 0);
+  const paid = parseFloat(receipt.amount_paid || 0);
+  document.getElementById('edit-supplier-pay').innerHTML = !(receipt.total_cost > 0) ? ''
+    : owed > 0
+      ? `<span style="color:var(--amber)">${paid > 0 ? `Paid ${fmtCost(paid)} · ` : ''}${fmtCost(owed)} owed — record payments on the Suppliers page; this receipt can't be edited until it's paid</span>`
+      : `<span style="color:#3dd06a">Paid ${fmtCost(paid)}</span>`;
   document.getElementById('edit-notes').value = receipt.notes || '';
   updateEditPreview();
   document.getElementById('edit-modal').classList.add('open');
