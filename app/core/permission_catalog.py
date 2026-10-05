@@ -146,7 +146,7 @@ PERMISSION_MATRIX = [
             {"action": "create_batch", "key": "action_production_create_batch", "label": "Create production batch"},
             {"action": "update_batch", "key": "action_production_update_batch", "label": "Edit production batch"},
             {"action": "delete_batch", "key": "action_production_delete_batch", "label": "Delete production batch"},
-            {"action": "apply_cost", "key": "action_production_apply_cost", "label": "Apply batch costs to products"},
+            {"action": "apply_cost", "key": "action_production_apply_cost", "label": "Update product costs (grown, bought, made)"},
             {"action": "log_spoilage", "key": "action_production_log_spoilage", "label": "Log / delete spoilage"},
             {"action": "drying_cancel",   "key": "action_drying_cancel_batch",   "label": "Cancel drying batch"},
             {"action": "drying_complete", "key": "action_drying_complete_batch", "label": "Complete drying batch"},

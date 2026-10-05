@@ -444,19 +444,51 @@ class ApplyBatchCosts(BaseModel):
     date_from: date_type
     date_to: date_type
     product_ids: List[int]
+    basis: str = "direct"     # Season Analysis cost: "direct" (farm costs) | "absorbed" (incl. overhead)
 
 
-async def _batch_cost_rows(db: AsyncSession, date_from: date_type, date_to: date_type) -> list[dict]:
-    """Production and drying batches in the period, rolled up into a cost per
-    output product. Same batch selection as the Production report."""
+async def _season_supplies(db: AsyncSession, date_from: date_type, date_to: date_type, basis: str) -> dict:
+    """Farm deliveries in the period, each farm's at that farm's own Season
+    Analysis cost — a crop grown on both farms gets one line per farm. Pooling
+    the farms would charge one farm's costs to the other's crops."""
+    from app.models.farm import Farm
+    from app.services.expense_service import get_cost_allocation
+
+    key = "cost_per_unit_absorbed" if basis == "absorbed" else "cost_per_unit"
+    farms = (await db.execute(select(Farm).where(Farm.is_active == 1).order_by(Farm.name))).scalars().all()
+    supplies = {}
+    for farm in farms:
+        allocation = await get_cost_allocation(
+            db, farm_id=farm.id, date_from=date_from.isoformat(), date_to=date_to.isoformat(),
+        )
+        for row in allocation["products"]:
+            if row["total_qty"] <= 0:
+                continue
+            unit_cost = row[key]
+            label = f"{farm.name} — Season Analysis ({allocation['allocation_basis_label'].lower()})"
+            if not row["can_apply_cost"]:
+                unit_cost, label = None, f"{farm.name} harvest not costed: {row['apply_skip_reason']}"
+            elif unit_cost <= 0:
+                unit_cost, label = None, f"{farm.name} harvest not costed: no farm costs in this period"
+            supplies.setdefault(row["product_id"], []).append(
+                {"source": "grown", "qty": row["total_qty"], "unit_cost": unit_cost, "label": label})
+    return supplies
+
+
+async def _cost_rows(db: AsyncSession, date_from: date_type, date_to: date_type, basis: str = "direct") -> list[dict]:
+    """Combined cost per product for the period: grown, bought and made
+    supply averaged by quantity. Batches are selected as the Production report
+    selects them."""
     from app.core.time_utils import utc_bounds
     from app.models.drying import (
         DryingBatch, DryingBatchStage, DryingBatchStageInput, DryingBatchStageOutput,
     )
+    from app.models.receipt import ProductReceipt
     from app.services.batch_cost_rollup import roll_up
 
     if date_to < date_from:
         raise HTTPException(status_code=400, detail="The end date is before the start date")
+    basis = "absorbed" if basis == "absorbed" else "direct"
     d_from, d_to = utc_bounds(date_from, date_to)
     batches, products = [], {}
 
@@ -491,40 +523,57 @@ async def _batch_cost_rows(db: AsyncSession, date_from: date_type, date_to: date
                         "outputs": [(o.product_id, float(o.qty)) for o in last.outputs]})
         products.update({line.product_id: line.product for line in [*stages[0].inputs, *last.outputs]})
 
-    return roll_up(batches, products)
+    supplies = await _season_supplies(db, date_from, date_to, basis)
+    # Bought: receipts with a price. A receipt with no price (a transfer, a
+    # gift) says nothing about cost and is left out.
+    res = await db.execute(
+        select(ProductReceipt.product_id, ProductReceipt.qty, ProductReceipt.unit_cost, ProductReceipt.ref_number)
+        .where(ProductReceipt.receive_date >= date_from, ProductReceipt.receive_date <= date_to,
+               ProductReceipt.unit_cost > 0)
+    )
+    for pid, qty, unit_cost, ref in res.all():
+        supplies.setdefault(pid, []).append({"source": "bought", "qty": float(qty),
+                                             "unit_cost": float(unit_cost), "label": ref})
+
+    missing_ids = [pid for pid in supplies if pid not in products]
+    if missing_ids:
+        res = await db.execute(select(Product).where(Product.id.in_(missing_ids)))
+        products.update({p.id: p for p in res.scalars().all()})
+
+    return roll_up(batches, products, supplies)
 
 
 @router.get("/api/costs/preview", dependencies=[Depends(require_permission("action_production_apply_cost"))])
-async def preview_batch_costs(date_from: date_type, date_to: date_type, db: AsyncSession = Depends(get_async_session)):
-    rows = await _batch_cost_rows(db, date_from, date_to)
-    return {"date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "products": rows}
+async def preview_costs(date_from: date_type, date_to: date_type, basis: str = "direct", db: AsyncSession = Depends(get_async_session)):
+    rows = await _cost_rows(db, date_from, date_to, basis)
+    return {"date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "basis": basis, "products": rows}
 
 
 @router.post("/api/costs/apply", dependencies=[Depends(require_permission("action_production_apply_cost"))])
-async def apply_batch_costs(data: ApplyBatchCosts, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
-    """Write the rolled-up cost onto the chosen products.
+async def apply_costs(data: ApplyBatchCosts, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
+    """Write the combined cost onto the chosen products.
 
     Recomputed here from the period, never taken from the browser, so a caller
     cannot post an arbitrary cost through this route.
     """
     wanted = set(data.product_ids)
     applied, skipped = [], []
-    for row in await _batch_cost_rows(db, data.date_from, data.date_to):
+    for row in await _cost_rows(db, data.date_from, data.date_to, data.basis):
         if row["product_id"] not in wanted:
             continue
         if row["new_cost"] is None:
-            skipped.append({"product": row["product"], "reason": (
-                "Inputs with no cost: " + ", ".join(row["missing_cost"])) if row["missing_cost"]
-                else "Nothing produced in this period"})
+            skipped.append({"product": row["product"], "reason": "; ".join(row["missing_cost"])
+                            or "Nothing came in during this period"})
             continue
         product = (await db.execute(select(Product).where(Product.id == row["product_id"]))).scalar_one()
         product.cost = Decimal(str(row["new_cost"]))
         applied.append({"product": row["product"], "old_cost": row["old_cost"], "new_cost": row["new_cost"]})
     if applied:
-        log_record(db, "Production", "apply_batch_cost",
-                   f"Applied batch costs ({data.date_from} to {data.date_to}) to {len(applied)} product(s): "
+        log_record(db, "Products", "apply_combined_cost",
+                   f"Applied combined costs ({data.date_from} to {data.date_to}, "
+                   f"{'incl. overhead' if data.basis == 'absorbed' else 'farm costs only'}) to {len(applied)} product(s): "
                    + "; ".join(f"{a['product']} {a['old_cost']}→{a['new_cost']}" for a in applied)[:900],
-                   user=current_user, ref_type="batch_cost", ref_id=None)
+                   user=current_user, ref_type="product_cost", ref_id=None)
         await db.commit()
     return {"applied": applied, "skipped": skipped,
             "applied_count": len(applied), "skipped_count": len(skipped)}
@@ -909,7 +958,7 @@ td.name{color:var(--text);font-weight:600;}
             <button class="btn btn-blue"   id="btn-pkg-recipe" onclick="openRecipeModal(true)"     style="display:none">+ Packaging Recipe</button>
             <button class="btn btn-danger" id="btn-spoilage"   onclick="openSpoilageModal()"       style="display:none">Log Spoilage</button>
             <button class="btn btn-orange" id="btn-drying"     onclick="openDryingStartModal()"    style="display:none">New Drying Batch</button>
-            <button class="btn btn-blue"   id="btn-costs"      onclick="openCostsModal()"          style="display:none" title="Carry batch costs onto the products made">💰 Update Costs</button>
+            <button class="btn btn-blue"   id="btn-costs"      onclick="openCostsModal()"          style="display:none" title="One average cost per product: grown, bought and made">💰 Update Costs</button>
         </div>
     </div>
 
@@ -1010,13 +1059,18 @@ td.name{color:var(--text);font-weight:600;}
 
 <!-- PROCESSING BATCH MODAL -->
 <div class="modal-bg" id="costs-modal">
-    <div class="modal" style="width:980px">
-        <div class="modal-title">Update product costs from batches</div>
-        <div class="modal-sub">Costs every production, packaging and drying batch in the period from its inputs' costs, and carries the result down the chain — dried powder costs feed the packs made from it. Raw materials keep the cost Season Analysis or receiving gave them. Nothing is saved until you press Apply.</div>
+    <div class="modal" style="width:1040px">
+        <div class="modal-title">Update product costs</div>
+        <div class="modal-sub">One average cost per product over everything that came in during the period — grown (farm deliveries at the Season Analysis cost of both farms), bought (receipts at what was paid) and made (batches at what their inputs cost) — weighted by quantity. Made products follow the chain, so packs use the combined cost of what they were packed from. Nothing is saved until you press Apply.</div>
         <div class="spl-filter" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px">
             <div><div style="font-size:11px;color:var(--muted);margin-bottom:4px">From</div><input type="date" id="costs-from"></div>
             <div><div style="font-size:11px;color:var(--muted);margin-bottom:4px">To</div><input type="date" id="costs-to"></div>
-            <button class="btn btn-teal" style="height:42px" onclick="previewCosts()">Preview</button>
+            <div><div style="font-size:11px;color:var(--muted);margin-bottom:4px">Harvest cost</div>
+                <select id="costs-basis" style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;color:var(--text);font-family:var(--sans);font-size:13px">
+                    <option value="direct">Farm costs only</option>
+                    <option value="absorbed">Including overhead</option>
+                </select></div>
+            <button class="btn btn-teal" style="height:40px" onclick="previewCosts()">Preview</button>
         </div>
         <div id="costs-result" style="font-size:13px"></div>
         <div class="modal-actions">
@@ -1884,8 +1938,9 @@ async function saveBatch(){
 }
 
 /* ── LOAD BATCHES ── */
-/* ── Batch costs → product cost ── */
+/* ── Combined product cost: grown + bought + made ── */
 let _costRows = [];
+const COST_SOURCE = {grown: "🌱 grown", bought: "🛒 bought", made: "⚙️ made"};
 function openCostsModal(){
     const to = new Date(), from = new Date(); from.setMonth(from.getMonth() - 6);
     const iso = d => d.toISOString().split("T")[0];
@@ -1895,44 +1950,54 @@ function openCostsModal(){
     document.getElementById("costs-apply-btn").style.display = "none";
     document.getElementById("costs-modal").classList.add("open");
 }
+function costsQuery(){
+    return {date_from: document.getElementById("costs-from").value,
+            date_to: document.getElementById("costs-to").value,
+            basis: document.getElementById("costs-basis").value};
+}
 async function previewCosts(){
-    const f = document.getElementById("costs-from").value, t = document.getElementById("costs-to").value;
+    const q = costsQuery();
     const box = document.getElementById("costs-result");
-    box.innerHTML = `<div style="color:var(--muted)">Costing batches…</div>`;
-    const r = await fetch(`/production/api/costs/preview?date_from=${f}&date_to=${t}`);
+    box.innerHTML = `<div style="color:var(--muted)">Working out costs…</div>`;
+    const r = await fetch(`/production/api/costs/preview?date_from=${q.date_from}&date_to=${q.date_to}&basis=${q.basis}`);
     const data = await r.json().catch(()=>({}));
-    if(!r.ok){ box.innerHTML = `<div style="color:var(--danger)">${escapeHtml(data.detail || "Could not cost the batches")}</div>`; return; }
+    if(!r.ok){ box.innerHTML = `<div style="color:var(--danger)">${escapeHtml(data.detail || "Could not work out costs")}</div>`; return; }
     _costRows = data.products;
-    const c3 = v => v === null || v === undefined ? "—" : Number(v).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:3});
+    const c3 = v => v === null || v === undefined ? "—" : Number(v).toLocaleString("en-US",{minimumFractionDigits:2, maximumFractionDigits:3});
+    const q3 = v => Number(v||0).toLocaleString("en-US",{maximumFractionDigits:3});
     const badge = {
         ok:         `<span style="color:var(--green)">will update</span>`,
         unchanged:  `<span style="color:var(--muted)">already right</span>`,
         suspect:    `<span style="color:var(--danger);font-weight:700">check — over 3× sale price</span>`,
-        incomplete: `<span style="color:var(--warn)">inputs have no cost</span>`,
-        no_output:  `<span style="color:var(--muted)">nothing produced</span>`,
+        incomplete: `<span style="color:var(--warn)">part can't be costed</span>`,
+        no_output:  `<span style="color:var(--muted)">nothing came in</span>`,
     };
     const counts = _costRows.reduce((a, r) => (a[r.status] = (a[r.status]||0) + 1, a), {});
-    box.innerHTML = !_costRows.length ? `<div style="color:var(--muted)">No batches in this period.</div>` : `
-        <div style="color:var(--muted);margin-bottom:8px">${_costRows.length} products · ${counts.ok||0} to update · ${counts.suspect||0} to check · ${counts.incomplete||0} missing input costs · ${counts.unchanged||0} already right</div>
+    box.innerHTML = !_costRows.length ? `<div style="color:var(--muted)">Nothing was grown, bought or made in this period.</div>` : `
+        <div style="color:var(--muted);margin-bottom:8px">${_costRows.length} products · ${counts.ok||0} to update · ${counts.suspect||0} to check · ${counts.incomplete||0} can't be costed yet · ${counts.unchanged||0} already right</div>
         <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px">
         <thead><tr style="color:var(--muted);text-align:left">
-            <th style="padding:6px"><input type="checkbox" id="costs-all" onchange="document.querySelectorAll('.cost-pick:not(:disabled)').forEach(c=>c.checked=this.checked)"></th>
-            <th style="padding:6px">Product</th><th style="padding:6px;text-align:right">Current cost</th><th style="padding:6px;text-align:right">From batches</th>
+            <th style="padding:6px"><input type="checkbox" onchange="document.querySelectorAll('.cost-pick:not(:disabled)').forEach(c=>c.checked=this.checked)"></th>
+            <th style="padding:6px">Product</th><th style="padding:6px">Came in as</th>
+            <th style="padding:6px;text-align:right">Current cost</th><th style="padding:6px;text-align:right">Average cost</th>
             <th style="padding:6px;text-align:right">Sells for</th><th style="padding:6px;text-align:right">Margin</th><th style="padding:6px">Status</th></tr></thead>
         <tbody>${_costRows.map((r, i)=>`
             <tr style="border-top:1px solid var(--border)">
                 <td style="padding:6px"><input type="checkbox" class="cost-pick" data-id="${r.product_id}" ${r.status==="ok"?"checked":""} ${r.new_cost===null||r.status==="unchanged"?"disabled":""}></td>
                 <td style="padding:6px;cursor:pointer" onclick="const d=document.getElementById('cost-detail-${i}');d.style.display=d.style.display==='none'?'':'none'">
-                    <b>${escapeHtml(r.product)}</b> <span style="color:var(--muted)">per ${escapeHtml(r.unit)}${r.level>1?` · step ${r.level} of the chain`:""} ▸</span></td>
+                    <b>${escapeHtml(r.product)}</b> <span style="color:var(--muted)">per ${escapeHtml(r.unit)}${r.level>1?` · step ${r.level}`:""} ▸</span></td>
+                <td style="padding:6px;color:var(--sub);white-space:nowrap">${r.sources.map(s=>`<div>${COST_SOURCE[s.source]} ${q3(s.qty)} @ ${c3(s.unit_cost)}</div>`).join("") || "—"}</td>
                 <td style="padding:6px;text-align:right;font-family:var(--mono);color:var(--muted)">${c3(r.old_cost)}</td>
                 <td style="padding:6px;text-align:right;font-family:var(--mono);font-weight:700">${c3(r.new_cost)}</td>
                 <td style="padding:6px;text-align:right;font-family:var(--mono)">${c3(r.sale_price)}</td>
                 <td style="padding:6px;text-align:right;font-family:var(--mono)">${r.margin_pct===null?"—":r.margin_pct+"%"}</td>
                 <td style="padding:6px">${badge[r.status]}</td>
             </tr>
-            <tr id="cost-detail-${i}" style="display:none"><td></td><td colspan="6" style="padding:4px 6px 10px;color:var(--muted)">
-                ${r.missing_cost.length?`<div style="color:var(--warn)">No cost on: ${r.missing_cost.map(escapeHtml).join(", ")} — set it (Season Analysis or receiving) and preview again.</div>`:""}
-                ${r.batches.map(b=>`<div>${escapeHtml(b.batch_number)}: ${c3(b.qty)} ${escapeHtml(r.unit)} → ${c3(b.allocated_cost)} = <b>${c3(b.unit_cost)}</b> per ${escapeHtml(r.unit)} <span style="opacity:.7">(${escapeHtml(b.basis)})</span></div>`).join("")}
+            <tr id="cost-detail-${i}" style="display:none"><td></td><td colspan="7" style="padding:4px 6px 10px;color:var(--muted)">
+                ${r.missing_cost.map(m=>`<div style="color:var(--warn)">${escapeHtml(m)}</div>`).join("")}
+                ${(r.suspect_lines||[]).map(m=>`<div style="color:var(--danger)">⚠ ${escapeHtml(m)} — fix that receipt or batch, then preview again</div>`).join("")}
+                ${r.lines.map(l=>`<div>${COST_SOURCE[l.source]} ${q3(l.qty)} ${escapeHtml(r.unit)} @ <b>${c3(l.unit_cost)}</b> <span style="opacity:.7">— ${escapeHtml(l.label)}</span></div>`).join("")}
+                ${r.new_cost!==null&&r.lines.length>1?`<div style="margin-top:4px">Average: ${c3(r.lines.reduce((a,l)=>a+l.qty*l.unit_cost,0))} ÷ ${q3(r.qty_in)} ${escapeHtml(r.unit)} = <b>${c3(r.new_cost)}</b></div>`:""}
             </td></tr>`).join("")}</tbody></table></div>`;
     document.getElementById("costs-apply-btn").style.display = _costRows.some(r=>r.new_cost!==null && r.status!=="unchanged") ? "" : "none";
 }
@@ -1940,12 +2005,15 @@ async function applyCosts(){
     const ids = [...document.querySelectorAll(".cost-pick:checked")].map(c=>Number(c.dataset.id));
     if(!ids.length){ showToast("Tick the products to update"); return; }
     const suspect = _costRows.filter(r=>ids.includes(r.product_id) && r.status==="suspect").map(r=>r.product);
-    if(suspect.length && !confirm(`These costs are over 3× the selling price — usually an input cost or quantity in the wrong unit:\\n\\n${suspect.join("\\n")}\\n\\nApply them anyway?`)) return;
+    if(suspect.length && !confirm(`These costs are over 3× the selling price — usually a cost or quantity in the wrong unit:
+
+${suspect.join(", ")}
+
+Apply them anyway?`)) return;
     const btn = document.getElementById("costs-apply-btn"); btn.disabled = true;
     try{
         const r = await fetch("/production/api/costs/apply", {method:"POST", headers:{"Content-Type":"application/json"},
-            body: JSON.stringify({date_from: document.getElementById("costs-from").value,
-                                  date_to: document.getElementById("costs-to").value, product_ids: ids})});
+            body: JSON.stringify({...costsQuery(), product_ids: ids})});
         const data = await r.json().catch(()=>({}));
         if(!r.ok){ showToast(data.detail || "Could not apply costs"); return; }
         showToast(`Updated the cost of ${data.applied_count} product(s)` + (data.skipped_count?` · ${data.skipped_count} skipped`:""));

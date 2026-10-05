@@ -30,6 +30,9 @@ from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.invoice import Invoice, InvoiceItem
 from app.models.product import Product
 from app.models.refund import RetailRefund, RetailRefundItem
+from app.models.drying import DryingBatch, DryingBatchStage, DryingBatchStageInput, DryingBatchStageOutput
+from app.models.production import BatchInput, BatchOutput, ProductionBatch
+from app.models.receipt import ProductReceipt
 from app.services.expense_service import get_cost_allocation
 
 
@@ -73,6 +76,9 @@ def make_session():
         B2BClient.__table__, B2BInvoice.__table__, B2BInvoiceItem.__table__,
         RetailRefund.__table__, RetailRefundItem.__table__,
         B2BRefund.__table__, B2BRefundItem.__table__,
+        ProductReceipt.__table__, ProductionBatch.__table__, BatchInput.__table__, BatchOutput.__table__,
+        DryingBatch.__table__, DryingBatchStage.__table__, DryingBatchStageInput.__table__,
+        DryingBatchStageOutput.__table__,
     ])
     Session = sessionmaker(bind=engine, expire_on_commit=False)
     return Session()
@@ -667,3 +673,22 @@ def test_genuine_unit_mismatch_is_still_refused():
 
     skipped = {s["product_name"] for s in result["skipped"]}
     assert "Lettuce" in skipped
+
+
+def test_a_crop_also_bought_in_the_period_is_left_for_the_combined_cost():
+    # Writing the harvest cost alone would wipe out what was paid for the
+    # bought part; Production → Update Costs averages the two.
+    with make_session() as session:
+        seed_base(session)
+        session.add(ProductReceipt(ref_number="RCV-1", product_id=1, receive_date=date(2026, 8, 10),
+                                   qty=Decimal("100"), unit_cost=Decimal("25"), total_cost=Decimal("2500"),
+                                   amount_paid=Decimal("2500")))
+        session.commit()
+        result = apply_costs(session)
+        tomato = session.get(Product, 1)
+        session.refresh(tomato)
+
+    assert [p["product_name"] for p in result["applied"]] == ["Lettuce"]
+    skip = next(s for s in result["skipped"] if s["product_name"] == "Tomato")
+    assert skip["reason"].startswith("Also bought in this period")
+    assert not tomato.cost

@@ -395,7 +395,8 @@ def cost_check_message(product: Product, unit_cost: Optional[Decimal]) -> Option
     if current > 0 and (unit_cost > current * 5 or unit_cost * 5 < current):
         return (f"{product.name}: {unit_cost:f} per {unit} is far from its current cost "
                 f"of {current:f} per {unit}")
-    if price > 0 and unit_cost > price * 3:
+    sold = (getattr(product, "item_type", None) or "").lower() not in {"packing", "raw"}
+    if sold and price > 0 and unit_cost > price * 3:
         return (f"{product.name}: {unit_cost:f} per {unit} is more than 3× its selling "
                 f"price of {price:f} per {unit}")
     return None

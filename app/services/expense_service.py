@@ -1884,6 +1884,39 @@ async def get_cost_allocation(
         "delivery_count": len(deliveries),
     }
 
+async def _bought_or_made_product_ids(db: AsyncSession, start: date_type, end: date_type) -> dict[int, str]:
+    """Products that also came in another way in the period: {id: "bought" |
+    "made" | "bought and made"}. Their cost is a combined average, not the
+    harvest cost alone."""
+    from app.core.time_utils import utc_bounds
+    from app.models.drying import DryingBatch, DryingBatchStage, DryingBatchStageOutput
+    from app.models.production import BatchOutput, ProductionBatch
+    from app.models.receipt import ProductReceipt
+
+    d_from, d_to = utc_bounds(start, end)
+    bought = set((await db.execute(
+        select(ProductReceipt.product_id).where(
+            ProductReceipt.receive_date >= start, ProductReceipt.receive_date <= end,
+            ProductReceipt.unit_cost > 0,
+        )
+    )).scalars().all())
+    made = set((await db.execute(
+        select(BatchOutput.product_id).join(ProductionBatch, BatchOutput.batch_id == ProductionBatch.id)
+        .where(ProductionBatch.created_at >= d_from, ProductionBatch.created_at <= d_to)
+    )).scalars().all())
+    made |= set((await db.execute(
+        select(DryingBatchStageOutput.product_id)
+        .join(DryingBatchStage, DryingBatchStageOutput.stage_id == DryingBatchStage.id)
+        .join(DryingBatch, DryingBatchStage.batch_id == DryingBatch.id)
+        .where(DryingBatch.started_at >= d_from, DryingBatch.started_at <= d_to,
+               DryingBatch.status != "cancelled")
+    )).scalars().all())
+    return {
+        pid: "bought and made" if pid in bought and pid in made else ("bought" if pid in bought else "made")
+        for pid in bought | made
+    }
+
+
 async def apply_cost_allocation_to_products(
     db: AsyncSession,
     current_user: User,
@@ -1922,10 +1955,23 @@ async def apply_cost_allocation_to_products(
 
     wanted = set(product_ids) if product_ids else None
     cost_key = "cost_per_unit" if basis_norm == "direct" else "cost_per_unit_absorbed"
+    also_supplied = await _bought_or_made_product_ids(
+        db, date_type.fromisoformat(date_from), date_type.fromisoformat(date_to),
+    )
 
     applied, skipped = [], []
     for row in allocation["products"]:
         if wanted is not None and row["product_id"] not in wanted:
+            continue
+        if row["product_id"] in also_supplied:
+            # Writing the harvest cost alone would overwrite what was paid or
+            # spent making the rest; the combined average is the right cost.
+            skipped.append({
+                "product_id": row["product_id"],
+                "product_name": row["product_name"],
+                "reason": f"Also {also_supplied[row['product_id']]} in this period — use "
+                          "Production → Update Costs, which averages grown, bought and made",
+            })
             continue
         new_cost = row[cost_key]
         if not row.get("can_apply_cost"):
