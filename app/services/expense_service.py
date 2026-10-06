@@ -1202,10 +1202,24 @@ def _crop_expense_filter():
     Written NULL-safe rather than as a plain `== False`, because rows created
     before the column existed carry NULL and would otherwise be dropped from
     the crop pool as if they were animal costs.
+
+    Stock bought through Receive is kept out too: its cost already travels
+    with the product (receipt → product cost → the batches and sales that use
+    it), so spreading the same money over the crops counted it twice.
     """
     return and_(
         or_(Expense.is_animal_expense.is_(False), Expense.is_animal_expense.is_(None)),
         Expense.animal_group_id.is_(None),
+        ~_stock_purchase_expense(),
+    )
+
+
+def _stock_purchase_expense():
+    """The expense was created by receiving stock (Receive → expense)."""
+    from app.models.receipt import ProductReceipt
+
+    return Expense.id.in_(
+        select(ProductReceipt.expense_id).where(ProductReceipt.expense_id.isnot(None))
     )
 
 
@@ -1330,6 +1344,7 @@ async def get_cost_allocation(
     selected_farm_ids: list[int]
     farm_scope_label: str
     include_unassigned_salary = False
+    not_producing: list[dict] = []
     if farm_selector == "both":
         farms_result = await db.execute(
             select(Farm).where(Farm.is_active == 1).order_by(Farm.name)
@@ -1337,21 +1352,49 @@ async def get_cost_allocation(
         farms = farms_result.scalars().all()
         if not farms:
             raise HTTPException(status_code=404, detail="No active farms found")
-        selected_farm_ids = [farm.id for farm in farms]
         farm_scope_label = "Both Farms"
         include_unassigned_salary = True
     else:
+        # One farm ("3") or several ("1,2") — several are costed as one pool.
         try:
-            single_farm_id = int(farm_selector)
+            wanted_ids = list(dict.fromkeys(int(x) for x in farm_selector.split(",") if x.strip()))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid farm selection") from exc
-
-        farm_result = await db.execute(select(Farm).where(Farm.id == single_farm_id))
-        farm = farm_result.scalar_one_or_none()
-        if not farm:
+        if not wanted_ids:
+            raise HTTPException(status_code=400, detail="Invalid farm selection")
+        farms_result = await db.execute(select(Farm).where(Farm.id.in_(wanted_ids)))
+        found = {farm.id: farm for farm in farms_result.scalars().all()}
+        if len(found) != len(wanted_ids):
             raise HTTPException(status_code=404, detail="Farm not found")
-        selected_farm_ids = [farm.id]
-        farm_scope_label = farm.name
+        farms = [found[i] for i in wanted_ids]
+        farm_scope_label = " + ".join(farm.name for farm in farms)
+
+    if len(farms) > 1:
+        # Only farms that harvested in the period carry this period's costs. A
+        # project not producing yet (a new farm being set up) is an investment:
+        # charging its spending to today's crops would make them look far more
+        # expensive than they are. It is reported on its own instead.
+        harvested_ids = set((await db.execute(
+            select(FarmDelivery.farm_id).where(
+                FarmDelivery.farm_id.in_([f.id for f in farms]),
+                FarmDelivery.delivery_date >= start_date,
+                FarmDelivery.delivery_date <= end_date,
+            ).distinct()
+        )).scalars().all())
+        producing = [f for f in farms if f.id in harvested_ids] or farms
+        for farm in farms:
+            if farm in producing:
+                continue
+            spent = float((await db.execute(
+                select(func.coalesce(func.sum(Expense.amount), 0)).where(
+                    Expense.farm_id == farm.id, _crop_expense_filter(),
+                    Expense.expense_date >= start_date, Expense.expense_date <= end_date,
+                )
+            )).scalar() or 0)
+            if spent > 0:
+                not_producing.append({"farm_id": farm.id, "farm": farm.name, "amount": round(spent, 2)})
+        farms = producing
+    selected_farm_ids = [farm.id for farm in farms]
 
     expense_scope = Expense.farm_id.in_(selected_farm_ids)
     if include_unassigned_salary:
@@ -1387,6 +1430,17 @@ async def get_cost_allocation(
         )
     )
     animal_cost_excluded = float(animal_cost_result.scalar() or 0)
+
+    # Stock bought through Receive in this scope (and untagged) — left out of
+    # the pools because the product already carries it. Reported so the gap
+    # between this page and the Expenses page is explained.
+    stock_scope = or_(Expense.farm_id.in_(selected_farm_ids), Expense.farm_id.is_(None))
+    stock_purchases_excluded = float((await db.execute(
+        select(func.coalesce(func.sum(Expense.amount), 0)).where(
+            stock_scope, _stock_purchase_expense(),
+            Expense.expense_date >= start_date, Expense.expense_date <= end_date,
+        )
+    )).scalar() or 0)
 
     cost_by_category: dict[str, float] = {}
     salary_cost = 0.0
@@ -1866,6 +1920,8 @@ async def get_cost_allocation(
         "imputed_unit_price": round(imputed_unit_price, 4),
         "products_missing_sales": sorted(set(missing_price)),
         "animal_cost_excluded": round(animal_cost_excluded, 2),
+        "stock_purchases_excluded": round(stock_purchases_excluded, 2),
+        "projects_not_producing": not_producing,
         "overhead_by_category": overhead_by_category,
         "overhead_top": overhead_top,
         "warnings": warnings,

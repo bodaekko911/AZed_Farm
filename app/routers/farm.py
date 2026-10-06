@@ -860,11 +860,15 @@ td.name{color:var(--text);font-weight:600;}
         <div style="background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:20px;margin-bottom:14px;">
             <div style="font-size:14px;font-weight:700;margin-bottom:14px;">Seasonal Cost Allocation</div>
             <div class="form-row" style="align-items:flex-end;gap:12px;flex-wrap:wrap;">
-                <div class="fld" style="min-width:180px">
-                    <label>Farm</label>
-                    <select class="filter-sel" id="season-farm" style="width:100%">
-                        <option value="">Select farm...</option>
-                    </select>
+                <div class="fld" style="min-width:220px;position:relative">
+                    <label>Farms</label>
+                    <!-- Holds what is sent: "both" (all), "1,2" (several) or "3" (one). -->
+                    <input type="hidden" id="season-farm" value="">
+                    <button type="button" class="filter-sel" id="season-farm-btn" onclick="toggleSeasonFarmMenu(event)"
+                            style="width:100%;text-align:left;cursor:pointer;display:flex;justify-content:space-between;gap:8px">
+                        <span id="season-farm-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Select farms…</span><span style="color:var(--muted)">▾</span>
+                    </button>
+                    <div id="season-farm-menu" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:300;margin-top:4px;background:var(--card);border:1px solid var(--border2);border-radius:10px;padding:6px;box-shadow:0 12px 30px rgba(0,0,0,.4)"></div>
                 </div>
                 <div class="fld" style="min-width:140px">
                     <label>Season Start</label>
@@ -1263,14 +1267,43 @@ function fillWeatherFarmFilter(){
         allFarms.map(f=>`<option value="${f.id}">${f.name}</option>`).join("");
 }
 
+// Season farms: tick one, several or all. Several are costed as one pool;
+// all of them is sent as "both" so untagged salaries are included as before.
 function fillSeasonFarmSelect(){
-    let allOption = allFarms.length > 1
-        ? `<option value="both">All Farms (Combined)</option>`
-        : "";
-    document.getElementById("season-farm").innerHTML =
-        `<option value="">Select farm...</option>` +
-        allOption +
-        allFarms.map(f=>`<option value="${f.id}">${f.name}</option>`).join("");
+    // Inline styles override the form's own label/input rules (uppercase
+    // labels, full-width inputs), which would otherwise apply inside .fld.
+    const row = (attrs, text) => `<label style="display:flex;align-items:center;justify-content:flex-start;gap:10px;padding:7px 8px;margin:0;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;text-transform:none;letter-spacing:0;color:var(--text);text-align:left">
+        <input type="checkbox" ${attrs} onchange="onSeasonFarmToggle(this)" style="width:16px;height:16px;margin:0;flex:0 0 auto;accent-color:var(--lime)"> <span>${text}</span></label>`;
+    document.getElementById("season-farm-menu").innerHTML =
+        (allFarms.length > 1 ? row('id="season-farm-all"', "<strong>All farms</strong>") + `<div style="border-top:1px solid var(--border);margin:4px 0"></div>` : "")
+        + allFarms.map(f=>row(`class="season-farm-cb" value="${f.id}"`, f.name)).join("");
+    syncSeasonFarmValue();
+}
+function toggleSeasonFarmMenu(ev){
+    ev.stopPropagation();
+    const m = document.getElementById("season-farm-menu");
+    m.style.display = m.style.display === "none" ? "" : "none";
+}
+document.addEventListener("click", ev => {
+    const m = document.getElementById("season-farm-menu");
+    if(m && m.style.display !== "none" && !m.contains(ev.target)) m.style.display = "none";
+});
+function onSeasonFarmToggle(cb){
+    const boxes = [...document.querySelectorAll(".season-farm-cb")];
+    if(cb.id === "season-farm-all") boxes.forEach(b => b.checked = cb.checked);
+    syncSeasonFarmValue();
+}
+function syncSeasonFarmValue(){
+    const boxes = [...document.querySelectorAll(".season-farm-cb")];
+    const picked = boxes.filter(b => b.checked);
+    const all = document.getElementById("season-farm-all");
+    if(all) all.checked = picked.length === boxes.length && boxes.length > 0;
+    const value = !picked.length ? "" : (picked.length === boxes.length && boxes.length > 1) ? "both"
+                : picked.map(b => b.value).join(",");
+    document.getElementById("season-farm").value = value;
+    const names = picked.map(b => (allFarms.find(f => String(f.id) === b.value) || {}).name).filter(Boolean);
+    document.getElementById("season-farm-label").innerText =
+        !names.length ? "Select farms…" : value === "both" ? "All farms" : names.join(" + ");
 }
 
 /* ── FARMS ── */
@@ -2272,7 +2305,7 @@ async function loadSeasonAnalysis(){
     let dateFrom = document.getElementById("season-from").value;
     let dateTo   = document.getElementById("season-to").value;
     let method   = (document.getElementById("season-method") || {}).value || "quantity";
-    if(!farmId)  { showToast("Select a farm first"); return; }
+    if(!farmId)  { showToast("Tick at least one farm"); return; }
     if(!dateFrom || !dateTo){ showToast("Set a date range"); return; }
     if(dateFrom > dateTo){ showToast("Start date must be before end date"); return; }
 
@@ -2391,9 +2424,16 @@ async function loadSeasonAnalysis(){
         const warnBox = document.getElementById("season-warnings");
         if(warnBox){
             const warns = Array.isArray(data.warnings) ? data.warnings : [];
-            warnBox.innerHTML = warns.length
-                ? warns.map(w=>`<div style="background:rgba(255,181,71,.08);border:1px solid rgba(255,181,71,.28);border-radius:10px;padding:11px 14px;font-size:12.5px;color:var(--warn);line-height:1.55;margin-bottom:10px">${w}</div>`).join("")
-                : "";
+            // What was deliberately left out, so the totals here can be matched
+            // against the Expenses page instead of looking like missing money.
+            const infos = [];
+            (data.projects_not_producing || []).forEach(p => infos.push(
+                `<strong>${p.farm}</strong>: ${fmt(p.amount)} EGP spent in this period, no harvest yet — kept out of these crop costs as an investment in a project not producing yet. Its costs go to its own crops once it starts delivering.`));
+            if(Number(data.stock_purchases_excluded || 0) > 0) infos.push(
+                `${fmt(data.stock_purchases_excluded)} EGP of stock bought through Receive (products, packaging, feed) is left out — its cost already travels with the product into batches and sales, so counting it here too would count it twice.`);
+            warnBox.innerHTML =
+                infos.map(i=>`<div style="background:rgba(77,159,255,.07);border:1px solid rgba(77,159,255,.25);border-radius:10px;padding:11px 14px;font-size:12.5px;color:var(--blue);line-height:1.55;margin-bottom:10px">${i}</div>`).join("")
+              + warns.map(w=>`<div style="background:rgba(255,181,71,.08);border:1px solid rgba(255,181,71,.28);border-radius:10px;padding:11px 14px;font-size:12.5px;color:var(--warn);line-height:1.55;margin-bottom:10px">${w}</div>`).join("");
         }
 
         // Cost breakdown chart

@@ -692,3 +692,84 @@ def test_a_crop_also_bought_in_the_period_is_left_for_the_combined_cost():
     skip = next(s for s in result["skipped"] if s["product_name"] == "Tomato")
     assert skip["reason"].startswith("Also bought in this period")
     assert not tomato.cost
+
+
+def test_stock_bought_through_receive_is_not_spread_over_the_crops_a_second_time():
+    # Jars received for 3 000 — that cost already goes into the packs through
+    # the jar's product cost; adding it to the crop pool counted it twice.
+    with make_session() as session:
+        seed_base(session)
+        session.add_all([
+            Expense(id=3, category_id=1, farm_id=1, amount=Decimal("3000"),
+                    expense_date=date(2026, 8, 6), description="Stock receipt RCV-1"),
+            Expense(id=4, category_id=1, farm_id=None, amount=Decimal("2000"),
+                    expense_date=date(2026, 8, 7), description="Stock receipt RCV-2"),
+            ProductReceipt(ref_number="RCV-1", product_id=1, receive_date=date(2026, 8, 6),
+                           qty=Decimal("100"), unit_cost=Decimal("30"), expense_id=3),
+            ProductReceipt(ref_number="RCV-2", product_id=1, receive_date=date(2026, 8, 7),
+                           qty=Decimal("100"), unit_cost=Decimal("20"), expense_id=4),
+        ])
+        session.commit()
+        data = allocate(session)
+
+    assert data["total_cost"] == 16000.0            # the farm's own costs only
+    assert data["shared_cost_total"] == 0.0         # and nothing in overhead
+    assert data["stock_purchases_excluded"] == 5000.0
+
+
+def test_both_farms_leaves_out_a_project_with_no_harvest_yet():
+    # SPC started this season: money spent, nothing harvested. Its spending is
+    # an investment, not a cost of the tomatoes the other farm grew.
+    with make_session() as session:
+        seed_base(session)
+        session.add_all([
+            Farm(id=4, name="Habiba/SPC", is_active=1),
+            Expense(id=5, category_id=1, farm_id=4, amount=Decimal("50000"),
+                    expense_date=date(2026, 8, 15), description="Greenhouse build"),
+        ])
+        session.commit()
+        both = allocate(session, farm_id="both")
+
+    assert both["farm_ids"] == [1]
+    assert both["total_cost"] == 16000.0
+    assert both["projects_not_producing"] == [{"farm_id": 4, "farm": "Habiba/SPC", "amount": 50000.0}]
+
+
+def test_several_farms_are_costed_as_one_pool():
+    with make_session() as session:
+        seed_base(session)
+        session.add_all([
+            Farm(id=2, name="South Farm", is_active=1),
+            Farm(id=4, name="Habiba/SPC", is_active=1),
+            Expense(id=6, category_id=1, farm_id=2, amount=Decimal("4000"),
+                    expense_date=date(2026, 8, 5), description="Fertiliser"),
+            Expense(id=7, category_id=1, farm_id=4, amount=Decimal("50000"),
+                    expense_date=date(2026, 8, 15), description="Greenhouse build"),
+            FarmDelivery(id=2, delivery_number="FD-2", farm_id=2, delivery_date=date(2026, 8, 20)),
+        ])
+        session.flush()
+        session.add(FarmDeliveryItem(delivery_id=2, product_id=1, qty=Decimal("200"), unit="kg"))
+        session.commit()
+
+        two = allocate(session, farm_id="1,2")
+        with_project = allocate(session, farm_id="1,2,4")
+
+    assert two["farm_ids"] == [1, 2]
+    assert two["farm_scope_label"] == "North Farm + South Farm"
+    assert two["total_cost"] == 20000.0                      # 16 000 + 4 000
+    tomato = next(p for p in two["products"] if p["product_name"] == "Tomato")
+    assert tomato["total_qty"] == 1000.0                      # 800 kg + 200 kg
+    # Ticking the project too still keeps its build-out out of the crop costs.
+    assert with_project["farm_ids"] == [1, 2]
+    assert with_project["total_cost"] == 20000.0
+    assert with_project["projects_not_producing"] == [{"farm_id": 4, "farm": "Habiba/SPC", "amount": 50000.0}]
+
+
+def test_an_unknown_farm_in_the_list_is_refused():
+    import pytest
+    from fastapi import HTTPException
+    with make_session() as session:
+        seed_base(session)
+        with pytest.raises(HTTPException) as exc:
+            allocate(session, farm_id="1,99")
+    assert exc.value.status_code == 404
