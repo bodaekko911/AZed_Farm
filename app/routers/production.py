@@ -7,6 +7,7 @@ from typing import Optional, List
 from pydantic import BaseModel
 from decimal import Decimal
 from datetime import date as date_type
+from types import SimpleNamespace
 
 from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
@@ -16,6 +17,7 @@ from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.user import User
 from app.services.production_costing import cost_batch
+from app.services.batch_auto_cost import cost_outputs, summary as cost_summary
 from app.services.spoilage_summary import spoilage_summary
 from app.models.production import (
     Recipe, RecipeInput, RecipeOutput,
@@ -314,9 +316,12 @@ async def create_batch(data: BatchCreate, db: AsyncSession = Depends(get_async_s
     batch = ProductionBatch(batch_number=batch_number, recipe_id=data.recipe_id, user_id=current_user.id, waste_pct=auto_waste, notes=data.notes, status="completed")
     db.add(batch); await db.flush()
 
+    # What went in and came out, kept to cost the outputs once stock has moved.
+    cost_inputs, cost_out, out_stock_before = [], [], {}
     for item in data.inputs:
         prod_r = await db.execute(select(Product).where(Product.id == item.product_id))
         product = prod_r.scalar_one_or_none()
+        cost_inputs.append(SimpleNamespace(product=product, product_id=product.id, qty=item.qty))
         before = float(product.stock); after = before - item.qty; product.stock = after
         db.add(BatchInput(batch_id=batch.id, product_id=product.id, qty=item.qty))
         db.add(StockMove(product_id=product.id, type="out", user_id=current_user.id, qty=-item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Used in {batch_number}"))
@@ -327,14 +332,20 @@ async def create_batch(data: BatchCreate, db: AsyncSession = Depends(get_async_s
         if not product:
             raise HTTPException(status_code=404, detail=f"Output product not found: {item.product_id}")
         before = float(product.stock); after = before + item.qty; product.stock = after
+        cost_out.append(SimpleNamespace(product=product, product_id=product.id, qty=item.qty))
+        out_stock_before.setdefault(product.id, before)
         db.add(BatchOutput(batch_id=batch.id, product_id=product.id, qty=item.qty))
         db.add(StockMove(product_id=product.id, type="in", user_id=current_user.id, qty=item.qty, qty_before=before, qty_after=after, ref_type="production", ref_id=batch.id, note=f"Produced in {batch_number}"))
+
+    # Cost what was made from what went in, blended with the stock on hand.
+    cost_updates = cost_outputs(cost_inputs, cost_out, out_stock_before)
 
     log_record(db, "Production", "create_batch",
            f"Batch {batch_number} — {len(data.inputs)} input(s), {len(data.outputs)} output(s), waste {float(batch.waste_pct):.1f}%",
            user=current_user, ref_type="production_batch", ref_id=batch.id)
     await db.commit(); await db.refresh(batch)
-    return {"id": batch.id, "batch_number": batch_number, "waste_pct": float(batch.waste_pct)}
+    return {"id": batch.id, "batch_number": batch_number, "waste_pct": float(batch.waste_pct),
+            "cost_updates": cost_updates, "cost_summary": cost_summary(cost_updates)}
 
 
 @router.put("/api/batches/{batch_id}", dependencies=[Depends(require_permission("action_production_update_batch"))])
@@ -1932,7 +1943,7 @@ async function saveBatch(){
     if(data.detail){ showToast("Error: "+data.detail); return; }
     closeBatchModal();
     let lossMsg = data.waste_pct > 0 ? ` | Loss: ${data.waste_pct.toFixed(1)}%` : "";
-    showToast(`${data.batch_number} ${editingBatchId?"updated":"completed"}${lossMsg}`);
+    showToast(`${data.batch_number} ${editingBatchId?"updated":"completed"}${lossMsg}${data.cost_summary?` · ${data.cost_summary}`:""}`, data.cost_summary?9000:0);
     allProducts = await (await fetch("/production/api/products-list")).json();
     refreshBatchViews();
 }
@@ -2191,7 +2202,7 @@ async function savePkgBatch(){
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
     document.getElementById("pkg-modal").classList.remove("open");
-    showToast(`${data.batch_number} - ${units} packs created!`);
+    showToast(`${data.batch_number} - ${units} packs created!${data.cost_summary?` · ${data.cost_summary}`:""}`, data.cost_summary?9000:0);
     allProducts = await (await fetch("/production/api/products-list")).json();
     loadPkgBatches();
     switchTab("packaging");
@@ -2896,7 +2907,9 @@ async function submitDryingNextStage(){
             alert("Failed to add stage: " + (err.detail || resp.status));
             return;
         }
+        const saved = await resp.json().catch(()=>({}));
         closeDryingNextStageModal();
+        if(saved.cost_summary) showToast(saved.cost_summary, 9000);
         await loadDrying();
     } catch(e){ alert("Network error: " + e.message); }
 }
@@ -2932,7 +2945,9 @@ async function submitDryingFinalize(){
             alert("Failed to finalize: " + (err.detail || resp.status));
             return;
         }
+        const saved = await resp.json().catch(()=>({}));
         closeDryingFinalizeModal();
+        if(saved.cost_summary) showToast(saved.cost_summary, 9000);
         await loadDrying();
     } catch(e){ alert("Network error: " + e.message); }
 }
@@ -2999,11 +3014,11 @@ async function submitDryingSpoilage(){
 });
 
 let toastTimer=null;
-function showToast(msg){
+function showToast(msg, ms){
     let t=document.getElementById("toast");
     t.innerText=msg; t.classList.add("show");
     clearTimeout(toastTimer);
-    toastTimer=setTimeout(()=>t.classList.remove("show"),4500);
+    toastTimer=setTimeout(()=>t.classList.remove("show"), ms || 4500);
 }
 
 init();

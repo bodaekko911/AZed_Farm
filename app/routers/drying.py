@@ -105,6 +105,17 @@ def _serialize_batch(batch) -> dict:
     }
 
 
+async def _with_cost_updates(db, batch) -> dict:
+    """The batch as usual, plus what closing the stage did to product costs."""
+    from app.services.batch_auto_cost import summary
+
+    updates = getattr(batch, "_cost_updates", None) or []
+    payload = _serialize_batch(await drying_service.get_batch(db, batch.id))
+    payload["cost_updates"] = updates
+    payload["cost_summary"] = summary(updates)
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -152,8 +163,7 @@ async def add_drying_next_stage(
     current_user: User = Depends(get_current_user),
 ):
     batch = await drying_service.add_next_stage(db, batch_id, data, current_user)
-    batch = await drying_service.get_batch(db, batch.id)
-    return _serialize_batch(batch)
+    return await _with_cost_updates(db, batch)
 
 
 @router.post("/api/batches/{batch_id}/finalize",
@@ -165,8 +175,7 @@ async def finalize_drying_batch(
     current_user: User = Depends(get_current_user),
 ):
     batch = await drying_service.finalize_batch(db, batch_id, data, current_user)
-    batch = await drying_service.get_batch(db, batch.id)
-    return _serialize_batch(batch)
+    return await _with_cost_updates(db, batch)
 
 
 @router.post("/api/batches/{batch_id}/cancel",

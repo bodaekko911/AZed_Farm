@@ -134,9 +134,13 @@ async def _close_open_stage(
     stage_1_inputs: list,
     current_user,
     batch_number: str,
-) -> None:
-    """Find the open stage, write its outputs, credit stock, compute metrics."""
+) -> list[dict]:
+    """Find the open stage, write its outputs, credit stock, compute metrics,
+    and cost the outputs from this stage's inputs. Returns the cost updates."""
+    from app.services.batch_auto_cost import cost_outputs
+
     open_stage = _find_open_stage(batch)
+    stock_before: dict = {}
 
     # Track newly-created output objects with product attached so metrics can
     # read .product.unit without needing the ORM relationship to be refreshed.
@@ -144,6 +148,7 @@ async def _close_open_stage(
     for item in outputs_payload:
         product = await _load_product_or_404(db, item.product_id)
         before = float(product.stock)
+        stock_before.setdefault(product.id, before)
         product.stock = before + float(item.qty)
         after = float(product.stock)
         out = DryingBatchStageOutput(
@@ -183,6 +188,10 @@ async def _close_open_stage(
     )
     open_stage.stage_loss_pct       = metrics["stage_loss_pct"]
     open_stage.cumulative_yield_pct = metrics["cumulative_yield_pct"]
+
+    # Each stage is costed from its own inputs, so a later stage's inputs —
+    # the previous stage's outputs — already carry the cost through.
+    return cost_outputs(open_stage.inputs, new_output_objs, stock_before)
 
 
 async def _load_product_or_404(db: AsyncSession, product_id: int) -> Product:
@@ -330,7 +339,7 @@ async def add_next_stage(
     if data.prev_stage_notes:
         open_stage.notes = data.prev_stage_notes
 
-    await _close_open_stage(
+    batch._cost_updates = await _close_open_stage(
         db, batch, data.prev_stage_outputs, stage_1_inputs, current_user, batch.batch_number
     )
 
@@ -416,7 +425,7 @@ async def finalize_batch(
 
     open_stage = _find_open_stage(batch)
 
-    await _close_open_stage(
+    batch._cost_updates = await _close_open_stage(
         db, batch, data.final_outputs, stage_1_inputs, current_user, batch.batch_number
     )
 
