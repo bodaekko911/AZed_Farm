@@ -2099,7 +2099,7 @@ async def export_production(date_from: str = None, date_to: str = None, db: Asyn
 
 # ── P&L ────────────────────────────────────────────────
 @router.get("/api/pl")
-async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_pl"))):
+async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = None, farm: Optional[str] = None, db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_pl"))):
     """
     Profit & Loss report.
 
@@ -2113,14 +2113,45 @@ async def pl_report(date_from: Optional[str] = None, date_to: Optional[str] = No
 
     Expenses come from the Expenses module (Expense.expense_date).
     Date filtering uses APP_TIMEZONE-aware UTC bounds — same as the Dashboard.
+
+    ``farm`` filters the expenses: one farm id, several ("1,2"), or "none"
+    for expenses saved without a farm (shared costs). Sales are not recorded
+    per farm, so revenue stays company-wide whatever the filter.
     """
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
-    return await _build_pl_report(db, d_from=d_from, d_to=d_to)
+    return await _build_pl_report(db, d_from=d_from, d_to=d_to, farm=farm)
 
 
-async def _build_pl_report(db, *, d_from, d_to):
+@router.get("/api/pl/farms")
+async def pl_farms(db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_pl"))):
+    """Farms for the P&L expense filter (the Farm page may not be open to this user)."""
+    rows = (await db.execute(select(Farm.id, Farm.name).where(Farm.is_active == 1).order_by(Farm.name))).all()
+    return [{"id": r.id, "name": r.name} for r in rows]
+
+
+async def _pl_farm_filter(db, farm: Optional[str]):
+    """(SQL condition on Expense.farm_id or None, label) for the P&L farm filter."""
+    value = (farm or "").strip().lower()
+    if not value or value == "all":
+        return None, "All farms"
+    if value == "none":
+        return Expense.farm_id.is_(None), "Shared (no farm)"
+    try:
+        ids = list(dict.fromkeys(int(x) for x in value.split(",") if x.strip()))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid farm filter")
+    rows = (await db.execute(select(Farm.id, Farm.name).where(Farm.id.in_(ids)))).all()
+    if len(rows) != len(ids):
+        raise HTTPException(status_code=404, detail="Farm not found")
+    names = {r.id: r.name for r in rows}
+    return Expense.farm_id.in_(ids), " + ".join(names[i] for i in ids)
+
+
+async def _build_pl_report(db, *, d_from, d_to, farm: Optional[str] = None):
+    farm_condition, farm_label = await _pl_farm_filter(db, farm)
+    expense_filter = [farm_condition] if farm_condition is not None else []
 
     # ── Revenue ──────────────────────────────────────────
     pos_result = await db.execute(
@@ -2278,7 +2309,7 @@ async def _build_pl_report(db, *, d_from, d_to):
         )
         .select_from(Expense)
         .join(ExpenseCategory, ExpenseCategory.id == Expense.category_id, isouter=True)
-        .where(Expense.expense_date >= local_from, Expense.expense_date <= local_to)
+        .where(Expense.expense_date >= local_from, Expense.expense_date <= local_to, *expense_filter)
         .group_by(ExpenseCategory.id, ExpenseCategory.account_code, ExpenseCategory.name)
         .order_by(ExpenseCategory.name)
     )
@@ -2292,8 +2323,10 @@ async def _build_pl_report(db, *, d_from, d_to):
             Expense.amount,
             Expense.vendor,
             Expense.description,
+            Farm.name.label("farm_name"),
         )
-        .where(Expense.expense_date >= local_from, Expense.expense_date <= local_to)
+        .join(Farm, Farm.id == Expense.farm_id, isouter=True)
+        .where(Expense.expense_date >= local_from, Expense.expense_date <= local_to, *expense_filter)
         .order_by(Expense.category_id, Expense.expense_date, Expense.id)
     )
     expenses_by_cat: dict[Optional[int], list[dict]] = {}
@@ -2306,6 +2339,7 @@ async def _build_pl_report(db, *, d_from, d_to):
             "ref_type":    "manual",
             "description": " — ".join(desc_parts) if desc_parts else "Expense",
             "amount":      round(float(r.amount or 0), 2),
+            "farm":        r.farm_name or "Shared (no farm)",
         })
 
     expense_lines = []
@@ -2333,6 +2367,8 @@ async def _build_pl_report(db, *, d_from, d_to):
         "date_to":        d_to.astimezone(tz).strftime("%Y-%m-%d"),
         "used_balance_fallback": False,
         "warning":        None,
+        "farm_filter":    farm_label,
+        "farm_filtered":  farm_condition is not None,
     }
 
 
@@ -2897,11 +2933,11 @@ async def export_utilities(
 
 
 @router.get("/export/pl", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_pl"))])
-async def export_pl(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+async def export_pl(date_from: str = None, date_to: str = None, farm: Optional[str] = None, db: AsyncSession = Depends(get_async_session)):
     d_from, d_to = parse_dates(date_from, date_to)
     if (d_to - d_from).days > 366:
         raise HTTPException(status_code=400, detail="Date range cannot exceed 1 year")
-    data = await _build_pl_report(db, d_from=d_from, d_to=d_to)
+    data = await _build_pl_report(db, d_from=d_from, d_to=d_to, farm=farm)
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -2942,7 +2978,8 @@ async def export_pl(date_from: str = None, date_to: str = None, db: AsyncSession
         # Title row
         ws1.merge_cells("A1:D1")
         tc = ws1["A1"]
-        tc.value = f"Profit & Loss Statement  |  {data['date_from']}  →  {data['date_to']}"
+        tc.value = (f"Profit & Loss Statement  |  {data['date_from']}  →  {data['date_to']}"
+                    + (f"  |  Expenses: {data['farm_filter']} (revenue is company-wide)" if data["farm_filtered"] else ""))
         tc.font = Font(bold=True, size=13, color="FFFFFF")
         tc.fill = green_fill
         tc.alignment = Alignment(horizontal="center", vertical="center")
@@ -3033,7 +3070,7 @@ async def export_pl(date_from: str = None, date_to: str = None, db: AsyncSession
 
         # ── Sheet 3: Expense Entries ──
         ws3 = wb.create_sheet("Expense Entries")
-        for ci, h in enumerate(["Account Code", "Account Name", "Date", "Type", "Description", "Amount (EGP)"], 1):
+        for ci, h in enumerate(["Account Code", "Account Name", "Date", "Type", "Farm", "Description", "Amount (EGP)"], 1):
             c = ws3.cell(row=1, column=ci, value=h)
             c.fill = red_fill; c.font = white_font; c.border = bord
             c.alignment = Alignment(horizontal="center", vertical="center")
@@ -3042,7 +3079,7 @@ async def export_pl(date_from: str = None, date_to: str = None, db: AsyncSession
         for line in data["expense_lines"]:
             for entry in line["entries"]:
                 fill = alt2 if ri % 2 == 0 else None
-                for ci, val in enumerate([line["code"], line["name"], entry["date"], entry["ref_type"], entry["description"], entry["amount"]], 1):
+                for ci, val in enumerate([line["code"], line["name"], entry["date"], entry["ref_type"], entry.get("farm", ""), entry["description"], entry["amount"]], 1):
                     c = ws3.cell(row=ri, column=ci, value=val)
                     c.border = bord
                     c.alignment = Alignment(vertical="center")
@@ -5438,6 +5475,11 @@ td.mono{font-family:var(--mono);}
             </div>
         </div>
         <div class="filter-bar no-print">
+            <label>Expenses of</label>
+            <select id="pl-farm" onchange="loadPL()" style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:7px 10px;color:var(--text);font-family:var(--sans);font-size:13px">
+                <option value="">All farms</option>
+                <option value="none">Shared (no farm)</option>
+            </select>
             <label>From</label><input type="date" id="pl-from">
             <label>To</label>  <input type="date" id="pl-to">
             <div class="filter-sep"></div>
@@ -5822,7 +5864,7 @@ async function exportSection(tab){
         hr:         ()=>{ let r=getRange("hr-from","hr-to"); let p=document.getElementById("hr-period").value; let d=document.getElementById("hr-department").value.trim(); let f=document.getElementById("hr-farm-id").value; return `/reports/export/hr?date_from=${r.from}&date_to=${r.to}${p?"&period="+encodeURIComponent(p):""}${d?"&department="+encodeURIComponent(d):""}${f?"&farm_id="+encodeURIComponent(f):""}`; },
         utilities:  ()=>{ let r=getRange("util-from","util-to"); return `/reports/export/utilities?date_from=${r.from}&date_to=${r.to}`; },
         carbon:     ()=>{ let r=getRange("carbon-from","carbon-to"); return `/reports/export/carbon?date_from=${r.from}&date_to=${r.to}`; },
-        pl:           ()=>{ let r=getRange("pl-from","pl-to");   return `/reports/export/pl?date_from=${r.from}&date_to=${r.to}`; },
+        pl:           ()=>{ let r=getRange("pl-from","pl-to"); let f=document.getElementById("pl-farm").value; return `/reports/export/pl?date_from=${r.from}&date_to=${r.to}${f?"&farm="+encodeURIComponent(f):""}`; },
         profitability:()=>{ let r=getRange("prof-from","prof-to"); return `/reports/export/profitability?date_from=${r.from}&date_to=${r.to}`; },
         animals:      ()=>{ let r=getRange("animals-from","animals-to"); return `/reports/export/animals?date_from=${r.from}&date_to=${r.to}`; },
         transactions: ()=>{ let r=getRange("tx-from","tx-to"); let s=document.getElementById("tx-source").value; return `/reports/export/transactions?date_from=${r.from}&date_to=${r.to}${s?"&source="+s:""}`; },
@@ -6951,9 +6993,21 @@ async function loadCarbon(){
 
 
 /* ── P&L ── */
+async function loadPLFarms(){
+    const sel = document.getElementById("pl-farm");
+    if(!sel || sel.dataset.loaded) return;
+    try{
+        const farms = await (await fetch("/reports/api/pl/farms")).json();
+        sel.insertAdjacentHTML("beforeend", farms.map(f=>`<option value="${f.id}">${escapeHtml(f.name)}</option>`).join(""));
+        sel.dataset.loaded = "1";
+    }catch(e){}
+}
+
 async function loadPL(){
+    await loadPLFarms();
     let r = getRange("pl-from","pl-to");
-    let data = await fetchReportJson(`/reports/api/pl?date_from=${r.from}&date_to=${r.to}`);
+    const farm = document.getElementById("pl-farm").value;
+    let data = await fetchReportJson(`/reports/api/pl?date_from=${r.from}&date_to=${r.to}${farm?"&farm="+encodeURIComponent(farm):""}`);
     setPrintDates("ph-pl-dates", data.date_from, data.date_to);
     let isProfit = data.net_profit >= 0;
 
@@ -6966,6 +7020,7 @@ async function loadPL(){
                 <thead><tr style="background:var(--card2)">
                     <th style="padding:6px 12px;text-align:left;color:var(--muted);font-weight:700;letter-spacing:.5px">Date</th>
                     <th style="padding:6px 12px;text-align:left;color:var(--muted);font-weight:700;letter-spacing:.5px">Type</th>
+                    ${entries.some(e=>e.farm)?`<th style="padding:6px 12px;text-align:left;color:var(--muted);font-weight:700;letter-spacing:.5px">Farm</th>`:""}
                     <th style="padding:6px 12px;text-align:left;color:var(--muted);font-weight:700;letter-spacing:.5px">Description</th>
                     <th style="padding:6px 12px;text-align:right;color:var(--muted);font-weight:700;letter-spacing:.5px">Amount (EGP)</th>
                 </tr></thead>
@@ -6973,6 +7028,7 @@ async function loadPL(){
                 ${entries.map(e=>`<tr style="border-top:1px solid var(--border)">
                     <td style="padding:7px 12px;font-family:var(--mono);color:var(--muted)">${e.date}</td>
                     <td style="padding:7px 12px"><span style="background:var(--card2);border-radius:4px;padding:1px 7px;font-size:11px;color:var(--sub)">${refLabel[e.ref_type]||e.ref_type}</span></td>
+                    ${e.farm!==undefined?`<td style="padding:7px 12px;color:${e.farm==="Shared (no farm)"?"var(--muted)":"var(--text)"};white-space:nowrap">${e.farm}</td>`:""}
                     <td style="padding:7px 12px;color:var(--sub)">${e.description}</td>
                     <td style="padding:7px 12px;text-align:right;font-family:var(--mono);font-weight:700;color:${color}">${e.amount.toFixed(2)}</td>
                 </tr>`).join("")}
@@ -7000,11 +7056,12 @@ async function loadPL(){
             <div class="stat-card sc-green"><div class="stat-label">Total Revenue</div><div class="stat-value sv-green">${data.total_revenue.toFixed(2)}</div></div>
             <div class="stat-card sc-danger"><div class="stat-label">Total Expenses</div><div class="stat-value sv-danger">${data.total_expense.toFixed(2)}</div></div>
             <div class="stat-card ${isProfit?"sc-green":"sc-danger"}">
-                <div class="stat-label">Net ${isProfit?"Profit":"Loss"}</div>
+                <div class="stat-label">${data.farm_filtered ? "Revenue − these expenses" : `Net ${isProfit?"Profit":"Loss"}`}</div>
                 <div class="stat-value ${isProfit?"sv-green":"sv-danger"}">${Math.abs(data.net_profit).toFixed(2)}</div>
             </div>
         </div>
         ${data.warning ? `<div style="font-size:12px;color:var(--warn);margin-bottom:12px">${data.warning}</div>` : ``}
+        ${data.farm_filtered ? `<div style="background:rgba(77,159,255,.07);border:1px solid rgba(77,159,255,.25);border-radius:10px;padding:10px 14px;font-size:12.5px;color:var(--blue);margin-bottom:12px">Expenses shown: <strong>${data.farm_filter}</strong> only. Sales are not recorded per farm, so revenue is the whole company's — the net figure is revenue minus these expenses, not this farm's profit.</div>` : ``}
         <div style="font-size:12px;color:var(--muted);margin-bottom:12px">💡 Click any account line to expand its journal entries</div>
         <div class="pl-section">
             <div class="pl-header">Revenue</div>
@@ -7018,7 +7075,7 @@ async function loadPL(){
         </div>
         <div class="pl-section">
             <div class="pl-row pl-net" style="background:${isProfit?"rgba(0,255,157,.06)":"rgba(255,77,109,.06)"};border-top:2px solid ${isProfit?"var(--green)":"var(--danger)"}">
-                <span>Net ${isProfit?"Profit":"Loss"}</span>
+                <span>${data.farm_filtered ? "Revenue − these expenses" : `Net ${isProfit?"Profit":"Loss"}`}</span>
                 <span class="mono" style="color:${isProfit?"var(--green)":"var(--danger)"};font-size:20px">${Math.abs(data.net_profit).toFixed(2)}</span>
             </div>
         </div>`;
