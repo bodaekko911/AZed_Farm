@@ -1296,6 +1296,11 @@ async def _realised_unit_prices(
     Returns {product_id: {"qty": net qty sold, "revenue": net revenue,
     "price": realised unit price}} — products with no net sales are absent, and
     the caller falls back to list price for those.
+
+    Lines with a zero total are left out: they are not sales but stock handed
+    over for nothing — mostly produce sent to the in-house kitchen on a 0-total
+    invoice. Counting their quantity at a price of 0 dragged the price down
+    (butterhead lettuce sold at 48 showed as 26.70).
     """
     from app.models.b2b import B2BInvoice, B2BInvoiceItem, B2BRefund, B2BRefundItem
     from app.models.invoice import Invoice, InvoiceItem
@@ -1330,6 +1335,7 @@ async def _realised_unit_prices(
                     item_model.product_id.in_(product_ids),
                     date_col >= start_dt,
                     date_col <= end_dt,
+                    item_model.total > 0,
                 )
             )
         except Exception:

@@ -792,3 +792,22 @@ def test_an_unknown_farm_in_the_list_is_refused():
         with pytest.raises(HTTPException) as exc:
             allocate(session, farm_id="1,99")
     assert exc.value.status_code == 404
+
+
+def test_free_lines_do_not_drag_down_the_price_sold_for():
+    # Produce sent to the in-house kitchen goes out on a 0-total invoice. It is
+    # not a sale: 100 kg sold at 20 and 100 kg handed over free is still 20/kg.
+    with make_session() as session:
+        seed_base(session)
+        seed_retail_sale(session, 1, 100, 2000, invoice_id=1)
+        session.add(Invoice(customer_id=1, id=2, invoice_number="HIST-2", total=Decimal("0"),
+                            created_at=datetime(2026, 8, 21, tzinfo=timezone.utc)))
+        session.flush()
+        session.add(InvoiceItem(invoice_id=2, product_id=1, qty=Decimal("100"),
+                                unit_price=Decimal("20"), total=Decimal("0")))
+        session.commit()
+        data = allocate(session)
+
+    tomato = next(p for p in data["products"] if p["product_name"] == "Tomato")
+    assert tomato["sale_price"] == 20.0
+    assert tomato["qty_sold"] == 100.0
