@@ -694,9 +694,9 @@ def test_genuine_unit_mismatch_is_still_refused():
     assert "Lettuce" in skipped
 
 
-def test_a_crop_also_bought_in_the_period_is_left_for_the_combined_cost():
+def test_a_crop_also_bought_in_the_period_is_averaged_with_what_was_paid():
     # Writing the harvest cost alone would wipe out what was paid for the
-    # bought part; Production → Update Costs averages the two.
+    # bought part: 800 kg grown at 17.78 and 100 kg bought at 25 is one stock.
     with make_session() as session:
         seed_base(session)
         session.add(ProductReceipt(ref_number="RCV-1", product_id=1, receive_date=date(2026, 8, 10),
@@ -707,10 +707,25 @@ def test_a_crop_also_bought_in_the_period_is_left_for_the_combined_cost():
         tomato = session.get(Product, 1)
         session.refresh(tomato)
 
-    assert [p["product_name"] for p in result["applied"]] == ["Lettuce"]
-    skip = next(s for s in result["skipped"] if s["product_name"] == "Tomato")
-    assert skip["reason"].startswith("Also bought in this period")
-    assert not tomato.cost
+    entry = next(p for p in result["applied"] if p["product_name"] == "Tomato")
+    assert (entry["harvest_cost"], entry["bought_qty"], entry["bought_cost"]) == (17.778, 100.0, 25.0)
+    assert entry["new_cost"] == 18.58                  # (800 × 17.778 + 2 500) ÷ 900
+    assert float(tomato.cost) == 18.58
+
+
+def test_a_product_made_in_batches_is_left_to_production():
+    with make_session() as session:
+        seed_base(session)
+        session.add_all([
+            ProductionBatch(id=1, batch_number="BATCH-1", created_at=datetime(2026, 8, 15, tzinfo=timezone.utc)),
+            BatchOutput(batch_id=1, product_id=2, qty=Decimal("10")),
+        ])
+        session.commit()
+        result = apply_costs(session)
+
+    assert [p["product_name"] for p in result["applied"]] == ["Tomato"]
+    skip = next(s for s in result["skipped"] if s["product_name"] == "Lettuce")
+    assert "Production → Update Costs" in skip["reason"]
 
 
 def test_stock_bought_through_receive_is_not_spread_over_the_crops_a_second_time():

@@ -2012,22 +2012,29 @@ async def get_cost_allocation(
         "delivery_count": len(deliveries),
     }
 
-async def _bought_or_made_product_ids(db: AsyncSession, start: date_type, end: date_type) -> dict[int, str]:
-    """Products that also came in another way in the period: {id: "bought" |
-    "made" | "bought and made"}. Their cost is a combined average, not the
-    harvest cost alone."""
+async def _other_supply(db: AsyncSession, start: date_type, end: date_type) -> tuple[dict, set]:
+    """What else came in during the period besides the harvest.
+
+    Returns ({product_id: (qty bought, value paid)} from priced receipts,
+    {product_ids made in production/drying batches}). A crop also bought is
+    averaged with what was paid; a product made in batches is costed by
+    Production → Update Costs instead.
+    """
     from app.core.time_utils import utc_bounds
     from app.models.drying import DryingBatch, DryingBatchStage, DryingBatchStageOutput
     from app.models.production import BatchOutput, ProductionBatch
     from app.models.receipt import ProductReceipt
 
     d_from, d_to = utc_bounds(start, end)
-    bought = set((await db.execute(
-        select(ProductReceipt.product_id).where(
+    bought: dict = {}
+    for pid, qty, unit_cost in (await db.execute(
+        select(ProductReceipt.product_id, ProductReceipt.qty, ProductReceipt.unit_cost).where(
             ProductReceipt.receive_date >= start, ProductReceipt.receive_date <= end,
             ProductReceipt.unit_cost > 0,
         )
-    )).scalars().all())
+    )).all():
+        q, v = bought.get(pid, (0.0, 0.0))
+        bought[pid] = (q + float(qty or 0), v + float(qty or 0) * float(unit_cost or 0))
     made = set((await db.execute(
         select(BatchOutput.product_id).join(ProductionBatch, BatchOutput.batch_id == ProductionBatch.id)
         .where(ProductionBatch.created_at >= d_from, ProductionBatch.created_at <= d_to)
@@ -2039,10 +2046,7 @@ async def _bought_or_made_product_ids(db: AsyncSession, start: date_type, end: d
         .where(DryingBatch.started_at >= d_from, DryingBatch.started_at <= d_to,
                DryingBatch.status != "cancelled")
     )).scalars().all())
-    return {
-        pid: "bought and made" if pid in bought and pid in made else ("bought" if pid in bought else "made")
-        for pid in bought | made
-    }
+    return bought, made
 
 
 async def apply_cost_allocation_to_products(
@@ -2083,7 +2087,7 @@ async def apply_cost_allocation_to_products(
 
     wanted = set(product_ids) if product_ids else None
     cost_key = "cost_per_unit" if basis_norm == "direct" else "cost_per_unit_absorbed"
-    also_supplied = await _bought_or_made_product_ids(
+    bought, made = await _other_supply(
         db, date_type.fromisoformat(date_from), date_type.fromisoformat(date_to),
     )
 
@@ -2091,14 +2095,11 @@ async def apply_cost_allocation_to_products(
     for row in allocation["products"]:
         if wanted is not None and row["product_id"] not in wanted:
             continue
-        if row["product_id"] in also_supplied:
-            # Writing the harvest cost alone would overwrite what was paid or
-            # spent making the rest; the combined average is the right cost.
+        if row["product_id"] in made:
             skipped.append({
                 "product_id": row["product_id"],
                 "product_name": row["product_name"],
-                "reason": f"Also {also_supplied[row['product_id']]} in this period — use "
-                          "Production → Update Costs, which averages grown, bought and made",
+                "reason": "Also made in production batches — its cost comes from Production → Update Costs",
             })
             continue
         new_cost = row[cost_key]
@@ -2138,6 +2139,14 @@ async def apply_cost_allocation_to_products(
             })
             continue
 
+        # Also bought in the period: average the harvest with what was paid,
+        # by quantity, so neither overwrites the other (Mejdool A: grown at
+        # 0.16 and bought at 0.142 is one stock, costing between the two).
+        bought_qty, bought_value = bought.get(product.id, (0.0, 0.0))
+        harvest_qty = float(row["total_qty"] or 0)
+        if bought_qty > 0 and harvest_qty > 0:
+            new_cost = (harvest_qty * float(new_cost) + bought_value) / (harvest_qty + bought_qty)
+
         old_cost = float(product.cost or 0)
         entry = {
             "product_id": product.id,
@@ -2146,6 +2155,9 @@ async def apply_cost_allocation_to_products(
             "old_cost": round(old_cost, 3),
             "new_cost": round(float(new_cost), 3),
             "change": round(float(new_cost) - old_cost, 3),
+            "harvest_cost": round(float(row[cost_key]), 3),
+            "bought_qty": round(bought_qty, 3),
+            "bought_cost": round(bought_value / bought_qty, 3) if bought_qty > 0 else None,
         }
         if not dry_run:
             product.cost = Decimal(str(round(float(new_cost), 3)))

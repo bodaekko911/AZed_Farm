@@ -487,9 +487,13 @@ async def _season_supplies(db: AsyncSession, date_from: date_type, date_to: date
 
 
 async def _cost_rows(db: AsyncSession, date_from: date_type, date_to: date_type, basis: str = "direct") -> list[dict]:
-    """Combined cost per product for the period: grown, bought and made
-    supply averaged by quantity. Batches are selected as the Production report
-    selects them."""
+    """Cost of the processed products — those made in production, packaging
+    or drying batches in the period — from their inputs' current costs.
+
+    Raw materials are not touched here: their cost comes from Season Analysis
+    (grown) and receiving (bought). A processed product that was also bought
+    or grown in the period is averaged with that supply, by quantity.
+    Batches are selected as the Production report selects them."""
     from app.core.time_utils import utc_bounds
     from app.models.drying import (
         DryingBatch, DryingBatchStage, DryingBatchStageInput, DryingBatchStageOutput,
@@ -545,6 +549,10 @@ async def _cost_rows(db: AsyncSession, date_from: date_type, date_to: date_type,
     for pid, qty, unit_cost, ref in res.all():
         supplies.setdefault(pid, []).append({"source": "bought", "qty": float(qty),
                                              "unit_cost": float(unit_cost), "label": ref})
+
+    # Only processed products are costed here; raw inputs keep their cost.
+    made_ids = {pid for b in batches for pid, _q in b["outputs"]}
+    supplies = {pid: lines for pid, lines in supplies.items() if pid in made_ids}
 
     missing_ids = [pid for pid in supplies if pid not in products]
     if missing_ids:
@@ -969,7 +977,7 @@ td.name{color:var(--text);font-weight:600;}
             <button class="btn btn-blue"   id="btn-pkg-recipe" onclick="openRecipeModal(true)"     style="display:none">+ Packaging Recipe</button>
             <button class="btn btn-danger" id="btn-spoilage"   onclick="openSpoilageModal()"       style="display:none">Log Spoilage</button>
             <button class="btn btn-orange" id="btn-drying"     onclick="openDryingStartModal()"    style="display:none">New Drying Batch</button>
-            <button class="btn btn-blue"   id="btn-costs"      onclick="openCostsModal()"          style="display:none" title="One average cost per product: grown, bought and made">💰 Update Costs</button>
+            <button class="btn btn-blue"   id="btn-costs"      onclick="openCostsModal()"          style="display:none" title="Cost the products made in batches from their inputs">💰 Update Costs</button>
         </div>
     </div>
 
@@ -1071,8 +1079,8 @@ td.name{color:var(--text);font-weight:600;}
 <!-- PROCESSING BATCH MODAL -->
 <div class="modal-bg" id="costs-modal">
     <div class="modal" style="width:1040px">
-        <div class="modal-title">Update product costs</div>
-        <div class="modal-sub">One average cost per product over everything that came in during the period — grown (farm deliveries at the Season Analysis cost of both farms), bought (receipts at what was paid) and made (batches at what their inputs cost) — weighted by quantity. Made products follow the chain, so packs use the combined cost of what they were packed from. Nothing is saved until you press Apply.</div>
+        <div class="modal-title">Update costs of processed products</div>
+        <div class="modal-sub">Costs everything made in production, packaging and drying batches in the period from what went into them, following the chain — packs use the new cost of the powder they were packed from. Raw materials keep their cost: set those first with Farm → Season Analysis → Apply (grown) and Receive (bought). Nothing is saved until you press Apply.</div>
         <div class="spl-filter" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px">
             <div><div style="font-size:11px;color:var(--muted);margin-bottom:4px">From</div><input type="date" id="costs-from"></div>
             <div><div style="font-size:11px;color:var(--muted);margin-bottom:4px">To</div><input type="date" id="costs-to"></div>
@@ -1984,7 +1992,7 @@ async function previewCosts(){
         no_output:  `<span style="color:var(--muted)">nothing came in</span>`,
     };
     const counts = _costRows.reduce((a, r) => (a[r.status] = (a[r.status]||0) + 1, a), {});
-    box.innerHTML = !_costRows.length ? `<div style="color:var(--muted)">Nothing was grown, bought or made in this period.</div>` : `
+    box.innerHTML = !_costRows.length ? `<div style="color:var(--muted)">No batches in this period.</div>` : `
         <div style="color:var(--muted);margin-bottom:8px">${_costRows.length} products · ${counts.ok||0} to update · ${counts.suspect||0} to check · ${counts.incomplete||0} can't be costed yet · ${counts.unchanged||0} already right</div>
         <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px">
         <thead><tr style="color:var(--muted);text-align:left">

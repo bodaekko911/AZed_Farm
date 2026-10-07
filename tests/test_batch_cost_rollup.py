@@ -186,7 +186,7 @@ def test_preview_then_apply_writes_only_the_chosen_products():
     assert session.get(Product, 1).cost == Decimal("0.01")
 
 
-def test_preview_combines_harvest_receipts_and_batches_from_the_database():
+def test_preview_costs_only_processed_products_from_their_inputs_cost():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine, expire_on_commit=False)()
@@ -197,7 +197,7 @@ def test_preview_combines_harvest_receipts_and_batches_from_the_database():
         ExpenseCategory(id=1, name="Fertiliser", account_code="5001", is_active="1"),
         # 1 400 EGP of farm costs over 10 kg of dates harvested ⇒ 0.14 a gram
         Expense(category_id=1, farm_id=1, amount=Decimal("1400"), expense_date=date(2026, 5, 3)),
-        Product(id=1, sku="MEJ", name="Mejdool A (1g)", unit="gram", price=Decimal("0.4"), cost=Decimal("190")),
+        Product(id=1, sku="MEJ", name="Mejdool A (1g)", unit="gram", price=Decimal("0.4"), cost=Decimal("0.16")),
         Product(id=2, sku="MEJ250", name="Mejdool (250g)", unit="piece", price=Decimal("165"), cost=Decimal("60")),
         FarmDelivery(id=1, delivery_number="D-1", farm_id=1, delivery_date=date(2026, 5, 4)),
         FarmDeliveryItem(delivery_id=1, product_id=1, qty=Decimal("10000"), unit="gram"),
@@ -212,12 +212,9 @@ def test_preview_combines_harvest_receipts_and_batches_from_the_database():
     preview = asyncio.run(preview_costs(date(2026, 5, 1), date(2026, 5, 31), "direct", AsyncSessionAdapter(session)))
     rows = {r["product"]: r for r in preview["products"]}
 
-    dates = rows["Mejdool A (1g)"]
-    assert dates["sources"] == [
-        {"source": "grown", "qty": 10000.0, "unit_cost": 0.14},
-        {"source": "bought", "qty": 10000.0, "unit_cost": 0.18},
-    ]
-    assert dates["new_cost"] == 0.16
+    # Only the processed product is costed here; the raw dates keep their cost
+    # (set by Season Analysis and receiving), whatever was grown or bought.
+    assert list(rows) == ["Mejdool (250g)"]
     assert rows["Mejdool (250g)"]["new_cost"] == 40.0         # 1 000 g × 0.16 ÷ 4 packs
 
 

@@ -2241,7 +2241,7 @@ async function refreshApplyPreview(){
         const up = p.change > 0, same = Math.abs(p.change) < 0.0005;
         const col = same ? "var(--muted)" : up ? "var(--danger)" : "var(--green)";
         return `<tr>
-            <td style="padding:7px 0;border-top:1px solid var(--border)">${p.product_name}</td>
+            <td style="padding:7px 0;border-top:1px solid var(--border)">${p.product_name}${p.bought_qty>0?`<div style="font-size:11px;color:var(--muted)">harvest ${fmtc(p.harvest_cost)} averaged with ${Number(p.bought_qty).toLocaleString()} ${p.unit||""} bought at ${fmtc(p.bought_cost)}</div>`:""}</td>
             <td style="padding:7px 8px;border-top:1px solid var(--border);text-align:right;font-family:var(--mono);color:var(--muted)">${fmtc(p.old_cost)}</td>
             <td style="padding:7px 8px;border-top:1px solid var(--border);text-align:center;color:var(--muted)">→</td>
             <td style="padding:7px 8px;border-top:1px solid var(--border);text-align:right;font-family:var(--mono);font-weight:700">${fmtc(p.new_cost)}</td>
