@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func, inspect, literal, or_, select
+from sqlalchemy import and_, func, inspect, literal, or_, select
 from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
 from types import SimpleNamespace
@@ -2131,13 +2131,21 @@ async def pl_farms(db: AsyncSession = Depends(get_async_session), _=Depends(requ
     return [{"id": r.id, "name": r.name} for r in rows]
 
 
+def _pl_animal_expense():
+    """Animal spending is marked by a flag or a herd, not a farm — the same
+    test the Expenses page uses to show it as "🐾 Animals"."""
+    return or_(Expense.is_animal_expense.is_(True), Expense.animal_group_id.isnot(None))
+
+
 async def _pl_farm_filter(db, farm: Optional[str]):
-    """(SQL condition on Expense.farm_id or None, label) for the P&L farm filter."""
+    """(SQL condition on the expense or None, label) for the P&L farm filter."""
     value = (farm or "").strip().lower()
     if not value or value == "all":
         return None, "All farms"
+    if value == "animals":
+        return _pl_animal_expense(), "🐾 Animals"
     if value == "none":
-        return Expense.farm_id.is_(None), "Shared (no farm)"
+        return and_(Expense.farm_id.is_(None), ~_pl_animal_expense()), "Shared (no farm)"
     try:
         ids = list(dict.fromkeys(int(x) for x in value.split(",") if x.strip()))
     except ValueError:
@@ -2324,6 +2332,8 @@ async def _build_pl_report(db, *, d_from, d_to, farm: Optional[str] = None):
             Expense.vendor,
             Expense.description,
             Farm.name.label("farm_name"),
+            Expense.is_animal_expense,
+            Expense.animal_group_id,
         )
         .join(Farm, Farm.id == Expense.farm_id, isouter=True)
         .where(Expense.expense_date >= local_from, Expense.expense_date <= local_to, *expense_filter)
@@ -2339,7 +2349,8 @@ async def _build_pl_report(db, *, d_from, d_to, farm: Optional[str] = None):
             "ref_type":    "manual",
             "description": " — ".join(desc_parts) if desc_parts else "Expense",
             "amount":      round(float(r.amount or 0), 2),
-            "farm":        r.farm_name or "Shared (no farm)",
+            "farm":        r.farm_name or ("🐾 Animals" if (r.is_animal_expense or r.animal_group_id)
+                                           else "Shared (no farm)"),
         })
 
     expense_lines = []
@@ -5479,6 +5490,7 @@ td.mono{font-family:var(--mono);}
             <select id="pl-farm" onchange="loadPL()" style="background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:7px 10px;color:var(--text);font-family:var(--sans);font-size:13px">
                 <option value="">All farms</option>
                 <option value="none">Shared (no farm)</option>
+                <option value="animals">🐾 Animals</option>
             </select>
             <label>From</label><input type="date" id="pl-from">
             <label>To</label>  <input type="date" id="pl-to">

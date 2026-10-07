@@ -53,6 +53,9 @@ def make_db():
         Expense(category_id=1, farm_id=4, amount=Decimal("5000"), expense_date=date(2026, 9, 4),
                 description="Greenhouse frame"),
         Expense(category_id=2, farm_id=None, amount=Decimal("3000"), expense_date=date(2026, 9, 5)),
+        # Feed bought for the animals: flagged, no farm — shown as Animals, not shared.
+        Expense(category_id=2, farm_id=None, is_animal_expense=True, amount=Decimal("700"),
+                expense_date=date(2026, 9, 6)),
     ])
     session.commit()
     return AsyncSessionAdapter(session)
@@ -65,10 +68,10 @@ def pl(db, farm=None):
 
 def test_no_filter_shows_every_expense_with_its_farm():
     data = pl(make_db())
-    assert data["total_expense"] == 9000.0
+    assert data["total_expense"] == 9700.0
     assert data["farm_filtered"] is False
     farms = sorted(e["farm"] for line in data["expense_lines"] for e in line["entries"])
-    assert farms == ["Habiba/SPC", "Organic Farm", "Shared (no farm)"]
+    assert farms == ["Habiba/SPC", "Organic Farm", "Shared (no farm)", "🐾 Animals"]
 
 
 def test_one_farm_two_farms_and_shared():
@@ -80,7 +83,10 @@ def test_one_farm_two_farms_and_shared():
 
     assert pl(db, "1,4")["total_expense"] == 6000.0
     shared = pl(db, "none")
-    assert shared["total_expense"] == 3000.0
+    assert shared["total_expense"] == 3000.0            # animal spending is not "shared"
+    animals = pl(db, "animals")
+    assert animals["total_expense"] == 700.0
+    assert animals["farm_filter"] == "🐾 Animals"
     assert shared["farm_filter"] == "Shared (no farm)"
     assert [l["name"] for l in shared["expense_lines"]] == ["Salaries & Wages"]
 
