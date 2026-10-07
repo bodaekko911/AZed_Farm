@@ -157,6 +157,7 @@ def test_expense_list_endpoint_forwards_supported_filters(monkeypatch) -> None:
             "category_id": 7,
             "date_from": "2026-04-01",
             "date_to": "2026-04-30",
+            "q": "power",
         },
     )
 
@@ -167,6 +168,7 @@ def test_expense_list_endpoint_forwards_supported_filters(monkeypatch) -> None:
         "month": None,
         "date_from": "2026-04-01",
         "date_to": "2026-04-30",
+        "q": "power",
     }
 
 

@@ -463,7 +463,13 @@ async def list_expenses(
     month: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    q: Optional[str] = None,
 ) -> list[dict]:
+    """Expenses matching the filters, newest first.
+
+    ``q`` searches the reference, category, vendor, description and farm; a
+    number also matches that exact amount ("1500" finds a 1,500.00 expense).
+    """
     statement = select(Expense).options(
         selectinload(Expense.category),
         selectinload(Expense.user),
@@ -472,6 +478,25 @@ async def list_expenses(
     )
     if category_id:
         statement = statement.where(Expense.category_id == category_id)
+    term = (q or "").strip()
+    if term:
+        like = f"%{term}%"
+        conditions = [
+            Expense.ref_number.ilike(like),
+            Expense.vendor.ilike(like),
+            Expense.description.ilike(like),
+            ExpenseCategory.name.ilike(like),
+            Farm.name.ilike(like),
+        ]
+        try:
+            conditions.append(Expense.amount == Decimal(term.replace(",", "")))
+        except Exception:
+            pass
+        statement = (
+            statement.outerjoin(ExpenseCategory, ExpenseCategory.id == Expense.category_id)
+            .outerjoin(Farm, Farm.id == Expense.farm_id)
+            .where(or_(*conditions))
+        )
     start_date = _parse_filter_date(date_from)
     end_date = _parse_filter_date(date_to)
     if start_date:

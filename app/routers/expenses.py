@@ -1296,6 +1296,8 @@ nav {
             <div class="main-head">
                 <span class="main-title" id="main-title">All Expenses</span>
                 <div class="filter-row">
+                    <input type="search" class="filter-input" id="exp-search" placeholder="Search ref, vendor, description, farm, amount…"
+                        oninput="onExpenseSearch()" autocomplete="off" style="min-width:240px">
                     <label style="font-size:11px;color:var(--sub);white-space:nowrap">From</label>
                     <input type="date" class="filter-input" id="date-from-filter"
                         oninput="loadExpenses()" style="cursor:pointer">
@@ -1744,12 +1746,21 @@ async function readJsonResponse(response, loaderName) {
     return data;
 }
 
+// Search runs on the server and combines with the category and date filters.
+let _expSearchTimer = null;
+function onExpenseSearch() {
+    clearTimeout(_expSearchTimer);
+    _expSearchTimer = setTimeout(loadExpenses, 300);
+}
+
 async function loadExpenses() {
     console.log("Loading expenses page data: expenses");
     const dateFrom = document.getElementById("date-from-filter").value;
     const dateTo   = document.getElementById("date-to-filter").value;
+    const search   = (document.getElementById("exp-search")?.value || "").trim();
     const params = new URLSearchParams();
     if (activeCatId) params.set("category_id", String(activeCatId));
+    if (search) params.set("q", search);
     if (dateFrom) params.set("date_from", dateFrom);
     if (dateTo) params.set("date_to", dateTo);
     const url = `/expenses/api/list${params.toString() ? "?" + params.toString() : ""}`;
@@ -1793,8 +1804,10 @@ async function loadExpenses() {
             length: data.length,
             firstRow: data[0] || null
         });
+        // A slower, older search must not overwrite a newer one's result.
+        if (search !== (document.getElementById("exp-search")?.value || "").trim()) return;
         if (!data.length) {
-            tbody.innerHTML = `<tr class="empty-row"><td colspan="8">No expenses found in this database.</td></tr>`;
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="8">${search ? `No expenses match “${escapeHtml(search)}”.` : "No expenses found in this database."}</td></tr>`;
             return;
         }
         tbody.innerHTML = data.map(e => {
@@ -1890,6 +1903,7 @@ function printReceipt() {
 }
 
 function clearFilter() {
+    document.getElementById("exp-search").value = "";
     document.getElementById("date-from-filter").value = "";
     document.getElementById("date-to-filter").value = "";
     loadExpenses();

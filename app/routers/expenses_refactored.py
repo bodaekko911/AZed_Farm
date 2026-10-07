@@ -82,6 +82,7 @@ async def get_expenses(
     month: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    q: Optional[str] = None,
     db: AsyncSession = Depends(get_async_session),
 ):
     return await list_expenses(
@@ -90,6 +91,7 @@ async def get_expenses(
         month=month,
         date_from=date_from,
         date_to=date_to,
+        q=q,
     )
 
 
