@@ -164,18 +164,37 @@ def test_pieces_are_converted_to_kilograms_before_splitting():
     assert by_name["Lettuce"]["total_kg"] == 100.0
 
 
-def test_missing_unit_weight_falls_back_and_says_why():
-    """Without a weight on the lettuce, kg and pieces cannot be compared, so
-    the split must not silently pretend 200 pieces == 200 kg."""
+def test_missing_unit_weight_is_estimated_for_that_crop_only_and_says_so():
+    """Without a weight on the lettuce, kg and pieces cannot be compared — but
+    one unweighed crop must not switch every crop to a sale-value split (that
+    gives them all the same margin). The weighed crops stay on real weight; the
+    lettuce is counted as the weight that sells for what it sells for."""
     with make_session() as session:
         seed_base(session, lettuce_weight=None)
-        seed_retail_sale(session, 1, 100, 2000)
+        seed_retail_sale(session, 1, 100, 2000)     # tomato sells at 20 / kg
         data = allocate(session)
 
     assert data["weight_basis_complete"] is False
-    assert data["allocation_method"] == "value"
+    assert data["allocation_method"] == "weight"
     assert data["products_missing_weight"] == ["Lettuce"]
-    assert any("no weight set" in w for w in data["warnings"])
+    rows = {p["product_name"]: p for p in data["products"]}
+    # 200 heads × 30 = 6 000 of value; at 20 per kg that is 300 kg equivalent.
+    assert rows["Lettuce"]["kg_estimated"] is True
+    assert rows["Lettuce"]["kg_equivalent"] == 300.0
+    assert data["split_kg"] == 1100.0
+    # Tomato: 800 of 1 100 kg × 16 000 = 11 636.36 → 14.545 per kg.
+    assert rows["Tomato"]["cost_per_unit"] == 14.545
+    assert any("No weight set on Lettuce" in w for w in data["warnings"])
+
+
+def test_crops_with_weights_keep_different_margins_when_one_has_no_weight():
+    with make_session() as session:
+        seed_base(session, lettuce_weight=None)
+        seed_third_crop(session, price=Decimal("12"), qty=Decimal("500"), weight=Decimal("0.4"))
+        data = allocate(session)
+
+    weighed = [p for p in data["products"] if not p["kg_estimated"]]
+    assert len({p["profit_margin_pct"] for p in weighed}) == len(weighed) == 2
 
 
 def test_cost_split_is_exhaustive():

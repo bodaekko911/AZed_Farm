@@ -1703,12 +1703,31 @@ async def get_cost_allocation(
     ]
     value_basis_complete = bool(quantity_by_product) and split_value_total > 0
 
+    # Weight split that survives a few products with no weight. Those used to
+    # switch EVERY crop to a sale-value split — which gives every crop the same
+    # margin, so the analysis could no longer tell crops apart. Now crops with a
+    # weight split by weight, and a crop without one is counted as the weight
+    # that sells for what it sells for (its sale value ÷ the weighed crops'
+    # value per kg). Only the unweighed crops are estimated, and they are named.
+    weighed = [i for i in quantity_by_product.values() if i["has_mass"] and i["total_kg"] > 0]
+    weighed_kg = sum(i["total_kg"] for i in weighed)
+    weighed_value = sum(i["split_value"] for i in weighed)
+    value_per_kg = (weighed_value / weighed_kg) if weighed_kg > 0 and weighed_value > 0 else 0.0
+    for info in quantity_by_product.values():
+        if info["has_mass"]:
+            info["split_kg"], info["kg_estimated"] = info["total_kg"], False
+        else:
+            info["split_kg"] = (info["split_value"] / value_per_kg) if value_per_kg > 0 else 0.0
+            info["kg_estimated"] = info["split_kg"] > 0
+    split_kg_total = sum(i["split_kg"] for i in quantity_by_product.values())
+    weight_basis_usable = weight_basis_complete or (weighed_kg > 0 and value_per_kg > 0)
+
     preference = ["value", "weight", "quantity"] if wants_value else ["weight", "value", "quantity"]
     for candidate in preference:
         if candidate == "value" and value_basis_complete:
             basis = "value"
             break
-        if candidate == "weight" and weight_basis_complete:
+        if candidate == "weight" and weight_basis_usable:
             basis = "weight"
             break
         if candidate == "quantity":
@@ -1734,6 +1753,21 @@ async def get_cost_allocation(
         warnings.append(
             f"Split {basis_label} instead — these products have {what}{detail}. {fix}"
         )
+    if basis == "weight" and missing_mass:
+        estimated = sorted({i["product_name"] for i in quantity_by_product.values() if i["kg_estimated"]})
+        unshared = sorted(set(missing_mass) - set(estimated))
+        if estimated:
+            warnings.append(
+                "No weight set on " + ", ".join(estimated[:10])
+                + " — their share was estimated from what they sell for, counted as the weight the"
+                " weighed crops sell for at the same value. The other crops are split by real weight."
+                " Set an average weight per unit on these for an exact split."
+            )
+        if unshared:
+            warnings.append(
+                "No weight and no price on " + ", ".join(unshared[:10])
+                + " — they could not be given a share of the costs. Set a weight or a price."
+            )
     if basis == "value" and imputed_products:
         warnings.append(
             "These products have no price, so an average price of "
@@ -1791,7 +1825,7 @@ async def get_cost_allocation(
         if basis == "value":
             return info["split_value"] / split_value_total if split_value_total > 0 else 0
         if basis == "weight":
-            return info["total_kg"] / total_kg if total_kg > 0 else 0
+            return info["split_kg"] / split_kg_total if split_kg_total > 0 else 0
         return info["total_qty"] / total_quantity if total_quantity > 0 else 0
 
     products = []
@@ -1843,6 +1877,8 @@ async def get_cost_allocation(
                 "apply_skip_reason": skip_reason,
                 "total_qty": round(qty, 3),
                 "total_kg": round(info["total_kg"], 3) if info["has_mass"] else None,
+                "kg_estimated": bool(info.get("kg_estimated")),
+                "kg_equivalent": round(info["split_kg"], 3) if info.get("kg_estimated") else None,
                 "share_pct": round(share * 100, 1),
                 # Direct = farm costs only. Absorbed = plus this farm's share of
                 # untagged head-office costs.
@@ -1910,10 +1946,15 @@ async def get_cost_allocation(
         # The whole split in one number: pool ÷ total weight. Every crop's cost
         # per kilogram equals this under weight basis, so seeing it makes an
         # implausible result traceable to its two inputs.
-        "cost_per_kg": round(total_cost / total_kg, 4) if total_kg > 0 else None,
-        "cost_per_kg_absorbed": (
-            round((total_cost + shared_cost_allocated) / total_kg, 4) if total_kg > 0 else None
-        ),
+        # Over the weight the split used — real kilograms plus the estimated
+        # kilograms of crops with no weight — so it is what each weighed crop
+        # is charged per kg.
+        "cost_per_kg": round(total_cost / split_kg_total, 4) if basis == "weight" and split_kg_total > 0 else (
+            round(total_cost / total_kg, 4) if total_kg > 0 else None),
+        "cost_per_kg_absorbed": round((total_cost + shared_cost_allocated) / split_kg_total, 4)
+            if basis == "weight" and split_kg_total > 0 else (
+            round((total_cost + shared_cost_allocated) / total_kg, 4) if total_kg > 0 else None),
+        "split_kg": round(split_kg_total, 3),
         "products_missing_weight": sorted(set(missing_mass)),
         "products_missing_price": sorted(set(missing_value)),
         "products_imputed_price": sorted(set(imputed_products)),

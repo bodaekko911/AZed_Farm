@@ -2359,7 +2359,7 @@ async function loadSeasonAnalysis(){
             <div class="stat-card" style="border-top:2px solid var(--warn)">
                 <div class="stat-label">Cost per kg</div>
                 <div class="stat-value" style="font-size:20px;color:var(--warn)">${Number(data.cost_per_kg).toFixed(2)}</div>
-                <div style="font-size:10px;color:var(--muted);margin-top:4px">${fmt(data.total_cost)} ÷ ${Number(data.total_kg||0).toFixed(1)} kg</div>
+                <div style="font-size:10px;color:var(--muted);margin-top:4px">${fmt(data.total_cost)} ÷ ${Number(data.split_kg||data.total_kg||0).toFixed(1)} kg${Number(data.split_kg||0) > Number(data.total_kg||0) + 0.05 ? " (incl. estimated)" : ""}</div>
             </div>` : ""}
             <div class="stat-card teal"><div class="stat-label">Expenses Tagged</div><div class="stat-value teal" style="font-size:20px">${Number(data.expense_count || 0)}</div></div>
             <div class="stat-card" style="border-top:2px solid var(--orange)"><div class="stat-label">Deliveries</div><div class="stat-value" style="font-size:20px;color:var(--orange)">${Number(data.delivery_count || 0)}</div></div>
@@ -2478,7 +2478,9 @@ async function loadSeasonAnalysis(){
                     : p.price_basis === "realised"
                     ? `<div style="font-size:10px;color:var(--muted)">${Number(p.qty_sold||0).toFixed(1)} ${p.unit} sold</div>`
                     : `<div style="font-size:10px;color:var(--warn)">list price</div>`;
-                const harvested = (p.total_kg !== null && p.total_kg !== undefined && p.unit !== "kg")
+                const harvested = p.kg_estimated
+                    ? `${p.total_qty.toFixed(2)} ${p.unit}<div style="font-size:10px;color:var(--warn)" title="No weight set on this product — counted as the weight that sells for the same value">≈ ${Number(p.kg_equivalent).toFixed(1)} kg est.</div>`
+                    : (p.total_kg !== null && p.total_kg !== undefined && p.unit !== "kg")
                     ? `${p.total_qty.toFixed(2)} ${p.unit}<div style="font-size:10px;color:var(--muted)">${p.total_kg.toFixed(1)} kg</div>`
                     : `${p.total_qty.toFixed(2)} ${p.unit}`;
                 return `<tr>
