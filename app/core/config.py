@@ -91,6 +91,13 @@ class BaseAppSettings(BaseSettings):
     MIGRATION_CHECK_ON_STARTUP: bool = True
     MIGRATION_CHECK_STRICT: bool = False
 
+    # "Ask" assistant — an OpenAI-format chat completions endpoint. Set these
+    # as environment variables (e.g. Railway Variables), never in code.
+    ASSISTANT_API_KEY: str | None = None
+    ASSISTANT_BASE_URL: str = "https://codecraftapi.com/v1"
+    ASSISTANT_MODEL: str | None = None
+    ASSISTANT_DAILY_LIMIT: int = 20
+
     model_config = CONFIG_MODEL
 
     @model_validator(mode="before")

@@ -24,6 +24,15 @@ PERMISSION_MATRIX = [
         ],
     },
     {
+        "module": "assistant",
+        "resource": "assistant",
+        "label": "Ask (assistant)",
+        "icon": "reports",
+        "actions": [
+            {"action": "view", "key": "page_assistant", "label": "Ask questions about the business data"},
+        ],
+    },
+    {
         "module": "reports",
         "resource": "reports",
         "label": "Reports",
@@ -313,6 +322,7 @@ ROLE_DEFINITIONS = {
         "description": "Operations leadership role with broad day-to-day control. Covers dashboard, reports, POS including refunds, B2B workflows, inventory adjustments, products, imports, production, farm intake, customers, and suppliers. Does not include accounting journals, HR/payroll, or user administration by default.",
         "permissions": {
             "page_dashboard",
+            "page_assistant",
             "page_reports",
             "tab_reports_sales",
             "tab_reports_inventory",

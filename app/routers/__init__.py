@@ -1,6 +1,7 @@
 import logging
 
 from app.routers import (
+    assistant,
     accounting,
     animals,
     audit_log,
@@ -68,6 +69,7 @@ _base_routers = (
     refunds.router,
     expenses_refactored.router,
     audit_log.router,
+    assistant.router,
 )
 
 if _farm_dashboard_router is not None:

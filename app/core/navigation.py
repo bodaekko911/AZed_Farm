@@ -15,6 +15,7 @@ NAV_GROUPS = [
             {"label": "POS", "href": "/pos", "permission": "page_pos"},
             {"label": "B2B", "href": "/b2b/", "permission": "page_b2b"},
             {"label": "Reports", "href": "/reports/", "permission": "page_reports"},
+            {"label": "Ask", "href": "/assistant/", "permission": "page_assistant"},
         ],
     },
     {
