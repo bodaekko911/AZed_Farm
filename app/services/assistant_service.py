@@ -75,6 +75,9 @@ Thinking it through:
 - Do the arithmetic yourself from the returned figures (totals, differences, shares, averages per day) and double-check it.
 - Ask the tools for exactly what you need; you can call several tools in one round. Don't repeat a lookup you already have.
 - If a result is empty, say there was nothing recorded for that period rather than guessing why.
+- Days worked / attendance: look up payroll with `employee`. Report attendance_now (present days) and, when the payroll
+  row's days_worked differs, say so and why (payroll run on <date>, before attendance was complete). If auto_mode is
+  "absent" or most days are Day Offs, point that out — it usually means the employee was left marked absent.
 
 Formatting (the answer is shown as Markdown):
 - Short answers: one or two sentences, key numbers in **bold**.
@@ -241,15 +244,80 @@ async def _b2b_balances(db, args):
 
 
 async def _payroll(db, args):
+    """Payroll for a month, next to the attendance recorded for it NOW.
+
+    A payroll row's days_worked is a snapshot: the Present days counted when payroll was run (unlogged days are
+    written as Day Off at that moment). A run early in the month, or an employee left on the "absent" auto mode,
+    gives a small number that is still "correct" for the row — so the model sees both and can say which it is.
+    """
+    from calendar import monthrange
+    from app.models.hr import Attendance, Employee, Payroll
     from app.routers.hr import get_payroll
     period = str(args.get("period") or today_local().strftime("%Y-%m"))[:7]
-    rows = await get_payroll(period=period, db=db)
+    try:
+        year, month = int(period[:4]), int(period[5:7])
+        start = date(year, month, 1)
+    except ValueError:
+        raise ValueError("period must be YYYY-MM")
+    end = date(year, month, monthrange(year, month)[1])
+    elapsed_end = min(end, today_local())
+    words = [w for w in str(args.get("employee") or "").lower().split() if w]
+    named = lambda name: all(w in (name or "").lower() for w in words)
+
+    rows = [r for r in await get_payroll(period=period, db=db) if named(r["employee"])]
+    employees = (await db.execute(select(Employee))).scalars().all()
+    by_id = {e.id: e for e in employees}
+    ids = {r["employee_id"] for r in rows}
+    if words:   # someone asked about by name still counts when payroll hasn't been run for them
+        ids |= {e.id for e in employees if named(e.name)}
+    run_on = dict((await db.execute(
+        select(Payroll.employee_id, Payroll.created_at).where(Payroll.period == period)
+    )).all())
+
+    attendance: dict = defaultdict(lambda: {"present": 0, "day_off": 0, "day_off_dates": [], "logged": set()})
+    for eid, day, status in (await db.execute(
+        select(Attendance.employee_id, Attendance.date, Attendance.status)
+        .where(Attendance.date >= start, Attendance.date <= end, Attendance.employee_id.in_(ids or {-1}))
+        .order_by(Attendance.date)
+    )).all():
+        a = attendance[eid]
+        a["logged"].add(day)
+        if status == "present":
+            a["present"] += 1
+        else:
+            a["day_off"] += 1
+            a["day_off_dates"].append(day.isoformat())
+
+    def attendance_now(eid: int) -> dict:
+        a, emp = attendance[eid], by_id.get(eid)
+        first = max(start, emp.hire_date) if emp and emp.hire_date else start
+        expected = max(0, (elapsed_end - first).days + 1)
+        out = {"present": a["present"], "day_off": a["day_off"],
+               "not_logged_yet": max(0, expected - len([d for d in a["logged"] if first <= d <= elapsed_end])),
+               "auto_mode": getattr(emp, "attendance_auto_status", None) or "present"}
+        if words:
+            out["day_off_dates"] = a["day_off_dates"][:31]
+        return out
+
+    keep = ("employee", "farm_name", "base_salary", "days_worked", "working_days", "bonuses", "allowance",
+            "deductions", "net_salary", "paid")
+    listed = []
+    for r in rows:
+        row = {k: r.get(k) for k in keep}
+        stamp = run_on.get(r["employee_id"])
+        row["payroll_run_on"] = stamp.date().isoformat() if hasattr(stamp, "date") else (str(stamp)[:10] if stamp else None)
+        row["attendance_now"] = attendance_now(r["employee_id"])
+        listed.append(row)
+    for eid in sorted(ids - {r["employee_id"] for r in rows}):
+        listed.append({"employee": by_id[eid].name, "payroll": "not run for this month",
+                       "attendance_now": attendance_now(eid)})
     return {
         "period": period,
         "total_net": round(sum(r["net_salary"] for r in rows), 2),
-        "employees": [{k: r.get(k) for k in ("employee", "farm_name", "base_salary", "days_worked", "working_days",
-                                             "bonuses", "allowance", "deductions", "net_salary", "paid")}
-                      for r in rows][:40],
+        "employees": listed[:40],
+        "note": "days_worked = Present days counted when payroll was run; attendance_now = what attendance shows "
+                "today. If they differ, payroll was run before attendance was complete. auto_mode 'absent' means "
+                "every new day is logged as a Day Off until someone marks the employee present.",
     }
 
 
@@ -440,8 +508,11 @@ TOOLS: dict[str, tuple[str, dict, tuple[str, ...], ToolFn]] = {
         "B2B clients who owe money now, largest balance first, with credit limits and payment terms.",
         {}, ("page_b2b",), _b2b_balances),
     "payroll": (
-        "Payroll for a month (YYYY-MM): each employee's salary, days, allowances, deductions, net and paid status.",
-        {"period": {"type": "string", "description": "Month as YYYY-MM"}},
+        "Payroll and attendance for a month (YYYY-MM): each employee's salary, days worked, allowances, deductions, "
+        "net and paid status, plus the attendance recorded now (present / day off / not logged, auto mode). Use for "
+        "'how many days did X work'. `employee` narrows to one person (any part of the name) and lists their day-off dates.",
+        {"period": {"type": "string", "description": "Month as YYYY-MM"},
+         "employee": {"type": "string", "description": "Optional employee name"}},
         ("page_hr", "tab_hr_payroll"), _payroll),
     "farm_harvest": (
         "Farm deliveries (harvest) for a period, by farm and product, with quantities.",

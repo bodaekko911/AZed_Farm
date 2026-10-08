@@ -325,3 +325,33 @@ def test_no_period_named_means_all_time_from_the_first_record():
         (date(2023, 1, 1), date(2025, 12, 31))
     out = json.loads(run(assistant_service.run_tool(db, user(), "expenses", "{}")))
     assert out["period"] == f"2024-03-05 to {today}" and out["total"] == 10.0
+
+
+def test_payroll_shows_attendance_now_next_to_the_payroll_snapshot():
+    """Taha: payroll was run on the 3rd (3 days worked) and he was then left on the 'absent' auto mode."""
+    from datetime import date
+    from app.models.hr import Attendance, Employee, Payroll
+    session, db = make_db()
+    session.add_all([Employee(id=1, name="Taha Mahmoud", base_salary=Decimal("6000"), attendance_auto_status="absent"),
+                     Employee(id=2, name="Other Person", base_salary=Decimal("5000"))])
+    session.add(Payroll(employee_id=1, period="2026-09", base_salary=Decimal("600"), days_worked=3, working_days=30,
+                        net_salary=Decimal("600"), paid=False, created_at=datetime(2026, 9, 3, 12, tzinfo=timezone.utc)))
+    for day in range(1, 31):
+        session.add(Attendance(employee_id=1, date=date(2026, 9, day), status="present" if day <= 3 else "absent"))
+    session.commit()
+
+    out = json.loads(run(assistant_service.run_tool(db, user(), "payroll",
+                                                    json.dumps({"period": "2026-09", "employee": "taha"}))))
+    [taha] = out["employees"]
+    assert taha["employee"] == "Taha Mahmoud" and taha["days_worked"] == 3
+    assert taha["payroll_run_on"] == "2026-09-03"
+    now = taha["attendance_now"]
+    assert (now["present"], now["day_off"], now["not_logged_yet"], now["auto_mode"]) == (3, 27, 0, "absent")
+    assert now["day_off_dates"][0] == "2026-09-04"
+
+    # Someone with no payroll row this month is still found by name.
+    other = json.loads(run(assistant_service.run_tool(db, user(), "payroll",
+                                                      json.dumps({"period": "2026-09", "employee": "other"}))))
+    assert other["employees"] == [{"employee": "Other Person", "payroll": "not run for this month",
+                                   "attendance_now": {"present": 0, "day_off": 0, "not_logged_yet": 30,
+                                                      "auto_mode": "present", "day_off_dates": []}}]
