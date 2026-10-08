@@ -125,6 +125,7 @@ async def read_invoices(request: Request, db: AsyncSession = Depends(get_async_s
     await db.commit()
     used, limit = await assistant_service.limit_state(db, user)
     return {"filename": filename, "invoices": await assistant_actions.match_invoices(db, invoices),
+            "can_create_customers": has_permission(user, "action_customers_create"),
             "questions_left": max(limit - used, 0) if limit else None, "daily_limit": limit or None}
 
 
@@ -315,6 +316,12 @@ button.send:disabled{opacity:.5;cursor:default}
 .inv-ok{color:var(--green)}.inv-bad{color:var(--danger)}
 .inv-hint{color:var(--warn);font-size:11.5px;margin-top:3px}.inv-hint:empty{display:none}
 .inv-conv{color:var(--blue);font-size:11.5px;margin-top:3px}.inv-conv:empty{display:none}
+.inv-new{margin:-2px 0 10px 80px;padding:8px 10px;border:1px dashed var(--border2);border-radius:8px}
+.inv-new[hidden]{display:none}
+.inv-new-fields{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+.inv-new-fields label{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--muted)}
+.inv-new-fields input{min-width:150px}
+@media (max-width:640px){.inv-new{margin-left:0}}
 .inv-problems{margin:8px 0 0;padding-inline-start:18px;color:var(--warn);font-size:12.5px}
 .inv-problems:empty{display:none}
 .inv-card.ready{border-color:color-mix(in srgb,var(--green) 55%,transparent)}

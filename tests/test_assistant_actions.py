@@ -339,3 +339,117 @@ def test_shop_packs_are_matched_and_recorded_in_azed_units():
 ], ids=["g", "arabic-g", "kg", "comma-kg", "litre", "arabic-litre", "no-size", "count"])
 def test_pack_sizes_are_read_from_names(text, pack):
     assert act.pack_of(text) == pack
+
+
+def test_a_customer_the_invoice_names_is_found_by_phone_or_offered_as_new():
+    async def go(db):
+        found, new = await act.match_invoices(db, [
+            {"number": "1", "date": "2025-09-20", "customer": "Mona A.", "customer_phone": "+20 100",
+             "items": [], "discount": 0, "total": 0, "paid": True},
+            {"number": "2", "date": "2025-09-20", "customer": "Karim Hassan", "customer_phone": "0122 333 4444",
+             "customer_email": "k@x.test", "customer_address": "Zamalek", "items": [], "discount": 0, "total": 0,
+             "paid": True},
+        ])
+        assert found["customer_match"]["name"] == "Mona Adel" and found["new_customer"] is None
+        assert new["customer_match"] is None and not new["walk_in"]
+        assert new["new_customer"] == {"name": "Karim Hassan", "phone": "0122 333 4444", "email": "k@x.test",
+                                       "address": "Zamalek"}
+    scenario(go)
+
+
+def test_a_new_customer_is_created_with_the_sale_and_reused_next_time():
+    async def go(db):
+        sale = {"date": "2025-09-20", "pdf_total": 150, "items": [{"product_id": 2, "qty": 1, "unit_price": 150}],
+                "new_customer": {"name": "Karim Hassan", "phone": "0122 333 4444", "email": "k@x.test",
+                                 "address": "Zamalek"}}
+        out = await act.record_invoice(db, admin(), dict(sale, number="2"))
+        karim = (await db.execute(select(Customer).where(Customer.name == "Karim Hassan"))).scalar_one()
+        assert (karim.phone, karim.email, karim.address) == ("0122 333 4444", "k@x.test", "Zamalek")
+        assert out["customer_id"] == karim.id
+        inv = (await db.execute(select(Invoice))).scalar_one()
+        assert inv.customer_id == karim.id
+
+        # Same phone written differently on the next invoice → the same customer, no duplicate.
+        again = dict(sale, number="3", new_customer={"name": "K. Hassan", "phone": "+201223334444"})
+        out2 = await act.record_invoice(db, admin(), again)
+        assert out2["customer_id"] == karim.id
+        assert len((await db.execute(select(Customer).where(Customer.phone.is_not(None)))).scalars().all()) == 2
+    scenario(go)
+
+
+def test_no_customer_is_left_behind_when_the_sale_fails_or_isnt_allowed():
+    async def go(db):
+        failing = {"number": "9", "date": "2025-09-20", "pdf_total": 15000, "new_customer": {"name": "Ghost Buyer"},
+                   "items": [{"product_id": 2, "qty": 100, "unit_price": 150}]}           # only 10 honey in stock
+        with pytest.raises(HTTPException):
+            await act.record_invoice(db, admin(), failing)
+        assert (await db.execute(select(Customer).where(Customer.name == "Ghost Buyer"))).scalar_one_or_none() is None
+
+        cashier_sale = {"number": "10", "date": "2025-09-20", "pdf_total": 150, "new_customer": {"name": "New One"},
+                        "items": [{"product_id": 2, "qty": 1, "unit_price": 150}]}
+        with pytest.raises(HTTPException) as perm:                                         # cashiers can't add customers
+            await act.record_invoice(db, cashier(), cashier_sale)
+        assert perm.value.status_code == 403
+        assert (await db.execute(select(Invoice))).scalars().all() == []
+    scenario(go)
+
+
+def test_phone_numbers_compare_in_any_format():
+    assert act.phone_key("01001234567") == act.phone_key("+20 100 123 4567") == act.phone_key("00201001234567")
+    assert act.phone_key("٠١٠٠١٢٣٤٥٦٧") == act.phone_key("01001234567")
+    assert act.phone_key("123") == ""
+
+
+async def add_delivery_items(db):
+    db.add_all([Product(id=10, sku="DEL-SH", name="Sharm Delivery", unit="trip", price=Decimal("50"), stock=0,
+                        item_type="service", is_active=True),
+                Product(id=11, sku="DEL-DH", name="Dahab Delivery", unit="trip", price=Decimal("120"), stock=0,
+                        item_type="service", is_active=True),
+                Product(id=12, sku="DHB", name="Dahab Honey 250g", unit="piece", price=Decimal("90"), stock=5,
+                        is_active=True)])
+    await db.commit()
+
+
+def invoice(**extra):
+    base = {"number": "S-1", "date": "2025-09-20", "customer": None, "discount": 0, "paid": True,
+            "items": [{"description": "Raw honey 500g", "sku": None, "qty": 1, "unit_price": 150, "line_total": 150}]}
+    return dict(base, **extra)
+
+
+def test_shipping_to_sharm_or_dahab_picks_that_delivery_item():
+    async def go(db):
+        await add_delivery_items(db)
+        sharm, dahab, arabic, unknown, as_item = await act.match_invoices(db, [
+            invoice(shipping=50, shipping_label="Shipping", customer_address="Hadaba, Sharm El Sheikh", total=200),
+            invoice(shipping=120, delivery_area="Dahab", total=270),
+            invoice(shipping=50, customer_address="شرم الشيخ - نبق", total=200),
+            invoice(shipping=40, customer_address="Somewhere else", total=190),
+            invoice(items=[{"description": "Dahab honey", "qty": 1, "unit_price": 90, "line_total": 90},
+                           {"description": "توصيل دهب", "qty": 1, "unit_price": 120, "line_total": 120}],
+                    shipping=120, total=210),
+        ])
+        last = lambda inv: inv["lines"][-1]
+        assert last(sharm)["product"]["sku"] == "DEL-SH" and last(sharm)["match"] == "delivery"
+        assert (last(sharm)["qty"], last(sharm)["unit_price"]) == (1, 50)
+        assert last(dahab)["product"]["sku"] == "DEL-DH"
+        assert last(arabic)["product"]["sku"] == "DEL-SH"                   # شرم → Sharm
+        assert last(unknown)["product"] is None and last(unknown)["delivery"]
+        assert {c["sku"] for c in last(unknown)["candidates"]} == {"DEL-SH", "DEL-DH"}   # pick from delivery items
+        # Shipping printed as an item line: one delivery line, not two; honey stays honey.
+        assert len(as_item["lines"]) == 2
+        assert as_item["lines"][0]["product"]["sku"] == "DHB" and as_item["lines"][1]["product"]["sku"] == "DEL-DH"
+    scenario(go)
+
+
+def test_an_invoice_with_sharm_delivery_records_the_delivery_item():
+    async def go(db):
+        await add_delivery_items(db)
+        out = await act.record_invoice(db, admin(), {"number": "S-9", "date": "2025-09-20", "pdf_total": 200,
+                                                     "customer_id": 2, "items": [
+                                                         {"product_id": 2, "qty": 1, "unit_price": 150},
+                                                         {"product_id": 10, "qty": 1, "unit_price": 50}]})
+        assert out["total"] == 200.0
+        from app.models.invoice import InvoiceItem
+        names = [i.name for i in (await db.execute(select(InvoiceItem))).scalars().all()]
+        assert names == ["Raw Honey 500g", "Sharm Delivery"]
+    scenario(go)

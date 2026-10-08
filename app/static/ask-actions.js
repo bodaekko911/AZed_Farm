@@ -119,7 +119,7 @@
   }
 
   // ── Picker: a select of likely matches, plus search ──
-  function picker(kind, current, candidates, allowWalkIn, onChange) {
+  function picker(kind, current, candidates, allowWalkIn, onChange, extra) {
     const wrap = h("div", { class: "inv-picker" });
     const select = h("select", { class: "inv-select" });
     const known = new Map();
@@ -134,10 +134,11 @@
     };
     if (allowWalkIn) select.append(h("option", { value: "", text: "Walk-in (no named customer)" }));
     else select.append(h("option", { value: "", text: "— pick a product —" }));
+    if (extra) select.append(h("option", { value: "__new", text: extra.label, disabled: extra.disabled }));
     select.append(h("option", { value: "__search", text: "🔍 Search…" }));
     if (current) add(current, true);
     (candidates || []).forEach(c => add(c, false));
-    if (!current) select.value = "";
+    if (!current) select.value = extra && extra.selected ? "__new" : "";
     const search = h("input", { class: "inv-search", type: "search", placeholder: kind === "customers" ? "Name or phone…" : "Product name or SKU…", hidden: true });
     const results = h("div", { class: "inv-results", hidden: true });
     let last = select.value, timer = null;
@@ -145,7 +146,7 @@
       if (select.value === "__search") {
         select.value = last; search.hidden = false; results.hidden = false; search.focus(); return;
       }
-      last = select.value; onChange(known.get(select.value) || null);
+      last = select.value; onChange(select.value === "__new" ? "__new" : (known.get(select.value) || null));
     };
     search.oninput = () => {
       clearTimeout(timer);
@@ -169,15 +170,18 @@
   }
 
   // ── One invoice to review ──
-  function invoiceCard(inv, filename, toast) {
+  function invoiceCard(inv, filename, toast, canCreateCustomers) {
     const state = {
       customer: inv.customer_match || null,
+      newCustomer: inv.new_customer ? Object.assign({}, inv.new_customer) : null,
+      useNew: !!(inv.new_customer && !inv.customer_match && canCreateCustomers),
       date: inv.date || "",
       paid: inv.paid !== false,
       discount: Number(inv.discount) || 0,
       pdfTotal: inv.total,
       lines: inv.lines.map(l => {
         const line = { description: l.description, product: l.product, candidates: l.candidates, match: l.match,
+                       delivery: !!l.delivery,
                        pdfQty: l.qty ?? "", pdfPrice: l.unit_price ?? "", pdfPack: l.pack, pdfLine: l.line_total };
         return Object.assign(line, inProductUnits(line));
       }),
@@ -200,7 +204,7 @@
         if (l.price === "" || !(p >= 0)) issues.push(`Line ${n}: price is missing.`);
         subtotal += (q || 0) * (p || 0);
         if (l.product) {
-          if (state.customer && Math.abs(p - l.product.price) > 0.0001)
+          if ((state.customer || state.useNew) && Math.abs(p - l.product.price) > 0.0001)
             issues.push(`Line ${n}: ${l.product.name} is ${money(l.product.price)} in the catalogue — the POS doesn't allow other prices for a named customer. Use the catalogue price or record it as Walk-in.`);
           if (l.product.tracked) qtyByProduct.set(l.product.id, { p: l.product, q: (qtyByProduct.get(l.product.id)?.q || 0) + (q || 0) });
         }
@@ -220,6 +224,7 @@
         totalBox.append(h("span", { class: "inv-bad", text: `❌ ${money(total)} vs PDF ${money(pdfTotal)}` }));
       }
       if (!state.date) issues.push("Set the invoice date.");
+      if (state.useNew && !(state.newCustomer.name || "").trim()) issues.push("Give the new customer a name.");
       if (inv.duplicate && !state.force) issues.push(inv.duplicate + ".");
       problems.replaceChildren(...issues.map(t => h("li", { text: t })));
       recordBtn.disabled = state.recorded || issues.length > 0;
@@ -235,9 +240,25 @@
     const head = h("div", { class: "inv-head" },
       h("div", { class: "inv-title", text: `PDF invoice ${inv.number || "(no number)"}` }),
       h("label", null, "Date ", dateInput), h("label", null, paidSelect));
+    // A customer the invoice names but Azed doesn't have: created with these details when recorded.
+    const newBox = h("div", { class: "inv-new", hidden: !state.useNew });
+    if (state.newCustomer) {
+      const field = (key, label, type) => h("label", null, label, h("input", {
+        type: type || "text", value: state.newCustomer[key] || "", maxlength: key === "address" ? 300 : 150,
+        oninput: e => { state.newCustomer[key] = e.target.value; check(); } }));
+      newBox.append(h("div", { class: "inv-muted", text: "Not in Azed yet — it will be added with these details when you record:" }),
+        h("div", { class: "inv-new-fields" }, field("name", "Name"), field("phone", "Phone", "tel"),
+          field("email", "Email", "email"), field("address", "Address")));
+    }
+    const customerExtra = state.newCustomer ? {
+      label: canCreateCustomers ? `➕ New customer: ${state.newCustomer.name}` : `➕ New customer: ${state.newCustomer.name} (you can't add customers)`,
+      disabled: !canCreateCustomers, selected: state.useNew } : null;
     const customerRow = h("div", { class: "inv-row" }, h("span", { class: "inv-label", text: "Customer" }),
       inv.customer ? h("span", { class: "inv-muted", text: `on PDF: ${inv.customer}` }) : null,
-      picker("customers", state.customer, inv.customer_candidates, true, c => { state.customer = c; check(); }));
+      picker("customers", state.customer, inv.customer_candidates, true, c => {
+        state.useNew = c === "__new"; state.customer = state.useNew ? null : c;
+        newBox.hidden = !state.useNew; check();
+      }, customerExtra));
 
     // lines
     const tbody = h("tbody");
@@ -246,8 +267,9 @@
       const paint = () => { lineTotal.textContent = money((Number(l.qty) || 0) * (Number(l.price) || 0)); };
       const qty = h("input", { type: "number", step: "any", min: "0", value: l.qty, oninput: e => { l.qty = e.target.value; paint(); check(); } });
       const price = h("input", { type: "number", step: "any", min: "0", value: l.price, oninput: e => { l.price = e.target.value; paint(); check(); } });
-      const hint = h("div", { class: "inv-hint", text: l.match === "closest" && l.product ? "Closest match by name — check it" : "" });
-      const conv = h("div", { class: "inv-conv", text: l.note });
+      const hint = h("div", { class: "inv-hint", text: l.match === "closest" && l.product ? "Closest match by name — check it"
+                                                      : l.delivery && !l.product ? "Shipping — pick the delivery area" : "" });
+      const conv = h("div", { class: "inv-conv", text: l.note || (l.match === "delivery" && l.product ? "Delivery item chosen from the address" : "") });
       const pick = picker("products", l.product, l.candidates, false, p => {
         l.product = p;
         hint.textContent = "";
@@ -276,6 +298,7 @@
       try {
         const out = await post("/assistant/api/invoices/record", {
           number: inv.number, date: state.date, customer_id: state.customer ? state.customer.id : null,
+          new_customer: state.useNew ? state.newCustomer : null,
           paid: state.paid, discount: state.discount, pdf_total: state.pdfTotal, filename, force: state.force,
           items: state.lines.map(l => ({ product_id: l.product ? l.product.id : null, qty: Number(l.qty), unit_price: Number(l.price) })),
         });
@@ -288,7 +311,7 @@
       }
     };
 
-    card.append(head, customerRow, table, foot, problems, buttons, result);
+    card.append(head, customerRow, newBox, table, foot, problems, buttons, result);
     card._record = () => recordBtn.disabled ? null : recordBtn.onclick();
     check();
     return card;
@@ -309,7 +332,7 @@
       opts.onLimit && opts.onLimit(data.questions_left, data.daily_limit);
       if (!data.invoices.length) { status.textContent = "No invoices were found in that PDF."; return; }
       status.textContent = `Found ${data.invoices.length} invoice${data.invoices.length > 1 ? "s" : ""}. Check each one — only invoices whose total matches the PDF can be recorded.`;
-      const cardsEls = data.invoices.map(inv => invoiceCard(inv, data.filename, toast));
+      const cardsEls = data.invoices.map(inv => invoiceCard(inv, data.filename, toast, !!data.can_create_customers));
       bubble.append(...cardsEls);
       if (cardsEls.length > 1) {
         bubble.append(h("div", { class: "act-buttons" }, h("button", {
