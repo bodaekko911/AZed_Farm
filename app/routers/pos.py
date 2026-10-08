@@ -21,6 +21,7 @@ from app.schemas.invoice import InvoiceCollectionRequest, InvoiceCreate
 from app.services.barcode_service import find_product_by_barcode, normalize_barcode_value
 from app.services.location_inventory_service import sync_product_stock_to_default_location
 from app.services.pos_service import create_invoice, post_journal
+from app.services.sale_cost import cost_snapshot
 
 
 def _fmt_unit_price(value: float) -> str:
@@ -329,6 +330,7 @@ async def _replace_unpaid_invoice_lines(
             qty=qty,
             unit_price=unit_price,
             total=line_total,
+            unit_cost=cost_snapshot(product),
         ))
         if is_stock_tracked_product(product):
             before = float(product.stock or 0)

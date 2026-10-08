@@ -30,6 +30,7 @@ from app.services.b2b_shared import (
     client_refund_subquery,
 )
 from app.schemas.invoice import B2BPaymentRequest, ConsignmentSaleItemIn
+from app.services.sale_cost import cost_snapshot
 from decimal import Decimal
 
 router = APIRouter(
@@ -908,6 +909,11 @@ async def _record_consignment_client_payment(
         )
         db.add(sale)
         await db.flush()
+        line_products = {
+            p.id: p for p in (await db.execute(
+                select(Product).where(Product.id.in_([l["product_id"] for l in sale_lines]))
+            )).scalars().all()
+        }
         for l in sale_lines:
             db.add(ConsignmentSaleItem(
                 sale_id=sale.id,
@@ -915,6 +921,7 @@ async def _record_consignment_client_payment(
                 qty=Decimal(str(l["qty"])),
                 unit_price=Decimal(str(l["unit_price"])),
                 total=Decimal(str(l["total"])),
+                unit_cost=cost_snapshot(line_products.get(l["product_id"])),
             ))
         sale_id = sale.id
 

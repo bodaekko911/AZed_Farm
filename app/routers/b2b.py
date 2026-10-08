@@ -24,6 +24,7 @@ from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.accounting import Journal, JournalEntry
 from app.models.user import User
+from app.services.sale_cost import cost_snapshot
 
 router = APIRouter(
     prefix="/b2b",
@@ -525,6 +526,7 @@ async def create_invoice(data: InvoiceCreate, db: AsyncSession = Depends(get_asy
             invoice_id=invoice.id, product_id=product.id,
             qty=item.qty, unit_price=item.unit_price,
             total=round(item.qty * item.unit_price, 2),
+            unit_cost=cost_snapshot(product),
         ))
         if is_stock_tracked_product(product):
             before = float(product.stock); after = before - item.qty
@@ -657,6 +659,7 @@ async def edit_invoice(invoice_id: int, data: InvoiceCreate, db: AsyncSession = 
             invoice_id=invoice.id, product_id=product.id,
             qty=item.qty, unit_price=item.unit_price,
             total=round(item.qty * item.unit_price, 2),
+            unit_cost=cost_snapshot(product),
         ))
         if is_stock_tracked_product(product):
             before = float(product.stock); after = before - item.qty
@@ -1107,6 +1110,7 @@ async def create_client_refund_core(db: AsyncSession, current_user: User, data: 
             qty=item.qty,
             unit_price=item.unit_price,
             total=line_total,
+            unit_cost=cost_snapshot(product),
         ))
         if is_stock_tracked_product(product):
             before = float(product.stock)

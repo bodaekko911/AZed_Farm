@@ -34,6 +34,8 @@ class RetailRefundItem(Base):
     qty        = Column(Numeric(12, 3), nullable=False)
     unit_price = Column(Numeric(12, 3), nullable=False)
     total      = Column(Numeric(12, 2), nullable=False)
+    # Product cost when this line was recorded — keeps past margins fixed when costs change later.
+    unit_cost  = Column(Numeric(12, 3), nullable=True)
 
     refund  = relationship("RetailRefund", back_populates="items")
     product = relationship("Product")

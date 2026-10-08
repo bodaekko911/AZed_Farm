@@ -481,6 +481,7 @@ async def _load_b2b_client_payment_records(
                     "qty": _num(it.qty),
                     "unit_price": _num(it.unit_price),
                     "total": _num(it.total),
+                    "unit_cost": _num(it.unit_cost) if getattr(it, "unit_cost", None) is not None else None,
                 }
                 for it in sale.items
             )
@@ -2422,7 +2423,7 @@ async def _build_profitability_report(db, *, d_from, d_to):
             continue
         ratio = _scaled(lines_total, _num(inv.total))
         for item in inv.items:
-            ledger.add_sale(item.product_id, item.product, item.qty, _num(item.total) * ratio, "pos")
+            ledger.add_sale(item.product_id, item.product, item.qty, _num(item.total) * ratio, "pos", item.unit_cost)
 
     payments = await _load_b2b_client_payment_records(db, d_from=d_from, d_to=d_to)
     invoice_ids = {p["invoice_id"] for p in payments if p.get("invoice_id") is not None and not p.get("sale_items")}
@@ -2445,7 +2446,7 @@ async def _build_profitability_report(db, *, d_from, d_to):
             for line in sale_items:
                 product = line.get("product")
                 ledger.add_sale(getattr(product, "id", None), product, line.get("qty"),
-                                _num(line.get("total")) * ratio, "b2b")
+                                _num(line.get("total")) * ratio, "b2b", line.get("unit_cost"))
             continue
         invoice = b2b_invoices.get(payment.get("invoice_id"))
         lines_total = sum(_num(i.total) for i in invoice.items) if invoice else 0.0
@@ -2457,7 +2458,7 @@ async def _build_profitability_report(db, *, d_from, d_to):
         money_ratio = _scaled(lines_total, amount)
         for item in invoice.items:
             ledger.add_sale(item.product_id, item.product, _num(item.qty) * qty_ratio,
-                            _num(item.total) * money_ratio, "b2b")
+                            _num(item.total) * money_ratio, "b2b", item.unit_cost)
 
     for model, item_model in ((RetailRefund, RetailRefundItem), (B2BRefund, B2BRefundItem)):
         ref_res = await db.execute(
@@ -2472,7 +2473,7 @@ async def _build_profitability_report(db, *, d_from, d_to):
                 continue
             ratio = _scaled(lines_total, _num(refund.total))
             for item in refund.items:
-                ledger.add_refund(item.product_id, item.product, item.qty, _num(item.total) * ratio)
+                ledger.add_refund(item.product_id, item.product, item.qty, _num(item.total) * ratio, item.unit_cost)
 
     # ── Losses ──
     spl_res = await db.execute(
@@ -7124,6 +7125,8 @@ async function loadProfitability(){
         warn.push(`No cost set on ${data.products_missing_cost.join(", ")} — their profit is overstated until a cost is entered.`);
     if(data.products_stale_cost.length)
         warn.push(`The product card cost is more than 10% off what batches say it costs to make for ${data.products_stale_cost.join(", ")} — spoilage and stock value use the card cost, so they are off too.`);
+    if(t.cogs_saved_pct !== null && t.cogs_saved_pct < 99.5)
+        warn.push(`${t.cogs_saved_pct}% of the cost of sales uses the cost saved when each item was sold; the rest is older sales, costed at today's cost.`);
     if(Math.abs(t.unattributed_revenue) >= 0.01)
         warn.push(`${m(t.unattributed_revenue)} EGP of sales could not be traced to products (collections without invoice lines). Net sales including it: ${m(t.net_sales)}.`);
     document.getElementById("prof-warnings").innerHTML = warn
@@ -7148,7 +7151,10 @@ async function loadProfitability(){
     // No cost means no cost of sales, so its margin would read as 100% — show
     // the money but not a margin it has not earned.
     const noCost = p => p.cost_source === "missing";
-    const sourceTag = s => s === "batch"
+    const sourceTag = s => s === "sale"
+        ? `<span class="badge badge-ok" title="Cost saved on each sale line when it was sold">at sale</span>`
+        : s === "mixed" ? `<span class="badge" style="background:rgba(77,159,255,.1);color:var(--blue)" title="Newer sales at the cost saved when sold, older ones at today's cost">mixed</span>`
+        : s === "batch"
         ? `<span class="badge badge-ok" title="Material cost from production / drying batches in this period">batch</span>`
         : s === "missing" ? `<span class="badge badge-low" title="No cost on the product card">not set</span>` : "";
     document.getElementById("prof-body").innerHTML = data.products.length
@@ -7178,9 +7184,11 @@ async function loadProfitability(){
 }
 
 function profBatchDetail(p, m){
-    const used = p.cost_source === "batch";
-    const head = used
-        ? `Unit cost ${m(p.unit_cost)} per ${p.unit||"unit"} = total allocated cost ÷ total output of these batches.`
+    const used = p.today_cost_source === "batch";
+    const head = p.cost_source === "sale"
+        ? `Every sale here used the cost saved when it was sold; these batches are shown for reference.`
+        : used
+        ? `Today's cost ${m(p.today_cost)} per ${p.unit||"unit"} = total allocated cost ÷ total output of these batches${p.cost_source==="mixed"?" (used for older sales without a saved cost)":""}.`
         : `Not used — at least one batch has inputs with no cost, so the product card cost (${m(p.card_cost)}) is used instead.`;
     return `<div style="font-size:12px;color:var(--muted);margin-bottom:8px">${head} Check input quantities and units — one mistyped line moves the whole product.</div>`
         + p.batches.map(b=>`<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px">

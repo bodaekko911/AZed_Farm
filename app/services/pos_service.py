@@ -16,6 +16,7 @@ from app.services.location_inventory_service import sync_product_stock_to_defaul
 from app.core.log import record
 from app.core.permissions import has_permission
 from app.core.product_types import is_stock_tracked_product
+from app.services.sale_cost import cost_snapshot
 
 
 async def post_journal(
@@ -164,6 +165,7 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int, us
                 qty=qty,
                 unit_price=sell_price,
                 total=round(line_total, 2),
+                unit_cost=cost_snapshot(product),
             ))
             if is_stock_tracked_product(product):
                 before = float(product.stock)

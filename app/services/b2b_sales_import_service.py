@@ -44,6 +44,7 @@ from app.models.inventory import StockMove
 from app.models.product import Product
 from app.services.b2b_shared import post_journal, seed_deferred_revenue
 from app.services.barcode_service import normalize_barcode_value
+from app.services.sale_cost import cost_snapshot
 
 VALID_MODES = frozenset({"history_only", "with_stock_adjustment"})
 _SKU_MAX = 80
@@ -732,6 +733,7 @@ async def import_b2b_sales(
                     qty=qty,
                     unit_price=unit_price,
                     total=line_total,
+                    unit_cost=cost_snapshot(product),
                 ))
 
                 if mode == "with_stock_adjustment" and is_stock_tracked_product(product):

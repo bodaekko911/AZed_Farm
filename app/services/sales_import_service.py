@@ -43,6 +43,7 @@ from app.core.product_types import is_stock_tracked_product
 from app.services.barcode_service import normalize_barcode_value
 from app.services.location_inventory_service import sync_product_stock_to_default_location
 from app.services.pos_service import get_walk_in_customer_id, post_journal
+from app.services.sale_cost import cost_snapshot
 
 VALID_MODES = frozenset({"history_only", "with_journals", "with_stock_and_journals"})
 _SKU_MAX  = 80
@@ -471,6 +472,7 @@ async def import_sales(
                     qty=qty,
                     unit_price=unit_price,
                     total=round(line_total, 2),
+                    unit_cost=cost_snapshot(product),
                 ))
 
                 if mode == "with_stock_and_journals" and is_stock_tracked_product(product):

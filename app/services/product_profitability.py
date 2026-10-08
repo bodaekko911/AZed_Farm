@@ -28,9 +28,11 @@ Unit cost, in order of preference:
     product  — the cost on the product card.
     missing  — neither; the product is reported, its cost is not invented.
 
-Sales lines do not store the cost at the time of sale, so the cost is the one
-known now, applied to the whole period. Batch cost is material only — labour,
-energy and overhead are not recorded against batches.
+Each sale line saves the product's cost at the moment it was sold, and that
+saved cost is used first — so a past month's margin stays what it was when
+costs change later. Lines recorded before costs were saved (or sold while the
+product had no cost) fall back to the cost above, today's. Batch cost is
+material only — labour, energy and overhead are not recorded against batches.
 
 Items typed as a Service (delivery, tours) have no cost of goods; they are
 reported apart from the products so they neither show as 100% margin goods
@@ -71,20 +73,28 @@ class ProfitabilityLedger:
                 "qty_sold": 0.0, "qty_refunded": 0.0,
                 "revenue_pos": 0.0, "revenue_b2b": 0.0, "refunds": 0.0,
                 "loss_qty": 0.0,
+                # Net quantity sold with a cost saved on the line, and its value.
+                "saved_qty": 0.0, "saved_value": 0.0,
                 "batch_qty": 0.0, "batch_cost": 0.0, "batch_incomplete": False,
                 "batches": [],
             }
         return row
 
-    def add_sale(self, product_id, product, qty, revenue, channel: str) -> None:
+    def add_sale(self, product_id, product, qty, revenue, channel: str, unit_cost=None) -> None:
         row = self._row(product_id, product)
         row["qty_sold"] += _num(qty)
         row["revenue_b2b" if channel == "b2b" else "revenue_pos"] += _num(revenue)
+        if unit_cost is not None and _num(unit_cost) > 0:
+            row["saved_qty"] += _num(qty)
+            row["saved_value"] += _num(qty) * _num(unit_cost)
 
-    def add_refund(self, product_id, product, qty, amount) -> None:
+    def add_refund(self, product_id, product, qty, amount, unit_cost=None) -> None:
         row = self._row(product_id, product)
         row["qty_refunded"] += _num(qty)
         row["refunds"] += _num(amount)
+        if unit_cost is not None and _num(unit_cost) > 0:
+            row["saved_qty"] -= _num(qty)
+            row["saved_value"] -= _num(qty) * _num(unit_cost)
 
     def add_loss(self, product_id, product, qty) -> None:
         self._row(product_id, product)["loss_qty"] += _num(qty)
@@ -155,10 +165,22 @@ class ProfitabilityLedger:
                     "revenue": round(revenue, 2),
                 })
                 continue
-            unit_cost, source = self._unit_cost(row)
+            today_cost, today_source = self._unit_cost(row)
             card_cost = _num(getattr(product, "cost", 0))
-            cogs = net_qty * unit_cost
-            loss_cost = row["loss_qty"] * unit_cost
+            # Cost of what was sold: the cost saved on each line where there is
+            # one, today's cost for the rest (older lines).
+            saved_qty = min(max(row["saved_qty"], 0.0), max(net_qty, 0.0))
+            saved_value = row["saved_value"] if saved_qty > 0 else 0.0
+            unsaved_qty = net_qty - saved_qty
+            cogs = saved_value + unsaved_qty * today_cost
+            unit_cost = cogs / net_qty if net_qty > 1e-9 else today_cost
+            if saved_qty > 0 and abs(unsaved_qty) < 1e-9:
+                source = "sale"
+            elif saved_qty > 0:
+                source = "mixed" if today_source != "missing" else "missing"
+            else:
+                source = today_source
+            loss_cost = row["loss_qty"] * today_cost
             gross = revenue - cogs
             profit = gross - loss_cost
             lines.append({
@@ -175,6 +197,10 @@ class ProfitabilityLedger:
                 "avg_price": round(revenue / net_qty, 3) if net_qty > 0 else None,
                 "unit_cost": round(unit_cost, 3),
                 "cost_source": source,
+                "today_cost": round(today_cost, 3),
+                "today_cost_source": today_source,
+                "qty_cost_saved": round(saved_qty, 3),
+                "cogs_saved": round(saved_value, 2),
                 "card_cost": round(card_cost, 3),
                 "cogs": round(cogs, 2),
                 "gross_profit": round(gross, 2),
@@ -203,8 +229,8 @@ class ProfitabilityLedger:
         # stock value) is off too.
         stale = sorted(
             r["name"] for r in lines
-            if r["cost_source"] == "batch" and r["card_cost"] > 0
-            and abs(r["card_cost"] - r["unit_cost"]) / r["unit_cost"] > 0.10
+            if r["today_cost_source"] == "batch" and r["card_cost"] > 0
+            and abs(r["card_cost"] - r["today_cost"]) / r["today_cost"] > 0.10
         )
 
         # A cost several times the selling price is almost always a unit
@@ -235,6 +261,9 @@ class ProfitabilityLedger:
                 "services_revenue": round(services_revenue, 2),
                 "unattributed_revenue": round(self.unattributed_revenue, 2),
                 "net_sales": round(revenue + services_revenue + self.unattributed_revenue, 2),
+                # How much of the cost of sales comes from costs saved at the
+                # time of sale; the rest is older sales at today's cost.
+                "cogs_saved_pct": round(sum(r["cogs_saved"] for r in lines) / cogs * 100, 1) if cogs > 0 else None,
             },
             "product_count": len(lines),
             "losing_count": len(losing),

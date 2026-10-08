@@ -70,6 +70,8 @@ class B2BInvoiceItem(Base):
     qty         = Column(Numeric(12,3), nullable=False)
     unit_price  = Column(Numeric(14,2), nullable=False)
     total       = Column(Numeric(14,2), nullable=False)
+    # Product cost when this line was recorded — keeps past margins fixed when costs change later.
+    unit_cost   = Column(Numeric(12, 3), nullable=True)
 
     invoice     = relationship("B2BInvoice", back_populates="items")
     product     = relationship("Product")
@@ -148,6 +150,8 @@ class ConsignmentSaleItem(Base):
     qty         = Column(Numeric(12, 3), nullable=False)
     unit_price  = Column(Numeric(14, 2), nullable=False)
     total       = Column(Numeric(14, 2), nullable=False)
+    # Product cost when this line was recorded — keeps past margins fixed when costs change later.
+    unit_cost   = Column(Numeric(12, 3), nullable=True)
 
     sale        = relationship("ConsignmentSale", back_populates="items")
     product     = relationship("Product")
@@ -219,6 +223,8 @@ class B2BRefundItem(Base):
     qty         = Column(Numeric(12,3), nullable=False)
     unit_price  = Column(Numeric(14,2), nullable=False)
     total       = Column(Numeric(14,2), nullable=False)
+    # Product cost when this line was recorded — keeps past margins fixed when costs change later.
+    unit_cost   = Column(Numeric(12, 3), nullable=True)
 
     refund      = relationship("B2BRefund", back_populates="items")
     product     = relationship("Product")

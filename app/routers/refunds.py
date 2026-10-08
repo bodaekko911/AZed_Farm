@@ -20,6 +20,7 @@ from app.models.invoice import Invoice
 from app.models.product import Product
 from app.models.refund import RetailRefund, RetailRefundItem
 from app.models.user import User
+from app.services.sale_cost import cost_snapshot
 
 router = APIRouter(
     prefix="/refunds",
@@ -262,6 +263,8 @@ async def create_refund(
             qty=qty,
             unit_price=float(invoice_item.unit_price),
             total=round(line_total, 2),
+            # Goods coming back carry the cost they went out at.
+            unit_cost=invoice_item.unit_cost if invoice_item.unit_cost is not None else cost_snapshot(product),
         ))
         if is_stock_tracked_product(product):
             before = float(product.stock)

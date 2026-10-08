@@ -37,6 +37,8 @@ class InvoiceItem(Base):
     qty        = Column(Numeric(12, 3), nullable=False)
     unit_price = Column(Numeric(12, 3), nullable=False)
     total      = Column(Numeric(12, 2), nullable=False)
+    # Product cost when this line was recorded — keeps past margins fixed when costs change later.
+    unit_cost  = Column(Numeric(12, 3), nullable=True)
 
     invoice = relationship("Invoice", back_populates="items")
     product = relationship("Product", back_populates="invoice_items")

@@ -144,6 +144,35 @@ async def ensure_delivery_transport_columns() -> None:
         logger.exception("ensure_delivery_transport_columns: failed (could not open DB session)")
 
 
+async def ensure_sale_line_cost_columns() -> None:
+    """Self-healing guard: unit_cost on sale and refund lines, the product cost
+    saved when the line was recorded. Idempotent and safe to run on every
+    startup (mirrors migration 20261008_0048)."""
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal
+
+    tables = ("invoice_items", "b2b_invoice_items", "consignment_sale_items",
+              "retail_refund_items", "b2b_refund_items")
+    statements = [f"ALTER TABLE {t} ADD COLUMN IF NOT EXISTS unit_cost NUMERIC(12,3)" for t in tables]
+    try:
+        async with AsyncSessionLocal() as db:
+            ok = 0
+            for stmt in statements:
+                try:
+                    await db.execute(text(stmt))
+                    await db.commit()
+                    ok += 1
+                except Exception:
+                    await db.rollback()
+                    logger.exception("ensure_sale_line_cost_columns: statement failed: %s", stmt)
+            if ok == len(statements):
+                logger.info("ensure_sale_line_cost_columns: sale line cost columns ready")
+            else:
+                logger.error("ensure_sale_line_cost_columns: only %d/%d statements succeeded", ok, len(statements))
+    except Exception:
+        logger.exception("ensure_sale_line_cost_columns: failed (could not open DB session)")
+
+
 async def ensure_product_categories_table() -> None:
     """Self-healing guard for standalone product categories."""
     from app.db.session import AsyncSessionLocal
@@ -596,6 +625,7 @@ async def lifespan(_: FastAPI):
     await ensure_payroll_columns()
     await ensure_price_precision()
     await ensure_delivery_transport_columns()
+    await ensure_sale_line_cost_columns()
     await ensure_product_categories_table()
     await ensure_consignment_sales_tables()
     await ensure_b2b_portal_columns()
