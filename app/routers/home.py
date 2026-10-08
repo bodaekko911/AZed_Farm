@@ -580,6 +580,18 @@ body {
             </div>
         </a>
 
+        <a href="/assistant/" class="module-card c-purple" data-permission="page_assistant">
+            <div class="card-icon">&#128172;</div>
+            <div class="card-body">
+                <div class="card-name">Ask</div>
+                <div class="card-desc">Ask about sales, profit, expenses, stock or payroll — in Arabic or English</div>
+            </div>
+            <div class="card-footer">
+                <span class="card-tag">Assistant</span>
+                <span class="card-arrow">&nearr;</span>
+            </div>
+        </a>
+
             <a href="/b2b/" class="module-card c-sky" data-permission="page_b2b">
                 <div class="card-icon">&#128188;</div>
                 <div class="card-body">
