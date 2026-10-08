@@ -356,3 +356,33 @@ def test_payroll_shows_attendance_now_next_to_the_payroll_snapshot():
                                    "attendance_now": {"present": 0, "day_off": 0, "not_logged_yet": 30,
                                                       "auto_mode": "present", "day_off_dates": []}}]
 
+
+
+def test_each_question_is_timed_and_the_admin_sees_averages():
+    session, db = make_db()
+    result = ask(db, user(), "What's running low?", [])
+    t = result["timing"]
+    assert t["seconds"] >= t["model_seconds"] >= 0 and t["lookup_seconds"] >= 0
+    log = session.query(ActivityLog).filter_by(module="Assistant", action="ask").one()
+    assert assistant_service.TIME_RE.search(log.description)
+    session.add(ActivityLog(user_id=7, user_name="Abdallah", user_role="admin", module="Assistant", action="ask",
+                            description="q | tokens 1+1 | time 9.0s model 7.0s lookups 2.0s",
+                            created_at=datetime.now(timezone.utc)))
+    session.commit()
+    usage = run(assistant_service.usage_today(db))[7]
+    assert usage["timed"] == 2 and usage["last_seconds"] == 9.0
+
+
+def test_the_first_day_of_data_is_cached_per_database():
+    from datetime import date
+    from app.models.expense import Expense, ExpenseCategory
+    session, db = make_db()
+    session.add(ExpenseCategory(id=1, name="Seeds", account_code="5001"))
+    session.add(Expense(category_id=1, expense_date=date(2024, 3, 5), amount=Decimal("10")))
+    session.commit()
+    assert run(assistant_service.first_day(db)) == date(2024, 3, 5)
+    session.add(Expense(category_id=1, expense_date=date(2023, 1, 1), amount=Decimal("10")))
+    session.commit()
+    assert run(assistant_service.first_day(db)) == date(2024, 3, 5)          # cached
+    assistant_service._FIRST_DAY_CACHE.clear()
+    assert run(assistant_service.first_day(db)) == date(2023, 1, 1)

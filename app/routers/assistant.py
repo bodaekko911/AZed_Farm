@@ -3,6 +3,7 @@
 from typing import Optional
 
 import json
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -118,13 +119,20 @@ async def read_invoices(request: Request, db: AsyncSession = Depends(get_async_s
     if any(not isinstance(p, str) or len(p) > assistant_actions.MAX_PAGE_CHARS or not assistant_actions.IMAGE_RE.match(p)
            for p in pages):
         raise HTTPException(status_code=400, detail="Each page must be an image.")
+    started = time.perf_counter()
     invoices, usage = await assistant_actions.read_invoices(pages)
+    model_s = time.perf_counter() - started
     del pages, body
+    matched = await assistant_actions.match_invoices(db, invoices)
+    total_s = time.perf_counter() - started
     record(db, "Assistant", "ask", f"PDF invoices: {filename} ({len(invoices)} found) | lookups: read_pdf | "
-                                   f"tokens {usage['prompt_tokens']}+{usage['completion_tokens']}", user=user)
+                                   f"tokens {usage['prompt_tokens']}+{usage['completion_tokens']} | "
+                                   f"{assistant_service.timing_text(total_s, model_s, total_s - model_s)}", user=user)
     await db.commit()
     used, limit = await assistant_service.limit_state(db, user)
-    return {"filename": filename, "invoices": await assistant_actions.match_invoices(db, invoices),
+    return {"filename": filename, "invoices": matched,
+            "timing": {"seconds": round(total_s, 1), "model_seconds": round(model_s, 1),
+                       "lookup_seconds": round(total_s - model_s, 1)},
             "can_create_customers": has_permission(user, "action_customers_create"),
             "questions_left": max(limit - used, 0) if limit else None, "daily_limit": limit or None}
 
@@ -174,6 +182,10 @@ async def admin_usage(db: AsyncSession = Depends(get_async_session), _admin: Use
             "limit": r["limit"] or None, "custom_limit": r["custom_limit"],
             "questions_left": max(r["limit"] - r["used"], 0) if r["limit"] else None,
             "last_question_at": r["last_question_at"].isoformat() if r["last_question_at"] else None,
+            "avg_seconds": round(r["seconds"] / r["timed"], 1) if r["timed"] else None,
+            "avg_model_seconds": round(r["model_seconds"] / r["timed"], 1) if r["timed"] else None,
+            "avg_lookup_seconds": round(r["lookup_seconds"] / r["timed"], 1) if r["timed"] else None,
+            "last_seconds": r["last_seconds"],
         })
     rows.sort(key=lambda x: (-x["asked_today"], x["name"].lower()))
     return {"default_limit": assistant_service.default_limit() or None, "users": rows}
@@ -371,8 +383,8 @@ button.send:disabled{opacity:.5;cursor:default}
                 <button class="ghost" id="reset-all">Reset everyone's questions</button>
             </div>
             <table>
-                <thead><tr><th>User</th><th>Used today</th><th>Tokens</th><th>Last question</th><th>Own limit</th><th></th></tr></thead>
-                <tbody id="admin-rows"><tr><td colspan="6">Loading…</td></tr></tbody>
+                <thead><tr><th>User</th><th>Used today</th><th>Tokens</th><th title="Average time per question today: AI model · your data">Avg time</th><th>Last question</th><th>Own limit</th><th></th></tr></thead>
+                <tbody id="admin-rows"><tr><td colspan="7">Loading…</td></tr></tbody>
             </table>
         </div>
     </details>
@@ -510,7 +522,8 @@ async function send(text){
         if(!r.ok){ add("bot", data.detail || "Something went wrong.", "", "err"); return; }
         // Charts stay out of the history sent back: the model doesn't need its own chart data again.
         history.push({role:"user", content:q}, {role:"assistant", content: window.AskChart ? AskChart.strip(data.answer) : data.answer});
-        const answered = add("bot", data.answer, data.lookups.length ? `Looked up: ${[...new Set(data.lookups)].join(", ")}` : "", "", true);
+        const took = data.timing ? `${data.timing.seconds}s` : "";
+        const answered = add("bot", data.answer, [data.lookups.length ? `Looked up: ${[...new Set(data.lookups)].join(", ")}` : "", took].filter(Boolean).join(" · "), "", true);
         if((data.proposals || []).length && window.AskActions) AskActions.cards(answered.querySelector(".bubble"), data.proposals);
         if(data.questions_left !== null) showLeft(data.questions_left, data.daily_limit);
         if(document.getElementById("admin").open) loadUsage();
@@ -549,7 +562,7 @@ async function loadUsage(){
         document.getElementById("admin-default").innerText =
             d.default_limit ? `Default: ${d.default_limit} questions per user per day. Leave "own limit" empty to use it; 0 = no limit.`
                             : `No default limit is set. "Own limit" 0 = no limit.`;
-        if(!d.users.length){ tbody.innerHTML = `<tr><td colspan="6">No users can use Ask.</td></tr>`; return; }
+        if(!d.users.length){ tbody.innerHTML = `<tr><td colspan="7">No users can use Ask.</td></tr>`; return; }
         tbody.innerHTML = d.users.map(u => {
             const used = u.limit ? `${u.used} / ${u.limit}` : `${u.used}`;
             const full = u.limit && u.used >= u.limit;
@@ -559,6 +572,7 @@ async function loadUsage(){
                 <td>${esc(u.name)} <span style="color:var(--muted)">· ${esc(u.role)}</span></td>
                 <td class="n ${full ? "full" : ""}">${used}${extra}</td>
                 <td class="n">${u.tokens ? u.tokens.toLocaleString() : "—"}</td>
+                <td class="n" title="AI model ${u.avg_model_seconds ?? "—"}s · your data ${u.avg_lookup_seconds ?? "—"}s">${u.avg_seconds !== null && u.avg_seconds !== undefined ? `${u.avg_seconds}s <span style="color:var(--muted)">(AI ${u.avg_model_seconds} · data ${u.avg_lookup_seconds})</span>` : "—"}</td>
                 <td class="n">${last}</td>
                 <td><input type="number" min="0" max="1000" placeholder="default" value="${u.custom_limit ?? ""}" data-limit="${u.user_id}"></td>
                 <td class="acts">
@@ -578,7 +592,7 @@ async function loadUsage(){
                 toast("Limit saved"); await loadUsage(); loadStatus();
             }catch(e){ toast(e.message); }
         });
-    }catch(e){ tbody.innerHTML = `<tr><td colspan="6">Couldn't load usage.</td></tr>`; }
+    }catch(e){ tbody.innerHTML = `<tr><td colspan="7">Couldn't load usage.</td></tr>`; }
 }
 document.getElementById("reset-all").onclick = async () => {
     if(!confirm("Reset today's questions for every user?")) return;

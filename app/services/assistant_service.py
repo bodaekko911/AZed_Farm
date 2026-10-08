@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Any, Awaitable, Callable, Optional
@@ -116,8 +117,23 @@ def _period_props() -> dict:
     }
 
 
+_FIRST_DAY_CACHE: dict = {}
+FIRST_DAY_TTL = 600
+
+
 async def first_day(db) -> date:
-    """The first day anything was recorded (sales, B2B, expenses, harvest) — where "all time" starts."""
+    """The first day anything was recorded (sales, B2B, expenses, harvest) — where "all time" starts.
+    Cached for FIRST_DAY_TTL per database: it only moves when older history is imported."""
+    key = id(getattr(db, "bind", None) or db)
+    hit = _FIRST_DAY_CACHE.get(key)
+    if hit and time.monotonic() - hit[1] < FIRST_DAY_TTL:
+        return hit[0]
+    value = await _first_day(db)
+    _FIRST_DAY_CACHE[key] = (value, time.monotonic())
+    return value
+
+
+async def _first_day(db) -> date:
     from app.models.b2b import B2BInvoice
     from app.models.expense import Expense
     from app.models.farm import FarmDelivery
@@ -611,6 +627,11 @@ async def run_tool(db: AsyncSession, user, name: str, raw_args: str) -> str:
 #   set_limit   — description starts "limit=N" (0 = no limit) or "limit=default"
 LIMIT_RE = re.compile(r"^limit=(\d+|default)")
 TOKENS_RE = re.compile(r"tokens (\d+)\+(\d+)")
+TIME_RE = re.compile(r"time ([\d.]+)s model ([\d.]+)s lookups ([\d.]+)s")
+
+
+def timing_text(total: float, model: float, lookups: float) -> str:
+    return f"time {total:.1f}s model {model:.1f}s lookups {lookups:.1f}s"
 
 
 def default_limit() -> int:
@@ -643,6 +664,7 @@ async def usage_today(db: AsyncSession, user_ids: Optional[list[int]] = None) ->
         if uid not in out:
             own = custom.get(str(uid))
             out[uid] = {"used": 0, "asked_today": 0, "tokens": 0, "last_question_at": None,
+                        "timed": 0, "seconds": 0.0, "model_seconds": 0.0, "lookup_seconds": 0.0, "last_seconds": None,
                         "limit": default_limit() if own is None else own, "custom_limit": own}
         return out[uid]
 
@@ -660,6 +682,13 @@ async def usage_today(db: AsyncSession, user_ids: Optional[list[int]] = None) ->
         r = row(entry.user_id)
         r["used"] += 1
         r["asked_today"] += 1
+        t = TIME_RE.search(entry.description or "")
+        if t:
+            r["timed"] += 1
+            r["seconds"] += float(t.group(1))
+            r["model_seconds"] += float(t.group(2))
+            r["lookup_seconds"] += float(t.group(3))
+            r["last_seconds"] = float(t.group(1))
         m = TOKENS_RE.search(entry.description or "")
         if m:
             r["tokens"] += int(m.group(1)) + int(m.group(2))
@@ -754,10 +783,13 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
 
     from app.services import assistant_actions
     lookups, proposals, usage = [], [], {"prompt_tokens": 0, "completion_tokens": 0}
+    started, model_s, lookup_s = time.perf_counter(), 0.0, 0.0
     async with httpx.AsyncClient(timeout=60.0, transport=transport) as client:
         answer = ""
         for round_no in range(MAX_ROUNDS + 1):
+            t0 = time.perf_counter()
             data = await _chat(client, messages, tools, allow_tools=round_no < MAX_ROUNDS)
+            model_s += time.perf_counter() - t0
             for k in usage:
                 usage[k] += int((data.get("usage") or {}).get(k) or 0)
             message = ((data.get("choices") or [{}])[0]).get("message") or {}
@@ -766,6 +798,7 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
                 answer = (message.get("content") or "").strip()
                 break
             messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": calls})
+            t0 = time.perf_counter()
             for call in calls:
                 fn = call.get("function") or {}
                 if fn.get("name") in assistant_actions.ACTIONS:
@@ -778,10 +811,12 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
                 lookups.append({"tool": fn.get("name"), "args": fn.get("arguments")})
                 messages.append({"role": "tool", "tool_call_id": call.get("id"),
                                  "content": await run_tool(db, user, fn.get("name"), fn.get("arguments"))})
+            lookup_s += time.perf_counter() - t0
 
     record(db, "Assistant", "ask",
            f"{question[:300]} | lookups: {', '.join(l['tool'] or '?' for l in lookups) or 'none'} | "
-           f"tokens {usage['prompt_tokens']}+{usage['completion_tokens']}",
+           f"tokens {usage['prompt_tokens']}+{usage['completion_tokens']} | "
+           f"{timing_text(time.perf_counter() - started, model_s, lookup_s)}",
            user=user)
     await db.commit()
     return {
@@ -789,5 +824,7 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
         "lookups": lookups,
         "proposals": proposals,
         "usage": usage,
+        "timing": {"seconds": round(time.perf_counter() - started, 1), "model_seconds": round(model_s, 1),
+                   "lookup_seconds": round(lookup_s, 1)},
         "questions_left": max(limit - used - 1, 0) if limit else None,
     }

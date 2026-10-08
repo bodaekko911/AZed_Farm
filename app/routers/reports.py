@@ -1478,14 +1478,17 @@ async def _build_inventory_report(
 
     prod_res = await db.execute(select(Product).where(Product.is_active == True).order_by(Product.name))
     products = prod_res.scalars().all()
+    # Every product's last stock move in one query (it used to be one query per product).
+    last_moves = dict((await db.execute(
+        select(StockMove.product_id, func.max(StockMove.created_at)).group_by(StockMove.product_id)
+    )).all())
     rows = []
     dead_stock_cutoff = datetime.now(timezone.utc) - timedelta(days=90)
     dead_stock_count = 0
     for product in products:
         stock_tracked = is_stock_tracked_product(product)
         threshold = _num(product.reorder_level if product.reorder_level is not None else product.min_stock if product.min_stock is not None else 5)
-        last_move_res = await db.execute(select(func.max(StockMove.created_at)).where(StockMove.product_id == product.id))
-        last_move_at = last_move_res.scalar()
+        last_move_at = last_moves.get(product.id)
         is_dead_stock = stock_tracked and _num(product.stock) > 0 and (last_move_at is None or last_move_at < dead_stock_cutoff)
         low_stock = stock_tracked and _num(product.stock) <= threshold
         if is_dead_stock:

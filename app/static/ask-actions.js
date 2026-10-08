@@ -331,7 +331,8 @@
       const data = await post("/assistant/api/invoices/read", { filename: file.name, pages });
       opts.onLimit && opts.onLimit(data.questions_left, data.daily_limit);
       if (!data.invoices.length) { status.textContent = "No invoices were found in that PDF."; return; }
-      status.textContent = `Found ${data.invoices.length} invoice${data.invoices.length > 1 ? "s" : ""}. Check each one — only invoices whose total matches the PDF can be recorded.`;
+      const took = data.timing ? ` (read in ${data.timing.seconds}s)` : "";
+      status.textContent = `Found ${data.invoices.length} invoice${data.invoices.length > 1 ? "s" : ""}${took}. Check each one — only invoices whose total matches the PDF can be recorded.`;
       const cardsEls = data.invoices.map(inv => invoiceCard(inv, data.filename, toast, !!data.can_create_customers));
       bubble.append(...cardsEls);
       if (cardsEls.length > 1) {
