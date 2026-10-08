@@ -681,67 +681,6 @@ def is_configured() -> bool:
     return bool(settings.ASSISTANT_API_KEY and settings.ASSISTANT_MODEL and settings.ASSISTANT_BASE_URL)
 
 
-# ── Voice questions ──────────────────────────────────────────────────────────
-# The browser records a short, compressed clip; the server forwards it to an OpenAI-format
-# /audio/transcriptions endpoint and returns the text. No model runs here and nothing is stored,
-# so the memory cost is one clip (capped at MAX_AUDIO_BYTES) for the length of one request.
-
-MAX_AUDIO_BYTES = 2_000_000      # ~60 s at the 24 kbps the page records at is ~200 KB
-AUDIO_TYPES = {"audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "m4a", "audio/x-m4a": "m4a",
-               "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/aac": "aac"}
-TRANSCRIBE_HINT = ("A question about Habiba Organic Farm's business data — sales, B2B clients, expenses, products, "
-                   "stock, spoilage, suppliers, payroll and harvest — in Egyptian Arabic or English.")
-
-
-def _transcribe_endpoint() -> tuple[Optional[str], Optional[str], Optional[str]]:
-    return (settings.ASSISTANT_TRANSCRIBE_BASE_URL or settings.ASSISTANT_BASE_URL,
-            settings.ASSISTANT_TRANSCRIBE_API_KEY or settings.ASSISTANT_API_KEY,
-            settings.ASSISTANT_TRANSCRIBE_MODEL)
-
-
-def can_transcribe() -> bool:
-    return all(_transcribe_endpoint())
-
-
-async def transcribe(db: AsyncSession, user, audio: bytes, content_type: str,
-                     transport: Optional[httpx.AsyncBaseTransport] = None) -> str:
-    base, key, model = _transcribe_endpoint()
-    if not (base and key and model):
-        raise HTTPException(status_code=503, detail="Voice questions are not set up: add ASSISTANT_TRANSCRIBE_MODEL "
-                                                    "to the server settings.")
-    used, limit = await limit_state(db, user)
-    if limit and used >= limit:
-        raise HTTPException(status_code=429, detail=f"You've used today's {limit} questions. The limit resets "
-                                                    "tomorrow, or an admin can reset it for you.")
-    mime = (content_type or "").split(";")[0].strip().lower()
-    ext = AUDIO_TYPES.get(mime)
-    if not ext:
-        raise HTTPException(status_code=415, detail="Unsupported audio format")
-    if not audio:
-        raise HTTPException(status_code=400, detail="No audio was recorded")
-    if len(audio) > MAX_AUDIO_BYTES:
-        raise HTTPException(status_code=413, detail="That recording is too long — keep it under a minute")
-
-    async with httpx.AsyncClient(timeout=60.0, transport=transport) as client:
-        response = await client.post(
-            base.rstrip("/") + "/audio/transcriptions",
-            headers={"Authorization": f"Bearer {key}"},
-            files={"file": (f"question.{ext}", audio, mime)},
-            data={"model": model, "prompt": TRANSCRIBE_HINT, "response_format": "json"},
-        )
-    if response.status_code >= 400:
-        logger.warning("transcription endpoint returned %s: %s", response.status_code, response.text[:300])
-        raise HTTPException(status_code=502, detail="Couldn't turn the recording into text. Try again, or type it.")
-    try:
-        text = str(response.json().get("text") or "").strip()
-    except ValueError:
-        text = response.text.strip()
-    text = text[:MAX_QUESTION_CHARS]
-    record(db, "Assistant", "transcribe", f"voice {len(audio) // 1024} KB → {len(text)} chars", user=user)
-    await db.commit()
-    return text
-
-
 # ── Asking ───────────────────────────────────────────────────────────────────
 
 def period_hints(today: Optional[date] = None) -> str:

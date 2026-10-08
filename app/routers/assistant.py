@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -47,7 +47,6 @@ async def status(db: AsyncSession = Depends(get_async_session), user: User = Dep
         "questions_left": max(limit - used, 0) if limit else None,
         "can_look_up": [TOOL_LABELS[t] for t in assistant_service.allowed_tools(user)],
         "is_admin": user.role == "admin",
-        "can_transcribe": assistant_service.can_transcribe(),
     }
 
 
@@ -58,29 +57,6 @@ async def ask(data: AskRequest, db: AsyncSession = Depends(get_async_session), u
     _used, limit = await assistant_service.limit_state(db, user)
     result["daily_limit"] = limit or None
     return result
-
-
-async def read_capped(request: Request, limit: int) -> bytes:
-    """The request body, read in chunks and refused as soon as it passes `limit` — an oversized upload is never
-    held in memory whole."""
-    if int(request.headers.get("content-length") or 0) > limit:
-        raise HTTPException(status_code=413, detail="That recording is too long — keep it under a minute")
-    chunks, size = [], 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size > limit:
-            raise HTTPException(status_code=413, detail="That recording is too long — keep it under a minute")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-@router.post("/api/transcribe")
-async def transcribe(request: Request, db: AsyncSession = Depends(get_async_session),
-                     user: User = Depends(get_current_user)):
-    """A recorded question (raw audio body, e.g. audio/webm) → its text, for the user to check and send."""
-    audio = await read_capped(request, assistant_service.MAX_AUDIO_BYTES)
-    text = await assistant_service.transcribe(db, user, audio, request.headers.get("content-type", ""))
-    return {"text": text}
 
 
 # ── Admin: usage and limits ─────────────────────────────────────────────────
@@ -208,19 +184,6 @@ textarea:focus{border-color:var(--lime)}
 button.send{background:linear-gradient(135deg,var(--lime),var(--green));border:none;border-radius:12px;padding:0 20px;font-weight:700;
             color:#0a1a00;cursor:pointer;font-family:var(--sans)}
 button.send:disabled{opacity:.5;cursor:default}
-.voice{background:var(--card);border:1px solid var(--border2);border-radius:12px;min-width:52px;padding:0 12px;color:var(--sub);
-       cursor:pointer;font-family:var(--mono);font-size:13px;display:inline-flex;align-items:center;justify-content:center;gap:7px}
-.voice:hover{color:var(--text);border-color:var(--lime)}
-.voice svg{width:20px;height:20px}
-.voice[data-state="recording"]{color:var(--danger);border-color:var(--danger)}
-.voice:disabled{opacity:.6;cursor:default}
-.voice[hidden]{display:none}
-.ask-voice-lang{background:var(--card);border:1px solid var(--border2);border-radius:12px;width:40px;color:var(--sub);cursor:pointer;
-                font-family:var(--sans);font-size:13px;font-weight:600}
-.ask-voice-lang:hover{color:var(--text);border-color:var(--lime)}
-.ask-voice-dot{width:9px;height:9px;border-radius:50%;background:var(--danger);animation:voicepulse 1.1s ease-in-out infinite}
-@keyframes voicepulse{50%{opacity:.25}}
-@media (prefers-reduced-motion: reduce){.ask-voice-dot{animation:none}}
 .left{font-size:11.5px;color:var(--muted);max-width:860px;margin:6px auto 0}
 .notice{background:color-mix(in srgb,var(--warn) 9%,transparent);border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);color:var(--warn);
         border-radius:10px;padding:11px 14px;font-size:13px;margin-top:14px}
@@ -242,7 +205,6 @@ button.send:disabled{opacity:.5;cursor:default}
 </style>
 <script src="/static/auth-guard.js"></script>
 <script src="/static/ask-chart.js"></script>
-<script src="/static/ask-voice.js"></script>
 </head>
 <body>
 """ + render_app_header(current_user, "page_assistant") + r"""
@@ -285,7 +247,6 @@ button.send:disabled{opacity:.5;cursor:default}
 <div class="bar">
     <div class="bar-inner">
         <textarea id="q" placeholder="Ask a question… / اسأل سؤالاً…" dir="auto" maxlength="1000"></textarea>
-        <button class="voice" id="voice" hidden aria-label="Ask by voice"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
         <button class="send" id="send">Ask</button>
     </div>
     <div class="left" id="left"></div>
@@ -384,9 +345,6 @@ async function loadStatus(){
         if(!s.configured) document.getElementById("notice").innerHTML =
             `<div class="notice">The assistant isn't set up yet. An admin needs to add ASSISTANT_API_KEY and ASSISTANT_MODEL to the server settings.</div>`;
         if(s.is_admin) document.getElementById("admin").style.display = "";
-        if(window.AskVoice)
-            AskVoice.attach({button: document.getElementById("voice"), input: document.getElementById("q"),
-                             endpoint: "/assistant/api/transcribe", server: s.can_transcribe, onError: toast});
     }catch(e){}
 }
 async function send(text){
