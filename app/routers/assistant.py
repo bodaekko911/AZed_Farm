@@ -215,6 +215,9 @@ button.send:disabled{opacity:.5;cursor:default}
 .voice[data-state="recording"]{color:var(--danger);border-color:var(--danger)}
 .voice:disabled{opacity:.6;cursor:default}
 .voice[hidden]{display:none}
+.ask-voice-lang{background:var(--card);border:1px solid var(--border2);border-radius:12px;width:40px;color:var(--sub);cursor:pointer;
+                font-family:var(--sans);font-size:13px;font-weight:600}
+.ask-voice-lang:hover{color:var(--text);border-color:var(--lime)}
 .ask-voice-dot{width:9px;height:9px;border-radius:50%;background:var(--danger);animation:voicepulse 1.1s ease-in-out infinite}
 @keyframes voicepulse{50%{opacity:.25}}
 @media (prefers-reduced-motion: reduce){.ask-voice-dot{animation:none}}
@@ -381,9 +384,9 @@ async function loadStatus(){
         if(!s.configured) document.getElementById("notice").innerHTML =
             `<div class="notice">The assistant isn't set up yet. An admin needs to add ASSISTANT_API_KEY and ASSISTANT_MODEL to the server settings.</div>`;
         if(s.is_admin) document.getElementById("admin").style.display = "";
-        if(s.can_transcribe && window.AskVoice && !document.getElementById("voice").dataset.state)
+        if(window.AskVoice)
             AskVoice.attach({button: document.getElementById("voice"), input: document.getElementById("q"),
-                             endpoint: "/assistant/api/transcribe", onError: toast});
+                             endpoint: "/assistant/api/transcribe", server: s.can_transcribe, onError: toast});
     }catch(e){}
 }
 async function send(text){
