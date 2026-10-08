@@ -240,3 +240,71 @@ def test_the_question_carries_the_usual_periods():
     assert "Today is Tuesday 2026-03-31" in hints
     assert "Last month: 2026-02-01 to 2026-02-28 (same days: 2026-02-01 to 2026-02-28)" in hints
     assert "This quarter: 2026-01-01 to 2026-03-31" in hints
+
+
+def test_top_pos_customers_are_ranked_by_spend():
+    from app.models.customer import Customer
+    from app.models.invoice import Invoice
+    session, db = make_db()
+    now = datetime.now(timezone.utc)
+    session.add_all([Customer(id=1, name="Mona"), Customer(id=2, name="Karim"), Customer(id=3, name="Mona")])
+    session.add_all([
+        Invoice(invoice_number="P1", customer_id=1, status="paid", total=Decimal("100"), created_at=now),
+        Invoice(invoice_number="P2", customer_id=2, status="paid", total=Decimal("500"), created_at=now),
+        Invoice(invoice_number="P3", customer_id=2, status="unpaid", total=Decimal("50"), created_at=now),
+        Invoice(invoice_number="P4", customer_id=3, status="paid", total=Decimal("70"), created_at=now),
+        Invoice(invoice_number="P5", customer_id=1, status="void", total=Decimal("999"), created_at=now),
+    ])
+    session.commit()
+    today = assistant_service.today_local().isoformat()
+    out = json.loads(run(assistant_service.run_tool(db, user(), "pos_customers",
+                                                    json.dumps({"date_from": today, "date_to": today}))))
+    assert out["invoices"] == 4 and out["total"] == 720.0
+    # Two different customers who share a name stay separate.
+    assert out["top_customers"] == [
+        {"customer": "Karim", "invoices": 2, "total": 550.0, "unpaid": 50.0},
+        {"customer": "Mona", "invoices": 1, "total": 100.0, "unpaid": 0.0},
+        {"customer": "Mona", "invoices": 1, "total": 70.0, "unpaid": 0.0},
+    ]
+
+
+def test_a_lookup_that_fails_in_the_database_does_not_break_the_question(monkeypatch):
+    """With a real async session the lookup runs in a savepoint; a failing one is reported to the model and the
+    question still gets answered and logged."""
+    from sqlalchemy import select, text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    async def broken(db, args):
+        await db.execute(text("SELECT no_such_column FROM products"))
+
+    monkeypatch.setitem(assistant_service.TOOLS, "products",
+                        (*assistant_service.TOOLS["products"][:3], broken))
+
+    async def scenario():
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+            seen = []
+            result = await assistant_service.ask(db, user(), "What's running low?", None,
+                                                 transport=fake_endpoint_reporting_errors(seen))
+            logged = (await db.execute(select(ActivityLog).where(ActivityLog.action == "ask"))).scalars().all()
+        await engine.dispose()
+        return result, logged, seen
+
+    result, logged, seen = run(scenario())
+    assert result["answer"] == "The lookup failed."
+    assert len(logged) == 1
+    assert json.loads([m for m in seen[-1]["body"]["messages"] if m["role"] == "tool"][0]["content"]) == \
+        {"error": "lookup failed"}
+
+
+def fake_endpoint_reporting_errors(seen):
+    def handler(request: httpx.Request):
+        body = json.loads(request.content)
+        seen.append({"body": body})
+        if not [m for m in body["messages"] if m["role"] == "tool"]:
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": None,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "products", "arguments": "{}"}}]}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "The lookup failed."}}]})
+    return httpx.MockTransport(handler)

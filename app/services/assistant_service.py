@@ -315,14 +315,19 @@ async def _suppliers(db, args):
     owed = (await db.execute(
         select(Supplier).where(Supplier.balance > 0).order_by(Supplier.balance.desc()).limit(20)
     )).scalars().all()
-    received = (await db.execute(
-        select(func.coalesce(Supplier.name, ProductReceipt.supplier_ref, "no supplier"),
+    # Grouped by plain columns and named in Python: a literal inside coalesce() is a separate bind parameter
+    # in SELECT and GROUP BY, which PostgreSQL rejects ("must appear in the GROUP BY clause").
+    by_name: dict = defaultdict(lambda: [0.0, 0.0, 0])
+    for name, ref, cost, paid, n in (await db.execute(
+        select(Supplier.name, ProductReceipt.supplier_ref,
                func.sum(ProductReceipt.total_cost), func.sum(ProductReceipt.amount_paid), func.count())
         .select_from(ProductReceipt).outerjoin(Supplier, Supplier.id == ProductReceipt.supplier_id)
         .where(ProductReceipt.receive_date >= d_from, ProductReceipt.receive_date <= d_to)
-        .group_by(func.coalesce(Supplier.name, ProductReceipt.supplier_ref, "no supplier"))
-        .order_by(func.sum(ProductReceipt.total_cost).desc())
-    )).all()
+        .group_by(Supplier.name, ProductReceipt.supplier_ref)
+    )).all():
+        b = by_name[name or ref or "no supplier"]
+        b[0] += float(cost or 0); b[1] += float(paid or 0); b[2] += n
+    received = sorted(((n, *v) for n, v in by_name.items()), key=lambda r: -r[1])
     return {
         "we_owe_now": {
             "total": round(sum(float(x.balance or 0) for x in owed), 2),
@@ -342,14 +347,14 @@ async def _customers(db, args):
     from app.models.invoice import Invoice
     d_from, d_to = _dates(args)
     s, e = utc_bounds(d_from, d_to)
-    rows = (await db.execute(
-        select(func.coalesce(Customer.name, "Walk-in"), func.count(), func.sum(Invoice.total),
+    rows = [(name or "Walk-in", n, t, u) for _id, name, n, t, u in (await db.execute(
+        select(Customer.id, Customer.name, func.count(), func.sum(Invoice.total),
                func.sum(case((Invoice.status == "unpaid", Invoice.total), else_=0)))
         .select_from(Invoice).outerjoin(Customer, Customer.id == Invoice.customer_id)
         .where(Invoice.created_at >= s, Invoice.created_at <= e, Invoice.status.in_(("paid", "unpaid")))
-        .group_by(func.coalesce(Customer.name, "Walk-in"))
+        .group_by(Customer.id, Customer.name)
         .order_by(func.sum(Invoice.total).desc())
-    )).all()
+    )).all()]
     count = sum(n for _c, n, _t, _u in rows)
     total = sum(float(t or 0) for _c, _n, t, _u in rows)
     return {
@@ -425,7 +430,8 @@ TOOLS: dict[str, tuple[str, dict, tuple[str, ...], ToolFn]] = {
         "Suppliers: what we owe each now, and what was received from each in the period (cost and paid on receipt).",
         {}, ("page_suppliers",), _suppliers),
     "pos_customers": (
-        "Retail (POS) customers for a period: number of invoices, total, average invoice, top customers, unpaid.",
+        "Retail / B2C (POS) customers for a period: number of invoices, total, average invoice, top customers by "
+        "spend, unpaid. B2B clients are in b2b_balances.",
         {}, ("page_customers",), _customers),
     "account_balances": (
         "Ledger account balances now (cash, receivables, inventory, payables, revenue, expenses…).",
@@ -459,7 +465,14 @@ async def run_tool(db: AsyncSession, user, name: str, raw_args: str) -> str:
         args = json.loads(raw_args or "{}")
         if not isinstance(args, dict):
             raise ValueError("arguments must be an object")
-        result = await TOOLS[name][3](db, args)
+        nested = getattr(db, "begin_nested", None)
+        if nested is None:
+            result = await TOOLS[name][3](db, args)
+        else:
+            # A savepoint, so a lookup that fails in the database can't leave the transaction aborted
+            # (PostgreSQL) and take the rest of the question — logging it, the next lookup — down with it.
+            async with nested():
+                result = await TOOLS[name][3](db, args)
     except (ValueError, json.JSONDecodeError) as exc:
         return json.dumps({"error": str(exc)})
     except Exception:
