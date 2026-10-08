@@ -525,7 +525,8 @@ async function send(text){
         if(!r.ok){ add("bot", data.detail || "Something went wrong.", "", "err"); return; }
         // Charts stay out of the history sent back: the model doesn't need its own chart data again.
         history.push({role:"user", content:q}, {role:"assistant", content: window.AskChart ? AskChart.strip(data.answer) : data.answer});
-        const took = data.timing ? `${data.timing.seconds}s` : "";
+        const t = data.timing;
+        const took = t ? `${t.seconds}s · AI ${t.model_seconds}s · data ${t.lookup_seconds}s` + (data.model ? ` · ${data.model}` : "") : "";
         const answered = add("bot", data.answer, [data.lookups.length ? `Looked up: ${[...new Set(data.lookups)].join(", ")}` : "", took].filter(Boolean).join(" · "), "", true);
         if((data.proposals || []).length && window.AskActions) AskActions.cards(answered.querySelector(".bubble"), data.proposals);
         if(data.questions_left !== null) showLeft(data.questions_left, data.daily_limit);
