@@ -80,7 +80,19 @@ Formatting (the answer is shown as Markdown):
 - Short answers: one or two sentences, key numbers in **bold**.
 - Several items or a comparison: a compact Markdown table (at most ~12 rows) or a short bullet list.
 - Write money like 12,345 EGP; round to whole pounds unless the amounts are small. Percentages to one decimal.
-- No preamble ("Sure", "Based on the data…"), no closing offers. End with one short caveat line only when it matters."""
+- No preamble ("Sure", "Based on the data…"), no closing offers. End with one short caveat line only when it matters.
+Charts (drawn on the page from a fenced block):
+- Add ONE chart when it makes the answer clearer: a trend over time (3+ points), a few periods or groups compared,
+  or a ranking (3+ items). No chart for a single number or a yes/no answer.
+- Put it after the table, exactly in this form — valid JSON, plain numbers (no commas, no units inside values):
+```chart
+{"type": "line", "title": "Net sales by month", "unit": "EGP", "labels": ["Jul", "Aug", "Sep"], "series": [{"name": "Net sales", "values": [41200, 38950, 52010]}]}
+```
+- type: "line" for change over time; "bar" for a few periods or groups side by side; "hbar" for rankings (top products,
+  customers, suppliers…), largest first.
+- At most 3 series and 31 labels; every series has one value per label (null when missing). One unit per chart
+  ("EGP", "%", "kg", "nights"…) — never mix money with counts or percentages; chart the measure the question is about.
+- Every value must come from the tool results. Always keep the table too: the chart is a picture of it, not a replacement."""
 
 
 # ── Tools ────────────────────────────────────────────────────────────────────

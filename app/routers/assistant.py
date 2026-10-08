@@ -155,6 +155,22 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 .md th,.md td{border:1px solid var(--border2);padding:5px 9px;text-align:start;vertical-align:top}
 .md th{background:var(--card2);font-weight:600}
 .md td.num{font-family:var(--mono);text-align:end;white-space:nowrap}
+/* Charts in answers — validated categorical slots 1–3 for each theme's card surface */
+.ask-chart{--chart-1:#3987e5;--chart-2:#d95926;--chart-3:#199e70;--chart-grid:rgba(255,255,255,.07);--chart-axis:rgba(255,255,255,.2);
+           position:relative;margin:10px 0 12px;min-width:240px}
+body.light .ask-chart{--chart-1:#2a78d6;--chart-2:#eb6834;--chart-3:#1baf7a;--chart-grid:rgba(0,0,0,.07);--chart-axis:rgba(0,0,0,.22)}
+.ask-chart svg{display:block;overflow:visible}
+.bubble.has-chart{width:85%}
+.ask-chart-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+.ask-chart-title{font-size:13px;font-weight:600;color:var(--text)}
+.ask-chart-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--sub)}
+.ask-chart-legend>span{display:inline-flex;align-items:center;gap:5px}
+.ask-chart-key{display:inline-block;width:10px;height:10px;border-radius:3px;flex:none}
+.ask-chart-tip{position:absolute;pointer-events:none;background:var(--card2);border:1px solid var(--border2);border-radius:8px;
+               padding:7px 10px;font-size:12px;color:var(--text);box-shadow:0 6px 18px rgba(0,0,0,.25);z-index:3;white-space:nowrap}
+.ask-chart-tip-head{color:var(--muted);margin-bottom:3px}
+.ask-chart-tip-row{display:flex;align-items:center;gap:6px}
+.ask-chart-tip-row b{margin-left:auto;padding-left:12px;font-family:var(--mono);font-weight:500}
 .meta{font-size:11px;color:var(--muted);margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .copy{background:none;border:none;color:var(--muted);cursor:pointer;font-size:11px;font-family:var(--sans);text-decoration:underline}
 .copy:hover{color:var(--text)}
@@ -188,6 +204,7 @@ button.send:disabled{opacity:.5;cursor:default}
        padding:9px 16px;border-radius:10px;font-size:13px;z-index:50;display:none}
 </style>
 <script src="/static/auth-guard.js"></script>
+<script src="/static/ask-chart.js"></script>
 </head>
 <body>
 """ + render_app_header(current_user, "page_assistant") + r"""
@@ -296,17 +313,23 @@ function add(role, text, meta, cls, keep){
     const bubble = document.createElement("div");
     bubble.className = "bubble" + (role === "bot" && !cls ? " md" : "");
     bubble.dir = isArabic(text) ? "rtl" : "ltr";
-    bubble.innerHTML = (role === "bot" && !cls) ? md(text) : esc(text);
+    let charts = [];
+    if(role === "bot" && !cls){
+        const parts = window.AskChart ? AskChart.extract(text) : {text, specs: []};
+        charts = parts.specs;
+        bubble.innerHTML = window.AskChart ? AskChart.slots(md(parts.text)) : md(parts.text);
+    }else bubble.innerHTML = esc(text);
     if(role === "bot" && !cls){
         const m = document.createElement("div"); m.className = "meta"; m.dir = "ltr";
         m.innerHTML = (meta ? `<span>${esc(meta)}</span>` : "") + `<button class="copy">Copy</button>`;
         m.querySelector(".copy").onclick = async e => {
-            try{ await navigator.clipboard.writeText(text); e.target.innerText = "Copied"; setTimeout(() => e.target.innerText = "Copy", 1500); }catch(_){}
+            try{ await navigator.clipboard.writeText(window.AskChart ? AskChart.strip(text) : text); e.target.innerText = "Copied"; setTimeout(() => e.target.innerText = "Copy", 1500); }catch(_){}
         };
         bubble.appendChild(m);
     }
     div.appendChild(bubble);
     log.appendChild(div);
+    if(charts.length){ bubble.classList.add("has-chart"); AskChart.mount(bubble, charts); }
     div.scrollIntoView({behavior:"smooth", block:"end"});
     if(keep){ shown.push({role, text, meta, cls}); save(); }
     return div;
@@ -338,7 +361,8 @@ async function send(text){
         const data = await r.json().catch(()=>({}));
         wait.remove();
         if(!r.ok){ add("bot", data.detail || "Something went wrong.", "", "err"); return; }
-        history.push({role:"user", content:q}, {role:"assistant", content:data.answer});
+        // Charts stay out of the history sent back: the model doesn't need its own chart data again.
+        history.push({role:"user", content:q}, {role:"assistant", content: window.AskChart ? AskChart.strip(data.answer) : data.answer});
         add("bot", data.answer, data.lookups.length ? `Looked up: ${[...new Set(data.lookups)].join(", ")}` : "", "", true);
         if(data.questions_left !== null) showLeft(data.questions_left, data.daily_limit);
         if(document.getElementById("admin").open) loadUsage();
