@@ -15,6 +15,7 @@ from app.core.navigation import render_app_header
 from app.core.permissions import get_current_user, has_permission, require_admin, require_permission
 from app.database import get_async_session
 from app.models.user import User
+from app.core.config import settings
 from app.core.log import record
 from app.services import assistant_actions, assistant_service
 
@@ -186,9 +187,11 @@ async def admin_usage(db: AsyncSession = Depends(get_async_session), _admin: Use
             "avg_model_seconds": round(r["model_seconds"] / r["timed"], 1) if r["timed"] else None,
             "avg_lookup_seconds": round(r["lookup_seconds"] / r["timed"], 1) if r["timed"] else None,
             "last_seconds": r["last_seconds"],
+            "fast_answers": r["fast"], "main_answers": r["main"],
         })
     rows.sort(key=lambda x: (-x["asked_today"], x["name"].lower()))
-    return {"default_limit": assistant_service.default_limit() or None, "users": rows}
+    return {"default_limit": assistant_service.default_limit() or None, "users": rows,
+            "fast_model": bool(settings.ASSISTANT_FAST_MODEL)}
 
 
 @router.post("/api/admin/reset/{user_id}")
@@ -571,7 +574,7 @@ async function loadUsage(){
             return `<tr>
                 <td>${esc(u.name)} <span style="color:var(--muted)">· ${esc(u.role)}</span></td>
                 <td class="n ${full ? "full" : ""}">${used}${extra}</td>
-                <td class="n">${u.tokens ? u.tokens.toLocaleString() : "—"}</td>
+                <td class="n" title="${d.fast_model ? `Fast model ${u.fast_answers} · main model ${u.main_answers}` : ""}">${u.tokens ? u.tokens.toLocaleString() : "—"}${d.fast_model && (u.fast_answers || u.main_answers) ? ` <span style="color:var(--muted)">(${u.fast_answers} fast)</span>` : ""}</td>
                 <td class="n" title="AI model ${u.avg_model_seconds ?? "—"}s · your data ${u.avg_lookup_seconds ?? "—"}s">${u.avg_seconds !== null && u.avg_seconds !== undefined ? `${u.avg_seconds}s <span style="color:var(--muted)">(AI ${u.avg_model_seconds} · data ${u.avg_lookup_seconds})</span>` : "—"}</td>
                 <td class="n">${last}</td>
                 <td><input type="number" min="0" max="1000" placeholder="default" value="${u.custom_limit ?? ""}" data-limit="${u.user_id}"></td>

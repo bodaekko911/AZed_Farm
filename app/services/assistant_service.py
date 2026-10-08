@@ -627,6 +627,7 @@ async def run_tool(db: AsyncSession, user, name: str, raw_args: str) -> str:
 #   set_limit   — description starts "limit=N" (0 = no limit) or "limit=default"
 LIMIT_RE = re.compile(r"^limit=(\d+|default)")
 TOKENS_RE = re.compile(r"tokens (\d+)\+(\d+)")
+MODEL_RE = re.compile(r"model_used (\S+)")
 TIME_RE = re.compile(r"time ([\d.]+)s model ([\d.]+)s lookups ([\d.]+)s")
 
 
@@ -665,6 +666,7 @@ async def usage_today(db: AsyncSession, user_ids: Optional[list[int]] = None) ->
             own = custom.get(str(uid))
             out[uid] = {"used": 0, "asked_today": 0, "tokens": 0, "last_question_at": None,
                         "timed": 0, "seconds": 0.0, "model_seconds": 0.0, "lookup_seconds": 0.0, "last_seconds": None,
+                        "fast": 0, "main": 0,
                         "limit": default_limit() if own is None else own, "custom_limit": own}
         return out[uid]
 
@@ -682,6 +684,9 @@ async def usage_today(db: AsyncSession, user_ids: Optional[list[int]] = None) ->
         r = row(entry.user_id)
         r["used"] += 1
         r["asked_today"] += 1
+        used = MODEL_RE.search(entry.description or "")
+        if used:
+            r["fast" if used.group(1) == "fast" else "main"] += 1
         t = TIME_RE.search(entry.description or "")
         if t:
             r["timed"] += 1
@@ -744,8 +749,36 @@ def period_hints(today: Optional[date] = None) -> str:
             f"This year: {date(t.year, 1, 1)} to {t}. Last year: {date(t.year - 1, 1, 1)} to {date(t.year - 1, 12, 31)}.")
 
 
-async def _chat(client: httpx.AsyncClient, messages: list, tools: list, allow_tools: bool) -> dict:
-    body = {"model": settings.ASSISTANT_MODEL, "messages": messages, "max_tokens": MAX_ANSWER_TOKENS}
+# ── Choosing the model ───────────────────────────────────────────────────────
+# No extra model call (that would cost tokens itself): simple questions go to ASSISTANT_FAST_MODEL, anything that
+# needs reasoning — comparing, explaining, trends, forecasts, long multi-part questions — to ASSISTANT_MODEL.
+
+DEEP_WORDS = (
+    "compare", "comparison", " vs", "versus", "why", "reason", "trend", "growth", "grow", "increase", "decrease",
+    "drop", "change", "difference", "analy", "forecast", "predict", "expect", "explain", "insight", "recommend",
+    "should we", "improve", "best", "worst", "margin", "profitab", "percentage", "%", "breakdown", "over time",
+    "month by month", "each month", "per month", "year over year", "last year",
+    "قارن", "مقارن", "مقابل", "ليه", "لماذا", "ليش", "سبب", "تحليل", "اتجاه", "نمو", "زيادة", "زاد", "نقص", "قل ",
+    "الفرق", "فرق", "توقع", "اشرح", "نصيحة", "انصح", "أفضل", "افضل", "أسوأ", "اسوأ", "هامش", "ربحية", "نسبة",
+    "كل شهر", "شهريا", "السنة اللي فاتت", "العام الماضي",
+)
+LONG_QUESTION = 160
+
+
+def pick_model(question: str) -> tuple[str, str]:
+    """(model id, "fast" | "main") for this question."""
+    fast = settings.ASSISTANT_FAST_MODEL
+    if not fast or fast == settings.ASSISTANT_MODEL:
+        return settings.ASSISTANT_MODEL, "main"
+    q = " " + (question or "").lower() + " "
+    if len(q) > LONG_QUESTION or any(w in q for w in DEEP_WORDS) or q.count("?") + q.count("؟") > 1:
+        return settings.ASSISTANT_MODEL, "main"
+    return fast, "fast"
+
+
+async def _chat(client: httpx.AsyncClient, messages: list, tools: list, allow_tools: bool,
+                model: Optional[str] = None) -> dict:
+    body = {"model": model or settings.ASSISTANT_MODEL, "messages": messages, "max_tokens": MAX_ANSWER_TOKENS}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto" if allow_tools else "none"
@@ -784,11 +817,19 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
     from app.services import assistant_actions
     lookups, proposals, usage = [], [], {"prompt_tokens": 0, "completion_tokens": 0}
     started, model_s, lookup_s = time.perf_counter(), 0.0, 0.0
+    model, tier = pick_model(question)
     async with httpx.AsyncClient(timeout=60.0, transport=transport) as client:
         answer = ""
         for round_no in range(MAX_ROUNDS + 1):
             t0 = time.perf_counter()
-            data = await _chat(client, messages, tools, allow_tools=round_no < MAX_ROUNDS)
+            try:
+                data = await _chat(client, messages, tools, allow_tools=round_no < MAX_ROUNDS, model=model)
+            except HTTPException:
+                if tier != "fast":
+                    raise
+                # The fast model failed: the main model carries on from here, with what was already looked up.
+                model, tier = settings.ASSISTANT_MODEL, "fast→main"
+                data = await _chat(client, messages, tools, allow_tools=round_no < MAX_ROUNDS, model=model)
             model_s += time.perf_counter() - t0
             for k in usage:
                 usage[k] += int((data.get("usage") or {}).get(k) or 0)
@@ -813,10 +854,20 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
                                  "content": await run_tool(db, user, fn.get("name"), fn.get("arguments"))})
             lookup_s += time.perf_counter() - t0
 
+        if not answer and tier == "fast":
+            # The fast model came back empty-handed: the main model writes the answer from the data already gathered.
+            model, tier = settings.ASSISTANT_MODEL, "fast→main"
+            t0 = time.perf_counter()
+            data = await _chat(client, messages, tools, allow_tools=False, model=model)
+            model_s += time.perf_counter() - t0
+            for k in usage:
+                usage[k] += int((data.get("usage") or {}).get(k) or 0)
+            answer = ((((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or "").strip()
+
     record(db, "Assistant", "ask",
            f"{question[:300]} | lookups: {', '.join(l['tool'] or '?' for l in lookups) or 'none'} | "
            f"tokens {usage['prompt_tokens']}+{usage['completion_tokens']} | "
-           f"{timing_text(time.perf_counter() - started, model_s, lookup_s)}",
+           f"{timing_text(time.perf_counter() - started, model_s, lookup_s)} | model_used {tier}",
            user=user)
     await db.commit()
     return {
@@ -826,5 +877,6 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
         "usage": usage,
         "timing": {"seconds": round(time.perf_counter() - started, 1), "model_seconds": round(model_s, 1),
                    "lookup_seconds": round(lookup_s, 1)},
+        "model": tier,
         "questions_left": max(limit - used - 1, 0) if limit else None,
     }

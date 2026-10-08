@@ -97,6 +97,9 @@ class BaseAppSettings(BaseSettings):
     ASSISTANT_BASE_URL: str = "https://codecraftapi.com/v1"
     ASSISTANT_MODEL: str | None = None
     ASSISTANT_DAILY_LIMIT: int = 10
+    # A cheaper, faster model for simple questions (one lookup, a plain figure, an action). Comparisons, "why",
+    # trends and long questions keep ASSISTANT_MODEL. Empty = always ASSISTANT_MODEL.
+    ASSISTANT_FAST_MODEL: str | None = None
     # Model used to read PDF invoices (must accept images); the assistant's model when empty.
     ASSISTANT_VISION_MODEL: str | None = None
 

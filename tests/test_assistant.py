@@ -386,3 +386,73 @@ def test_the_first_day_of_data_is_cached_per_database():
     assert run(assistant_service.first_day(db)) == date(2024, 3, 5)          # cached
     assistant_service._FIRST_DAY_CACHE.clear()
     assert run(assistant_service.first_day(db)) == date(2023, 1, 1)
+
+
+@pytest.mark.parametrize("question, tier", [
+    ("How much did we sell this month?", "fast"),
+    ("Which B2B clients owe us the most?", "fast"),
+    ("ما المنتجات التي قاربت على النفاد؟", "fast"),
+    ("add 500 EGP diesel expense today", "fast"),
+    ("Compare sales this month vs last month", "main"),
+    ("Why did profit drop in September?", "main"),
+    ("ليه المصروفات زادت الشهر ده؟", "main"),
+    ("قارن مبيعات سبتمبر بأغسطس", "main"),
+    ("What is the trend of basil sales?", "main"),
+], ids=lambda v: v if v in ("fast", "main") else None)
+def test_simple_questions_go_to_the_fast_model_and_reasoning_to_the_main_one(monkeypatch, question, tier):
+    monkeypatch.setattr(settings, "ASSISTANT_FAST_MODEL", "fast-model")
+    model, picked = assistant_service.pick_model(question)
+    assert picked == tier and model == ("fast-model" if tier == "fast" else "test-model")
+
+
+def test_without_a_fast_model_everything_uses_the_main_one():
+    assert assistant_service.pick_model("How much did we sell?") == ("test-model", "main")
+
+
+def test_the_main_model_takes_over_when_the_fast_one_fails(monkeypatch):
+    monkeypatch.setattr(settings, "ASSISTANT_FAST_MODEL", "fast-model")
+    models = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        models.append(body["model"])
+        if body["model"] == "fast-model":
+            return httpx.Response(500, json={"error": "overloaded"})
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "Answer."}}]})
+
+    session, db = make_db()
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(assistant_service.ask(db, user(), "How much did we sell?", None,
+                                                               transport=httpx.MockTransport(handler)))
+    finally:
+        loop.close()
+    assert models == ["fast-model", "test-model"] and result["answer"] == "Answer." and result["model"] == "fast→main"
+    log = session.query(ActivityLog).filter_by(module="Assistant", action="ask").one()
+    assert "model_used fast→main" in log.description
+
+
+def test_an_empty_fast_answer_is_written_by_the_main_model_from_the_same_lookups(monkeypatch):
+    monkeypatch.setattr(settings, "ASSISTANT_FAST_MODEL", "fast-model")
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append((body["model"], len([m for m in body["messages"] if m["role"] == "tool"])))
+        if body["model"] == "fast-model" and not any(m["role"] == "tool" for m in body["messages"]):
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": None,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "products", "arguments": "{}"}}]}}]})
+        if body["model"] == "fast-model":
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": ""}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "From the lookup."}}]})
+
+    _session, db = make_db()
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(assistant_service.ask(db, user(), "What's in stock?", None,
+                                                               transport=httpx.MockTransport(handler)))
+    finally:
+        loop.close()
+    # The products lookup ran once; the main model got its result and wrote the answer.
+    assert calls == [("fast-model", 0), ("fast-model", 1), ("test-model", 1)]
+    assert result["answer"] == "From the lookup." and result["lookups"] == [{"tool": "products", "args": "{}"}]
