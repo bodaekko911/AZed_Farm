@@ -97,6 +97,13 @@ class BaseAppSettings(BaseSettings):
     ASSISTANT_BASE_URL: str = "https://codecraftapi.com/v1"
     ASSISTANT_MODEL: str | None = None
     ASSISTANT_DAILY_LIMIT: int = 10
+    # Voice questions — an OpenAI-format /audio/transcriptions endpoint (e.g. OpenAI
+    # "gpt-4o-mini-transcribe", Groq "whisper-large-v3-turbo"). The mic button shows
+    # only when ASSISTANT_TRANSCRIBE_MODEL is set; URL and key fall back to the
+    # assistant's own when left empty. Audio is forwarded, never stored.
+    ASSISTANT_TRANSCRIBE_MODEL: str | None = None
+    ASSISTANT_TRANSCRIBE_BASE_URL: str | None = None
+    ASSISTANT_TRANSCRIBE_API_KEY: str | None = None
 
     model_config = CONFIG_MODEL
 
