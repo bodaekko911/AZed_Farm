@@ -161,7 +161,7 @@ def test_follow_ups_send_only_the_last_few_turns():
                for i in range(20)]
     ask(db, user(), "And now?", seen, history=history)
     roles = [m["role"] for m in seen[0]["body"]["messages"]]
-    assert roles[0] == "system" and roles.count("user") + roles.count("assistant") == 7   # 6 earlier + this one
+    assert roles[0] == "system" and roles.count("user") + roles.count("assistant") == 11   # 10 earlier + this one
 
 
 @pytest.mark.parametrize("tool", sorted(assistant_service.TOOLS))
@@ -176,3 +176,67 @@ def test_every_lookup_runs_against_the_real_schema(tool):
     finally:
         loop.close()
     assert "error" not in out, out
+
+
+def run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def log_questions(session, n, user_id=7):
+    for _ in range(n):
+        session.add(ActivityLog(user_id=user_id, user_name="Abdallah", user_role="admin", module="Assistant",
+                                action="ask", description="q | lookups: none | tokens 100+20",
+                                created_at=datetime.now(timezone.utc)))
+    session.commit()
+
+
+def test_an_admin_reset_lets_the_user_ask_again_today():
+    session, db = make_db()
+    log_questions(session, 3)
+    admin = SimpleNamespace(id=1, name="Boss", role="admin", permissions=None)
+    run(assistant_service.reset_limit(db, admin, user()))
+
+    assert run(assistant_service.limit_state(db, user())) == (0, 3)
+    result = ask(db, user(), "What's running low?", [])
+    assert result["questions_left"] == 2
+    usage = run(assistant_service.usage_today(db))[7]
+    assert usage["used"] == 1 and usage["asked_today"] == 4 and usage["tokens"] == 3 * 120 + 2150
+
+
+def test_reset_everyone_and_a_reset_for_someone_else():
+    session, db = make_db()
+    log_questions(session, 3)
+    log_questions(session, 2, user_id=8)
+    admin = SimpleNamespace(id=1, name="Boss", role="admin", permissions=None)
+    run(assistant_service.reset_limit(db, admin, SimpleNamespace(id=8, name="Other")))
+    assert run(assistant_service.limit_state(db, user())) == (3, 3)
+    run(assistant_service.reset_limit(db, admin, None))
+    assert run(assistant_service.limit_state(db, user())) == (0, 3)
+
+
+def test_a_user_can_be_given_their_own_limit_and_back_to_default():
+    session, db = make_db()
+    log_questions(session, 3)
+    admin = SimpleNamespace(id=1, name="Boss", role="admin", permissions=None)
+    run(assistant_service.set_limit(db, admin, user(), 5))
+    assert run(assistant_service.limit_state(db, user())) == (3, 5)
+    assert ask(db, user(), "What's running low?", [])["questions_left"] == 1
+    run(assistant_service.set_limit(db, admin, user(), 0))      # no limit
+    assert run(assistant_service.limit_state(db, user()))[1] == 0
+    run(assistant_service.set_limit(db, admin, user(), None))   # default again
+    assert run(assistant_service.limit_state(db, user())) == (4, 3)
+    with pytest.raises(HTTPException) as exc:
+        ask(db, user(), "One more?", [])
+    assert exc.value.status_code == 429
+
+
+def test_the_question_carries_the_usual_periods():
+    from datetime import date
+    hints = assistant_service.period_hints(date(2026, 3, 31))
+    assert "Today is Tuesday 2026-03-31" in hints
+    assert "Last month: 2026-02-01 to 2026-02-28 (same days: 2026-02-01 to 2026-02-28)" in hints
+    assert "This quarter: 2026-01-01 to 2026-03-31" in hints
