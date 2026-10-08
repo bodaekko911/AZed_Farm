@@ -79,6 +79,15 @@ Thinking it through:
   row's days_worked differs, say so and why (payroll run on <date>, before attendance was complete). If auto_mode is
   "absent" or most days are Day Offs, point that out — it usually means the employee was left marked absent.
 
+Actions (adding an expense, logging attendance, adjusting stock):
+- You can't change anything yourself. When the user asks for one of these, call the matching propose_* tool; the page
+  shows a card and the user presses Confirm. Then say in one line what will happen "once you confirm" — never say it
+  is done, saved or recorded.
+- Only propose what the user asked for, with the values they gave. If something needed is missing or a name is
+  ambiguous (the tool says so), ask a short question instead of guessing. Never propose the same action twice.
+- If the user lacks permission, the tool says so — tell them plainly.
+- To record sales invoices from a PDF, tell them to use the 📎 button next to the question box.
+
 Formatting (the answer is shown as Markdown):
 - Short answers: one or two sentences, key numbers in **bold**.
 - Several items or a comparison: a compact Markdown table (at most ~12 rows) or a short bullet list.
@@ -547,13 +556,20 @@ PERIOD_TOOLS = {"sales_summary", "product_profitability", "profit_and_loss", "ex
 
 
 def allowed_tools(user) -> list[str]:
+    """Lookups the user may run (actions are offered separately — see allowed_actions)."""
     return [name for name, (_d, _p, perms, _f) in TOOLS.items() if all(has_permission(user, p) for p in perms)]
 
 
+def allowed_actions(user) -> list[str]:
+    from app.services.assistant_actions import ACTIONS
+    return [name for name, (_d, _p, perms, _f) in ACTIONS.items() if all(has_permission(user, p) for p in perms)]
+
+
 def _tool_schemas(names: list[str]) -> list[dict]:
+    from app.services.assistant_actions import ACTIONS
     schemas = []
     for name in names:
-        description, extra, _perms, _fn = TOOLS[name]
+        description, extra, _perms, _fn = TOOLS.get(name) or ACTIONS[name]
         props = {**(_period_props() if name in PERIOD_TOOLS else {}), **extra}
         schemas.append({"type": "function", "function": {
             "name": name, "description": description,
@@ -728,7 +744,7 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
         raise HTTPException(status_code=429, detail=f"You've used today's {limit} questions. The limit resets "
                                                     "tomorrow, or an admin can reset it for you.")
 
-    names = allowed_tools(user)
+    names = allowed_tools(user) + allowed_actions(user)
     tools = _tool_schemas(names)
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
     for turn in (history or [])[-MAX_HISTORY:]:
@@ -736,7 +752,8 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
             messages.append({"role": turn["role"], "content": str(turn["content"])[:2000]})
     messages.append({"role": "user", "content": f"({period_hints()})\n{question}"})
 
-    lookups, usage = [], {"prompt_tokens": 0, "completion_tokens": 0}
+    from app.services import assistant_actions
+    lookups, proposals, usage = [], [], {"prompt_tokens": 0, "completion_tokens": 0}
     async with httpx.AsyncClient(timeout=60.0, transport=transport) as client:
         answer = ""
         for round_no in range(MAX_ROUNDS + 1):
@@ -751,6 +768,13 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
             messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": calls})
             for call in calls:
                 fn = call.get("function") or {}
+                if fn.get("name") in assistant_actions.ACTIONS:
+                    # An action is only ever proposed here; the page shows it with Confirm / Cancel.
+                    text, card = await assistant_actions.propose(db, user, fn.get("name"), fn.get("arguments"))
+                    if card:
+                        proposals.append(card)
+                    messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": text})
+                    continue
                 lookups.append({"tool": fn.get("name"), "args": fn.get("arguments")})
                 messages.append({"role": "tool", "tool_call_id": call.get("id"),
                                  "content": await run_tool(db, user, fn.get("name"), fn.get("arguments"))})
@@ -763,6 +787,7 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
     return {
         "answer": answer or "I couldn't find an answer to that.",
         "lookups": lookups,
+        "proposals": proposals,
         "usage": usage,
         "questions_left": max(limit - used - 1, 0) if limit else None,
     }

@@ -97,6 +97,8 @@ class BaseAppSettings(BaseSettings):
     ASSISTANT_BASE_URL: str = "https://codecraftapi.com/v1"
     ASSISTANT_MODEL: str | None = None
     ASSISTANT_DAILY_LIMIT: int = 10
+    # Model used to read PDF invoices (must accept images); the assistant's model when empty.
+    ASSISTANT_VISION_MODEL: str | None = None
 
     model_config = CONFIG_MODEL
 

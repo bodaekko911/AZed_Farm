@@ -2,7 +2,9 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -12,7 +14,8 @@ from app.core.navigation import render_app_header
 from app.core.permissions import get_current_user, has_permission, require_admin, require_permission
 from app.database import get_async_session
 from app.models.user import User
-from app.services import assistant_service
+from app.core.log import record
+from app.services import assistant_actions, assistant_service
 
 router = APIRouter(
     prefix="/assistant",
@@ -47,6 +50,7 @@ async def status(db: AsyncSession = Depends(get_async_session), user: User = Dep
         "questions_left": max(limit - used, 0) if limit else None,
         "can_look_up": [TOOL_LABELS[t] for t in assistant_service.allowed_tools(user)],
         "is_admin": user.role == "admin",
+        "can_record_invoices": has_permission(user, "page_pos") and has_permission(user, "action_pos_create_sale"),
     }
 
 
@@ -57,6 +61,91 @@ async def ask(data: AskRequest, db: AsyncSession = Depends(get_async_session), u
     _used, limit = await assistant_service.limit_state(db, user)
     result["daily_limit"] = limit or None
     return result
+
+
+# ── Actions (proposed in chat, done only on Confirm) ────────────────────────
+
+class ConfirmRequest(BaseModel):
+    token: str = Field(..., max_length=4000)
+
+
+@router.post("/api/actions/confirm")
+async def confirm_action(data: ConfirmRequest, db: AsyncSession = Depends(get_async_session),
+                         user: User = Depends(get_current_user)):
+    return await assistant_actions.execute(db, user, data.token)
+
+
+# ── PDF invoices → POS ──────────────────────────────────────────────────────
+
+async def _read_capped(request: Request, limit: int) -> bytes:
+    """The body, read in chunks and refused once it passes `limit`, so a huge upload never sits in memory."""
+    if int(request.headers.get("content-length") or 0) > limit:
+        raise HTTPException(status_code=413, detail="That PDF is too large — send at most 10 pages.")
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(status_code=413, detail="That PDF is too large — send at most 10 pages.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _need_pos(user: User) -> None:
+    if not (has_permission(user, "page_pos") and has_permission(user, "action_pos_create_sale")):
+        raise HTTPException(status_code=403, detail="Recording invoices needs permission to create POS sales.")
+
+
+@router.post("/api/invoices/read")
+async def read_invoices(request: Request, db: AsyncSession = Depends(get_async_session),
+                        user: User = Depends(get_current_user)):
+    """Page images of a PDF (rendered in the browser) → invoices matched to customers and products, for review.
+    Reading counts as one question toward the daily limit; nothing is recorded here."""
+    _need_pos(user)
+    if not assistant_service.is_configured():
+        raise HTTPException(status_code=503, detail="The assistant is not set up yet.")
+    used, limit = await assistant_service.limit_state(db, user)
+    if limit and used >= limit:
+        raise HTTPException(status_code=429, detail=f"You've used today's {limit} questions. The limit resets "
+                                                    "tomorrow, or an admin can reset it for you.")
+    try:
+        body = json.loads(await _read_capped(request, assistant_actions.MAX_PDF_REQUEST_BYTES))
+        pages = body.get("pages") or []
+        filename = str(body.get("filename") or "upload.pdf")[:120]
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="Couldn't read the upload.")
+    if not pages or len(pages) > assistant_actions.MAX_PDF_PAGES:
+        raise HTTPException(status_code=400, detail=f"Send 1 to {assistant_actions.MAX_PDF_PAGES} pages.")
+    if any(not isinstance(p, str) or len(p) > assistant_actions.MAX_PAGE_CHARS or not assistant_actions.IMAGE_RE.match(p)
+           for p in pages):
+        raise HTTPException(status_code=400, detail="Each page must be an image.")
+    invoices, usage = await assistant_actions.read_invoices(pages)
+    del pages, body
+    record(db, "Assistant", "ask", f"PDF invoices: {filename} ({len(invoices)} found) | lookups: read_pdf | "
+                                   f"tokens {usage['prompt_tokens']}+{usage['completion_tokens']}", user=user)
+    await db.commit()
+    used, limit = await assistant_service.limit_state(db, user)
+    return {"filename": filename, "invoices": await assistant_actions.match_invoices(db, invoices),
+            "questions_left": max(limit - used, 0) if limit else None, "daily_limit": limit or None}
+
+
+@router.get("/api/invoices/search")
+async def search_records(kind: str, q: str = "", db: AsyncSession = Depends(get_async_session),
+                         user: User = Depends(get_current_user)):
+    _need_pos(user)
+    if kind not in ("customers", "products"):
+        raise HTTPException(status_code=400, detail="kind must be customers or products")
+    return {"results": await assistant_actions.search(db, kind, q[:80])}
+
+
+@router.post("/api/invoices/record")
+async def record_invoice(request: Request, db: AsyncSession = Depends(get_async_session),
+                         user: User = Depends(get_current_user)):
+    try:
+        data = json.loads(await _read_capped(request, 200_000))
+        assert isinstance(data, dict)
+    except (ValueError, AssertionError):
+        raise HTTPException(status_code=400, detail="Couldn't read the invoice.")
+    return await assistant_actions.record_invoice(db, user, data)
 
 
 # ── Admin: usage and limits ─────────────────────────────────────────────────
@@ -185,6 +274,53 @@ button.send{background:linear-gradient(135deg,var(--lime),var(--green));border:n
             color:#0a1a00;cursor:pointer;font-family:var(--sans)}
 button.send:disabled{opacity:.5;cursor:default}
 .left{font-size:11.5px;color:var(--muted);max-width:860px;margin:6px auto 0}
+.attach{background:var(--card);border:1px solid var(--border2);border-radius:12px;min-width:48px;padding:0 12px;color:var(--sub);cursor:pointer;font-size:18px}
+.attach:hover{color:var(--text);border-color:var(--lime)}
+.attach[hidden]{display:none}
+/* Action cards and PDF invoice review */
+.act-card,.inv-card{border:1px solid var(--border2);border-radius:12px;padding:12px 14px;margin-top:12px;background:var(--card2);white-space:normal}
+.act-title,.inv-title{font-weight:700;font-size:14px;margin-bottom:8px}
+.act-table{border-collapse:collapse;font-size:13px}
+.act-table th{color:var(--muted);font-weight:500;text-align:start;padding:3px 14px 3px 0;vertical-align:top;white-space:nowrap}
+.act-table td{padding:3px 0}
+.act-buttons{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.act-btn{background:var(--card);border:1px solid var(--border2);border-radius:9px;padding:7px 14px;color:var(--text);cursor:pointer;font-family:var(--sans);font-size:13px}
+.act-btn:hover:not(:disabled){border-color:var(--lime)}
+.act-primary{background:linear-gradient(135deg,var(--lime),var(--green));border:none;color:#0a1a00;font-weight:700}
+.act-btn:disabled{opacity:.45;cursor:default}
+.act-status{font-size:12.5px;margin-top:8px;color:var(--muted)}
+.act-status.ok{color:var(--green)}.act-status.bad{color:var(--danger)}
+.inv-bubble{width:100%;max-width:100%}
+.inv-file{font-weight:600;margin-bottom:4px}
+.inv-muted{color:var(--muted);font-size:12.5px}
+.inv-head{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.inv-head .inv-title{margin:0 auto 0 0}
+.inv-head label,.inv-foot label{font-size:12.5px;color:var(--sub);display:inline-flex;gap:6px;align-items:center}
+.inv-row{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;margin-bottom:8px;font-size:13px}
+.inv-label{color:var(--muted);min-width:70px;padding-top:6px}
+.inv-card input,.inv-card select{background:var(--card);border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:5px 7px;font-family:var(--sans);font-size:12.5px;max-width:100%}
+.inv-card input[type=number]{width:84px;font-family:var(--mono)}
+.inv-picker{display:flex;flex-direction:column;gap:4px;min-width:200px;flex:1}
+.inv-select{width:100%}
+.inv-results{display:flex;flex-direction:column;gap:2px;max-height:180px;overflow:auto}
+.inv-result{text-align:start;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);cursor:pointer;font-size:12.5px;font-family:var(--sans)}
+.inv-result:hover{border-color:var(--lime)}
+.inv-table{width:100%;border-collapse:collapse;font-size:12.5px;margin:6px 0}
+.inv-table th{color:var(--muted);font-weight:500;text-align:start;padding:5px 6px;border-bottom:1px solid var(--border2)}
+.inv-table td{padding:6px;border-bottom:1px solid var(--border);vertical-align:top}
+.inv-table td.num{font-family:var(--mono);text-align:end;white-space:nowrap;padding-top:11px}
+.inv-desc{max-width:180px;color:var(--sub);padding-top:11px!important}
+.inv-foot{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.inv-total{margin-left:auto;font-weight:700;font-size:13.5px}
+.inv-ok{color:var(--green)}.inv-bad{color:var(--danger)}
+.inv-hint{color:var(--warn);font-size:11.5px;margin-top:3px}.inv-hint:empty{display:none}
+.inv-conv{color:var(--blue);font-size:11.5px;margin-top:3px}.inv-conv:empty{display:none}
+.inv-problems{margin:8px 0 0;padding-inline-start:18px;color:var(--warn);font-size:12.5px}
+.inv-problems:empty{display:none}
+.inv-card.ready{border-color:color-mix(in srgb,var(--green) 55%,transparent)}
+.inv-card.done{opacity:.8}
+@media (max-width:640px){.inv-table thead{display:none}.inv-table tr{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+  .inv-table td{border:none}.inv-table td.inv-desc,.inv-table td:nth-child(2){grid-column:1/-1}}
 .notice{background:color-mix(in srgb,var(--warn) 9%,transparent);border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);color:var(--warn);
         border-radius:10px;padding:11px 14px;font-size:13px;margin-top:14px}
 .admin{margin-top:16px;background:var(--card);border:1px solid var(--border);border-radius:12px}
@@ -205,6 +341,7 @@ button.send:disabled{opacity:.5;cursor:default}
 </style>
 <script src="/static/auth-guard.js"></script>
 <script src="/static/ask-chart.js"></script>
+<script src="/static/ask-actions.js"></script>
 </head>
 <body>
 """ + render_app_header(current_user, "page_assistant") + r"""
@@ -246,6 +383,8 @@ button.send:disabled{opacity:.5;cursor:default}
 </div>
 <div class="bar">
     <div class="bar-inner">
+        <button class="attach" id="attach" hidden title="Record sales invoices from a PDF" aria-label="Attach a PDF of invoices">📎</button>
+        <input type="file" id="pdf" accept="application/pdf,.pdf" hidden>
         <textarea id="q" placeholder="Ask a question… / اسأل سؤالاً…" dir="auto" maxlength="1000"></textarea>
         <button class="send" id="send">Ask</button>
     </div>
@@ -345,6 +484,7 @@ async function loadStatus(){
         if(!s.configured) document.getElementById("notice").innerHTML =
             `<div class="notice">The assistant isn't set up yet. An admin needs to add ASSISTANT_API_KEY and ASSISTANT_MODEL to the server settings.</div>`;
         if(s.is_admin) document.getElementById("admin").style.display = "";
+        document.getElementById("attach").hidden = !(s.can_record_invoices && s.configured && window.AskActions);
     }catch(e){}
 }
 async function send(text){
@@ -363,7 +503,8 @@ async function send(text){
         if(!r.ok){ add("bot", data.detail || "Something went wrong.", "", "err"); return; }
         // Charts stay out of the history sent back: the model doesn't need its own chart data again.
         history.push({role:"user", content:q}, {role:"assistant", content: window.AskChart ? AskChart.strip(data.answer) : data.answer});
-        add("bot", data.answer, data.lookups.length ? `Looked up: ${[...new Set(data.lookups)].join(", ")}` : "", "", true);
+        const answered = add("bot", data.answer, data.lookups.length ? `Looked up: ${[...new Set(data.lookups)].join(", ")}` : "", "", true);
+        if((data.proposals || []).length && window.AskActions) AskActions.cards(answered.querySelector(".bubble"), data.proposals);
         if(data.questions_left !== null) showLeft(data.questions_left, data.daily_limit);
         if(document.getElementById("admin").open) loadUsage();
     }catch(e){
@@ -440,6 +581,13 @@ document.getElementById("reset-all").onclick = async () => {
 document.getElementById("admin").addEventListener("toggle", e => { if(e.target.open) loadUsage(); });
 
 document.getElementById("send").onclick = () => send();
+document.getElementById("attach").onclick = () => document.getElementById("pdf").click();
+document.getElementById("pdf").onchange = e => {
+    const file = e.target.files[0]; e.target.value = "";
+    if(!file) return;
+    document.getElementById("chips").style.display = "none";
+    AskActions.pdf(file, {log, toast, onLimit: (left, limit) => { if(left !== null && left !== undefined) showLeft(left, limit); }});
+};
 document.getElementById("newchat").onclick = newChat;
 document.getElementById("q").addEventListener("keydown", e => { if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); } });
 document.querySelectorAll(".chip").forEach(c => c.onclick = () => send(c.innerText));
