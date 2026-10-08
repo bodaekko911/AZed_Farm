@@ -96,7 +96,7 @@ class BaseAppSettings(BaseSettings):
     ASSISTANT_API_KEY: str | None = None
     ASSISTANT_BASE_URL: str = "https://codecraftapi.com/v1"
     ASSISTANT_MODEL: str | None = None
-    ASSISTANT_DAILY_LIMIT: int = 20
+    ASSISTANT_DAILY_LIMIT: int = 10
 
     model_config = CONFIG_MODEL
 
