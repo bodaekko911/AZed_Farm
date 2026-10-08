@@ -308,3 +308,20 @@ def fake_endpoint_reporting_errors(seen):
                 "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "products", "arguments": "{}"}}]}}]})
         return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "The lookup failed."}}]})
     return httpx.MockTransport(handler)
+
+
+def test_no_period_named_means_all_time_from_the_first_record():
+    from datetime import date
+    from app.models.expense import Expense, ExpenseCategory
+    session, db = make_db()
+    session.add(ExpenseCategory(id=1, name="Seeds", account_code="5001"))
+    session.add(Expense(category_id=1, expense_date=date(2024, 3, 5), amount=Decimal("10")))
+    session.commit()
+    today = assistant_service.today_local()
+    assert run(assistant_service._dates(db, {})) == (date(2024, 3, 5), today)
+    assert run(assistant_service._dates(db, {"date_to": "2025-01-31"})) == (date(2024, 3, 5), date(2025, 1, 31))
+    # A period that is named is used as given — longer than a year is fine.
+    assert run(assistant_service._dates(db, {"date_from": "2023-01-01", "date_to": "2025-12-31"})) == \
+        (date(2023, 1, 1), date(2025, 12, 31))
+    out = json.loads(run(assistant_service.run_tool(db, user(), "expenses", "{}")))
+    assert out["period"] == f"2024-03-05 to {today}" and out["total"] == 10.0
