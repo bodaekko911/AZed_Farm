@@ -456,3 +456,31 @@ def test_an_empty_fast_answer_is_written_by_the_main_model_from_the_same_lookups
     # The products lookup ran once; the main model got its result and wrote the answer.
     assert calls == [("fast-model", 0), ("fast-model", 1), ("test-model", 1)]
     assert result["answer"] == "From the lookup." and result["lookups"] == [{"tool": "products", "args": "{}"}]
+
+
+def test_pricing_flags_low_margins_and_suggests_a_rounded_price():
+    session, db = make_db()
+    session.add_all([
+        Product(id=3, sku="HON", name="Raw Honey 500g", unit="piece", price=Decimal("12"), cost=Decimal("10"),
+                stock=Decimal("5"), is_active=True),
+        Product(id=4, sku="OIL", name="Olive Oil 1L", unit="piece", price=Decimal("90"), cost=Decimal("100"),
+                stock=Decimal("5"), is_active=True),
+        Product(id=5, sku="NEW", name="New Jam", unit="piece", price=Decimal("40"), cost=None, stock=1, is_active=True),
+    ])
+    session.commit()
+    out = json.loads(run(assistant_service.run_tool(db, user(), "pricing", "{}")))
+    assert out["target_margin_pct"] == 30
+    assert [r["sku"] for r in out["below_cost"]] == ["OIL"]
+    honey = next(r for r in out["below_target"] if r["sku"] == "HON")
+    assert honey["margin_at_catalogue_pct"] == 16.7
+    assert honey["suggested_price"] == 14.5 and honey["change_pct"] == 20.8        # 10 / 0.7 = 14.29 → 14.5
+    assert {"name": "New Jam", "issue": "no cost recorded — can't advise"} in out["cant_advise"]
+    assert any(r["name"] == "500g Jar" and "unit mix-up" in r["issue"] for r in out["cant_advise"])
+    basil = json.loads(run(assistant_service.run_tool(db, user(), "pricing",
+                                                      json.dumps({"product": "basil", "target_margin": 80}))))
+    [b] = basil["products"]
+    assert b["below_target"] and b["suggested_price"] == 1.2                         # 0.233 / 0.2 = 1.165 → 1.2
+
+
+def test_nice_prices_round_up_by_size():
+    assert [assistant_service.nice_price(v) for v in (0.8123, 3.1, 14.29, 142.1, 1234)] == [0.82, 3.1, 14.5, 145, 1240]

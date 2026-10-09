@@ -270,6 +270,31 @@ async def propose_stock(db, user, args: dict) -> dict:
     return {"kind": "stock", "title": "Adjust stock", "lines": lines, "payload": payload}
 
 
+async def propose_price(db, user, args: dict) -> dict:
+    from app.models.product import Product
+    products = (await db.execute(select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))))\
+        .scalars().all()
+    needle = str(args.get("product") or "").strip()
+    by_sku = [p for p in products if (p.sku or "").lower() == needle.lower()]
+    product = by_sku[0] if by_sku else _one(needle, products, lambda p: p.name, "product")
+    try:
+        new = round(float(args.get("new_price")), 3)
+    except (TypeError, ValueError):
+        raise ValueError("new_price is required.")
+    if new <= 0:
+        raise ValueError("The price must be more than 0.")
+    old, cost = float(product.price or 0), float(product.cost or 0)
+    if abs(new - old) < 0.0005:
+        raise ValueError(f"{product.name} is already {old:g}.")
+    lines = [["Product", f"{product.name} ({product.sku})"], ["Price now", f"{old:g} EGP per {product.unit or 'unit'}"],
+             ["New price", f"{new:g} EGP"], ["Change", f"{(new - old) / old * 100:+.1f}%" if old else "—"]]
+    if cost > 0:
+        lines.append(["Margin at new price", f"{(new - cost) / new * 100:.1f}% (card cost {cost:g})"])
+    lines.append(["Note", "Named customers pay the catalogue price at the POS, so this applies to their next sale"])
+    return {"kind": "price", "title": "Change price", "lines": lines,
+            "payload": {"product_id": product.id, "old_price": old, "new_price": new}}
+
+
 # name → (description, parameters, permissions, propose function)
 ACTIONS = {
     "propose_expense": (
@@ -292,6 +317,11 @@ ACTIONS = {
         {"product": {"type": "string", "description": "Product name or SKU"}, "set_to": {"type": "number"},
          "change_by": {"type": "number"}, "note": {"type": "string"}},
         ("page_inventory", "action_inventory_adjust"), propose_stock),
+    "propose_price_change": (
+        "PROPOSE changing one product's catalogue price (the user confirms; nothing is saved by this call). Only when "
+        "the user asks to change a price.",
+        {"product": {"type": "string", "description": "Product name or SKU"}, "new_price": {"type": "number"}},
+        ("page_products", "action_products_edit"), propose_price),
 }
 
 
@@ -387,6 +417,24 @@ async def execute(db, user, token: str) -> dict:
         note = "Via Ask" + (f": {p['note']}" if p.get("note") else "")
         out = await adjust_stock(StockAdjustment(product_id=product.id, qty=delta, note=note), db, current_user=user)
         return {"ok": True, "message": f"{product.name}: stock is now {out['new_stock']:g} {product.unit or ''}."}
+
+    if kind == "price":
+        _need(user, "page_products", "action_products_edit")
+        from app.models.product import Product
+        product = (await db.execute(select(Product).where(Product.id == p["product_id"]))).scalar_one_or_none()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        if abs(float(product.price or 0) - float(p["old_price"])) > 0.0005:
+            raise HTTPException(status_code=409, detail=f"{product.name}'s price changed to {float(product.price):g} "
+                                                        "since this was suggested. Ask again.")
+        product.price = Decimal(str(p["new_price"]))
+        record(db, "Products", "edit_product",
+               f"Edited product: [{product.sku}] {product.name} — price {p['old_price']:g} → {p['new_price']:g} (via Ask)",
+               user=user, ref_type="product", ref_id=product.id)
+        record(db, "Assistant", "action", f"Confirmed: price {product.name} {p['new_price']:g}", user=user,
+               ref_type="assistant_action", ref_id=body["nonce"])
+        await db.commit()
+        return {"ok": True, "message": f"{product.name} now costs {p['new_price']:g} EGP."}
 
     raise HTTPException(status_code=400, detail="Unknown action")
 

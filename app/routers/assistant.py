@@ -30,7 +30,7 @@ TOOL_LABELS = {
     "expenses": "Expenses", "products": "Products & stock", "b2b_balances": "B2B balances",
     "payroll": "Payroll", "farm_harvest": "Farm harvest", "sales_trend": "Sales trend",
     "stock": "Inventory", "spoilage": "Spoilage", "suppliers": "Suppliers", "pos_customers": "POS customers",
-    "account_balances": "Account balances",
+    "account_balances": "Account balances", "pricing": "Pricing",
 }
 
 
@@ -400,6 +400,7 @@ button.send:disabled{opacity:.5;cursor:default}
         <button class="chip">ما المنتجات التي قاربت على النفاد؟</button>
         <button class="chip">How much did spoilage cost us this month, and on which products?</button>
         <button class="chip">How much do we owe suppliers?</button>
+        <button class="chip">Which products are priced too low?</button>
     </div>
     <div id="log"></div>
 </div>

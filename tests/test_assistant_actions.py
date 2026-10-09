@@ -453,3 +453,26 @@ def test_an_invoice_with_sharm_delivery_records_the_delivery_item():
         names = [i.name for i in (await db.execute(select(InvoiceItem))).scalars().all()]
         assert names == ["Raw Honey 500g", "Sharm Delivery"]
     scenario(go)
+
+
+def test_a_price_change_is_proposed_then_applied_once_and_refused_if_the_price_moved():
+    async def go(db):
+        _t, card = await act.propose(db, admin(), "propose_price_change", json.dumps({"product": "honey", "new_price": 165}))
+        lines = dict(card["lines"])
+        assert lines["Price now"].startswith("150") and lines["Change"] == "+10.0%" and "45.5%" in lines["Margin at new price"]
+        out = await act.execute(db, admin(), card["token"])
+        assert "165" in out["message"]
+        honey = (await db.execute(select(Product).where(Product.id == 2))).scalar_one()
+        await db.refresh(honey)
+        assert float(honey.price) == 165
+        # A suggestion made against an older price is refused rather than overwriting a newer change.
+        _t, stale = await act.propose(db, admin(), "propose_price_change", json.dumps({"product": "honey", "new_price": 170}))
+        honey.price = Decimal("168")
+        await db.commit()
+        with pytest.raises(HTTPException) as moved:
+            await act.execute(db, admin(), stale["token"])
+        assert moved.value.status_code == 409
+        # Cashiers can't change prices.
+        text, none = await act.propose(db, cashier(), "propose_price_change", json.dumps({"product": "honey", "new_price": 1}))
+        assert none is None and "permission" in json.loads(text)["error"]
+    scenario(go)

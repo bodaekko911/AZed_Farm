@@ -80,7 +80,15 @@ Thinking it through:
   row's days_worked differs, say so and why (payroll run on <date>, before attendance was complete). If auto_mode is
   "absent" or most days are Day Offs, point that out — it usually means the employee was left marked absent.
 
-Actions (adding an expense, logging attendance, adjusting stock):
+Pricing:
+- For "is X priced right", "what should X cost", "which products are too cheap", "what price gives X% margin": use
+  pricing. Say the target margin used (30% unless the user gave one) and that costs are material costs only.
+- Lead with what matters: products below cost first, then the biggest gains. Give the suggested price, the change in
+  %, and the extra revenue — and say plainly that it assumes the same volume sells at the new price.
+- Products with no cost or a suspicious cost: say so; don't advise a price for them.
+- Only propose a price change (propose_price_change) when the user asks to change a price.
+
+Actions (adding an expense, logging attendance, adjusting stock, changing a price):
 - You can't change anything yourself. When the user asks for one of these, call the matching propose_* tool; the page
   shows a card and the user presses Confirm. Then say in one line what will happen "once you confirm" — never say it
   is done, saved or recorded.
@@ -494,6 +502,88 @@ async def _customers(db, args):
     }
 
 
+def nice_price(value: float) -> float:
+    """Round a price UP to a step that suits its size — 0.01 below 1, 0.05 to 10, 0.5 to 100, 5 to 1,000, then 10 —
+    so rounding never adds more than ~3% on top of the target."""
+    import math
+    step = 0.01 if value < 1 else 0.05 if value < 10 else 0.5 if value < 100 else 5 if value < 1000 else 10
+    return round(math.ceil(round(value / step, 6)) * step, 3)
+
+
+async def _pricing(db, args):
+    """Catalogue price vs current cost per product, what is really received after discounts, and the price that
+    reaches a target margin. Costs are the profitability report's current cost (batches, else the product card)."""
+    from app.core.product_types import is_stock_tracked_product
+    from app.models.product import Product
+    from app.routers.reports import _build_profitability_report
+    try:
+        target = float(args.get("target_margin") if args.get("target_margin") is not None else 30)
+    except (TypeError, ValueError):
+        raise ValueError("target_margin must be a percentage, e.g. 30")
+    if not 0 < target < 95:
+        raise ValueError("target_margin must be between 0 and 95 (%)")
+    d_from, d_to = await _dates(db, args)
+    s, e = utc_bounds(d_from, d_to)
+    sold = {r["product_id"]: r for r in (await _build_profitability_report(db, d_from=s, d_to=e))["products"]}
+    words = [w for w in str(args.get("product") or "").lower().split() if w]
+    products = (await db.execute(select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))))\
+        .scalars().all()
+
+    rows = []
+    for p in products:
+        if not is_stock_tracked_product(p) or (words and not all(w in (p.name or "").lower() for w in words)):
+            continue
+        r = sold.get(p.id) or {}
+        price = float(p.price or 0)
+        if r.get("today_cost_source") not in (None, "missing") and r.get("today_cost"):
+            cost, source = float(r["today_cost"]), r["today_cost_source"]
+        else:
+            cost, source = float(p.cost or 0), ("card" if p.cost else "missing")
+        row = {"name": p.name, "sku": p.sku, "unit": p.unit, "catalogue_price": price, "cost": round(cost, 3),
+               "cost_source": source, "qty_sold": r.get("qty_sold", 0), "avg_sold_price": r.get("avg_price")}
+        if source == "missing" or cost <= 0:
+            row["issue"] = "no cost recorded — can't advise"
+        elif price > 0 and cost > 3 * price:
+            row["issue"] = "cost looks wrong (over 3× the price — probably a unit mix-up)"
+        else:
+            row["margin_at_catalogue_pct"] = round((price - cost) / price * 100, 1) if price else None
+            avg = row["avg_sold_price"]
+            if avg:
+                row["margin_actually_received_pct"] = round((avg - cost) / avg * 100, 1)
+                row["discount_vs_catalogue_pct"] = round((price - avg) / price * 100, 1) if price else None
+            suggested = nice_price(cost / (1 - target / 100))
+            row["below_cost"] = price < cost
+            row["below_target"] = price < suggested - 1e-9
+            if row["below_target"]:
+                row["suggested_price"] = suggested
+                row["change_pct"] = round((suggested - price) / price * 100, 1) if price else None
+                if row["qty_sold"]:
+                    row["extra_revenue_same_volume"] = round((suggested - price) * row["qty_sold"], 2)
+        rows.append(row)
+
+    if words:
+        return {"target_margin_pct": target, "sales_period": f"{d_from} to {d_to}", "products": rows[:15],
+                "note": "cost = material cost only (no labour/overhead); suggested_price is the lowest rounded price "
+                        "that reaches the target margin"}
+    priced = [r for r in rows if "issue" not in r]
+    below_cost = [r for r in priced if r["below_cost"]]
+    below_target = sorted((r for r in priced if r["below_target"] and not r["below_cost"]),
+                          key=lambda r: -(r.get("extra_revenue_same_volume") or 0))
+    discounted = sorted((r for r in priced if (r.get("discount_vs_catalogue_pct") or 0) >= 5),
+                        key=lambda r: -(r["discount_vs_catalogue_pct"] or 0))
+    return {
+        "target_margin_pct": target, "sales_period": f"{d_from} to {d_to}",
+        "products_checked": len(rows), "at_or_above_target": len(priced) - len(below_cost) - len(below_target),
+        "below_cost": below_cost[:15], "below_target": below_target[:20],
+        "sold_well_below_catalogue": discounted[:10],
+        "cant_advise": [{"name": r["name"], "issue": r["issue"]} for r in rows if "issue" in r][:15],
+        "extra_revenue_if_all_suggestions_same_volume": round(
+            sum(r.get("extra_revenue_same_volume") or 0 for r in below_cost + below_target), 2),
+        "note": "cost = material cost only (no labour/overhead); extra revenue assumes the same quantities sell at "
+                "the new price, which may not hold",
+    }
+
+
 async def _accounts(db, args):
     from app.models.accounting import Account
     rows = (await db.execute(select(Account).order_by(Account.code))).scalars().all()
@@ -563,11 +653,18 @@ TOOLS: dict[str, tuple[str, dict, tuple[str, ...], ToolFn]] = {
         "Retail / B2C (POS) customers for a period: number of invoices, total, average invoice, top customers by "
         "spend, unpaid. B2B clients are in b2b_balances.",
         {}, ("page_customers",), _customers),
+    "pricing": (
+        "Pricing advice: catalogue price vs current cost per product, the margin actually received after discounts, "
+        "products priced below cost or below a target margin, and the rounded price that reaches the target. "
+        "`target_margin` in % (default 30); `product` for one product; the period only sets which sales are used "
+        "for 'actually received' and volumes.",
+        {"target_margin": {"type": "number"}, "product": {"type": "string"}},
+        ("page_reports", "tab_reports_profitability"), _pricing),
     "account_balances": (
         "Ledger account balances now (cash, receivables, inventory, payables, revenue, expenses…).",
         {}, ("page_accounting",), _accounts),
 }
-PERIOD_TOOLS = {"sales_summary", "product_profitability", "profit_and_loss", "expenses", "farm_harvest",
+PERIOD_TOOLS = {"sales_summary", "product_profitability", "profit_and_loss", "expenses", "farm_harvest", "pricing",
                 "sales_trend", "stock", "spoilage", "suppliers", "pos_customers"}
 
 
