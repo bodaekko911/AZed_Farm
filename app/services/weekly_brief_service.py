@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 EMAIL_RE = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
 TICK_SECONDS = 300
 CATCH_UP = timedelta(days=2)       # how late a missed brief may still go out
+TITLE = "Azed Farm"                 # how the brief names the business, in the subject and heading
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
@@ -325,7 +326,7 @@ def render(data: dict, summary: Optional[str]) -> tuple[str, str, str]:
                           data["stock"])
     week = _span(data["week_start"], data["week_end"])
     profit_word = "profit" if p["net"] >= 0 else "loss"
-    subject = (f"Weekly brief — {week}: {_m(s['net'])} EGP sales, "
+    subject = (f"{TITLE} weekly brief — {week}: {_m(s['net'])} EGP sales, "
                f"{_m(abs(p['net']))} EGP {profit_word}")
 
     farm_total = ""
@@ -378,10 +379,10 @@ def render(data: dict, summary: Optional[str]) -> tuple[str, str, str]:
 
     css_td = "padding:5px 10px 5px 0;vertical-align:top;font-size:14px"
     parts = ["<div style=\"font-family:Segoe UI,Arial,sans-serif;color:#1a1e14;max-width:640px\">",
-             f"<h2 style=\"margin:0 0 4px;font-size:20px\">{e(settings.APP_NAME)} — weekly brief</h2>",
+             f"<h2 style=\"margin:0 0 4px;font-size:20px\">{e(TITLE)} — weekly brief</h2>",
              f"<div style=\"color:#667;font-size:13px;margin-bottom:14px\">{e(week)} · compared with "
              f"{e(_span(data['prior_start'], data['prior_end']))}</div>"]
-    text = [f"{settings.APP_NAME} — weekly brief, {week}", ""]
+    text = [f"{TITLE} — weekly brief, {week}", ""]
     if summary:
         parts.append("<div style=\"background:#f2f7f4;border-left:4px solid #0f8a43;padding:10px 14px;margin-bottom:16px;"
                      "font-size:14px;line-height:1.6\">" + "<br>".join(e(l) for l in summary.splitlines()) + "</div>")

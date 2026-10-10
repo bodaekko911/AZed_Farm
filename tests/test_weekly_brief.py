@@ -248,7 +248,8 @@ def sample(**over):
 
 def test_the_email_reads_well_and_escapes_names():
     subject, html, text = brief.render(sample(), "• Sales up 12%\n• <i>Loss</i> on the week")
-    assert subject == "Weekly brief — Sat 03 Oct – Fri 09 Oct: 52,000 EGP sales, 8,000 EGP loss"
+    assert subject == "Azed Farm weekly brief — Sat 03 Oct – Fri 09 Oct: 52,000 EGP sales, 8,000 EGP loss"
+    assert "Azed Farm — weekly brief</h2>" in html and text.startswith("Azed Farm — weekly brief")
     assert "Basil &lt;b&gt;HOF&lt;/b&gt;" in html and "<b>HOF</b>" not in html
     assert "&lt;i&gt;Loss&lt;/i&gt;" in html
     assert "Joud &amp; Bahaa" in html and "&amp;amp;" not in html
