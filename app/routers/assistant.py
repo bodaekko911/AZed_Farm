@@ -223,10 +223,13 @@ class BriefSettingsIn(BaseModel):
     send_time: str = Field("09:00", max_length=5)
     recipients: str = Field("", max_length=4000)
     include_ai_summary: bool = True
+    monthly_enabled: bool = False
+    monthly_day: int = Field(1, ge=1, le=28)          # every month has a 28th
 
 
 class BriefTestIn(BaseModel):
     to: Optional[str] = Field(None, max_length=4000)  # the addresses in the box, one per line
+    period: str = Field("week", pattern="^(week|month)$")
 
 
 def _brief_out(cfg) -> dict:
@@ -234,6 +237,8 @@ def _brief_out(cfg) -> dict:
     return {"enabled": bool(cfg.enabled), "send_weekday": int(cfg.send_weekday), "send_time": cfg.send_time,
             "recipients": cfg.recipients or "", "include_ai_summary": bool(cfg.include_ai_summary),
             "last_sent_week": cfg.last_sent_week, "last_status": cfg.last_status,
+            "monthly_enabled": bool(cfg.monthly_enabled), "monthly_day": int(cfg.monthly_day or 1),
+            "last_sent_month": cfg.last_sent_month,
             "mail_configured": mail_service.is_configured()}
 
 
@@ -254,14 +259,16 @@ async def save_brief_settings(data: BriefSettingsIn, db: AsyncSession = Depends(
         raise HTTPException(status_code=400, detail="Not valid e-mail addresses: " + ", ".join(bad[:5]))
     if not brief.valid_time(data.send_time):
         raise HTTPException(status_code=400, detail="Send time must be HH:MM, e.g. 09:00")
-    if data.enabled and not good:
+    if (data.enabled or data.monthly_enabled) and not good:
         raise HTTPException(status_code=400, detail="Add at least one recipient to turn the brief on.")
     cfg = await brief.get_settings(db)
     hh, mm = data.send_time.split(":")
     cfg.enabled, cfg.send_weekday, cfg.send_time = data.enabled, data.send_weekday, f"{int(hh):02d}:{mm}"
     cfg.recipients, cfg.include_ai_summary = "\n".join(good), data.include_ai_summary
+    cfg.monthly_enabled, cfg.monthly_day = data.monthly_enabled, data.monthly_day
     record(db, "assistant", "update",
-           f"Weekly brief {'on' if data.enabled else 'off'}: {brief.WEEKDAYS[data.send_weekday]} {cfg.send_time} "
+           f"Weekly brief {'on' if data.enabled else 'off'}: {brief.WEEKDAYS[data.send_weekday]} {cfg.send_time}; "
+           f"monthly brief {'on' if data.monthly_enabled else 'off'}: day {data.monthly_day}; "
            f"to {len(good)} recipient(s)", user=admin, ref_type="weekly_brief")
     await db.commit()
     return _brief_out(cfg)
@@ -270,10 +277,11 @@ async def save_brief_settings(data: BriefSettingsIn, db: AsyncSession = Depends(
 @router.post("/api/admin/brief/test")
 async def send_test_brief(data: Optional[BriefTestIn] = None, db: AsyncSession = Depends(get_async_session),
                           _admin: User = Depends(require_admin)):
-    """Send last week's brief now, marked [Test], to the addresses in the recipients box (else the saved list).
-    It doesn't count as that week's brief, so the scheduled one still goes out."""
+    """Send the last week's (or last month's) brief now, marked [Test], to the addresses in the recipients box
+    (else the saved list). It doesn't count as that period's brief, so the scheduled one still goes out."""
     from app.services import weekly_brief_service as brief
     text = data.to if data else None
+    period = data.period if data else "week"
     if text is None:
         text = (await brief.get_settings(db)).recipients or ""
     good, bad = brief.parse_recipients(text)
@@ -282,19 +290,22 @@ async def send_test_brief(data: Optional[BriefTestIn] = None, db: AsyncSession =
     if not good:
         raise HTTPException(status_code=400, detail="Add at least one recipient first.")
     try:
-        await brief.send(db, only_to=good)
+        await brief.send(db, only_to=good, period=period)
     except Exception as exc:  # noqa: BLE001  shown to the admin as is
         raise HTTPException(status_code=400, detail=f"Not sent: {exc}")
-    return {"ok": True, "message": f"Test brief sent to {len(good)} recipient{'s' if len(good) != 1 else ''}: "
+    return {"ok": True, "message": f"Test {'monthly' if period == 'month' else 'weekly'} brief sent to {len(good)} recipient{'s' if len(good) != 1 else ''}: "
                                    + ", ".join(good)}
 
 
 @router.get("/admin/brief/preview", response_class=HTMLResponse)
-async def preview_brief(db: AsyncSession = Depends(get_async_session), _admin: User = Depends(require_admin)):
-    """The brief for the last 7 full days, as it would be e-mailed (figures only — no AI call, nothing sent)."""
+async def preview_brief(period: str = "week", db: AsyncSession = Depends(get_async_session),
+                        _admin: User = Depends(require_admin)):
+    """The brief for the last 7 full days (or last month), as it would be e-mailed — figures only, no AI call,
+    nothing sent."""
     from html import escape
     from app.services import weekly_brief_service as brief
-    subject, html, _text = brief.render(await brief.build(db), None)
+    data = await (brief.build_month(db) if period == "month" else brief.build(db))
+    subject, html, _text = brief.render(data, None)
     return HTMLResponse(f"<!doctype html><meta charset=utf-8><title>{escape(subject)}</title>"
                         f"<body style='background:#fff;padding:24px'>{html}</body>")
 
@@ -485,7 +496,7 @@ button.send:disabled{opacity:.5;cursor:default}
         </div>
     </details>
     <details class="admin" id="brief" style="display:none">
-        <summary>Weekly brief e-mail · admin</summary>
+        <summary>Weekly &amp; monthly brief e-mail · admin</summary>
         <div class="admin-body">
             <div id="brief-mail" class="brief-note"></div>
             <div class="brief-form">
@@ -498,6 +509,10 @@ button.send:disabled{opacity:.5;cursor:default}
                     <option value="4">Friday</option></select>
                     at <input type="time" id="brief-time" value="09:00"> <span class="brief-note">(Egypt time)</span>
                     <div class="brief-note">It covers the 7 days before that day, compared with the week before.</div></div>
+                <label for="brief-mon">Monthly brief</label>
+                <div><div class="brief-check"><input type="checkbox" id="brief-mon"><span>Also send one every month, on day</span>
+                    <select id="brief-mday"></select></div>
+                    <div class="brief-note">It covers the whole previous month, compared with the month before — same time and recipients.</div></div>
                 <label for="brief-to">Recipients</label>
                 <div><textarea id="brief-to" placeholder="owner@example.com&#10;manager@example.com"></textarea>
                     <div class="brief-note">One e-mail per line. Everyone gets it as Bcc, so they don't see each other's addresses.</div></div>
@@ -507,7 +522,9 @@ button.send:disabled{opacity:.5;cursor:default}
             <div class="brief-actions">
                 <button class="ghost" id="brief-save">Save</button>
                 <button class="ghost" id="brief-test">Send a test</button>
+                <button class="ghost" id="brief-test-month">Send a monthly test</button>
                 <a class="ghost" href="/assistant/admin/brief/preview" target="_blank" rel="noopener" style="text-decoration:none">Preview last week's brief</a>
+                <a class="ghost" href="/assistant/admin/brief/preview?period=month" target="_blank" rel="noopener" style="text-decoration:none">Preview last month's</a>
             </div>
             <div id="brief-status" class="brief-note"></div>
         </div>
@@ -733,12 +750,15 @@ function showBrief(b){
     $b("brief-on").checked = !!b.enabled; $b("brief-day").value = String(b.send_weekday ?? 5);
     $b("brief-time").value = b.send_time || "09:00";
     $b("brief-to").value = b.recipients || ""; $b("brief-ai").checked = b.include_ai_summary !== false;
+    $b("brief-mon").checked = !!b.monthly_enabled; $b("brief-mday").value = String(b.monthly_day || 1);
     $b("brief-mail").textContent = b.mail_configured ? ""
         : "E-mail isn't set up on the server yet: add MAIL_RELAY_URL and MAIL_RELAY_SECRET (the Gmail relay) in Railway Variables.";
     $b("brief-mail").className = b.mail_configured ? "brief-note" : "brief-note brief-warn";
     $b("brief-status").textContent = (b.last_status ? `Last: ${b.last_status}` : "Not sent yet.")
-        + (b.last_sent_week ? ` (week ending ${b.last_sent_week})` : "");
+        + (b.last_sent_week ? ` · last week sent: ending ${b.last_sent_week}` : "")
+        + (b.last_sent_month ? ` · last month sent: ${b.last_sent_month}` : "");
 }
+for(let d = 1; d <= 28; d++){ const o = document.createElement("option"); o.value = String(d); o.textContent = String(d); $b("brief-mday").appendChild(o); }
 async function loadBrief(){
     try{ showBrief(await (await fetch("/assistant/api/admin/brief")).json()); }
     catch(e){ $b("brief-status").textContent = "Couldn't load the brief settings."; }
@@ -748,20 +768,24 @@ $b("brief-save").onclick = async () => {
     try{
         showBrief(await adminPost("/assistant/api/admin/brief", {enabled: $b("brief-on").checked,
             send_weekday: Number($b("brief-day").value), send_time: $b("brief-time").value,
-            recipients: $b("brief-to").value, include_ai_summary: $b("brief-ai").checked}));
-        toast("Weekly brief saved");
+            recipients: $b("brief-to").value, include_ai_summary: $b("brief-ai").checked,
+            monthly_enabled: $b("brief-mon").checked, monthly_day: Number($b("brief-mday").value)}));
+        toast("Brief settings saved");
     }catch(e){ toast(e.message); }
 };
-$b("brief-test").onclick = async () => {
+async function sendTest(period, button){
     const to = $b("brief-to").value.trim();
     const count = (to.match(/@/g) || []).length;
     if(!count){ toast("Add at least one recipient first."); return; }
-    if(!confirm(`Send a test brief now to ${count} recipient${count === 1 ? "" : "s"}?`)) return;
-    const b = $b("brief-test"); b.disabled = true; b.textContent = "Sending…";
-    try{ toast((await adminPost("/assistant/api/admin/brief/test", {to})).message); }
+    const what = period === "month" ? "monthly" : "weekly";
+    if(!confirm(`Send a test ${what} brief now to ${count} recipient${count === 1 ? "" : "s"}?`)) return;
+    const b = $b(button), label = b.textContent; b.disabled = true; b.textContent = "Sending…";
+    try{ toast((await adminPost("/assistant/api/admin/brief/test", {to, period})).message); }
     catch(e){ toast(e.message); }
-    finally{ b.disabled = false; b.textContent = "Send a test"; }
-};
+    finally{ b.disabled = false; b.textContent = label; }
+}
+$b("brief-test").onclick = () => sendTest("week", "brief-test");
+$b("brief-test-month").onclick = () => sendTest("month", "brief-test-month");
 
 document.getElementById("send").onclick = () => send();
 document.getElementById("attach").onclick = () => document.getElementById("pdf").click();

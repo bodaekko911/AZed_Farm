@@ -1,4 +1,4 @@
-"""Weekly brief settings.
+"""Weekly and monthly brief settings.
 
 Revision ID: 20261010_0049_weekly_brief
 Revises: 20261008_0048_sale_line_unit_cost
@@ -31,6 +31,9 @@ def upgrade() -> None:
         sa.Column("recipients", sa.Text(), nullable=False, server_default=""),
         sa.Column("include_ai_summary", sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.Column("last_sent_week", sa.String(10), nullable=True),
+        sa.Column("monthly_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("monthly_day", sa.Integer(), nullable=False, server_default="1"),
+        sa.Column("last_sent_month", sa.String(7), nullable=True),
         sa.Column("last_status", sa.String(300), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=True),
     )

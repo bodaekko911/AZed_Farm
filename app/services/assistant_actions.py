@@ -295,6 +295,169 @@ async def propose_price(db, user, args: dict) -> dict:
             "payload": {"product_id": product.id, "old_price": old, "new_price": new}}
 
 
+def _qty_in_unit(qty: float, said_unit: Any, product) -> float:
+    """``qty`` in the product's own unit. A unit the user named is converted when it is the same kind (g ↔ kg,
+    ml ↔ L); anything else is refused rather than guessed."""
+    said = _norm(said_unit).replace(" ", "")
+    unit = _norm(product.unit).replace(" ", "")
+    if not said or said == unit:
+        return qty
+    a, b = _UNITS.get(said), _UNITS.get(unit)
+    if a and b and a[0] == b[0]:
+        return qty * a[1] / b[1]
+    raise ValueError(f"{product.name} is counted in {product.unit or 'its own unit'}, not {said_unit}. "
+                     f"Ask the user for the amount in {product.unit or 'that unit'}.")
+
+
+async def _active_products(db) -> list:
+    from app.models.product import Product
+    return (await db.execute(select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))))\
+        .scalars().all()
+
+
+def _product_named(needle: str, products: list):
+    needle = str(needle or "").strip()
+    by_sku = [p for p in products if (p.sku or "").lower() == needle.lower()]
+    return by_sku[0] if by_sku else _one(needle, products, lambda p: p.name, "product")
+
+
+async def propose_farm_delivery(db, user, args: dict) -> dict:
+    from app.models.farm import Farm
+    farms = (await db.execute(select(Farm).where(or_(Farm.is_active == 1, Farm.is_active.is_(None))))).scalars().all()
+    farm = _one(str(args.get("farm") or ""), farms, lambda f: f.name, "farm")
+    day = _parse_day(args.get("date"), today_local())
+    if day > today_local():
+        raise ValueError("A delivery can't be dated in the future.")
+    raw_items = args.get("items") or []
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("Give at least one item: the product and the quantity delivered.")
+    if len(raw_items) > 30:
+        raise ValueError("At most 30 products in one delivery.")
+    products = await _active_products(db)
+    items, lines, seen = [], [["Farm", farm.name], ["Date", day.isoformat()]], set()
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            raise ValueError("Each item needs a product and a qty.")
+        product = _product_named(raw.get("product"), products)
+        try:
+            qty = float(raw.get("qty"))
+        except (TypeError, ValueError):
+            raise ValueError(f"A quantity is required for {product.name}.")
+        qty = round(_qty_in_unit(qty, raw.get("unit"), product), 3)
+        if qty <= 0:
+            raise ValueError(f"The quantity of {product.name} must be more than 0.")
+        if product.id in seen:
+            raise ValueError(f"{product.name} is listed twice — give it once with the total.")
+        seen.add(product.id)
+        items.append({"product_id": product.id, "qty": qty})
+        lines.append([product.name, f"{qty:g} {product.unit or ''}".strip()])
+    received_by = (str(args.get("received_by") or "").strip() or None)
+    notes = (str(args.get("notes") or "").strip() or None)
+    if received_by:
+        lines.append(["Received by", received_by])
+    if notes:
+        lines.append(["Notes", notes])
+    lines.append(["Stock", "Each product's stock goes up by its quantity"])
+    return {"kind": "farm_delivery", "title": "Record farm delivery", "lines": lines,
+            "payload": {"farm_id": farm.id, "date": day.isoformat(), "items": items,
+                        "received_by": received_by, "notes": notes}}
+
+
+async def propose_spoilage(db, user, args: dict) -> dict:
+    from app.models.farm import Farm
+    product = _product_named(args.get("product"), await _active_products(db))
+    try:
+        qty = float(args.get("qty"))
+    except (TypeError, ValueError):
+        raise ValueError("A quantity is required.")
+    qty = round(_qty_in_unit(qty, args.get("unit"), product), 3)
+    if qty <= 0:
+        raise ValueError("The quantity must be more than 0.")
+    stock = float(product.stock or 0)
+    if qty > stock + 1e-9:
+        raise ValueError(f"Only {stock:g} {product.unit or ''} of {product.name} is in stock — spoilage can't be more "
+                         "than that.")
+    day = _parse_day(args.get("date"), today_local())
+    if day > today_local():
+        raise ValueError("Spoilage can't be dated in the future.")
+    farm_id, farm_label = None, None
+    farm_text = str(args.get("farm") or "").strip()
+    if farm_text and farm_text.lower() not in ("none", "no farm"):
+        farms = (await db.execute(select(Farm))).scalars().all()
+        farm = _one(farm_text, farms, lambda f: f.name, "farm")
+        farm_id, farm_label = farm.id, farm.name
+    reason = (str(args.get("reason") or "").strip() or None)
+    notes = (str(args.get("notes") or "").strip() or None)
+    cost = float(product.cost or 0)
+    unit = product.unit or ""
+    lines = [["Product", f"{product.name} ({product.sku})"], ["Spoiled", f"{qty:g} {unit}"], ["Date", day.isoformat()],
+             ["Stock", f"{stock:g} → {stock - qty:g} {unit}"],
+             ["Loss at cost", f"{qty * cost:,.2f} EGP" if cost > 0 else "no cost on the product card"]]
+    if reason:
+        lines.append(["Reason", reason])
+    if farm_label:
+        lines.append(["Farm", farm_label])
+    if notes:
+        lines.append(["Notes", notes])
+    return {"kind": "spoilage", "title": "Log spoilage", "lines": lines,
+            "payload": {"product_id": product.id, "qty": qty, "spoilage_date": day.isoformat(), "reason": reason,
+                        "farm_id": farm_id, "notes": notes}}
+
+
+async def _open_invoices(db, client_id: int) -> list:
+    from app.models.b2b import B2BInvoice
+    rows = (await db.execute(
+        select(B2BInvoice).where(B2BInvoice.client_id == client_id, B2BInvoice.status.in_(("unpaid", "partial")))
+        .order_by(B2BInvoice.created_at, B2BInvoice.id)
+    )).scalars().all()
+    return [i for i in rows if float(i.total or 0) - float(i.amount_paid or 0) > 0.005]
+
+
+async def propose_b2b_payment(db, user, args: dict) -> dict:
+    from app.models.b2b import B2BClient
+    try:
+        amount = round(float(args.get("amount")), 2)
+    except (TypeError, ValueError):
+        raise ValueError("An amount is required.")
+    if amount <= 0:
+        raise ValueError("The amount must be more than 0.")
+    clients = (await db.execute(select(B2BClient))).scalars().all()
+    client = _one(str(args.get("client") or ""), clients, lambda c: c.name, "B2B client")
+    invoices = await _open_invoices(db, client.id)
+    wanted = str(args.get("invoice") or "").strip().lower()
+    if wanted:
+        invoices = [i for i in invoices if (i.invoice_number or "").lower() == wanted]
+        if not invoices:
+            raise ValueError(f"{client.name} has no open invoice numbered '{args.get('invoice')}'.")
+    # Consignment invoices are settled from what the client sold, on the B2B page.
+    payable = [i for i in invoices if (i.invoice_type or "") != "consignment"]
+    if not payable:
+        raise ValueError(f"{client.name} has no open invoice this can be recorded against"
+                         + (" (only consignment invoices — settle those on the B2B page)" if invoices else "") + ".")
+    open_total = round(sum(float(i.total) - float(i.amount_paid or 0) for i in payable), 2)
+    if amount > open_total + 0.01:
+        raise ValueError(f"{client.name} owes {open_total:,.2f} EGP on open invoices — {amount:,.2f} is more than that. "
+                         "Ask the user to check the amount.")
+    plan, left = [], amount
+    for inv in payable:                                  # oldest first
+        if left <= 0.005:
+            break
+        balance = round(float(inv.total) - float(inv.amount_paid or 0), 2)
+        part = round(min(balance, left), 2)
+        plan.append({"invoice_id": inv.id, "number": inv.invoice_number, "amount": part, "balance": balance})
+        left = round(left - part, 2)
+    lines = [["Client", client.name], ["Amount", f"{amount:,.2f} EGP"]]
+    for part in plan:
+        settles = "settles it" if part["amount"] >= part["balance"] - 0.005 else \
+            f"{part['balance'] - part['amount']:,.2f} left"
+        lines.append([f"Invoice {part['number']}", f"{part['amount']:,.2f} of {part['balance']:,.2f} ({settles})"])
+    lines.append(["Still owed after", f"{open_total - amount:,.2f} EGP on open invoices"])
+    return {"kind": "b2b_payment", "title": "Record B2B payment", "lines": lines,
+            "payload": {"client_id": client.id, "amount": amount,
+                        "plan": [{"invoice_id": p["invoice_id"], "amount": p["amount"], "balance": p["balance"]}
+                                 for p in plan]}}
+
+
 # name → (description, parameters, permissions, propose function)
 ACTIONS = {
     "propose_expense": (
@@ -322,6 +485,28 @@ ACTIONS = {
         "the user asks to change a price.",
         {"product": {"type": "string", "description": "Product name or SKU"}, "new_price": {"type": "number"}},
         ("page_products", "action_products_edit"), propose_price),
+    "propose_farm_delivery": (
+        "PROPOSE recording a delivery from one farm (the user confirms; nothing is saved by this call). `items` lists "
+        "each product delivered with its qty; give `unit` only if the user named one (kg, g …).",
+        {"farm": {"type": "string"}, "date": {"type": "string", "description": "YYYY-MM-DD, default today"},
+         "items": {"type": "array", "items": {"type": "object", "properties": {
+             "product": {"type": "string", "description": "Product name or SKU"}, "qty": {"type": "number"},
+             "unit": {"type": "string"}}, "required": ["product", "qty"]}},
+         "received_by": {"type": "string"}, "notes": {"type": "string"}},
+        ("page_farm", "action_farm_delivery_create"), propose_farm_delivery),
+    "propose_spoilage": (
+        "PROPOSE logging spoilage of one product — stock thrown away (the user confirms; nothing is saved by this "
+        "call). Give `unit` only if the user named one.",
+        {"product": {"type": "string", "description": "Product name or SKU"}, "qty": {"type": "number"},
+         "unit": {"type": "string"}, "date": {"type": "string", "description": "YYYY-MM-DD, default today"},
+         "reason": {"type": "string"}, "farm": {"type": "string"}, "notes": {"type": "string"}},
+        ("page_production", "action_production_log_spoilage"), propose_spoilage),
+    "propose_b2b_payment": (
+        "PROPOSE recording money a B2B client paid (the user confirms; nothing is saved by this call). It is applied "
+        "to the client's open invoices oldest first, or to `invoice` if the user named one.",
+        {"client": {"type": "string"}, "amount": {"type": "number"},
+         "invoice": {"type": "string", "description": "Invoice number, only if the user named one"}},
+        ("page_b2b", "action_b2b_collect"), propose_b2b_payment),
 }
 
 
@@ -435,6 +620,59 @@ async def execute(db, user, token: str) -> dict:
                ref_type="assistant_action", ref_id=body["nonce"])
         await db.commit()
         return {"ok": True, "message": f"{product.name} now costs {p['new_price']:g} EGP."}
+
+    if kind == "farm_delivery":
+        _need(user, "page_farm", "action_farm_delivery_create")
+        from app.models.farm import Farm
+        from app.services.farm_intake_service import create_farm_delivery
+        farm = (await db.execute(select(Farm).where(Farm.id == p["farm_id"]))).scalar_one_or_none()
+        if not farm:
+            raise HTTPException(status_code=404, detail="Farm not found")
+        record(db, "Assistant", "action", f"Confirmed: farm delivery from {farm.name}", user=user,
+               ref_type="assistant_action", ref_id=body["nonce"])
+        try:
+            delivery, _moves = await create_farm_delivery(
+                db, farm=farm, delivery_date=date.fromisoformat(p["date"]), user_id=user.id,
+                items=[{"product_id": i["product_id"], "qty": i["qty"], "notes": None} for i in p["items"]],
+                received_by=p.get("received_by"), notes=("Via Ask" + (f": {p['notes']}" if p.get("notes") else "")),
+                record_stock_movement=True, activity_user=user)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        await db.commit()
+        n = len(p["items"])
+        return {"ok": True, "message": f"Delivery {delivery.delivery_number} from {farm.name} recorded — "
+                                       f"{n} product{'s' if n != 1 else ''}, stock updated."}
+
+    if kind == "spoilage":
+        _need(user, "page_production", "action_production_log_spoilage")
+        from app.routers.production import SpoilageCreate, create_spoilage
+        record(db, "Assistant", "action", f"Confirmed: spoilage of product #{p['product_id']}", user=user,
+               ref_type="assistant_action", ref_id=body["nonce"])
+        out = await create_spoilage(SpoilageCreate(**p), db, current_user=user)
+        return {"ok": True, "message": f"Spoilage {out['ref_number']} logged — {out['qty']:g} of {out['product']}."}
+
+    if kind == "b2b_payment":
+        _need(user, "page_b2b", "action_b2b_collect")
+        from app.models.b2b import B2BInvoice
+        from app.routers.b2b import PaymentRecord, record_payment
+        # The balances the card showed must still hold: a payment taken elsewhere in the meantime would make this
+        # one land on the wrong invoice, or overpay one.
+        for part in p["plan"]:
+            inv = (await db.execute(select(B2BInvoice).where(B2BInvoice.id == part["invoice_id"]))).scalar_one_or_none()
+            if not inv or abs((float(inv.total) - float(inv.amount_paid or 0)) - part["balance"]) > 0.01:
+                raise HTTPException(status_code=409, detail="This client's invoices changed since this was suggested. "
+                                                            "Ask again.")
+        record(db, "Assistant", "action", f"Confirmed: B2B payment {p['amount']:.2f} from client #{p['client_id']}",
+               user=user, ref_type="assistant_action", ref_id=body["nonce"])
+        numbers = []
+        for part in p["plan"]:
+            await record_payment(part["invoice_id"], PaymentRecord(amount=part["amount"]), db, current_user=user)
+            inv = (await db.execute(select(B2BInvoice).where(B2BInvoice.id == part["invoice_id"]))).scalar_one()
+            numbers.append(inv.invoice_number)
+        record(db, "B2B", "collect_payment", f"Payment {p['amount']:.2f} recorded on {', '.join(numbers)} (via Ask)",
+               user=user, ref_type="b2b_client", ref_id=p["client_id"])
+        await db.commit()
+        return {"ok": True, "message": f"Payment of {p['amount']:,.2f} EGP recorded on {', '.join(numbers)}."}
 
     raise HTTPException(status_code=400, detail="Unknown action")
 

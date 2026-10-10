@@ -131,12 +131,12 @@ def test_it_sends_once_for_the_week_however_many_workers_tick(outbox):
     session.add(settings_row())
     session.commit()
     now = local(2026, 10, 10, 9, 30)
-    assert run(brief.tick(db, now)) == "sent to 1"
+    assert run(brief.tick(db, now)) == "weekly sent to 1"
     assert run(brief.tick(db, now)) is None            # a second worker, same week
     assert len(outbox) == 1 and outbox[0]["to"] == ["owner@farm.test"]
     cfg = session.execute(select(WeeklyBriefSettings)).scalar_one()
     session.refresh(cfg)
-    assert cfg.last_sent_week == "2026-10-09" and cfg.last_status.startswith("Sent to 1")
+    assert cfg.last_sent_week == "2026-10-09" and cfg.last_status.startswith("Weekly sent to 1")
 
 
 def test_a_failed_send_hands_the_week_back_for_a_retry(monkeypatch):
@@ -148,7 +148,7 @@ def test_a_failed_send_hands_the_week_back_for_a_retry(monkeypatch):
         raise OSError("connection refused")
     monkeypatch.setattr(mail_service, "_send", boom)
     out = run(brief.tick(db, local(2026, 10, 10, 9, 30)))
-    assert out.startswith("failed")
+    assert out.startswith("weekly failed")
     cfg = session.execute(select(WeeklyBriefSettings)).scalar_one()
     session.refresh(cfg)
     assert cfg.last_sent_week == "2026-10-02"           # not marked sent
@@ -200,7 +200,7 @@ def test_the_week_figures_come_from_that_week_only():
     week_end = date(2026, 10, 9)
     seed(session, week_end)
     data = run(brief.build(db, week_end))
-    assert (data["week_start"], data["week_end"]) == ("2026-10-03", "2026-10-09")
+    assert (data["period"], data["start"], data["end"]) == ("week", "2026-10-03", "2026-10-09")
     assert data["expenses"]["total"] == 2000 and data["expenses"]["count"] == 2
     assert data["expenses"]["by_category"][0] == {"category": "Seeds", "amount": 1500.0}
     assert data["farm"]["same_unit_total"] == {"qty": 120.0, "unit": "kg"}
@@ -225,7 +225,8 @@ def test_mixed_units_are_not_added_together():
 
 def sample(**over):
     data = {
-        "week_start": "2026-10-03", "week_end": "2026-10-09", "prior_start": "2026-09-26", "prior_end": "2026-10-02",
+        "period": "week", "start": "2026-10-03", "end": "2026-10-09", "prior_start": "2026-09-26",
+        "prior_end": "2026-10-02",
         "sales": {"net": 52000, "net_change_pct": 12.4, "gross": 53000, "refunds": 1000, "pos": 21000,
                   "pos_count": 140, "b2b": 32000, "b2b_count": 6, "cash_collected": 50000,
                   "top_products": [{"name": "Basil <b>HOF</b>", "qty": 300, "revenue": 9000}]},
@@ -298,3 +299,84 @@ def test_shop_sales_in_the_week_are_counted_and_last_weeks_are_compared():
     assert data["sales"]["net_change_pct"] == 50.0
     assert data["sales"]["top_products"][0]["name"] == "Tomatoes"
     assert data["profit"]["gross_margin_pct"] == 60.0          # (600 − 30×8) / 600
+
+
+
+# --- monthly ------------------------------------------------------------------------
+
+def test_the_monthly_brief_covers_last_calendar_month():
+    cfg = settings_row(enabled=False, monthly_enabled=True, monthly_day=1)
+    assert brief.due_month(cfg, local(2026, 10, 1, 9, 30)) == date(2026, 9, 30)
+    assert brief.due_month(cfg, local(2026, 10, 1, 8, 0)) is None             # before the time
+    assert brief.due_month(cfg, local(2026, 10, 2, 20, 0)) == date(2026, 9, 30)  # a day late: catch up
+    assert brief.due_month(cfg, local(2026, 10, 3, 10, 0)) is None            # over two days: too late
+    cfg.last_sent_month = "2026-09"
+    assert brief.due_month(cfg, local(2026, 10, 1, 9, 30)) is None            # already sent
+    assert brief.period_bounds("month", date(2026, 9, 30)) == (
+        date(2026, 9, 1), date(2026, 9, 30), date(2026, 8, 1), date(2026, 8, 31))
+    assert brief.period_bounds("month", date(2026, 3, 31))[2:] == (date(2026, 2, 1), date(2026, 2, 28))
+
+
+def test_a_monthly_day_before_now_in_the_month_still_finds_last_month():
+    cfg = settings_row(enabled=False, monthly_enabled=True, monthly_day=15)
+    # 15 Oct, after the time: the month covered is September.
+    assert brief.due_month(cfg, local(2026, 10, 15, 10, 0)) == date(2026, 9, 30)
+
+
+def test_weekly_and_monthly_each_send_once_when_both_fall_due(outbox):
+    session, db = make_db()
+    # Thursday 1 Oct 2026 09:30: weekly on Thursdays, monthly on the 1st.
+    session.add(settings_row(send_weekday=3, monthly_enabled=True, monthly_day=1))
+    session.commit()
+    now = local(2026, 10, 1, 9, 30)
+    assert run(brief.tick(db, now)) == "weekly sent to 1; monthly sent to 1"
+    assert run(brief.tick(db, now)) is None
+    subjects = sorted(m["subject"] for m in outbox)
+    assert subjects[0].startswith("Azed Farm monthly brief — September 2026:")
+    assert subjects[1].startswith("Azed Farm weekly brief — Thu 24 Sep – Wed 30 Sep:")
+    cfg = session.execute(select(WeeklyBriefSettings)).scalar_one()
+    session.refresh(cfg)
+    assert (cfg.last_sent_week, cfg.last_sent_month) == ("2026-09-30", "2026-09")
+
+
+def test_the_monthly_figures_come_from_the_whole_month():
+    session, db = make_db()
+    seed(session, date(2026, 10, 9))                 # expenses on 7 Oct (this "week") and 30 Sep
+    data = run(brief.build_month(db, date(2026, 9, 30)))
+    assert (data["period"], data["start"], data["end"]) == ("month", "2026-09-01", "2026-09-30")
+    assert data["expenses"]["total"] == 999               # only September's
+    assert len(data["sales"]["daily"]) == 30
+
+
+def test_the_monthly_email_says_month_not_week():
+    data = sample(period="month", start="2026-09-01", end="2026-09-30", prior_start="2026-08-01",
+                  prior_end="2026-08-31")
+    subject, html, text = brief.render(data, None)
+    assert subject.startswith("Azed Farm monthly brief — September 2026:")
+    assert "Azed Farm — monthly brief</h2>" in html and "compared with August 2026" in html
+    assert "vs the month before" in text and "week before" not in text
+
+
+# --- charts ----------------------------------------------------------------------------
+
+def test_the_sales_chart_has_a_bar_per_day_and_skips_an_empty_period():
+    daily = [{"date": f"2026-10-0{d}", "net": v} for d, v in zip(range(3, 10), (100, 0, 250, 50, 0, 400, 200))]
+    html = brief.chart_daily(daily, "week")
+    assert html.count("<td valign=\"bottom\"") == 7
+    assert "height:110px" in html                          # the best day is full height
+    assert ">Sat<" in html and ">400<" in html
+    assert brief.chart_daily([{"date": "2026-10-03", "net": 0}], "week") == ""
+
+
+def test_the_expense_chart_scales_to_the_largest_and_escapes_names():
+    html = brief.chart_bars([("Salaries", 40000), ("Fuel <b>", 10000), ("Nothing", 0)], "Expenses by category")
+    assert "width:100%;height:12px" in html and "width:25%;height:12px" in html
+    assert "Fuel &lt;b&gt;" in html and "Nothing" not in html
+
+
+def test_the_charts_are_in_the_email():
+    daily = [{"date": f"2026-10-0{d}", "net": 100 * d} for d in range(3, 10)]
+    data = sample()
+    data["sales"]["daily"] = daily
+    _s, html, _t = brief.render(data, None)
+    assert "Net sales per day" in html and "Expenses by category (EGP)" in html

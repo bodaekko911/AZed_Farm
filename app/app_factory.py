@@ -327,6 +327,9 @@ async def ensure_weekly_brief_table() -> None:
         " recipients TEXT NOT NULL DEFAULT '',"
         " include_ai_summary BOOLEAN NOT NULL DEFAULT TRUE,"
         " last_sent_week VARCHAR(10),"
+        " monthly_enabled BOOLEAN NOT NULL DEFAULT FALSE,"
+        " monthly_day INTEGER NOT NULL DEFAULT 1,"
+        " last_sent_month VARCHAR(7),"
         " last_status VARCHAR(300),"
         " updated_at TIMESTAMPTZ DEFAULT now())"
     )
