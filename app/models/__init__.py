@@ -2,6 +2,7 @@ from app.core.log import ActivityLog
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.animal import AnimalGroup, FeedingLog, MortalityLog
 from app.models.receipt import ProductReceipt
+from app.models.brief import WeeklyBriefSettings
 from app.models.b2b import (
     B2BClient,
     B2BClientPrice,
@@ -47,6 +48,7 @@ from app.models.refresh_token import RefreshToken
 from app.models.user import User
 
 __all__ = [
+    "WeeklyBriefSettings",
     "Account",
     "ActivityLog",
     "AnimalGroup",

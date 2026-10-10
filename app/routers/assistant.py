@@ -215,6 +215,90 @@ async def admin_set_limit(user_id: int, data: LimitRequest, db: AsyncSession = D
     return {"ok": True}
 
 
+# ── Admin: weekly brief e-mail ───────────────────────────────────────────────
+
+class BriefSettingsIn(BaseModel):
+    enabled: bool = False
+    send_weekday: int = Field(5, ge=0, le=6)          # 0 = Monday … 6 = Sunday
+    send_time: str = Field("09:00", max_length=5)
+    recipients: str = Field("", max_length=4000)
+    include_ai_summary: bool = True
+
+
+class BriefTestIn(BaseModel):
+    to: Optional[str] = Field(None, max_length=4000)  # the addresses in the box, one per line
+
+
+def _brief_out(cfg) -> dict:
+    from app.services import mail_service
+    return {"enabled": bool(cfg.enabled), "send_weekday": int(cfg.send_weekday), "send_time": cfg.send_time,
+            "recipients": cfg.recipients or "", "include_ai_summary": bool(cfg.include_ai_summary),
+            "last_sent_week": cfg.last_sent_week, "last_status": cfg.last_status,
+            "mail_configured": mail_service.is_configured()}
+
+
+@router.get("/api/admin/brief")
+async def brief_settings(db: AsyncSession = Depends(get_async_session), _admin: User = Depends(require_admin)):
+    from app.services import weekly_brief_service as brief
+    cfg = await brief.get_settings(db)
+    await db.commit()
+    return _brief_out(cfg)
+
+
+@router.post("/api/admin/brief")
+async def save_brief_settings(data: BriefSettingsIn, db: AsyncSession = Depends(get_async_session),
+                              admin: User = Depends(require_admin)):
+    from app.services import weekly_brief_service as brief
+    good, bad = brief.parse_recipients(data.recipients)
+    if bad:
+        raise HTTPException(status_code=400, detail="Not valid e-mail addresses: " + ", ".join(bad[:5]))
+    if not brief.valid_time(data.send_time):
+        raise HTTPException(status_code=400, detail="Send time must be HH:MM, e.g. 09:00")
+    if data.enabled and not good:
+        raise HTTPException(status_code=400, detail="Add at least one recipient to turn the brief on.")
+    cfg = await brief.get_settings(db)
+    hh, mm = data.send_time.split(":")
+    cfg.enabled, cfg.send_weekday, cfg.send_time = data.enabled, data.send_weekday, f"{int(hh):02d}:{mm}"
+    cfg.recipients, cfg.include_ai_summary = "\n".join(good), data.include_ai_summary
+    record(db, "assistant", "update",
+           f"Weekly brief {'on' if data.enabled else 'off'}: {brief.WEEKDAYS[data.send_weekday]} {cfg.send_time} "
+           f"to {len(good)} recipient(s)", user=admin, ref_type="weekly_brief")
+    await db.commit()
+    return _brief_out(cfg)
+
+
+@router.post("/api/admin/brief/test")
+async def send_test_brief(data: Optional[BriefTestIn] = None, db: AsyncSession = Depends(get_async_session),
+                          _admin: User = Depends(require_admin)):
+    """Send last week's brief now, marked [Test], to the addresses in the recipients box (else the saved list).
+    It doesn't count as that week's brief, so the scheduled one still goes out."""
+    from app.services import weekly_brief_service as brief
+    text = data.to if data else None
+    if text is None:
+        text = (await brief.get_settings(db)).recipients or ""
+    good, bad = brief.parse_recipients(text)
+    if bad:
+        raise HTTPException(status_code=400, detail="Not valid e-mail addresses: " + ", ".join(bad[:5]))
+    if not good:
+        raise HTTPException(status_code=400, detail="Add at least one recipient first.")
+    try:
+        await brief.send(db, only_to=good)
+    except Exception as exc:  # noqa: BLE001  shown to the admin as is
+        raise HTTPException(status_code=400, detail=f"Not sent: {exc}")
+    return {"ok": True, "message": f"Test brief sent to {len(good)} recipient{'s' if len(good) != 1 else ''}: "
+                                   + ", ".join(good)}
+
+
+@router.get("/admin/brief/preview", response_class=HTMLResponse)
+async def preview_brief(db: AsyncSession = Depends(get_async_session), _admin: User = Depends(require_admin)):
+    """The brief for the last 7 full days, as it would be e-mailed (figures only — no AI call, nothing sent)."""
+    from html import escape
+    from app.services import weekly_brief_service as brief
+    subject, html, _text = brief.render(await brief.build(db), None)
+    return HTMLResponse(f"<!doctype html><meta charset=utf-8><title>{escape(subject)}</title>"
+                        f"<body style='background:#fff;padding:24px'>{html}</body>")
+
+
 @router.get("/", response_class=HTMLResponse)
 def assistant_ui(current_user: User = Depends(require_permission("page_assistant"))):
     return """<!DOCTYPE html>
@@ -354,6 +438,15 @@ button.send:disabled{opacity:.5;cursor:default}
 .admin th{color:var(--muted);font-weight:500;text-align:start;padding:6px 8px;border-bottom:1px solid var(--border)}
 .admin td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
 .admin td.n{font-family:var(--mono);white-space:nowrap}
+.brief-form{display:grid;grid-template-columns:150px 1fr;gap:10px 14px;align-items:start;font-size:13px}
+.brief-form label{color:var(--sub);padding-top:6px}
+.brief-form textarea{width:100%;min-height:90px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:8px;font-family:inherit;font-size:13px}
+.brief-form input[type=time],.brief-form select{background:var(--card2);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:5px 8px;font-family:inherit}
+.brief-check{display:flex;gap:8px;align-items:center;padding-top:6px}
+.brief-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.brief-note{font-size:12px;color:var(--muted);margin-top:8px}
+.brief-warn{color:var(--warn)}
+@media (max-width:640px){.brief-form{grid-template-columns:1fr}}
 .admin .full{color:var(--danger);font-weight:600}
 .admin input{width:64px;background:var(--card2);border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:4px 6px;font-family:var(--mono);font-size:12px}
 .admin .acts{display:flex;gap:6px;white-space:nowrap}
@@ -389,6 +482,34 @@ button.send:disabled{opacity:.5;cursor:default}
                 <thead><tr><th>User</th><th>Used today</th><th>Tokens</th><th title="Average time per question today: AI model · your data">Avg time</th><th>Last question</th><th>Own limit</th><th></th></tr></thead>
                 <tbody id="admin-rows"><tr><td colspan="7">Loading…</td></tr></tbody>
             </table>
+        </div>
+    </details>
+    <details class="admin" id="brief" style="display:none">
+        <summary>Weekly brief e-mail · admin</summary>
+        <div class="admin-body">
+            <div id="brief-mail" class="brief-note"></div>
+            <div class="brief-form">
+                <label for="brief-on">Send every week</label>
+                <div class="brief-check"><input type="checkbox" id="brief-on"><span>On</span></div>
+                <label for="brief-day">On</label>
+                <div><select id="brief-day">
+                    <option value="5">Saturday</option><option value="6">Sunday</option><option value="0">Monday</option>
+                    <option value="1">Tuesday</option><option value="2">Wednesday</option><option value="3">Thursday</option>
+                    <option value="4">Friday</option></select>
+                    at <input type="time" id="brief-time" value="09:00"> <span class="brief-note">(Egypt time)</span>
+                    <div class="brief-note">It covers the 7 days before that day, compared with the week before.</div></div>
+                <label for="brief-to">Recipients</label>
+                <div><textarea id="brief-to" placeholder="owner@example.com&#10;manager@example.com"></textarea>
+                    <div class="brief-note">One e-mail per line. Everyone gets it as Bcc, so they don't see each other's addresses.</div></div>
+                <label for="brief-ai">AI highlights</label>
+                <div class="brief-check"><input type="checkbox" id="brief-ai" checked><span>Add 3–4 lines of highlights at the top (one small AI call a week)</span></div>
+            </div>
+            <div class="brief-actions">
+                <button class="ghost" id="brief-save">Save</button>
+                <button class="ghost" id="brief-test">Send a test</button>
+                <a class="ghost" href="/assistant/admin/brief/preview" target="_blank" rel="noopener" style="text-decoration:none">Preview last week's brief</a>
+            </div>
+            <div id="brief-status" class="brief-note"></div>
         </div>
     </details>
     <div class="chips" id="chips">
@@ -506,7 +627,7 @@ async function loadStatus(){
         document.getElementById("scope").innerText = s.can_look_up.length ? `You can ask about: ${s.can_look_up.join(", ")}.` : "";
         if(!s.configured) document.getElementById("notice").innerHTML =
             `<div class="notice">The assistant isn't set up yet. An admin needs to add ASSISTANT_API_KEY and ASSISTANT_MODEL to the server settings.</div>`;
-        if(s.is_admin) document.getElementById("admin").style.display = "";
+        if(s.is_admin){ document.getElementById("admin").style.display = ""; document.getElementById("brief").style.display = ""; }
         document.getElementById("attach").hidden = !(s.can_record_invoices && s.configured && window.AskActions);
     }catch(e){}
 }
@@ -605,6 +726,42 @@ document.getElementById("reset-all").onclick = async () => {
     catch(e){ toast(e.message); }
 };
 document.getElementById("admin").addEventListener("toggle", e => { if(e.target.open) loadUsage(); });
+
+// ── Admin: weekly brief e-mail ──
+const $b = id => document.getElementById(id);
+function showBrief(b){
+    $b("brief-on").checked = !!b.enabled; $b("brief-day").value = String(b.send_weekday ?? 5);
+    $b("brief-time").value = b.send_time || "09:00";
+    $b("brief-to").value = b.recipients || ""; $b("brief-ai").checked = b.include_ai_summary !== false;
+    $b("brief-mail").textContent = b.mail_configured ? ""
+        : "E-mail isn't set up on the server yet: add MAIL_RELAY_URL and MAIL_RELAY_SECRET (the Gmail relay) in Railway Variables.";
+    $b("brief-mail").className = b.mail_configured ? "brief-note" : "brief-note brief-warn";
+    $b("brief-status").textContent = (b.last_status ? `Last: ${b.last_status}` : "Not sent yet.")
+        + (b.last_sent_week ? ` (week ending ${b.last_sent_week})` : "");
+}
+async function loadBrief(){
+    try{ showBrief(await (await fetch("/assistant/api/admin/brief")).json()); }
+    catch(e){ $b("brief-status").textContent = "Couldn't load the brief settings."; }
+}
+$b("brief").addEventListener("toggle", e => { if(e.target.open) loadBrief(); });
+$b("brief-save").onclick = async () => {
+    try{
+        showBrief(await adminPost("/assistant/api/admin/brief", {enabled: $b("brief-on").checked,
+            send_weekday: Number($b("brief-day").value), send_time: $b("brief-time").value,
+            recipients: $b("brief-to").value, include_ai_summary: $b("brief-ai").checked}));
+        toast("Weekly brief saved");
+    }catch(e){ toast(e.message); }
+};
+$b("brief-test").onclick = async () => {
+    const to = $b("brief-to").value.trim();
+    const count = (to.match(/@/g) || []).length;
+    if(!count){ toast("Add at least one recipient first."); return; }
+    if(!confirm(`Send a test brief now to ${count} recipient${count === 1 ? "" : "s"}?`)) return;
+    const b = $b("brief-test"); b.disabled = true; b.textContent = "Sending…";
+    try{ toast((await adminPost("/assistant/api/admin/brief/test", {to})).message); }
+    catch(e){ toast(e.message); }
+    finally{ b.disabled = false; b.textContent = "Send a test"; }
+};
 
 document.getElementById("send").onclick = () => send();
 document.getElementById("attach").onclick = () => document.getElementById("pdf").click();

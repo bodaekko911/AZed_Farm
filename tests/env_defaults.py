@@ -13,6 +13,7 @@ TEST_ENV_DEFAULTS = {
     "COOKIE_SECURE": "false",
     "MIGRATION_CHECK_ON_STARTUP": "false",
     "MIGRATION_CHECK_STRICT": "false",
+    "WEEKLY_BRIEF_LOOP": "false",
 }
 
 

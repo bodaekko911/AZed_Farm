@@ -311,6 +311,37 @@ async def ensure_b2b_portal_columns() -> None:
         logger.exception("ensure_b2b_portal_columns: failed (could not open DB session)")
 
 
+async def ensure_weekly_brief_table() -> None:
+    """Self-healing guard for the weekly brief settings table. Mirrors migration
+    20261010_0049 so the brief's settings work even if alembic is blocked.
+    Idempotent — CREATE TABLE IF NOT EXISTS on every boot."""
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal
+
+    stmt = (
+        "CREATE TABLE IF NOT EXISTS weekly_brief_settings ("
+        " id INTEGER PRIMARY KEY,"
+        " enabled BOOLEAN NOT NULL DEFAULT FALSE,"
+        " send_weekday INTEGER NOT NULL DEFAULT 5,"
+        " send_time VARCHAR(5) NOT NULL DEFAULT '09:00',"
+        " recipients TEXT NOT NULL DEFAULT '',"
+        " include_ai_summary BOOLEAN NOT NULL DEFAULT TRUE,"
+        " last_sent_week VARCHAR(10),"
+        " last_status VARCHAR(300),"
+        " updated_at TIMESTAMPTZ DEFAULT now())"
+    )
+    try:
+        async with AsyncSessionLocal() as db:
+            try:
+                await db.execute(text(stmt))
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                logger.exception("ensure_weekly_brief_table: statement failed")
+    except Exception:
+        logger.exception("ensure_weekly_brief_table: failed (could not open DB session)")
+
+
 async def ensure_carbon_methodology() -> None:
     """Self-healing guard for the carbon module's methodology upgrade.
 
@@ -630,11 +661,22 @@ async def lifespan(_: FastAPI):
     await ensure_consignment_sales_tables()
     await ensure_b2b_portal_columns()
     await ensure_carbon_methodology()
+    await ensure_weekly_brief_table()
     await sync_livestock_emissions_on_boot()
     await seed_chart_of_accounts()
     from app.core.cache import init_redis_pool, close_redis_pool
     await init_redis_pool()
+    # The weekly brief e-mail: checks every few minutes, sends once a week after
+    # the admin's chosen day and time. Only one worker sends (see the service).
+    brief_task = None
+    try:
+        from app.services import weekly_brief_service
+        brief_task = weekly_brief_service.start_loop()
+    except Exception:  # noqa: BLE001  never block startup on e-mail
+        logger.exception("Weekly brief loop not started")
     yield
+    if brief_task is not None:
+        brief_task.cancel()
     await close_redis_pool()
 
 

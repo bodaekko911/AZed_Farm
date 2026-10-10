@@ -103,6 +103,19 @@ class BaseAppSettings(BaseSettings):
     # Model used to read PDF invoices (must accept images); the assistant's model when empty.
     ASSISTANT_VISION_MODEL: str | None = None
 
+    # Outgoing e-mail, for the weekly brief. Gmail relay over HTTPS (works on
+    # Railway Hobby, which blocks SMTP) — see scripts/gmail_relay.gs:
+    MAIL_RELAY_URL: str | None = None
+    MAIL_RELAY_SECRET: str | None = None
+    # …or plain SMTP, where the host allows it. SMTP_SECURITY: "starttls" (587), "ssl" (465), "none".
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str | None = None
+    SMTP_PASSWORD: str | None = None
+    SMTP_FROM: str | None = None
+    SMTP_SECURITY: str = "starttls"
+    WEEKLY_BRIEF_LOOP: bool = True
+
     model_config = CONFIG_MODEL
 
     @model_validator(mode="before")
