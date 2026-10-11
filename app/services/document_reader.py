@@ -202,13 +202,21 @@ async def _vision(system: str, images: list[str], transport=None) -> tuple[dict,
     content += [{"type": "image_url", "image_url": {"url": img}} for img in images]
     body = {"model": model, "max_tokens": 4000, "temperature": 0,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}]}
-    async with httpx.AsyncClient(timeout=120.0, transport=transport) as client:
-        response = await client.post(settings.ASSISTANT_BASE_URL.rstrip("/") + "/chat/completions",
-                                     headers={"Authorization": f"Bearer {settings.ASSISTANT_API_KEY}"}, json=body)
+    from app.services.assistant_service import RETRYABLE_STATUS, ProviderUnavailable, post_completion
+    try:
+        async with httpx.AsyncClient(timeout=120.0, transport=transport) as client:
+            response = await post_completion(client, body)
+    except (ProviderUnavailable, httpx.TimeoutException):
+        raise HTTPException(status_code=502, detail="The AI service didn't answer. Try again in a minute — nothing "
+                                                    "was recorded.")
     if response.status_code >= 400:
         logger.warning("document reading returned %s: %s", response.status_code, response.text[:300])
-        raise HTTPException(status_code=502, detail="The assistant couldn't read the document. If it keeps failing, "
-                                                    "the model may not read images — set ASSISTANT_VISION_MODEL.")
+        if response.status_code in RETRYABLE_STATUS:
+            raise HTTPException(status_code=502, detail="The AI service had a temporary error (tried 3 times). Try "
+                                                        "again in a minute — nothing was recorded.")
+        raise HTTPException(status_code=502, detail="The AI service refused to read the images. If it keeps "
+                                                    "happening, the model may not read images — set "
+                                                    "ASSISTANT_VISION_MODEL.")
     data = response.json()
     usage = {k: int((data.get("usage") or {}).get(k) or 0) for k in ("prompt_tokens", "completion_tokens")}
     message = ((data.get("choices") or [{}])[0]).get("message") or {}

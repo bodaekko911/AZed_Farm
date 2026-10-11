@@ -411,6 +411,7 @@ def test_without_a_fast_model_everything_uses_the_main_one():
 
 def test_the_main_model_takes_over_when_the_fast_one_fails(monkeypatch):
     monkeypatch.setattr(settings, "ASSISTANT_FAST_MODEL", "fast-model")
+    monkeypatch.setattr(assistant_service, "RETRY_DELAYS", (0, 0))
     models = []
 
     def handler(request):
@@ -427,7 +428,8 @@ def test_the_main_model_takes_over_when_the_fast_one_fails(monkeypatch):
                                                                transport=httpx.MockTransport(handler)))
     finally:
         loop.close()
-    assert models == ["fast-model", "test-model"] and result["answer"] == "Answer." and result["model"] == "fast→main"
+    # A provider error is retried first (it is usually a passing one); only then does the main model take over.
+    assert models == ["fast-model"] * 3 + ["test-model"] and result["answer"] == "Answer." and result["model"] == "fast→main"
     log = session.query(ActivityLog).filter_by(module="Assistant", action="ask").one()
     assert "model_used fast→main" in log.description
 

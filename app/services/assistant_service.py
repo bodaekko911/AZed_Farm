@@ -878,17 +878,52 @@ def pick_model(question: str) -> tuple[str, str]:
     return fast, "fast"
 
 
+# The model endpoint fails now and then for no reason of ours — an "unexpected error" 500 on roughly one request
+# in four, text and images alike, and the same request goes through a second later. Those are retried; a refusal
+# (4xx other than 429) is not, and neither is a timeout, so a slow provider can't keep someone waiting for minutes.
+RETRY_DELAYS = (1.0, 2.5)                 # seconds before the 2nd and 3rd attempt
+RETRYABLE_STATUS = {429, 500, 502, 503, 504, 520, 522, 524, 529}
+
+
+class ProviderUnavailable(Exception):
+    """The model endpoint couldn't be reached at all, after the retries."""
+
+
+async def post_completion(client: httpx.AsyncClient, body: dict) -> httpx.Response:
+    """POST one chat completion, retrying a passing failure of the endpoint. Returns the last response — the caller
+    decides what an error status means — or raises ProviderUnavailable when no attempt got an answer."""
+    import asyncio
+    url = settings.ASSISTANT_BASE_URL.rstrip("/") + "/chat/completions"
+    headers = {"Authorization": f"Bearer {settings.ASSISTANT_API_KEY}"}
+    response = None
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        if attempt:
+            await asyncio.sleep(RETRY_DELAYS[attempt - 1])
+        try:
+            response = await client.post(url, headers=headers, json=body)
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as exc:
+            logger.warning("assistant endpoint unreachable (attempt %d): %r", attempt + 1, exc)
+            response = None
+            continue
+        if response.status_code not in RETRYABLE_STATUS:
+            return response
+        logger.warning("assistant endpoint returned %s (attempt %d of %d): %s", response.status_code, attempt + 1,
+                       len(RETRY_DELAYS) + 1, response.text[:200])
+    if response is None:
+        raise ProviderUnavailable()
+    return response
+
+
 async def _chat(client: httpx.AsyncClient, messages: list, tools: list, allow_tools: bool,
                 model: Optional[str] = None) -> dict:
     body = {"model": model or settings.ASSISTANT_MODEL, "messages": messages, "max_tokens": MAX_ANSWER_TOKENS}
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto" if allow_tools else "none"
-    response = await client.post(
-        settings.ASSISTANT_BASE_URL.rstrip("/") + "/chat/completions",
-        headers={"Authorization": f"Bearer {settings.ASSISTANT_API_KEY}"},
-        json=body,
-    )
+    try:
+        response = await post_completion(client, body)
+    except ProviderUnavailable:
+        raise HTTPException(status_code=502, detail="The assistant service did not answer. Try again in a minute.")
     if response.status_code >= 400:
         logger.warning("assistant endpoint returned %s: %s", response.status_code, response.text[:300])
         raise HTTPException(status_code=502, detail="The assistant service did not answer. Try again in a minute.")

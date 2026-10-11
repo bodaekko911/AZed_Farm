@@ -48,6 +48,8 @@ def configured(monkeypatch):
     monkeypatch.setattr(settings, "ASSISTANT_VISION_MODEL", "vision-model")
     monkeypatch.setattr(settings, "ASSISTANT_BASE_URL", "https://assistant.test/v1")
     monkeypatch.setattr(settings, "ASSISTANT_DAILY_LIMIT", 10)
+    from app.services import assistant_service
+    monkeypatch.setattr(assistant_service, "RETRY_DELAYS", (0, 0))     # no real waiting between retries in tests
     yield
     asyncio.set_event_loop(asyncio.new_event_loop())
 
@@ -348,4 +350,46 @@ def test_the_receipt_image_is_served_only_to_those_who_may_see_expenses():
         assert page.count("/documents/file/") == 2 and "SHA-256" in page
         with pytest.raises(HTTPException):
             await doc_router.document_view("expense", out["expenses"][0]["id"], db=db, user=cashier())
+    scenario(go)
+
+
+# ── The AI service failing now and then ──────────────────────────────────────
+
+def flaky(responses: list, calls: list):
+    """Answers in turn with each (status, payload) given, recording every call."""
+    def handler(request: httpx.Request):
+        calls.append(1)
+        status, payload = responses[min(len(calls), len(responses)) - 1]
+        if status != 200:
+            return httpx.Response(status, json={"error": {"message": "An unexpected error occurred.", "type": "api_error"}})
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": json.dumps(payload)}}]})
+    return httpx.MockTransport(handler)
+
+
+def test_a_passing_error_of_the_ai_service_is_retried():
+    """The provider answers 500 on about one request in four and the same request then goes through."""
+    async def go(db):
+        calls = []
+        d, _usage = await reader.read(db, admin(), "expense_receipt", [PART1],
+                                      transport=flaky([(500, None), (200, RECEIPT)], calls))
+        assert len(calls) == 2 and d["total"] == 800.0
+    scenario(go)
+
+
+def test_it_gives_up_after_three_tries_with_an_honest_message():
+    async def go(db):
+        calls = []
+        with pytest.raises(HTTPException) as down:
+            await reader.read(db, admin(), "expense_receipt", [PART1], transport=flaky([(500, None)], calls))
+        assert len(calls) == 3 and "temporary error" in down.value.detail
+        assert "VISION_MODEL" not in down.value.detail          # not the model's fault: don't send the admin hunting
+    scenario(go)
+
+
+def test_a_refusal_is_not_retried():
+    async def go(db):
+        calls = []
+        with pytest.raises(HTTPException) as refused:
+            await reader.read(db, admin(), "expense_receipt", [PART1], transport=flaky([(400, None)], calls))
+        assert len(calls) == 1 and "ASSISTANT_VISION_MODEL" in refused.value.detail
     scenario(go)
