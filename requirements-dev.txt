@@ -1,0 +1,8 @@
+# Development and test only — never installed in the production image (the
+# Dockerfile installs requirements.txt). Install with:
+#     pip install -r requirements-dev.txt
+-r requirements.txt
+
+# Async SQLite driver: the assistant tests run real queries on an in-memory
+# SQLite database through SQLAlchemy's async engine.
+aiosqlite==0.20.0

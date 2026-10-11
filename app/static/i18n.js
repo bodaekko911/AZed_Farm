@@ -689,7 +689,70 @@
     "Change Password — AZed Farm": "تغيير كلمة المرور — AZed Farm",
     "Carbon Footprint | AZed Farm": "البصمة الكربونية | AZed Farm",
     "Emission Factors | Carbon | AZed Farm": "معاملات الانبعاث | الكربون | AZed Farm",
-    "Animals — AZed Farm": "الحيوانات — AZed Farm"
+    "Animals — AZed Farm": "الحيوانات — AZed Farm",
+
+    /* ── Ask: photos and scans of documents ── */
+    "Attach a document": "إرفاق مستند",
+    "Take a photo of a document": "تصوير مستند",
+    "Photo or PDF of a receipt": "صورة أو PDF لإيصال",
+    "PDF of sales invoices": "ملف PDF لفواتير المبيعات",
+    "Document": "مستند",
+    "New document": "مستند جديد",
+    "Add a photo": "إضافة صورة",
+    "Add a file": "إضافة ملف",
+    "Read document": "قراءة المستند",
+    "Not sure — let the assistant tell": "غير متأكد — دع المساعد يحدد",
+    "Add every part of the document (a long receipt can be several photos), then read it. Reading counts as one question.":
+      "أضف كل أجزاء المستند (الإيصال الطويل قد يكون عدة صور) ثم اقرأه. القراءة تُحسب سؤالاً واحداً.",
+    "Preparing": "جارٍ التجهيز",
+    "At most 10 images for one document.": "١٠ صور كحد أقصى للمستند الواحد.",
+    "Reading the document… this can take a minute.": "جارٍ قراءة المستند… قد يستغرق ذلك دقيقة.",
+    "This doesn't look like that kind of document. Check the type and the photos.":
+      "لا يبدو أن هذا المستند من هذا النوع. راجع النوع والصور.",
+    "Couldn't read that document.": "تعذّرت قراءة المستند.",
+    "Expense receipt": "إيصال مصروف",
+    "Record expense": "تسجيل المصروف",
+    "Highlighted fields were hard to read — check them against the photo.":
+      "الحقول المميزة كانت صعبة القراءة — راجعها مع الصورة.",
+    "Not readable on the image — enter it": "غير مقروء في الصورة — أدخله",
+    "Hard to read on the image — check it": "صعب القراءة في الصورة — راجعه",
+    "Tap to enlarge": "اضغط للتكبير",
+    "Receipt no.": "رقم الإيصال",
+    "Paid by": "طريقة الدفع",
+    "Card": "بطاقة",
+    "Bank transfer": "تحويل بنكي",
+    "— pick a category —": "— اختر فئة —",
+    "No farm (shared)": "بدون مزرعة (مشترك)",
+    "Category suggested by the assistant — confirm or change it.": "فئة اقترحها المساعد — أكّدها أو غيّرها.",
+    "Line total": "إجمالي البند",
+    "No item lines were printed — the total is recorded as it is on the receipt.":
+      "لا توجد بنود مطبوعة — يُسجّل الإجمالي كما هو في الإيصال.",
+    "Tax / extra charges": "ضريبة / رسوم إضافية",
+    "Printed total": "الإجمالي المطبوع",
+    "Split by category": "تقسيم حسب الفئة",
+    "One expense per category, all linked to this receipt. The amounts must add up to the printed total.":
+      "مصروف لكل فئة، وكلها مرتبطة بهذا الإيصال. يجب أن يساوي مجموع المبالغ الإجمالي المطبوع.",
+    "+ Add a category": "+ إضافة فئة",
+    "Enter the printed total.": "أدخل الإجمالي المطبوع.",
+    "Set the receipt's date.": "حدّد تاريخ الإيصال.",
+    "The date is in the future.": "التاريخ في المستقبل.",
+    "A line has no amount — fill in its total or its quantity and price:":
+      "بند بدون مبلغ — أدخل إجماليه أو الكمية والسعر:",
+    "Lines match the printed total": "البنود تطابق الإجمالي المطبوع",
+    "The lines don't add up to the printed total:": "مجموع البنود لا يساوي الإجمالي المطبوع:",
+    "A split needs at least two categories.": "التقسيم يحتاج فئتين على الأقل.",
+    "Give every line a category.": "حدّد فئة لكل بند.",
+    "Pick a category for every amount.": "اختر فئة لكل مبلغ.",
+    "Every category needs an amount above 0.": "كل فئة تحتاج مبلغاً أكبر من صفر.",
+    "Each category can appear only once.": "لا يمكن تكرار الفئة.",
+    "The split doesn't add up to the printed total:": "مجموع التقسيم لا يساوي الإجمالي المطبوع:",
+    "Pick an expense category.": "اختر فئة المصروف.",
+    "Record anyway": "تسجيل على أي حال",
+    "Recording": "جارٍ التسجيل",
+    "Recorded": "تم التسجيل",
+    "receipt image kept with the expense": "صورة الإيصال محفوظة مع المصروف",
+    "Source document": "المستند الأصلي",
+    "Source document (receipt photo)": "المستند الأصلي (صورة الإيصال)"
   };
 
   /* Regex rules for dynamic strings (applied when exact lookup fails). */

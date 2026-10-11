@@ -95,7 +95,7 @@
       document.head.appendChild(s);
     });
   }
-  async function renderPages(file, onProgress) {
+  async function renderPages(file, onProgress, maxWidth) {
     const pdfjsLib = await loadPdfJs();
     const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer(), isEvalSupported: false }).promise;
     if (pdf.numPages > MAX_PAGES) throw new Error(`That PDF has ${pdf.numPages} pages — send at most ${MAX_PAGES} at a time.`);
@@ -104,7 +104,9 @@
       onProgress && onProgress(i, pdf.numPages);
       const page = await pdf.getPage(i);
       const base = page.getViewport({ scale: 1 });
-      const viewport = page.getViewport({ scale: Math.min(2, MAX_WIDTH / base.width) });
+      // Invoices fit the page width to MAX_WIDTH, as always; documents (maxWidth given) fit the long side.
+      const fit = maxWidth ? maxWidth / Math.max(base.width, base.height) : MAX_WIDTH / base.width;
+      const viewport = page.getViewport({ scale: Math.min(2, fit) });
       const canvas = document.createElement("canvas");
       canvas.width = Math.floor(viewport.width); canvas.height = Math.floor(viewport.height);
       const ctx = canvas.getContext("2d");
@@ -347,5 +349,6 @@
     }
   }
 
-  window.AskActions = { cards, pdf };
+  // renderPages is shared with ask-documents.js (photos and scans of receipts …).
+  window.AskActions = { cards, pdf, renderPages };
 })();

@@ -190,6 +190,12 @@ def test_a_refund_from_closed_history_no_longer_discounts_todays_balance():
     with make_session() as session:
         seed(session)
         b2b_refund(session, qty=10, price=20)      # 200 credit, Aug
+        # The refund code stamps the refund with today's date. Pin it to August as the
+        # story says — left at "now", the test started failing once today passed the
+        # 1 Oct invoice below, though the rule it checks was still right.
+        for refund in session.query(B2BRefund).all():
+            refund.created_at = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        session.commit()
         settle(session)                            # its invoice is paid off
         later_invoice(session, datetime(2026, 10, 1, tzinfo=timezone.utc), total=500)
 

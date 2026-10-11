@@ -53,7 +53,13 @@ async def status(db: AsyncSession = Depends(get_async_session), user: User = Dep
         "can_look_up": [TOOL_LABELS[t] for t in assistant_service.allowed_tools(user)],
         "is_admin": user.role == "admin",
         "can_record_invoices": has_permission(user, "page_pos") and has_permission(user, "action_pos_create_sale"),
+        "document_kinds": _document_kinds(user),
     }
+
+
+def _document_kinds(user: User) -> list[dict]:
+    from app.services import document_reader
+    return [{"kind": k, "label": document_reader.KINDS[k]["label"]} for k in document_reader.allowed_kinds(user)]
 
 
 @router.post("/api/ask")
@@ -79,15 +85,18 @@ async def confirm_action(data: ConfirmRequest, db: AsyncSession = Depends(get_as
 
 # ── PDF invoices → POS ──────────────────────────────────────────────────────
 
-async def _read_capped(request: Request, limit: int) -> bytes:
+_TOO_LARGE = "That PDF is too large — send at most 10 pages."
+
+
+async def _read_capped(request: Request, limit: int, too_large: str = _TOO_LARGE) -> bytes:
     """The body, read in chunks and refused once it passes `limit`, so a huge upload never sits in memory."""
     if int(request.headers.get("content-length") or 0) > limit:
-        raise HTTPException(status_code=413, detail="That PDF is too large — send at most 10 pages.")
+        raise HTTPException(status_code=413, detail=too_large)
     chunks, size = [], 0
     async for chunk in request.stream():
         size += len(chunk)
         if size > limit:
-            raise HTTPException(status_code=413, detail="That PDF is too large — send at most 10 pages.")
+            raise HTTPException(status_code=413, detail=too_large)
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -156,6 +165,65 @@ async def record_invoice(request: Request, db: AsyncSession = Depends(get_async_
     except (ValueError, AssertionError):
         raise HTTPException(status_code=400, detail="Couldn't read the invoice.")
     return await assistant_actions.record_invoice(db, user, data)
+
+
+# ── Photos and scans of paper documents (receipts …) ─────────────────────────
+
+_DOC_TOO_LARGE = "Those images are too large together — send fewer photos (at most 10)."
+
+@router.post("/api/documents/read")
+async def read_document(request: Request, db: AsyncSession = Depends(get_async_session),
+                        user: User = Depends(get_current_user)):
+    """Images of one paper document → a draft to review. Counts as one question toward the daily limit; nothing is
+    recorded here."""
+    from app.services import document_reader
+    if not assistant_service.is_configured():
+        raise HTTPException(status_code=503, detail="The assistant is not set up yet.")
+    try:
+        body = json.loads(await _read_capped(request, document_reader.MAX_REQUEST_BYTES, _DOC_TOO_LARGE))
+        kind = str(body.get("kind") or "")
+        images = body.get("images") or []
+        filename = str(body.get("filename") or "photo")[:120]
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="Couldn't read the upload.")
+    if kind == "auto":
+        allowed = document_reader.allowed_kinds(user)
+        if not allowed:
+            raise HTTPException(status_code=403, detail="You don't have permission to record any document type.")
+        kind = allowed[0]                          # one type so far; more are added in later phases
+    document_reader.need_kind(user, kind)
+    used, limit = await assistant_service.limit_state(db, user)
+    if limit and used >= limit:
+        raise HTTPException(status_code=429, detail=f"You've used today's {limit} questions. The limit resets "
+                                                    "tomorrow, or an admin can reset it for you.")
+    if not isinstance(images, list) or not images or len(images) > document_reader.MAX_IMAGES:
+        raise HTTPException(status_code=400, detail=f"Send 1 to {document_reader.MAX_IMAGES} images.")
+    started = time.perf_counter()
+    draft, usage = await document_reader.read(db, user, kind, images)
+    total_s = time.perf_counter() - started
+    del images, body
+    record(db, "Assistant", "ask", f"Document ({kind}): {filename} ({draft.get('pages')} image(s)) | lookups: "
+                                   f"read_document | tokens {usage['prompt_tokens']}+{usage['completion_tokens']} | "
+                                   f"{assistant_service.timing_text(total_s, total_s, 0)}", user=user)
+    await db.commit()
+    used, limit = await assistant_service.limit_state(db, user)
+    return {"filename": filename, "document": draft,
+            "timing": {"seconds": round(total_s, 1)},
+            "questions_left": max(limit - used, 0) if limit else None, "daily_limit": limit or None}
+
+
+@router.post("/api/documents/record")
+async def record_document(request: Request, db: AsyncSession = Depends(get_async_session),
+                          user: User = Depends(get_current_user)):
+    from app.services import document_reader
+    try:
+        data = json.loads(await _read_capped(request, document_reader.MAX_REQUEST_BYTES, _DOC_TOO_LARGE))
+        assert isinstance(data, dict)
+    except (ValueError, AssertionError):
+        raise HTTPException(status_code=400, detail="Couldn't read the document.")
+    if data.get("kind") == "expense_receipt":
+        return await document_reader.record_expense(db, user, data)
+    raise HTTPException(status_code=400, detail="Unknown document type.")
 
 
 # ── Admin: usage and limits ─────────────────────────────────────────────────
@@ -433,6 +501,28 @@ button.send:disabled{opacity:.5;cursor:default}
 .inv-new-fields input{min-width:150px}
 @media (max-width:640px){.inv-new{margin-left:0}}
 .inv-problems{margin:8px 0 0;padding-inline-start:18px;color:var(--warn);font-size:12.5px}
+.attach-wrap{position:relative;display:flex}
+.attach-menu{position:absolute;bottom:calc(100% + 6px);inset-inline-start:0;z-index:20;background:var(--card);border:1px solid var(--border2);
+             border-radius:12px;padding:6px;display:flex;flex-direction:column;gap:2px;min-width:250px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.attach-menu[hidden]{display:none}
+.attach-menu button{background:none;border:0;color:var(--text);text-align:start;padding:10px 12px;border-radius:8px;cursor:pointer;font-family:var(--sans);font-size:14px}
+.attach-menu button:hover{background:var(--card2)}
+.attach-menu button[hidden]{display:none}
+.doc-thumbs{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
+.doc-thumb{position:relative}
+.doc-thumb img,.doc-thumbs.small img{height:90px;border-radius:6px;border:1px solid var(--border2);background:#fff;display:block}
+.doc-thumbs.small img{height:64px;cursor:zoom-in}
+.doc-thumbs.small img.big{height:auto;max-width:100%;cursor:zoom-out}
+.doc-thumb-x{position:absolute;top:-6px;inset-inline-end:-6px;width:22px;height:22px;border-radius:50%;border:0;background:var(--danger);color:#fff;cursor:pointer;line-height:22px;padding:0}
+.doc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px 12px;margin:8px 0}
+.doc-field{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted)}
+.doc-field input,.doc-field select{width:100%}
+.inv-card input.doc-missing{border-color:var(--danger)!important;background:color-mix(in srgb,var(--danger) 12%,transparent)}
+.inv-card input.doc-unclear{border-color:var(--warn)!important;background:color-mix(in srgb,var(--warn) 14%,transparent)}
+.doc-split{display:flex;gap:8px;align-items:center;font-size:13px;margin-top:10px;cursor:pointer}
+.doc-alloc{margin-top:6px;padding:8px 10px;border:1px dashed var(--border2);border-radius:8px}
+.doc-line-cat{max-width:170px}
+@media (max-width:640px){.inv-table input{min-width:70px}.doc-grid{grid-template-columns:1fr 1fr}}
 .inv-problems:empty{display:none}
 .inv-card.ready{border-color:color-mix(in srgb,var(--green) 55%,transparent)}
 .inv-card.done{opacity:.8}
@@ -468,6 +558,7 @@ button.send:disabled{opacity:.5;cursor:default}
 <script src="/static/auth-guard.js"></script>
 <script src="/static/ask-chart.js"></script>
 <script src="/static/ask-actions.js"></script>
+<script src="/static/ask-documents.js"></script>
 </head>
 <body>
 """ + render_app_header(current_user, "page_assistant") + r"""
@@ -544,8 +635,17 @@ button.send:disabled{opacity:.5;cursor:default}
 </div>
 <div class="bar">
     <div class="bar-inner">
-        <button class="attach" id="attach" hidden title="Record sales invoices from a PDF" aria-label="Attach a PDF of invoices">📎</button>
+        <div class="attach-wrap">
+            <button class="attach" id="attach" hidden title="Attach a document" aria-label="Attach a document" aria-haspopup="true">📎</button>
+            <div class="attach-menu" id="attach-menu" hidden>
+                <button type="button" id="att-camera" hidden>📷 Take a photo of a document</button>
+                <button type="button" id="att-doc" hidden>🧾 Photo or PDF of a receipt</button>
+                <button type="button" id="att-pdf" hidden>📑 PDF of sales invoices</button>
+            </div>
+        </div>
         <input type="file" id="pdf" accept="application/pdf,.pdf" hidden>
+        <input type="file" id="doc-files" accept="image/*,.heic,.heif,application/pdf,.pdf" multiple hidden>
+        <input type="file" id="doc-camera" accept="image/*" capture="environment" hidden>
         <textarea id="q" placeholder="Ask a question… / اسأل سؤالاً…" dir="auto" maxlength="1000"></textarea>
         <button class="send" id="send">Ask</button>
     </div>
@@ -645,7 +745,13 @@ async function loadStatus(){
         if(!s.configured) document.getElementById("notice").innerHTML =
             `<div class="notice">The assistant isn't set up yet. An admin needs to add ASSISTANT_API_KEY and ASSISTANT_MODEL to the server settings.</div>`;
         if(s.is_admin){ document.getElementById("admin").style.display = ""; document.getElementById("brief").style.display = ""; }
-        document.getElementById("attach").hidden = !(s.can_record_invoices && s.configured && window.AskActions);
+        docKinds = s.document_kinds || [];
+        const canPdf = !!(s.can_record_invoices && window.AskActions);
+        const canDocs = !!(docKinds.length && window.AskDocuments);
+        document.getElementById("att-pdf").hidden = !canPdf;
+        document.getElementById("att-doc").hidden = !canDocs;
+        document.getElementById("att-camera").hidden = !canDocs;
+        document.getElementById("attach").hidden = !(s.configured && (canPdf || canDocs));
     }catch(e){}
 }
 async function send(text){
@@ -788,7 +894,22 @@ $b("brief-test").onclick = () => sendTest("week", "brief-test");
 $b("brief-test-month").onclick = () => sendTest("month", "brief-test-month");
 
 document.getElementById("send").onclick = () => send();
-document.getElementById("attach").onclick = () => document.getElementById("pdf").click();
+let docKinds = [];
+const attachMenu = document.getElementById("attach-menu");
+document.getElementById("attach").onclick = e => { e.stopPropagation(); attachMenu.hidden = !attachMenu.hidden; };
+document.addEventListener("click", e => { if(!e.target.closest(".attach-wrap")) attachMenu.hidden = true; });
+document.getElementById("att-pdf").onclick = () => { attachMenu.hidden = true; document.getElementById("pdf").click(); };
+document.getElementById("att-doc").onclick = () => { attachMenu.hidden = true; document.getElementById("doc-files").click(); };
+document.getElementById("att-camera").onclick = () => { attachMenu.hidden = true; document.getElementById("doc-camera").click(); };
+function startDocument(input){
+    const files = Array.from(input.files || []); input.value = "";
+    if(!files.length) return;
+    document.getElementById("chips").style.display = "none";
+    AskDocuments.start(files, {log, toast, kinds: docKinds,
+        onLimit: (left, limit) => { if(left !== null && left !== undefined) showLeft(left, limit); }});
+}
+document.getElementById("doc-files").onchange = e => startDocument(e.target);
+document.getElementById("doc-camera").onchange = e => startDocument(e.target);
 document.getElementById("pdf").onchange = e => {
     const file = e.target.files[0]; e.target.value = "";
     if(!file) return;

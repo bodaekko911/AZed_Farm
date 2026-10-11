@@ -3,6 +3,7 @@ from app.models.accounting import Account, Journal, JournalEntry
 from app.models.animal import AnimalGroup, FeedingLog, MortalityLog
 from app.models.receipt import ProductReceipt
 from app.models.brief import WeeklyBriefSettings
+from app.models.document import DocumentFile, DocumentLink
 from app.models.b2b import (
     B2BClient,
     B2BClientPrice,
@@ -49,6 +50,8 @@ from app.models.user import User
 
 __all__ = [
     "WeeklyBriefSettings",
+    "DocumentFile",
+    "DocumentLink",
     "Account",
     "ActivityLog",
     "AnimalGroup",

@@ -345,6 +345,49 @@ async def ensure_weekly_brief_table() -> None:
         logger.exception("ensure_weekly_brief_table: failed (could not open DB session)")
 
 
+async def ensure_document_files_tables() -> None:
+    """Self-healing guard for the document evidence tables. Mirrors migration
+    20261011_0050 so documents read by Ask are kept even if alembic is blocked.
+    Idempotent — CREATE TABLE / INDEX IF NOT EXISTS on every boot."""
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal
+
+    statements = [
+        "CREATE TABLE IF NOT EXISTS document_files ("
+        " id SERIAL PRIMARY KEY,"
+        " doc_key VARCHAR(36) NOT NULL,"
+        " page_no INTEGER NOT NULL DEFAULT 1,"
+        " kind VARCHAR(30) NOT NULL,"
+        " content_type VARCHAR(40) NOT NULL DEFAULT 'image/jpeg',"
+        " size_bytes INTEGER NOT NULL,"
+        " sha256 VARCHAR(64) NOT NULL,"
+        " data BYTEA NOT NULL,"
+        " filename VARCHAR(150),"
+        " user_id INTEGER REFERENCES users(id),"
+        " created_at TIMESTAMPTZ DEFAULT now())",
+        "CREATE INDEX IF NOT EXISTS ix_document_files_doc_key ON document_files (doc_key)",
+        "CREATE TABLE IF NOT EXISTS document_links ("
+        " id SERIAL PRIMARY KEY,"
+        " doc_key VARCHAR(36) NOT NULL,"
+        " ref_type VARCHAR(30) NOT NULL,"
+        " ref_id INTEGER NOT NULL,"
+        " created_at TIMESTAMPTZ DEFAULT now())",
+        "CREATE INDEX IF NOT EXISTS ix_document_links_doc_key ON document_links (doc_key)",
+        "CREATE INDEX IF NOT EXISTS ix_document_links_ref ON document_links (ref_type, ref_id)",
+    ]
+    try:
+        async with AsyncSessionLocal() as db:
+            for stmt in statements:
+                try:
+                    await db.execute(text(stmt))
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("ensure_document_files_tables: statement failed: %s", stmt)
+    except Exception:
+        logger.exception("ensure_document_files_tables: failed (could not open DB session)")
+
+
 async def ensure_carbon_methodology() -> None:
     """Self-healing guard for the carbon module's methodology upgrade.
 
@@ -665,6 +708,7 @@ async def lifespan(_: FastAPI):
     await ensure_b2b_portal_columns()
     await ensure_carbon_methodology()
     await ensure_weekly_brief_table()
+    await ensure_document_files_tables()
     await sync_livestock_emissions_on_boot()
     await seed_chart_of_accounts()
     from app.core.cache import init_redis_pool, close_redis_pool

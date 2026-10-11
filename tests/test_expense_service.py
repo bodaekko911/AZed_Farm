@@ -99,7 +99,8 @@ def test_list_expenses_returns_expenses_with_no_filters() -> None:
                     animal_group=None,
                     is_animal_expense=False,
                 )
-            ]
+            ],
+            [],      # no source document (receipt photo) linked to it
         ]
     )
 
@@ -123,6 +124,7 @@ def test_list_expenses_returns_expenses_with_no_filters() -> None:
             "animal_group_id": None,
             "animal_group_name": None,
             "is_animal_expense": False,
+            "has_document": False,
         }
     ]
 

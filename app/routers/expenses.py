@@ -1827,7 +1827,9 @@ async function loadExpenses() {
             const rowJson = JSON.stringify(e).replace(/"/g,'&quot;');
             return `
             <tr>
-                <td><div class="exp-ref">${escapeHtml(String(ref))}</div></td>
+                <td><div class="exp-ref">${escapeHtml(String(ref))}${e.has_document
+                    ? ` <a href="/documents/view?ref_type=expense&amp;ref_id=${Number(e.id)}" target="_blank" rel="noopener" title="Source document (receipt photo)" style="text-decoration:none">📄</a>`
+                    : ""}</div></td>
                 <td>
                     <div class="exp-cat">${escapeHtml(String(category))}</div>
                     <div class="exp-vendor">${escapeHtml(String(vendor))}${badge}</div>

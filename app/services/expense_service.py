@@ -9,7 +9,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.log import record
+from app.core.log import logger, record
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.animal import AnimalGroup
 from app.models.carbon import CarbonEmissionFactor, CarbonLog
@@ -516,6 +516,7 @@ async def list_expenses(
     statement = statement.order_by(Expense.expense_date.desc(), Expense.id.desc())
     result = await db.execute(statement)
     expenses = result.scalars().all()
+    documented = await _expenses_with_documents(db, [e.id for e in expenses])
     return [
         {
             "id": expense.id,
@@ -534,9 +535,26 @@ async def list_expenses(
             "animal_group_id":   expense.animal_group_id,
             "animal_group_name": expense.animal_group.name if expense.animal_group else None,
             "is_animal_expense": bool(getattr(expense, "is_animal_expense", False)),
+            "has_document": expense.id in documented,
         }
         for expense in expenses
     ]
+
+
+async def _expenses_with_documents(db: AsyncSession, ids: list[int]) -> set[int]:
+    """The ids among ``ids`` that have a source document (a receipt photo read by Ask)."""
+    if not ids:
+        return set()
+    from app.models.document import DocumentLink
+    try:
+        rows = await db.execute(select(DocumentLink.ref_id).where(
+            DocumentLink.ref_type == "expense", DocumentLink.ref_id.in_(ids)))
+        return {r for (r,) in rows.all()}
+    except Exception:          # the table not there yet (alembic blocked) must not break the expenses list
+        logger.exception("expense list: document lookup failed")
+        if hasattr(db, "rollback"):
+            await db.rollback()
+        return set()
 
 
 async def get_summary(db: AsyncSession) -> dict:
@@ -587,7 +605,10 @@ async def get_summary(db: AsyncSession) -> dict:
     }
 
 
-async def create_expense_entry(db: AsyncSession, data: ExpenseCreate, current_user: User) -> dict:
+async def create_expense_entry(db: AsyncSession, data: ExpenseCreate, current_user: User, *,
+                               commit: bool = True) -> dict:
+    """Record one expense with its journal. ``commit=False`` leaves the commit to the caller, for several expenses
+    that must be saved together or not at all (a receipt split by category, with its document image)."""
     category = await _get_active_category(db, data.category_id)
     if data.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be greater than 0")
@@ -664,8 +685,9 @@ async def create_expense_entry(db: AsyncSession, data: ExpenseCreate, current_us
         ref_type="expense",
         ref_id=0,
     )
-    await db.commit()
-    await db.refresh(expense)
+    if commit:
+        await db.commit()
+        await db.refresh(expense)
     return {
         "id": expense.id,
         "ref_number": expense.ref_number,
