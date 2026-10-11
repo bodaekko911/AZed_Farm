@@ -274,6 +274,7 @@ async def get_deliveries(farm_id: int = None, skip: int = 0, limit: int = 50, db
     )
     result = await db.execute(stmt)
     deliveries = result.scalars().all()
+    documented = await _deliveries_with_documents(db, [d.id for d in deliveries])
     return {
         "total": total,
         "deliveries": [
@@ -301,10 +302,25 @@ async def get_deliveries(farm_id: int = None, skip: int = 0, limit: int = 50, db
                 ],
                 "total_items": len(d.items),
                 "total_qty":   sum(float(i.qty) for i in d.items),
+                "has_document": d.id in documented,
             }
             for d in deliveries
         ],
     }
+
+
+async def _deliveries_with_documents(db: AsyncSession, ids: list[int]) -> set[int]:
+    """The ids among ``ids`` that have a source document (a harvest sheet read by Ask)."""
+    if not ids:
+        return set()
+    from app.models.document import DocumentLink
+    try:
+        rows = await db.execute(select(DocumentLink.ref_id).where(
+            DocumentLink.ref_type == "farm_delivery", DocumentLink.ref_id.in_(ids)))
+        return {r for (r,) in rows.all()}
+    except Exception:          # the table not there yet (alembic blocked) must not break the deliveries list
+        await db.rollback()
+        return set()
 
 @router.post("/api/deliveries", dependencies=[Depends(require_permission("action_farm_delivery_create"))])
 async def create_delivery(data: DeliveryCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
@@ -1429,7 +1445,9 @@ async function loadDeliveries(){
 
         html+=`
         <tr class="expandable" onclick="toggleDetail('det-${d.id}')">
-            <td style="font-family:var(--mono);font-size:12px;color:var(--lime)">${d.delivery_number}</td>
+            <td style="font-family:var(--mono);font-size:12px;color:var(--lime)">${d.delivery_number}${d.has_document
+                ? ` <a href="/documents/view?ref_type=farm_delivery&amp;ref_id=${Number(d.id)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Source document (harvest sheet)" style="text-decoration:none">📄</a>`
+                : ""}</td>
             <td><span class="farm-badge ${farmCls}">${d.farm}</span></td>
             <td style="font-family:var(--mono);font-size:12px">${d.delivery_date}</td>
             <td style="font-size:12px">${d.received_by}${d.distance_km ? ` <span style="font-family:var(--mono);font-size:10px;color:var(--muted)" title="Transport logged to carbon footprint">🚚 ${d.distance_km} km</span>` : ""}</td>

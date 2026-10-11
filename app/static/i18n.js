@@ -696,6 +696,7 @@
     "Take a photo of a document": "تصوير مستند",
     "Photo or PDF of a receipt": "صورة أو PDF لإيصال",
     "Photo or PDF of a receipt or delivery note": "صورة أو PDF لإيصال أو إذن استلام",
+    "Photo or PDF of a document (receipt, delivery note, harvest sheet)": "صورة أو PDF لمستند (إيصال، إذن استلام، كشف حصاد)",
     "PDF of sales invoices": "ملف PDF لفواتير المبيعات",
     "Document": "مستند",
     "New document": "مستند جديد",
@@ -786,7 +787,21 @@
     "No prices on the note — quantities only": "لا توجد أسعار في الإذن — الكميات فقط",
     "Received": "تم الاستلام",
     "delivery note image kept with the stock": "صورة إذن الاستلام محفوظة مع المخزون",
-    "The costs are right — receive anyway": "التكاليف صحيحة — استلم على أي حال"
+    "The costs are right — receive anyway": "التكاليف صحيحة — استلم على أي حال",
+    "Harvest sheet": "كشف حصاد",
+    "Record deliveries": "تسجيل التوريدات",
+    "Received by": "المستلم",
+    "— pick the farm —": "— اختر المزرعة —",
+    "Written on the sheet": "المكتوب في الكشف",
+    "Written in": "مكتوب بـ",
+    "enter the quantity in": "أدخل الكمية بـ",
+    "Set the sheet's date.": "حدّد تاريخ الكشف.",
+    "Pick the farm for:": "اختر المزرعة لـ:",
+    "No lines were read from the sheet.": "لم تُقرأ أي بنود من الكشف.",
+    "One delivery per farm will be recorded:": "سيُسجَّل توريد واحد لكل مزرعة:",
+    "stock updated, sheet image kept with the deliveries": "تم تحديث المخزون، وصورة الكشف محفوظة مع التوريدات",
+    "Check every line against the photo — handwriting is easy to misread.": "راجع كل بند مع الصورة — الخط اليدوي قد يُقرأ خطأ.",
+    "Source document (harvest sheet)": "المستند الأصلي (كشف الحصاد)"
   };
 
   /* Regex rules for dynamic strings (applied when exact lookup fails). */

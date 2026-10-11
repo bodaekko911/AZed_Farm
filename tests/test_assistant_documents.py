@@ -1,4 +1,5 @@
-"""Ask — photos and scans of paper documents: expense receipts (phase 1) and supplier delivery notes (phase 2).
+"""Ask — photos and scans of paper documents: expense receipts (phase 1), supplier delivery notes (phase 2) and
+handwritten harvest sheets (phase 3).
 
 A real async SQLite session runs the app's own expense code; the vision model is an httpx MockTransport, so nothing
 calls a real model. What is protected:
@@ -33,7 +34,7 @@ from app.database import Base
 from app.models.accounting import Account, Journal
 from app.models.document import DocumentFile, DocumentLink
 from app.models.expense import Expense, ExpenseCategory
-from app.models.farm import Farm
+from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.product import Product
 from app.models.receipt import ProductReceipt
 from app.models.supplier import Supplier
@@ -97,11 +98,14 @@ async def session_with_data():
         ExpenseCategory(id=2, name="Seeds", account_code="5500", is_active="1"),
         ExpenseCategory(id=3, name="Old category", account_code="5500", is_active="0"),
         Farm(id=1, name="North Farm"),
+        Farm(id=2, name="South Farm"),
         ExpenseCategory(id=4, name="Products", account_code="5500", is_active="1"),
         Supplier(id=1, name="Al Baraka Farms", phone="01001234567", balance=0),
         Product(id=1, sku="TOM", name="Tomatoes", unit="kg", price=Decimal("20"), cost=Decimal("10"),
                 stock=Decimal("5"), is_active=True),
         Product(id=2, sku="HON", name="Raw Honey (1g)", unit="gram", price=Decimal("0.6"), cost=Decimal("0.3"),
+                stock=Decimal("0"), is_active=True),
+        Product(id=3, sku="BAS", name="Basil", unit="gram", price=Decimal("1"), cost=Decimal("0.2"),
                 stock=Decimal("0"), is_active=True),
     ])
     await db.commit()
@@ -307,7 +311,7 @@ def test_the_kept_images_must_be_the_ones_that_were_read():
 def test_a_user_without_expense_rights_can_neither_read_nor_record_receipts():
     async def go(db):
         assert reader.allowed_kinds(cashier()) == []
-        assert reader.allowed_kinds(admin()) == ["expense_receipt", "delivery_note"]
+        assert reader.allowed_kinds(admin()) == ["expense_receipt", "delivery_note", "harvest_sheet"]
         with pytest.raises(HTTPException) as read:
             await read_draft(db, user=cashier())
         assert read.value.status_code == 403
@@ -609,4 +613,143 @@ def test_delivery_notes_follow_the_receive_permissions():
             await doc_router.document_file(f.id, db=db, user=cashier())
         page = await doc_router.document_view("product_receipt", out["receipts"][0]["id"], db=db, user=receiver())
         assert "/documents/file/" in page.body.decode()
+    scenario(go)
+
+
+
+# ══ Phase 3: handwritten harvest sheets ══════════════════════════════════════
+
+def farmhand():
+    """May record farm deliveries; nothing else."""
+    return SimpleNamespace(id=4, name="Field", role="viewer", permissions="page_farm,action_farm_delivery_create")
+
+
+SHEET = {
+    "type": "harvest_sheet", "date": "2026-10-10", "farm": "المزرعة الشمالية", "farm_match": "North Farm",
+    "items": [{"farm": None, "farm_match": None, "product": "طماطم", "product_match": "Tomatoes", "qty": "١٢٠", "unit": "كيلو"},
+              {"farm": "القبلية", "farm_match": "South Farm", "product": "ريحان", "product_match": "Basil", "qty": "٢", "unit": "kg"}],
+    "received_by": "عم سيد", "notes": None, "unclear": ["items.1.qty"],
+}
+
+
+async def read_sheet(db, payload=SHEET, user=None, seen=None):
+    return (await reader.read(db, user or admin(), "harvest_sheet", [PART1], transport=model_reply(payload, seen)))[0]
+
+
+def recording_sheet(draft, **over):
+    """What the review card sends: 2 kg of basil in the product's own unit (grams)."""
+    body = {"kind": "harvest_sheet", "images": [PART1], "proof": draft["proof"], "filename": "sheet.jpg",
+            "date": draft["date"], "received_by": draft["received_by"], "notes": "",
+            "items": [{"farm_id": 1, "product_id": 1, "qty": 120, "written": "طماطم · ١٢٠ · كيلو"},
+                      {"farm_id": 2, "product_id": 3, "qty": 2000, "written": "القبلية · ريحان · ٢ · kg"}]}
+    body.update(over)
+    return body
+
+
+def test_an_arabic_sheet_is_read_and_matched_to_english_records():
+    async def go(db):
+        seen = []
+        d = await read_sheet(db, seen=seen)
+        system = seen[0]["messages"][0]["content"]
+        assert 'FARMS: ["North Farm", "South Farm"]' in system and '"Tomatoes"' in system and "PRODUCTS:" in system
+        assert d["kind"] == "harvest_sheet" and d["date"] == "2026-10-10" and d["received_by"] == "عم سيد"
+        tom, basil = d["lines"]
+        assert (tom["farm_id"], tom["product"]["id"], tom["qty"], tom["match"]) == (1, 1, 120.0, "suggested")
+        assert (basil["farm_id"], basil["product"]["id"], basil["qty"]) == (2, 3, 2.0)   # its own farm, not the sheet's
+        assert basil["pack"] == {"amount": 1000.0, "base": "g"}                           # 2 kg → 2000 g on the card
+        assert tom["pack"] == {"amount": 1000.0, "base": "g"}                             # كيلو is a kilo too
+        assert d["unclear"] == ["items.1.qty"] and d["missing"] == [] and d["duplicates"] == []
+        assert await count(db, FarmDelivery) == 0
+    scenario(go)
+
+
+def test_a_suggestion_that_isnt_on_the_list_is_not_used():
+    async def go(db):
+        d = await read_sheet(db, {**SHEET, "farm": "مزرعة الوادي", "farm_match": "Valley Farm",
+                                  "items": [{**SHEET["items"][0], "product": "مانجو", "product_match": "Mango"}]})
+        [line] = d["lines"]
+        assert line["farm_id"] is None and line["product"] is None            # never invented
+        assert "items.0.farm" in d["missing"]
+    scenario(go)
+
+
+def test_a_reviewed_sheet_becomes_one_delivery_per_farm_with_its_image_kept():
+    async def go(db):
+        from app.routers.farm import get_deliveries
+        d = await read_sheet(db)
+        out = await reader.record_harvest(db, admin(), recording_sheet(d))
+        assert [(x["farm"], x["lines"]) for x in out["deliveries"]] == [("North Farm", 1), ("South Farm", 1)]
+        deliveries = (await db.execute(select(FarmDelivery).order_by(FarmDelivery.id))).scalars().all()
+        assert [(x.farm_id, str(x.delivery_date), x.received_by) for x in deliveries] == \
+            [(1, "2026-10-10", "عم سيد"), (2, "2026-10-10", "عم سيد")]
+        items = (await db.execute(select(FarmDeliveryItem).order_by(FarmDeliveryItem.id))).scalars().all()
+        assert [(i.product_id, float(i.qty), i.unit) for i in items] == [(1, 120.0, "kg"), (3, 2000.0, "gram")]
+        assert items[0].notes == "طماطم · ١٢٠ · كيلو"                         # what was written stays with the line
+        tom, basil = await db.get(Product, 1), await db.get(Product, 3)
+        await db.refresh(tom), await db.refresh(basil)
+        assert float(tom.stock) == 125.0 and float(basil.stock) == 2000.0
+        links = (await db.execute(select(DocumentLink))).scalars().all()
+        assert sorted(l.ref_id for l in links) == [x.id for x in deliveries]
+        assert {l.ref_type for l in links} == {"farm_delivery"} and await count(db, DocumentFile) == 1
+        listed = await get_deliveries(db=db)
+        assert all(row["has_document"] for row in listed["deliveries"])
+    scenario(go)
+
+
+def test_every_line_needs_a_farm_a_product_and_a_quantity():
+    async def go(db):
+        d = await read_sheet(db)
+        for bad, message in (({"farm_id": None}, "pick the farm"), ({"product_id": None}, "pick the product"),
+                             ({"qty": 0}, "above 0")):
+            items = [{**recording_sheet(d)["items"][0], **bad}]
+            with pytest.raises(HTTPException) as err:
+                await reader.record_harvest(db, admin(), recording_sheet(d, items=items))
+            assert message in err.value.detail
+        assert await count(db, FarmDelivery) == 0 and await count(db, DocumentFile) == 0
+    scenario(go)
+
+
+def test_a_sheet_already_delivered_is_warned_about_and_can_be_recorded_anyway():
+    async def go(db):
+        d = await read_sheet(db)
+        await reader.record_harvest(db, admin(), recording_sheet(d))
+        again = await read_sheet(db)
+        assert len(again["duplicates"]) == 2 and "North Farm already has 120 kg of Tomatoes" in again["duplicates"][0]
+        with pytest.raises(HTTPException) as dup:
+            await reader.record_harvest(db, admin(), recording_sheet(again))
+        assert dup.value.status_code == 409
+        await reader.record_harvest(db, admin(), recording_sheet(again, force=True))
+        assert await count(db, FarmDelivery) == 4
+    scenario(go)
+
+
+def test_harvest_sheets_follow_the_farm_delivery_permissions():
+    async def go(db):
+        assert reader.allowed_kinds(farmhand()) == ["harvest_sheet"]
+        assert "harvest_sheet" not in reader.allowed_kinds(receiver())
+        with pytest.raises(HTTPException) as read:
+            await read_sheet(db, user=receiver())
+        assert read.value.status_code == 403
+        # A farm hand may search products for the card, but not suppliers.
+        assert [x["id"] for x in await reader.search(db, farmhand(), "products", "basil")] == [3]
+        with pytest.raises(HTTPException):
+            await reader.search(db, farmhand(), "suppliers", "bar")
+        d = await read_sheet(db, user=farmhand())
+        out = await reader.record_harvest(db, farmhand(), recording_sheet(d))
+        f = (await db.execute(select(DocumentFile))).scalars().first()
+        assert (await doc_router.document_file(f.id, db=db, user=farmhand())).body == f.data
+        with pytest.raises(HTTPException):
+            await doc_router.document_file(f.id, db=db, user=receiver())
+        with pytest.raises(HTTPException):
+            await reader.record_harvest(db, receiver(), recording_sheet(d))
+        assert out["deliveries"][0]["delivery_number"].startswith("FD-")
+    scenario(go)
+
+
+def test_not_sure_can_also_find_a_harvest_sheet():
+    async def go(db):
+        seen = []
+        d, _u = await reader.read(db, admin(), "auto", [PART1], transport=model_reply(SHEET, seen))
+        assert d["kind"] == "harvest_sheet" and len(d["lines"]) == 2
+        assert '"harvest_sheet"' in seen[0]["messages"][0]["content"]
     scenario(go)

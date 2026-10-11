@@ -224,13 +224,15 @@ async def record_document(request: Request, db: AsyncSession = Depends(get_async
         return await document_reader.record_expense(db, user, data)
     if data.get("kind") == "delivery_note":
         return await document_reader.record_delivery(db, user, data)
+    if data.get("kind") == "harvest_sheet":
+        return await document_reader.record_harvest(db, user, data)
     raise HTTPException(status_code=400, detail="Unknown document type.")
 
 
 @router.get("/api/documents/search")
 async def search_document_records(kind: str, q: str = "", db: AsyncSession = Depends(get_async_session),
                                   user: User = Depends(get_current_user)):
-    """Suppliers or products for the delivery-note review card."""
+    """Suppliers or products for the delivery-note and harvest-sheet review cards."""
     from app.services import document_reader
     return {"results": await document_reader.search(db, user, kind, q)}
 
@@ -648,7 +650,7 @@ button.send:disabled{opacity:.5;cursor:default}
             <button class="attach" id="attach" hidden title="Attach a document" aria-label="Attach a document" aria-haspopup="true">📎</button>
             <div class="attach-menu" id="attach-menu" hidden>
                 <button type="button" id="att-camera" hidden>📷 Take a photo of a document</button>
-                <button type="button" id="att-doc" hidden>🧾 Photo or PDF of a receipt or delivery note</button>
+                <button type="button" id="att-doc" hidden>🧾 Photo or PDF of a document (receipt, delivery note, harvest sheet)</button>
                 <button type="button" id="att-pdf" hidden>📑 PDF of sales invoices</button>
             </div>
         </div>

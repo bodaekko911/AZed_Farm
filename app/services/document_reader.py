@@ -16,7 +16,8 @@ The same safe pattern as PDF sales invoices (see assistant_actions.read_invoices
    returned at step 3 ties the images sent at step 4 to the ones the model read, so the evidence is the document
    the record was made from.
 
-Expense receipts (phase 1) and supplier delivery notes (phase 2); harvest sheets plug into the same KINDS registry.
+Expense receipts (phase 1), supplier delivery notes (phase 2) and handwritten harvest sheets (phase 3) — each a
+kind in the KINDS registry.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ KINDS = {
     "expense_receipt": {"label": "Expense receipt", "permissions": ("page_expenses", "action_expenses_create")},
     "delivery_note": {"label": "Supplier delivery note",
                       "permissions": ("page_receive_products", "action_receive_products_create")},
+    "harvest_sheet": {"label": "Harvest sheet", "permissions": ("page_farm", "action_farm_delivery_create")},
 }
 
 
@@ -214,6 +216,21 @@ _SPECS = {
 - "amount_paid": the amount the document says was paid (cash received, paid stamp with an amount), else null.
   "paid_in_full": true only if it is marked paid / cash in full, false if marked credit / unpaid / on account, else
   null."""),
+    "harvest_sheet": ("a HARVEST sheet — a farm worker's daily sheet, often handwritten in Arabic, listing what was "
+                      "picked and brought in from the farm(s)",
+                      """{"type": "harvest_sheet", "date": "YYYY-MM-DD or null", "farm": "farm name as written for the whole sheet, or null",
+ "farm_match": "the one name from FARMS it means, or null",
+ "items": [{"farm": "farm as written on THIS line if the sheet lists several farms, else null",
+            "farm_match": "the one name from FARMS it means, or null",
+            "product": "product as written", "product_match": "the one name from PRODUCTS it means, or null",
+            "qty": 120, "unit": "unit as written (kg, كيلو, box, صندوق, crate, bunch …) or null"}],
+ "received_by": "name of whoever signed or received it, or null", "notes": "any other remark, or null",
+ "unclear": ["items.0.qty"]}""",
+                      """- Copy "farm", "product" and "unit" exactly as written, in the language written. "farm_match" and
+  "product_match" are SUGGESTIONS for the user to confirm: the name from the lists below that the written word means
+  (طماطم → Tomatoes), or null if none clearly fits — never invent a name that isn't in the list.
+- Handwriting is often hard to read: put every quantity or word you are not sure of in "unclear" rather than
+  guessing. A crossed-out value is not the value; use the corrected one if written, else null."""),
 }
 
 
@@ -228,8 +245,11 @@ def build_prompt(kinds: list[str], choices: dict) -> str:
         text = (f"{_INTRO}\nFirst decide which ONE of these kinds the document is, then return that kind's JSON with "
                 f'"type" set to it. If it is none of them, return {{"type": "other"}}.\n{parts}\n{_COMMON_RULES}')
     if "expense_receipt" in kinds:
-        text += ("\nCATEGORIES: " + json.dumps([c["name"] for c in choices.get("categories", [])][:150], ensure_ascii=False)
-                 + "\nFARMS: " + json.dumps([f["name"] for f in choices.get("farms", [])][:60], ensure_ascii=False))
+        text += "\nCATEGORIES: " + json.dumps([c["name"] for c in choices.get("categories", [])][:150], ensure_ascii=False)
+    if "expense_receipt" in kinds or "harvest_sheet" in kinds:
+        text += "\nFARMS: " + json.dumps([f["name"] for f in choices.get("farms", [])][:60], ensure_ascii=False)
+    if "harvest_sheet" in kinds:
+        text += "\nPRODUCTS: " + json.dumps(choices.get("product_names", [])[:400], ensure_ascii=False)
     return text
 
 
@@ -326,15 +346,20 @@ async def read(db, user, kind: str, images: list[str], transport=None) -> tuple[
     blobs = image_bytes(images)
     hashes = [hashlib.sha256(b).hexdigest() for b in blobs]
     choices = await _choices(db)
+    if "harvest_sheet" in kinds:
+        choices["product_names"] = await _product_names(db)
     raw, usage = await _vision(build_prompt(kinds, choices), images, transport=transport)
+    choices.pop("product_names", None)
     found = raw.get("type") if isinstance(raw, dict) else None
     detected = found if len(kinds) > 1 else kinds[0]
     if detected not in kinds or found == "other":
         return {"not_this_kind": True, "kind": kind, "pages": len(images)}, usage
     if detected == "expense_receipt":
         draft = await match_expense(db, parse_expense(raw), choices)
-    else:
+    elif detected == "delivery_note":
         draft = await match_delivery(db, parse_delivery(raw))
+    else:
+        draft = await match_harvest(db, parse_harvest(raw), choices)
     draft.update({"kind": detected, "proof": proof_for(user, detected, hashes), "pages": len(images), **choices})
     return draft, usage
 
@@ -475,11 +500,13 @@ async def delivery_duplicate(db, supplier_id: Optional[int], number: Optional[st
 
 
 async def search(db, user, kind: str, q: str) -> list[dict]:
-    """Suppliers or products for the review pickers — only for someone who may record a delivery note."""
+    """Suppliers (delivery notes) or products (delivery notes and harvest sheets) for the review pickers — only for
+    someone who may record a document that uses them."""
     from app.models.product import Product
     from app.models.supplier import Supplier
     from app.services.assistant_actions import _product_out
-    need_kind(user, "delivery_note")
+    if kind == "suppliers" or "harvest_sheet" not in allowed_kinds(user):
+        need_kind(user, "delivery_note")
     q = (q or "").strip()[:80]
     if len(q) < 2:
         return []
@@ -766,3 +793,159 @@ async def record_delivery(db, user, data: dict) -> dict:
             "total_paid": out["total_paid"], "total_unpaid": out["total_unpaid"],
             "receipts": [{"id": r["id"], "ref_number": r["ref_number"], "product_name": r["product_name"],
                           "qty": r["qty"]} for r in out["receipts"]]}
+
+
+
+# ── Harvest sheets: parse, match, check ──────────────────────────────────────
+
+async def _product_names(db) -> list[str]:
+    from app.models.product import Product
+    from app.services.assistant_actions import is_delivery_text
+    names = [n for (n,) in (await db.execute(select(Product.name).where(
+        (Product.is_active.is_(True)) | (Product.is_active.is_(None))).order_by(Product.name))).all()]
+    return [n for n in names if not is_delivery_text(n)]
+
+
+def parse_harvest(raw: dict) -> dict:
+    """The model's JSON → a clean draft. Missing stays None; nothing is computed or guessed here."""
+    items = []
+    for it in (raw.get("items") or [])[:100]:
+        if not isinstance(it, dict):
+            continue
+        items.append({"farm": _text(it.get("farm"), 150), "farm_match": _text(it.get("farm_match"), 150),
+                      "product": _text(it.get("product"), 200) or "", "product_match": _text(it.get("product_match"), 200),
+                      "qty": number(it.get("qty")), "unit": _text(it.get("unit"), 30)})
+    return {"date": _day(raw.get("date")), "farm": _text(raw.get("farm"), 150),
+            "farm_match": _text(raw.get("farm_match"), 150), "items": items,
+            "received_by": _text(raw.get("received_by"), 150), "notes": _text(raw.get("notes"), 500),
+            "unclear": _unclear(raw.get("unclear"))}
+
+
+async def match_harvest(db, draft: dict, choices: dict) -> dict:
+    """Each line's farm (its own, else the sheet's) and product matched to records: the model's suggestion from the
+    lists first (it reads طماطم as Tomatoes), else the written word by spelling. The review card shows the written
+    words next to the match, so the user checks every one."""
+    from app.models.product import Product
+    from app.services.assistant_actions import (_norm, _product_out, best_matches, is_delivery_text, pack_of,
+                                                without_size)
+    farms = choices["farms"]
+    by_name = {_norm(f["name"]): f for f in farms}
+
+    def farm_for(written: Optional[str], suggested: Optional[str]) -> Optional[dict]:
+        if suggested and _norm(suggested) in by_name:
+            return by_name[_norm(suggested)]
+        if written:
+            found = best_matches(written, farms, lambda f: f["name"], limit=1, floor=0.85)
+            return found[0][1] if found else None
+        return None
+
+    sheet_farm = farm_for(draft.get("farm"), draft.get("farm_match"))
+    products = [p for p in (await db.execute(select(Product).where(
+        (Product.is_active.is_(True)) | (Product.is_active.is_(None))))).scalars().all() if not is_delivery_text(p.name)]
+    product_by_name = {_norm(p.name): p for p in products}
+    lines = []
+    for it in draft["items"]:
+        farm = farm_for(it.get("farm"), it.get("farm_match")) or sheet_farm
+        product, match = None, None
+        if it.get("product_match") and _norm(it["product_match"]) in product_by_name:
+            product, match = product_by_name[_norm(it["product_match"])], "suggested"
+        found = best_matches(without_size(it["product"]), products, lambda p: without_size(p.name), limit=4, floor=0.5)
+        if product is None and found:
+            product, match = found[0][1], ("name" if found[0][0] >= 0.85 else "closest")
+        lines.append({**it, "farm_id": farm["id"] if farm else None,
+                      "product": _product_out(product) if product else None, "match": match,
+                      "pack": pack_of("1" + it["unit"]) if it.get("unit") else None,
+                      "candidates": [_product_out(p) for _s, p in found if p is not product][:3]})
+    missing = [k for k in ("date",) if not draft.get(k)]
+    for n, line in enumerate(lines):
+        if line["qty"] is None:
+            missing.append(f"items.{n}.qty")
+        if line["farm_id"] is None:
+            missing.append(f"items.{n}.farm")
+    draft.update({"farm_match": sheet_farm, "lines": lines, "missing": missing,
+                  "duplicates": await harvest_duplicates(db, draft.get("date"), [
+                      (l["farm_id"], l["product"]["id"] if l["product"] else None) for l in lines])})
+    return draft
+
+
+async def harvest_duplicates(db, day: Optional[str], pairs: list[tuple]) -> list[str]:
+    """Deliveries already recorded for the same farm, date and product — the same sheet entered twice, or a line
+    the farm page already has."""
+    from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
+    from app.models.product import Product
+    pairs = [(f, p) for f, p in pairs if f and p]
+    if not day or not pairs:
+        return []
+    when = date.fromisoformat(day)
+    rows = (await db.execute(
+        select(FarmDelivery.farm_id, FarmDeliveryItem.product_id, FarmDelivery.delivery_number, Farm.name,
+               Product.name, FarmDeliveryItem.qty, FarmDeliveryItem.unit)
+        .join(FarmDeliveryItem, FarmDeliveryItem.delivery_id == FarmDelivery.id)
+        .join(Farm, Farm.id == FarmDelivery.farm_id).join(Product, Product.id == FarmDeliveryItem.product_id)
+        .where(FarmDelivery.delivery_date == when, FarmDelivery.farm_id.in_({f for f, _p in pairs}),
+               FarmDeliveryItem.product_id.in_({p for _f, p in pairs})))).all()
+    wanted = set(pairs)
+    return [f"{farm} already has {float(qty):g} {unit or ''} of {product} delivered on {when} ({number})"
+            .replace("  ", " ")
+            for f, p, number, farm, product, qty, unit in rows if (f, p) in wanted]
+
+
+async def record_harvest(db, user, data: dict) -> dict:
+    """Confirm a reviewed harvest sheet: one farm delivery per farm on the sheet, through the same code the farm page
+    and the delivery action use — stock goes up, the delivery is logged — with the sheet's image kept."""
+    from app.models.farm import Farm
+    from app.models.product import Product
+    from app.services.farm_intake_service import create_farm_delivery
+
+    kind = "harvest_sheet"
+    need_kind(user, kind)
+    blobs, hashes = check_images(user, kind, data.get("images") or [], data.get("proof"))
+    day = _day(data.get("date"))
+    if not day:
+        raise HTTPException(status_code=400, detail="Enter the sheet's date.")
+    if date.fromisoformat(day) > today_local():
+        raise HTTPException(status_code=400, detail="The sheet's date is in the future.")
+    raw = [it for it in (data.get("items") or []) if isinstance(it, dict)][:100]
+    if not raw:
+        raise HTTPException(status_code=400, detail="There are no lines to record.")
+    farms = {f.id: f for f in (await db.execute(select(Farm))).scalars().all()}
+    ids = [int(it["product_id"]) for it in raw if str(it.get("product_id") or "").isdigit()]
+    products = {p.id: p for p in (await db.execute(select(Product).where(Product.id.in_(ids)))).scalars().all()}
+    by_farm: dict[int, list[dict]] = {}
+    for n, it in enumerate(raw, start=1):
+        fid = int(it["farm_id"]) if str(it.get("farm_id") or "").isdigit() else None
+        pid = int(it["product_id"]) if str(it.get("product_id") or "").isdigit() else None
+        if fid not in farms:
+            raise HTTPException(status_code=400, detail=f"Line {n}: pick the farm.")
+        if pid not in products:
+            raise HTTPException(status_code=400, detail=f"Line {n}: pick the product.")
+        qty = number(it.get("qty"))
+        if qty is None or qty <= 0:
+            raise HTTPException(status_code=400, detail=f"Line {n}: the quantity must be above 0.")
+        by_farm.setdefault(fid, []).append({"product_id": pid, "qty": round(qty, 3),
+                                            "notes": _text(it.get("written"), 255)})
+    if not data.get("force"):
+        dups = await harvest_duplicates(db, day, [(f, it["product_id"]) for f, items in by_farm.items() for it in items])
+        if dups:
+            raise HTTPException(status_code=409, detail="; ".join(dups[:5]) + ". Press “Record anyway” if these are "
+                                                                             "new deliveries.")
+    received_by = _text(data.get("received_by"), 150)
+    notes = "From a harvest sheet read by Ask" + (f": {_text(data.get('notes'), 400)}" if data.get("notes") else "")
+    deliveries = []
+    for fid, items in by_farm.items():
+        try:
+            delivery, _moves = await create_farm_delivery(
+                db, farm=farms[fid], delivery_date=date.fromisoformat(day), user_id=getattr(user, "id", None),
+                items=items, received_by=received_by, notes=notes, record_stock_movement=True, activity_user=user)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        deliveries.append((delivery, farms[fid].name, len(items)))
+    key = store_document(db, user, kind, blobs, hashes, _text(data.get("filename"), 150),
+                         [("farm_delivery", d.id) for d, _n, _c in deliveries])
+    record(db, "Assistant", "record_document",
+           f"Harvest sheet read by Ask → {', '.join(d.delivery_number for d, _n, _c in deliveries)} ({day}, "
+           f"{len(blobs)} image(s) kept)", user=user, ref_type="document", ref_id=None)
+    await db.commit()
+    return {"ok": True, "doc_key": key, "date": day,
+            "deliveries": [{"id": d.id, "delivery_number": d.delivery_number, "farm": name, "lines": count}
+                           for d, name, count in deliveries]}

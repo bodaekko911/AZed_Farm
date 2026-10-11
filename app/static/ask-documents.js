@@ -171,6 +171,7 @@
         chooser.remove();
         if (d.kind === "expense_receipt") bubble.append(expenseCard(d, images, name, opts));
         else if (d.kind === "delivery_note") bubble.append(deliveryCard(d, images, name, opts));
+        else if (d.kind === "harvest_sheet") bubble.append(harvestCard(d, images, name, opts));
       } catch (e) {
         status.replaceChildren(h("span", { class: "inv-bad", text: e.message || "Couldn't read that document." }));
         chooser.querySelectorAll("button, select").forEach(x => { x.disabled = false; });
@@ -648,6 +649,130 @@
         h("span", { class: "inv-muted", text: "Highlighted fields were hard to read — check them against the photo." })),
       h("div", { class: "doc-thumbs small" }, images.map(src => h("img", { src, alt: "", title: "Tap to enlarge", onclick: e => e.target.classList.toggle("big") }))),
       supplierRow, newBox, head, table, foot, problems, costBox, buttons, result);
+    check();
+    return card;
+  }
+
+  // ── Step 2: review a handwritten harvest sheet ──
+  function harvestCard(d, images, filename, opts) {
+    const unclear = new Set(d.unclear || []), missing = new Set(d.missing || []);
+    const farmName = id => ((d.farms || []).find(f => String(f.id) === String(id)) || {}).name || "";
+    const state = {
+      date: d.date || "", received_by: d.received_by || "", notes: d.notes || "", force: false, recorded: false,
+      lines: (d.lines || []).map(l => {
+        const line = { written: [l.farm, l.product, l.qty, l.unit].filter(x => x !== null && x !== undefined && x !== "").join(" · "),
+                       wProduct: l.product, unit: l.unit, farm_id: l.farm_id ? String(l.farm_id) : "", product: l.product,
+                       candidates: l.candidates, match: l.match, pack: l.pack, pQty: l.qty ?? "", pCost: null };
+        line.product = l.product;
+        return Object.assign(line, inProductUnits(line));
+      }),
+    };
+    const card = h("div", { class: "inv-card" });
+    const problems = h("ul", { class: "inv-problems" });
+    const summary = h("div", { class: "doc-alloc" });
+    const result = h("div", { class: "act-status" });
+    const recordBtn = h("button", { class: "act-btn act-primary", text: "Record deliveries" });
+    function flag(input, path) {
+      if (missing.has(path)) { input.classList.add("doc-missing"); input.title = "Not readable on the image — enter it"; }
+      else if (unclear.has(path)) { input.classList.add("doc-unclear"); input.title = "Hard to read on the image — check it"; }
+      input.addEventListener("input", () => input.classList.remove("doc-missing", "doc-unclear"));
+      input.addEventListener("change", () => input.classList.remove("doc-missing", "doc-unclear"));
+      return input;
+    }
+    const field = (label, input) => h("label", { class: "doc-field" }, h("span", { text: label }), input);
+    const head = h("div", { class: "doc-grid" },
+      field("Date", flag(h("input", { type: "date", value: state.date, max: today(), oninput: e => { state.date = e.target.value; check(); } }), "date")),
+      field("Received by", h("input", { type: "text", value: state.received_by, maxlength: 150, "data-no-i18n": true,
+        oninput: e => { state.received_by = e.target.value; } })),
+      field("Notes", h("input", { type: "text", value: state.notes, maxlength: 400, "data-no-i18n": true,
+        oninput: e => { state.notes = e.target.value; } })));
+
+    const tbody = h("tbody");
+    state.lines.forEach((l, i) => {
+      const farm = flag(h("select", { onchange: e => { l.farm_id = e.target.value; check(); } },
+        h("option", { value: "", text: "— pick the farm —" }),
+        ...(d.farms || []).map(f => h("option", { value: String(f.id), text: f.name, "data-no-i18n": true }))), `items.${i}.farm`);
+      farm.value = l.farm_id;
+      const qty = flag(h("input", { type: "number", step: "any", min: "0", value: l.qty, oninput: e => { l.qty = e.target.value; check(); } }), `items.${i}.qty`);
+      const unit = data("span", l.product ? l.product.unit : "", "inv-muted");
+      const hint = h("div", { class: "inv-hint" });
+      const conv = h("div", { class: "inv-conv", text: l.note });
+      const paintHint = () => {
+        const written = (l.unit || "").trim().toLowerCase(), own = l.product ? (l.product.unit || "").toLowerCase() : "";
+        hint.replaceChildren();
+        if (l.match === "closest" && l.product) hint.append(h("span", { text: "Closest match by name — check it" }));
+        else if (written && own && !l.note && written !== own)
+          hint.append(h("span", { text: "Written in" }), " ", data("span", l.unit), " — ",
+                      h("span", { text: "enter the quantity in" }), " ", data("span", l.product.unit));
+      };
+      const pick = picker("products", l.product, l.candidates, "— pick a product —", p => {
+        l.product = p; l.match = null;
+        Object.assign(l, inProductUnits(l));
+        qty.value = l.qty; conv.textContent = l.note; unit.textContent = p ? p.unit : "";
+        paintHint(); check();
+      });
+      paintHint();
+      tbody.append(h("tr", null, h("td", { class: "inv-desc" }, data("div", l.written || "—")),
+        h("td", null, farm), h("td", null, pick, hint, conv), h("td", null, qty, " ", unit)));
+    });
+    const table = h("table", { class: "inv-table" },
+      h("thead", null, h("tr", null, ["Written on the sheet", "Farm", "Product", "Qty"].map(t => h("th", { text: t })))), tbody);
+
+    function check() {
+      const issues = [];
+      if (!state.date) issues.push(h("li", null, h("span", { text: "Set the sheet's date." })));
+      else if (state.date > today()) issues.push(h("li", null, h("span", { text: "The date is in the future." })));
+      state.lines.forEach(l => {
+        if (!l.farm_id) issues.push(h("li", null, h("span", { text: "Pick the farm for:" }), " ", data("strong", l.written || "—")));
+        if (!l.product) issues.push(h("li", null, h("span", { text: "Pick a product for:" }), " ", data("strong", l.written || "—")));
+        if (!(num(l.qty) > 0)) issues.push(h("li", null, h("span", { text: "A quantity must be above 0:" }), " ", data("strong", l.written || "—")));
+      });
+      if (!state.lines.length) issues.push(h("li", null, h("span", { text: "No lines were read from the sheet." })));
+      (d.duplicates || []).forEach(t => { if (!state.force) issues.push(h("li", null, data("span", t))); });
+      problems.replaceChildren(...issues);
+      // No printed total on a harvest sheet: say what will be recorded, per farm and product, instead.
+      const byFarm = new Map();
+      state.lines.forEach(l => {
+        if (!l.farm_id || !l.product || !(num(l.qty) > 0)) return;
+        const f = byFarm.get(l.farm_id) || new Map();
+        const k = l.product.id, cur = f.get(k) || { name: l.product.name, unit: l.product.unit, qty: 0 };
+        cur.qty += num(l.qty); f.set(k, cur); byFarm.set(l.farm_id, f);
+      });
+      summary.replaceChildren(h("div", { class: "inv-muted", text: "One delivery per farm will be recorded:" }),
+        ...[...byFarm.entries()].map(([fid, items]) => h("div", { class: "inv-row" },
+          data("strong", farmName(fid)), data("span", [...items.values()].map(x => `${x.name} ${fmt3(x.qty)} ${x.unit || ""}`).join(" · ")))));
+      recordBtn.disabled = state.recorded || issues.length > 0;
+      return !issues.length;
+    }
+
+    const buttons = h("div", { class: "act-buttons" }, recordBtn);
+    if ((d.duplicates || []).length) buttons.append(h("button", { class: "act-btn", text: "Record anyway",
+      onclick: e => { state.force = true; e.target.remove(); check(); } }));
+    recordBtn.onclick = async () => {
+      if (!check()) return;
+      recordBtn.disabled = true; result.replaceChildren(h("span", { text: "Recording…" })); result.className = "act-status";
+      try {
+        const out = await post("/assistant/api/documents/record", {
+          kind: "harvest_sheet", images, proof: d.proof, filename, force: state.force, date: state.date,
+          received_by: state.received_by, notes: state.notes,
+          items: state.lines.map(l => ({ farm_id: Number(l.farm_id) || null, product_id: l.product ? l.product.id : null,
+                                         qty: num(l.qty), written: l.written })),
+        });
+        state.recorded = true;
+        result.className = "act-status ok";
+        result.replaceChildren("✓ ", h("span", { text: "Recorded" }), " ",
+          ...out.deliveries.map((x, i) => h("span", null, i ? ", " : "", h("a", { href: `/documents/view?ref_type=farm_delivery&ref_id=${x.id}`,
+            target: "_blank", rel: "noopener", "data-no-i18n": true, text: `${x.delivery_number} (${x.farm})` }))),
+          " — ", h("span", { text: "stock updated, sheet image kept with the deliveries" }));
+        card.classList.add("done"); card.querySelectorAll("input, select, button").forEach(x => { x.disabled = true; });
+      } catch (e) { result.replaceChildren(h("span", { text: e.message })); result.className = "act-status bad"; check(); }
+    };
+
+    card.append(
+      h("div", { class: "inv-head" }, h("div", { class: "inv-title", text: "Harvest sheet" }),
+        h("span", { class: "inv-muted", text: "Check every line against the photo — handwriting is easy to misread." })),
+      h("div", { class: "doc-thumbs small" }, images.map(src => h("img", { src, alt: "", title: "Tap to enlarge", onclick: e => e.target.classList.toggle("big") }))),
+      head, table, summary, problems, buttons, result);
     check();
     return card;
   }
