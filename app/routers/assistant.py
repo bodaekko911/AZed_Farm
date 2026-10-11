@@ -186,12 +186,11 @@ async def read_document(request: Request, db: AsyncSession = Depends(get_async_s
         filename = str(body.get("filename") or "photo")[:120]
     except (ValueError, AttributeError):
         raise HTTPException(status_code=400, detail="Couldn't read the upload.")
-    if kind == "auto":
-        allowed = document_reader.allowed_kinds(user)
-        if not allowed:
+    if kind == "auto":                             # "Not sure": the model says which of the user's types it is
+        if not document_reader.allowed_kinds(user):
             raise HTTPException(status_code=403, detail="You don't have permission to record any document type.")
-        kind = allowed[0]                          # one type so far; more are added in later phases
-    document_reader.need_kind(user, kind)
+    else:
+        document_reader.need_kind(user, kind)
     used, limit = await assistant_service.limit_state(db, user)
     if limit and used >= limit:
         raise HTTPException(status_code=429, detail=f"You've used today's {limit} questions. The limit resets "
@@ -202,7 +201,7 @@ async def read_document(request: Request, db: AsyncSession = Depends(get_async_s
     draft, usage = await document_reader.read(db, user, kind, images)
     total_s = time.perf_counter() - started
     del images, body
-    record(db, "Assistant", "ask", f"Document ({kind}): {filename} ({draft.get('pages')} image(s)) | lookups: "
+    record(db, "Assistant", "ask", f"Document ({draft.get('kind') or kind}): {filename} ({draft.get('pages')} image(s)) | lookups: "
                                    f"read_document | tokens {usage['prompt_tokens']}+{usage['completion_tokens']} | "
                                    f"{assistant_service.timing_text(total_s, total_s, 0)}", user=user)
     await db.commit()
@@ -223,7 +222,17 @@ async def record_document(request: Request, db: AsyncSession = Depends(get_async
         raise HTTPException(status_code=400, detail="Couldn't read the document.")
     if data.get("kind") == "expense_receipt":
         return await document_reader.record_expense(db, user, data)
+    if data.get("kind") == "delivery_note":
+        return await document_reader.record_delivery(db, user, data)
     raise HTTPException(status_code=400, detail="Unknown document type.")
+
+
+@router.get("/api/documents/search")
+async def search_document_records(kind: str, q: str = "", db: AsyncSession = Depends(get_async_session),
+                                  user: User = Depends(get_current_user)):
+    """Suppliers or products for the delivery-note review card."""
+    from app.services import document_reader
+    return {"results": await document_reader.search(db, user, kind, q)}
 
 
 # ── Admin: usage and limits ─────────────────────────────────────────────────
@@ -639,7 +648,7 @@ button.send:disabled{opacity:.5;cursor:default}
             <button class="attach" id="attach" hidden title="Attach a document" aria-label="Attach a document" aria-haspopup="true">📎</button>
             <div class="attach-menu" id="attach-menu" hidden>
                 <button type="button" id="att-camera" hidden>📷 Take a photo of a document</button>
-                <button type="button" id="att-doc" hidden>🧾 Photo or PDF of a receipt</button>
+                <button type="button" id="att-doc" hidden>🧾 Photo or PDF of a receipt or delivery note</button>
                 <button type="button" id="att-pdf" hidden>📑 PDF of sales invoices</button>
             </div>
         </div>

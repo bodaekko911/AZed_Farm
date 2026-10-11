@@ -1,4 +1,4 @@
-"""Ask — photos and scans of paper documents, phase 1: expense receipts.
+"""Ask — photos and scans of paper documents: expense receipts (phase 1) and supplier delivery notes (phase 2).
 
 A real async SQLite session runs the app's own expense code; the vision model is an httpx MockTransport, so nothing
 calls a real model. What is protected:
@@ -34,11 +34,15 @@ from app.models.accounting import Account, Journal
 from app.models.document import DocumentFile, DocumentLink
 from app.models.expense import Expense, ExpenseCategory
 from app.models.farm import Farm
+from app.models.product import Product
+from app.models.receipt import ProductReceipt
+from app.models.supplier import Supplier
 from app.models.user import User
 from app.routers import assistant as ask_router
 from app.routers import documents as doc_router
 from app.services import document_reader as reader
 from app.services.expense_service import list_expenses
+from app.services.receive_service import list_receipts
 
 
 @pytest.fixture(autouse=True)
@@ -93,6 +97,12 @@ async def session_with_data():
         ExpenseCategory(id=2, name="Seeds", account_code="5500", is_active="1"),
         ExpenseCategory(id=3, name="Old category", account_code="5500", is_active="0"),
         Farm(id=1, name="North Farm"),
+        ExpenseCategory(id=4, name="Products", account_code="5500", is_active="1"),
+        Supplier(id=1, name="Al Baraka Farms", phone="01001234567", balance=0),
+        Product(id=1, sku="TOM", name="Tomatoes", unit="kg", price=Decimal("20"), cost=Decimal("10"),
+                stock=Decimal("5"), is_active=True),
+        Product(id=2, sku="HON", name="Raw Honey (1g)", unit="gram", price=Decimal("0.6"), cost=Decimal("0.3"),
+                stock=Decimal("0"), is_active=True),
     ])
     await db.commit()
     return engine, db
@@ -172,7 +182,7 @@ def test_an_unreadable_value_stays_empty_and_is_marked_missing():
         d = await read_draft(db, {**RECEIPT, "total": None, "vendor": "", "date": "31/02/2026",
                                   "items": [{"description": "Rope", "qty": None, "unit_price": 20, "line_total": None}]})
         assert d["total"] is None and d["vendor"] is None and d["date"] is None
-        assert set(d["missing"]) == {"total", "date", "vendor", "items.0.line_total"}
+        assert set(d["missing"]) == {"total", "date", "items.0.line_total"}     # no vendor: optional, not flagged
     scenario(go)
 
 
@@ -296,7 +306,8 @@ def test_the_kept_images_must_be_the_ones_that_were_read():
 
 def test_a_user_without_expense_rights_can_neither_read_nor_record_receipts():
     async def go(db):
-        assert reader.allowed_kinds(cashier()) == [] and reader.allowed_kinds(admin()) == ["expense_receipt"]
+        assert reader.allowed_kinds(cashier()) == []
+        assert reader.allowed_kinds(admin()) == ["expense_receipt", "delivery_note"]
         with pytest.raises(HTTPException) as read:
             await read_draft(db, user=cashier())
         assert read.value.status_code == 403
@@ -392,4 +403,210 @@ def test_a_refusal_is_not_retried():
         with pytest.raises(HTTPException) as refused:
             await reader.read(db, admin(), "expense_receipt", [PART1], transport=flaky([(400, None)], calls))
         assert len(calls) == 1 and "ASSISTANT_VISION_MODEL" in refused.value.detail
+    scenario(go)
+
+
+def test_a_receipt_without_a_vendor_can_be_recorded():
+    async def go(db):
+        d = await read_draft(db, {**RECEIPT, "vendor": None})
+        out = await reader.record_expense(db, admin(), recording(d, vendor=""))
+        [exp] = (await db.execute(select(Expense))).scalars().all()
+        assert exp.vendor is None and out["expenses"][0]["amount"] == 800.0
+    scenario(go)
+
+
+
+# ══ Phase 2: supplier delivery notes ═════════════════════════════════════════
+
+def receiver():
+    """May receive stock; may not add suppliers or record expenses."""
+    return SimpleNamespace(id=3, name="Store", role="viewer",
+                           permissions="page_receive_products,action_receive_products_create")
+
+
+NOTE = {
+    "type": "delivery_note", "supplier": "Baraka Farm", "supplier_phone": "+20 100 123 4567", "date": "2026-10-09",
+    "document_number": "DN-٧٧",
+    "items": [{"description": "Tomatoes", "sku": "TOM", "qty": "٢٥", "unit": "kg", "unit_cost": "١٢", "line_total": "٣٠٠"},
+              {"description": "Raw honey 500g", "sku": None, "qty": 4, "unit": "jar", "unit_cost": 150, "line_total": 600}],
+    "discount": 0, "other_charges": 0, "total": "٩٠٠", "amount_paid": 400, "paid_in_full": False,
+    "unclear": ["items.1.unit_cost"],
+}
+
+
+async def read_note(db, payload=NOTE, user=None, kind="delivery_note"):
+    return (await reader.read(db, user or admin(), kind, [PART1], transport=model_reply(payload)))[0]
+
+
+def receiving(draft, **over):
+    """What the review card sends: quantities and costs in each product's own unit (4 jars of 500 g = 2000 g)."""
+    body = {"kind": "delivery_note", "images": [PART1], "proof": draft["proof"], "filename": "note.jpg",
+            "date": draft["date"], "document_number": draft["document_number"], "supplier_id": 1,
+            "items": [{"product_id": 1, "qty": 25, "unit_cost": 12}, {"product_id": 2, "qty": 2000, "unit_cost": 0.3}],
+            "total": 900, "discount": 0, "other_charges": 0, "amount_paid": 400, "expense_category_id": 4,
+            "farm": "1", "location_id": None}
+    body.update(over)
+    return body
+
+
+def test_a_delivery_note_is_read_and_matched_and_nothing_is_written():
+    async def go(db):
+        d = await read_note(db)
+        assert d["kind"] == "delivery_note" and d["total"] == 900.0 and d["document_number"] == "DN-٧٧"
+        assert d["supplier_match"] == {"id": 1, "name": "Al Baraka Farms", "phone": "01001234567"}   # by phone
+        tom, honey = d["lines"]
+        assert tom["product"]["id"] == 1 and tom["match"] == "sku" and tom["qty"] == 25.0
+        assert honey["product"]["id"] == 2 and honey["pack"] == {"amount": 500.0, "base": "g"}         # 4 × 500 g
+        assert d["unclear"] == ["items.1.unit_cost"] and d["missing"] == [] and d["duplicate"] is None
+        assert d["locations"] is not None and d["categories"]
+        assert await count(db, ProductReceipt) == 0
+    scenario(go)
+
+
+def test_a_reviewed_note_is_received_like_the_receive_page_with_its_image_kept():
+    async def go(db):
+        d = await read_note(db)
+        out = await reader.record_delivery(db, admin(), receiving(d))
+        assert out["count"] == 2 and out["total_cost"] == 900.0 and out["total_paid"] == 400.0
+        assert out["total_unpaid"] == 500.0
+        tom, honey = await db.get(Product, 1), await db.get(Product, 2)
+        await db.refresh(tom), await db.refresh(honey)
+        assert float(tom.stock) == 30.0 and float(honey.stock) == 2000.0
+        assert round(float(tom.cost), 3) == round((5 * 10 + 25 * 12) / 30, 3)        # blended, as on the Receive page
+        supplier = await db.get(Supplier, 1)
+        await db.refresh(supplier)
+        assert float(supplier.balance) == 500.0                                        # what is still owed
+        receipts = (await db.execute(select(ProductReceipt).order_by(ProductReceipt.id))).scalars().all()
+        assert {r.supplier_ref for r in receipts} == {"DN-٧٧"} and all(r.supplier_id == 1 for r in receipts)
+        links = (await db.execute(select(DocumentLink))).scalars().all()
+        assert sorted(l.ref_id for l in links) == [r.id for r in receipts]
+        assert {l.ref_type for l in links} == {"product_receipt"} and await count(db, DocumentFile) == 1
+        history = await list_receipts(db)
+        assert all(row["has_document"] for row in history["items"])
+    scenario(go)
+
+
+def test_a_discount_on_the_note_is_spread_over_the_line_costs():
+    async def go(db):
+        d = await read_note(db)
+        await reader.record_delivery(db, admin(), receiving(d, total=810, discount=90, amount_paid=810))
+        receipts = (await db.execute(select(ProductReceipt).order_by(ProductReceipt.id))).scalars().all()
+        assert [float(r.total_cost) for r in receipts] == [270.0, 540.0]               # 10% off each line
+        assert sum(float(r.total_cost) for r in receipts) == 810.0
+    scenario(go)
+
+
+def test_lines_that_dont_add_up_to_the_total_receive_nothing():
+    async def go(db):
+        d = await read_note(db)
+        with pytest.raises(HTTPException) as bad:
+            await reader.record_delivery(db, admin(), receiving(d, total=950))
+        assert bad.value.status_code == 400 and "printed total is 950.00" in bad.value.detail
+        assert await count(db, ProductReceipt) == 0 and await count(db, DocumentFile) == 0
+        tom = await db.get(Product, 1)
+        await db.refresh(tom)
+        assert float(tom.stock) == 5.0
+    scenario(go)
+
+
+def test_a_note_without_prices_receives_quantities_only():
+    async def go(db):
+        d = await read_note(db, {**NOTE, "total": None, "amount_paid": None,
+                                 "items": [{**NOTE["items"][0], "unit_cost": None, "line_total": None}]})
+        assert d["missing"] == []                         # no prices printed: nothing to flag
+        await reader.record_delivery(db, admin(), receiving(d, items=[{"product_id": 1, "qty": 25, "unit_cost": None}],
+                                                           total=None, amount_paid=None, expense_category_id=None))
+        [r] = (await db.execute(select(ProductReceipt))).scalars().all()
+        assert float(r.qty) == 25.0 and r.total_cost is None and r.expense_id is None
+    scenario(go)
+
+
+def test_an_unpaid_amount_needs_a_supplier():
+    async def go(db):
+        d = await read_note(db)
+        with pytest.raises(HTTPException) as bad:
+            await reader.record_delivery(db, admin(), receiving(d, supplier_id=None))
+        assert "Pick the supplier" in bad.value.detail
+    scenario(go)
+
+
+def test_a_new_supplier_is_added_with_the_receive_only_by_someone_allowed_to():
+    async def go(db):
+        d = await read_note(db, {**NOTE, "supplier": "Delta Packaging", "supplier_phone": "0122 555 0199"})
+        assert d["supplier_match"] is None and d["new_supplier"] == {"name": "Delta Packaging", "phone": "0122 555 0199"}
+        with pytest.raises(HTTPException) as denied:
+            await reader.record_delivery(db, receiver(), receiving(
+                {**d, "proof": reader.proof_for(receiver(), "delivery_note", [__import__("hashlib").sha256(
+                    reader.image_bytes([PART1])[0]).hexdigest()])},
+                supplier_id=None, new_supplier=d["new_supplier"], expense_category_id=4))
+        assert denied.value.status_code == 403
+        assert await count(db, Supplier) == 1 and await count(db, ProductReceipt) == 0
+        await reader.record_delivery(db, admin(), receiving(d, supplier_id=None, new_supplier=d["new_supplier"]))
+        new = (await db.execute(select(Supplier).where(Supplier.name == "Delta Packaging"))).scalar_one()
+        await db.refresh(new)
+        assert float(new.balance) == 500.0
+    scenario(go)
+
+
+def test_the_same_note_twice_is_warned_about_and_can_be_received_anyway():
+    async def go(db):
+        d = await read_note(db)
+        await reader.record_delivery(db, admin(), receiving(d))
+        again = await read_note(db)
+        assert "already received" in again["duplicate"]
+        with pytest.raises(HTTPException) as dup:
+            await reader.record_delivery(db, admin(), receiving(again))
+        assert dup.value.status_code == 409
+        await reader.record_delivery(db, admin(), receiving(again, force=True))
+        assert await count(db, ProductReceipt) == 4
+    scenario(go)
+
+
+def test_a_cost_far_from_the_usual_one_is_checked_like_on_the_receive_page():
+    async def go(db):
+        d = await read_note(db)
+        # 1 200 per kg: a per-box price typed as per-kg — the Receive page's own check stops it.
+        body = receiving(d, items=[{"product_id": 1, "qty": 25, "unit_cost": 1200}], total=30000, amount_paid=0)
+        with pytest.raises(HTTPException) as check:
+            await reader.record_delivery(db, admin(), body)
+        assert check.value.status_code == 409 and check.value.detail["code"] == "cost_check"
+        assert await count(db, ProductReceipt) == 0 and await count(db, DocumentFile) == 0
+        await reader.record_delivery(db, admin(), {**body, "confirm_cost": True})
+        assert await count(db, ProductReceipt) == 1
+    scenario(go)
+
+
+def test_not_sure_lets_the_model_say_which_kind_it_is():
+    async def go(db):
+        seen = []
+        d, _u = await reader.read(db, admin(), "auto", [PART1], transport=model_reply(NOTE, seen))
+        assert d["kind"] == "delivery_note" and d["supplier_match"]["id"] == 1
+        system = seen[0]["messages"][0]["content"]
+        assert '"expense_receipt"' in system and '"delivery_note"' in system
+        other = (await reader.read(db, admin(), "auto", [PART1], transport=model_reply({"type": "other"})))[0]
+        assert other["not_this_kind"] is True
+    scenario(go)
+
+
+def test_delivery_notes_follow_the_receive_permissions():
+    async def go(db):
+        assert reader.allowed_kinds(receiver()) == ["delivery_note"]
+        assert reader.allowed_kinds(cashier()) == []
+        with pytest.raises(HTTPException) as read:
+            await read_note(db, user=cashier())
+        assert read.value.status_code == 403
+        with pytest.raises(HTTPException) as search:
+            await reader.search(db, cashier(), "suppliers", "bar")
+        assert search.value.status_code == 403
+        assert [x["id"] for x in await reader.search(db, receiver(), "suppliers", "bar")] == [1]
+        assert [x["id"] for x in await reader.search(db, receiver(), "products", "honey")] == [2]
+        # The kept note is shown to whoever may open the Receive page, not to the cashier.
+        d = await read_note(db)
+        out = await reader.record_delivery(db, admin(), receiving(d))
+        f = (await db.execute(select(DocumentFile))).scalars().first()
+        assert (await doc_router.document_file(f.id, db=db, user=receiver())).body == f.data
+        with pytest.raises(HTTPException):
+            await doc_router.document_file(f.id, db=db, user=cashier())
+        page = await doc_router.document_view("product_receipt", out["receipts"][0]["id"], db=db, user=receiver())
+        assert "/documents/file/" in page.body.decode()
     scenario(go)

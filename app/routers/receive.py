@@ -1626,7 +1626,9 @@ async function loadHistory() {
       }
     }
     return `<tr>
-    <td><span class="badge">${esc(row.ref_number)}</span></td>
+    <td><span class="badge">${esc(row.ref_number)}</span>${row.has_document
+      ? ` <a href="/documents/view?ref_type=product_receipt&amp;ref_id=${Number(row.id)}" target="_blank" rel="noopener" title="Source document (delivery note)" style="text-decoration:none">📄</a>`
+      : ''}</td>
     <td>${esc(row.receive_date||'')}</td>
     <td>
       <div style="font-weight:600">${esc(row.product_name||'')}</div>

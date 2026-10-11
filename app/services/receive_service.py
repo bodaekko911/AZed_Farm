@@ -1008,6 +1008,8 @@ async def create_receipt_batch(
     db: AsyncSession,
     data: BatchReceiptCreate,
     current_user: User,
+    *,
+    commit: bool = True,
 ) -> dict[str, Any]:
     """
     Multi-product receive submitted in one form.
@@ -1017,6 +1019,8 @@ async def create_receipt_batch(
 
     All items are processed inside a single transaction:
     one commit at the end — if any product is invalid the whole batch rolls back.
+    ``commit=False`` leaves that commit to the caller, which saves something else in the same transaction (the
+    delivery-note image Ask read, kept as evidence).
     """
     # First pass — compute per-line totals so we can distribute amount_paid proportionally.
     line_totals: list[Decimal] = []
@@ -1103,7 +1107,8 @@ async def create_receipt_batch(
         )
         receipts.append(await _create_receipt_core(db, line, current_user))
 
-    await db.commit()
+    if commit:
+        await db.commit()
 
     total_cost   = sum(r["total_cost"]    or 0 for r in receipts)
     total_paid_f = sum(r["amount_paid"]   or 0 for r in receipts)
@@ -1171,6 +1176,7 @@ async def list_receipts(
     )
     result   = await db.execute(rows_stmt)
     receipts = result.scalars().all()
+    documented = await _receipts_with_documents(db, [r.id for r in receipts])
 
     def _row(r: ProductReceipt) -> dict[str, Any]:
         total_cost = float(r.total_cost) if r.total_cost is not None else None
@@ -1201,9 +1207,25 @@ async def list_receipts(
             "created_at":     r.created_at.isoformat() if r.created_at else None,
             "location_id":    r.location_id,
             "location_name":  r.location.name if r.location else None,
+            "has_document":   r.id in documented,
         }
 
     return {
         "total": total,
         "items": [_row(r) for r in receipts],
     }
+
+
+async def _receipts_with_documents(db: AsyncSession, ids: list[int]) -> set[int]:
+    """The ids among ``ids`` that have a source document (a delivery note read by Ask)."""
+    if not ids:
+        return set()
+    from app.models.document import DocumentLink
+    try:
+        rows = await db.execute(select(DocumentLink.ref_id).where(
+            DocumentLink.ref_type == "product_receipt", DocumentLink.ref_id.in_(ids)))
+        return {r for (r,) in rows.all()}
+    except Exception:          # the table not there yet (alembic blocked) must not break the history list
+        if hasattr(db, "rollback"):
+            await db.rollback()
+        return set()

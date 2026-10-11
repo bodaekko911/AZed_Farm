@@ -39,7 +39,12 @@
   async function post(url, body) {
     const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const out = await r.json().catch(() => ({}));
-    if (!r.ok) { const e = new Error(typeof out.detail === "string" ? out.detail : "Something went wrong."); e.status = r.status; throw e; }
+    if (!r.ok) {
+      // A structured detail (the Receive page's cost check) keeps its fields so the card can show them.
+      const d = out.detail;
+      const e = new Error(typeof d === "string" ? d : (d && d.message) || "Something went wrong.");
+      e.status = r.status; e.detail = d; throw e;
+    }
     return out;
   }
 
@@ -165,6 +170,7 @@
         status.replaceChildren();
         chooser.remove();
         if (d.kind === "expense_receipt") bubble.append(expenseCard(d, images, name, opts));
+        else if (d.kind === "delivery_note") bubble.append(deliveryCard(d, images, name, opts));
       } catch (e) {
         status.replaceChildren(h("span", { class: "inv-bad", text: e.message || "Couldn't read that document." }));
         chooser.querySelectorAll("button, select").forEach(x => { x.disabled = false; });
@@ -401,6 +407,248 @@
         onclick: e => e.target.classList.toggle("big") }))),
       head, suggestion, lines, foot, splitToggle, allocBox, problems, buttons, result);
     paintLines(); check();
+    return card;
+  }
+
+  // ── Picker: likely matches, plus search (suppliers / products) ──
+  function picker(kind, current, candidates, emptyLabel, onChange, extra) {
+    const label = item => kind === "suppliers" ? item.name + (item.phone ? ` · ${item.phone}` : "")
+                                               : `${item.name} · ${item.sku} · ${item.unit || ""}`;
+    const wrap = h("div", { class: "inv-picker" });
+    const select = h("select", { class: "inv-select", "data-no-i18n": true });
+    const known = new Map();
+    const add = (item, selected) => {
+      if (!known.has(String(item.id))) {
+        known.set(String(item.id), item);
+        select.insertBefore(h("option", { value: String(item.id), text: label(item) }), select.querySelector('option[value="__search"]'));
+      }
+      if (selected) select.value = String(item.id);
+    };
+    select.append(h("option", { value: "", text: emptyLabel }));
+    if (extra) select.append(h("option", { value: "__new", text: extra.label, disabled: extra.disabled }));
+    select.append(h("option", { value: "__search", text: "🔍 Search…" }));
+    if (current) add(current, true);
+    (candidates || []).forEach(c => add(c, false));
+    if (!current) select.value = extra && extra.selected ? "__new" : "";
+    const search = h("input", { class: "inv-search", type: "search", hidden: true,
+                                placeholder: kind === "suppliers" ? "Name or phone…" : "Product name or SKU…" });
+    const results = h("div", { class: "inv-results", hidden: true });
+    let last = select.value, timer = null;
+    select.onchange = () => {
+      if (select.value === "__search") { select.value = last; search.hidden = results.hidden = false; search.focus(); return; }
+      last = select.value; onChange(select.value === "__new" ? "__new" : (known.get(select.value) || null));
+    };
+    search.oninput = () => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        results.replaceChildren();
+        if (search.value.trim().length < 2) return;
+        try {
+          const r = await fetch(`/assistant/api/documents/search?kind=${kind}&q=${encodeURIComponent(search.value.trim())}`);
+          const out = await r.json();
+          (out.results || []).forEach(item => results.append(h("button", { class: "inv-result", type: "button", text: label(item), "data-no-i18n": true,
+            onclick: () => { add(item, true); last = select.value; search.hidden = results.hidden = true; search.value = ""; results.replaceChildren(); onChange(item); } })));
+          if (!(out.results || []).length) results.append(h("div", { class: "inv-muted", text: "No matches." }));
+        } catch (e) { /* ignore */ }
+      }, 250);
+    };
+    wrap.append(select, search, results);
+    return wrap;
+  }
+
+  // ── Pack sizes: "Honey 500g" × 10 on the note, "Honey (1g)" in Azed ──
+  const fmt3 = v => String(Math.round(v * 1000) / 1000);
+  const packText = p => p.amount >= 1000 ? `${fmt3(p.amount / 1000)} ${p.base === "g" ? "kg" : "l"}` : `${fmt3(p.amount)} ${p.base}`;
+  /** Quantity and unit cost in the product's own unit, from what the note says. */
+  function inProductUnits(l) {
+    const p = l.product, from = l.pack, to = p && p.pack;
+    let qty = l.pQty, cost = l.pCost, note = "";
+    if (from && to && from.base === to.base && Math.abs(from.amount - to.amount) > 1e-9 && qty !== "" && qty !== null) {
+      const f = from.amount / to.amount;
+      qty = Math.round(Number(qty) * f * 1000) / 1000;
+      if (cost !== "" && cost !== null) cost = Number(cost) / f;
+      note = `${fmt3(l.pQty)} × ${packText(from)} = ${fmt3(Number(l.pQty) * from.amount)} ${from.base}`;
+    }
+    return { qty: qty ?? "", cost: cost ?? "", note };
+  }
+
+  // ── Step 2: review a supplier delivery note ──
+  function deliveryCard(d, images, filename, opts) {
+    const unclear = new Set(d.unclear || []), missing = new Set(d.missing || []);
+    const paid0 = d.amount_paid !== null && d.amount_paid !== undefined ? d.amount_paid
+                : (d.paid_in_full === true ? (d.total ?? "") : 0);
+    const state = {
+      supplier: d.supplier_match || null,
+      newSupplier: d.new_supplier ? Object.assign({}, d.new_supplier) : null,
+      useNew: !!(d.new_supplier && !d.supplier_match),
+      date: d.date || "", number: d.document_number || "",
+      total: d.total ?? "", discount: d.discount ?? 0, other_charges: d.other_charges ?? 0, paid: paid0,
+      category_id: "", farm: "", location_id: "",
+      lines: (d.lines || []).map(l => {
+        // A cost derived from the printed line total and quantity is arithmetic on printed values, not a guess.
+        const pCost = l.unit_cost ?? (l.line_total !== null && l.line_total !== undefined && l.qty ? l.line_total / l.qty : null);
+        const line = { description: l.description, product: l.product, candidates: l.candidates, match: l.match,
+                       pack: l.pack, unit: l.unit, pQty: l.qty ?? "", pCost: pCost ?? "" };
+        return Object.assign(line, inProductUnits(line));
+      }),
+      force: false, confirmCost: false, recorded: false,
+    };
+    const card = h("div", { class: "inv-card" });
+    const problems = h("ul", { class: "inv-problems" });
+    const totalBox = h("div", { class: "inv-total" });
+    const result = h("div", { class: "act-status" });
+    const costBox = h("div", { class: "doc-alloc", hidden: true });
+    const recordBtn = h("button", { class: "act-btn act-primary", text: "Receive stock" });
+    function flag(input, path) {
+      if (missing.has(path)) { input.classList.add("doc-missing"); input.title = "Not readable on the image — enter it"; }
+      else if (unclear.has(path)) { input.classList.add("doc-unclear"); input.title = "Hard to read on the image — check it"; }
+      input.addEventListener("input", () => input.classList.remove("doc-missing", "doc-unclear"));
+      return input;
+    }
+    const field = (label, input) => h("label", { class: "doc-field" }, h("span", { text: label }), input);
+    const priced = () => state.lines.some(l => l.cost !== "" && l.cost !== null) || (state.total !== "" && state.total !== null);
+
+    // Supplier (existing, or new from the note)
+    const newBox = h("div", { class: "inv-new", hidden: !state.useNew });
+    if (state.newSupplier) {
+      const f = (key, label) => h("label", null, label, h("input", { type: "text", value: state.newSupplier[key] || "", maxlength: 150,
+        "data-no-i18n": true, oninput: e => { state.newSupplier[key] = e.target.value; check(); } }));
+      newBox.append(h("div", { class: "inv-muted", text: "Not in Azed yet — it will be added when you receive:" }),
+        h("div", { class: "inv-new-fields" }, f("name", "Name"), f("phone", "Phone")));
+    }
+    const supplierRow = h("div", { class: "inv-row" }, h("span", { class: "inv-label", text: "Supplier" }),
+      d.supplier ? data("span", d.supplier, "inv-muted") : null,
+      picker("suppliers", state.supplier, d.supplier_candidates, "— no supplier (paid in cash) —", s => {
+        state.useNew = s === "__new"; state.supplier = state.useNew ? null : s; newBox.hidden = !state.useNew; check();
+      }, state.newSupplier ? { label: `➕ ${state.newSupplier.name}`, selected: state.useNew } : null));
+
+    const cats = h("select", { onchange: e => { state.category_id = e.target.value; check(); } },
+      h("option", { value: "", text: "— pick a category —" }),
+      ...(d.categories || []).map(c => h("option", { value: String(c.id), text: c.name, "data-no-i18n": true })));
+    const farm = h("select", { onchange: e => { state.farm = e.target.value; } },
+      h("option", { value: "", text: "No farm (shared)" }), h("option", { value: "animals", text: "Animals" }),
+      ...(d.farms || []).map(f => h("option", { value: String(f.id), text: f.name, "data-no-i18n": true })));
+    const loc = h("select", { onchange: e => { state.location_id = e.target.value; } },
+      h("option", { value: "", text: "Main warehouse (default)" }),
+      ...(d.locations || []).map(l => h("option", { value: String(l.id), text: l.name, "data-no-i18n": true })));
+    const head = h("div", { class: "doc-grid" },
+      field("Date", flag(h("input", { type: "date", value: state.date, max: today(), oninput: e => { state.date = e.target.value; check(); } }), "date")),
+      field("Document no.", flag(h("input", { type: "text", value: state.number, maxlength: 60, "data-no-i18n": true,
+        oninput: e => { state.number = e.target.value; check(); } }), "document_number")),
+      field("Store in", loc), field("Expense category", cats), field("Farm", farm));
+
+    // Lines
+    const tbody = h("tbody");
+    state.lines.forEach((l, i) => {
+      const amt = h("td", { class: "num" });
+      const paint = () => { const q = num(l.qty), c = num(l.cost); amt.textContent = q !== null && c !== null ? money(q * c) : "—"; };
+      const qty = flag(h("input", { type: "number", step: "any", min: "0", value: l.qty, oninput: e => { l.qty = e.target.value; paint(); check(); } }), `items.${i}.qty`);
+      const cost = flag(h("input", { type: "number", step: "any", min: "0", value: l.cost, oninput: e => { l.cost = e.target.value; paint(); check(); } }), `items.${i}.unit_cost`);
+      const hint = h("div", { class: "inv-hint", text: l.match === "closest" && l.product ? "Closest match by name — check it" : "" });
+      const conv = h("div", { class: "inv-conv", text: l.note });
+      const unit = data("span", l.product ? l.product.unit : "", "inv-muted");
+      const pick = picker("products", l.product, l.candidates, "— pick a product —", p => {
+        l.product = p; hint.textContent = "";
+        Object.assign(l, inProductUnits(l));      // a different product may count in a different size
+        qty.value = l.qty; cost.value = l.cost; conv.textContent = l.note; unit.textContent = p ? p.unit : "";
+        paint(); check();
+      });
+      paint();
+      const printed = [l.pQty !== "" ? l.pQty : "?", l.unit || "", l.pCost !== "" ? `@ ${money(l.pCost)}` : ""].join(" ");
+      tbody.append(h("tr", null,
+        h("td", { class: "inv-desc" }, data("div", l.description || "—"), data("div", printed, "inv-muted")),
+        h("td", null, pick, hint, conv), h("td", null, qty, " ", unit), h("td", null, cost), amt));
+    });
+    const table = h("table", { class: "inv-table" },
+      h("thead", null, h("tr", null, ["On the note", "Product", "Qty", "Unit cost", "Line"].map(t => h("th", { text: t })))), tbody);
+
+    const numIn = (key, path) => flag(h("input", { type: "number", step: "any", min: "0", value: state[key] ?? "",
+      oninput: e => { state[key] = e.target.value; check(); } }), path || key);
+    const foot = h("div", { class: "inv-foot" },
+      field("Discount", numIn("discount")), field("Transport / extra charges", numIn("other_charges")),
+      field("Printed total", numIn("total")), field("Amount paid now", numIn("paid", "amount_paid")), totalBox);
+
+    function issue(parts) { return h("li", null, ...parts.map(p => typeof p === "string" ? h("span", { text: p }) : p)); }
+    function check() {
+      const issues = [];
+      if (!state.date) issues.push(issue(["Set the delivery note's date."]));
+      else if (state.date > today()) issues.push(issue(["The date is in the future."]));
+      if (state.useNew && !(state.newSupplier.name || "").trim()) issues.push(issue(["Give the new supplier a name."]));
+      state.lines.forEach(l => {
+        if (!l.product) issues.push(issue(["Pick a product for:", " ", data("strong", l.description || "—")]));
+        if (!(num(l.qty) > 0)) issues.push(issue(["A quantity must be above 0:", " ", data("strong", l.description || "—")]));
+      });
+      totalBox.replaceChildren();
+      if (priced()) {
+        if (state.lines.some(l => num(l.cost) === null)) issues.push(issue(["Give every line a unit cost, or clear all costs and the total to receive quantities only."]));
+        const total = num(state.total);
+        if (total === null) issues.push(issue(["Enter the printed total."]));
+        else {
+          const sum = round2(state.lines.reduce((a, l) => a + (num(l.qty) || 0) * (num(l.cost) || 0), 0)
+                      - (num(state.discount) || 0) + (num(state.other_charges) || 0));
+          if (Math.abs(sum - total) <= 0.1) totalBox.append(h("span", { class: "inv-ok" }, "✅ ", h("span", { text: "Lines match the printed total" })));
+          else {
+            issues.push(issue(["The lines don't add up to the printed total:", " ", data("strong", money(sum)), " / ", data("strong", money(total))]));
+            totalBox.append(h("span", { class: "inv-bad" }, "❌ ", data("span", `${money(sum)} / ${money(total)}`)));
+          }
+          const paid = num(state.paid) || 0;
+          if (paid < 0 || paid > total) issues.push(issue(["The amount paid must be between 0 and the total."]));
+          if (!state.supplier && !state.useNew && paid < total) issues.push(issue(["Pick the supplier — there is an unpaid amount."]));
+        }
+        if (!state.category_id) issues.push(issue(["Pick the expense category."]));
+      } else {
+        totalBox.append(h("span", { class: "inv-muted", text: "No prices on the note — quantities only" }));
+      }
+      if (d.duplicate && !state.force) issues.push(issue([data("span", d.duplicate)]));
+      problems.replaceChildren(...issues);
+      recordBtn.disabled = state.recorded || issues.length > 0;
+      return !issues.length;
+    }
+
+    const buttons = h("div", { class: "act-buttons" }, recordBtn);
+    if (d.duplicate) buttons.append(h("button", { class: "act-btn", text: "Record anyway", onclick: e => { state.force = true; e.target.remove(); check(); } }));
+    recordBtn.onclick = async () => {
+      if (!check()) return;
+      recordBtn.disabled = true; result.replaceChildren(h("span", { text: "Recording…" })); result.className = "act-status";
+      const isPriced = priced();
+      try {
+        const out = await post("/assistant/api/documents/record", {
+          kind: "delivery_note", images, proof: d.proof, filename, force: state.force, confirm_cost: state.confirmCost,
+          date: state.date, document_number: state.number,
+          supplier_id: state.supplier ? state.supplier.id : null, new_supplier: state.useNew ? state.newSupplier : null,
+          items: state.lines.map(l => ({ product_id: l.product ? l.product.id : null, qty: num(l.qty), unit_cost: isPriced ? num(l.cost) : null })),
+          total: isPriced ? num(state.total) : null, discount: num(state.discount) || 0, other_charges: num(state.other_charges) || 0,
+          amount_paid: isPriced ? (num(state.paid) || 0) : null,
+          expense_category_id: isPriced ? Number(state.category_id) : null, farm: state.farm || null, location_id: state.location_id || null,
+        });
+        state.recorded = true; costBox.hidden = true;
+        result.className = "act-status ok";
+        result.replaceChildren("✓ ", h("span", { text: "Received" }), " ",
+          ...out.receipts.map((x, i) => h("span", null, i ? ", " : "", h("a", { href: `/documents/view?ref_type=product_receipt&ref_id=${x.id}`,
+            target: "_blank", rel: "noopener", "data-no-i18n": true, text: x.ref_number }))),
+          isPriced ? h("span", { "data-no-i18n": true, text: ` — ${money(out.total_cost)} (${money(out.total_unpaid)} owed)` }) : "",
+          " — ", h("span", { text: "delivery note image kept with the stock" }));
+        card.classList.add("done"); card.querySelectorAll("input, select, button").forEach(x => { x.disabled = true; });
+      } catch (e) {
+        if (e.status === 409 && e.detail && e.detail.code === "cost_check") {
+          // The Receive page's check: a cost far from the product's usual one is usually a unit mix-up.
+          costBox.hidden = false;
+          costBox.replaceChildren(h("div", { class: "inv-bad", text: e.detail.message }),
+            h("ul", { class: "inv-problems" }, ...(e.detail.problems || []).map(p => h("li", null, data("span", p)))),
+            h("button", { class: "act-btn", type: "button", text: "The costs are right — receive anyway",
+              onclick: () => { state.confirmCost = true; costBox.hidden = true; recordBtn.onclick(); } }));
+          result.replaceChildren();
+        } else { result.replaceChildren(h("span", { text: e.message })); result.className = "act-status bad"; }
+        check();
+      }
+    };
+
+    card.append(
+      h("div", { class: "inv-head" }, h("div", { class: "inv-title", text: "Supplier delivery note" }),
+        h("span", { class: "inv-muted", text: "Highlighted fields were hard to read — check them against the photo." })),
+      h("div", { class: "doc-thumbs small" }, images.map(src => h("img", { src, alt: "", title: "Tap to enlarge", onclick: e => e.target.classList.toggle("big") }))),
+      supplierRow, newBox, head, table, foot, problems, costBox, buttons, result);
+    check();
     return card;
   }
 
