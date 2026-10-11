@@ -458,6 +458,126 @@ async def propose_b2b_payment(db, user, args: dict) -> dict:
                                  for p in plan]}}
 
 
+SALE_METHODS = {"cash": "cash", "visa": "visa", "card": "visa", "credit card": "visa", "كاش": "cash",
+                "نقدي": "cash", "فيزا": "visa"}
+MAX_SALE_LINES = 30
+
+
+async def propose_pos_sale(db, user, args: dict) -> dict:
+    """A shop sale typed in chat: products and quantities, the customer (or walk-in), how it was paid."""
+    from app.core.product_types import is_stock_tracked_product
+    from app.models.customer import Customer
+    raw_items = args.get("items") or []
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("Give at least one product and the quantity sold.")
+    if len(raw_items) > MAX_SALE_LINES:
+        raise ValueError(f"At most {MAX_SALE_LINES} products in one sale.")
+
+    # Who bought it: a named customer by phone or name, else walk-in. A name that isn't on file is asked back
+    # (or added, when the user says it's a new customer).
+    customer, new_customer = None, None
+    who = str(args.get("customer") or "").strip()
+    phone = str(args.get("customer_phone") or "").strip()
+    if who and _norm(who) not in WALK_IN_WORDS or phone:
+        named = (await db.execute(select(Customer).where(Customer.name != "Walk-in Customer"))).scalars().all()
+        key = phone_key(phone)
+        by_phone = [c for c in named if key and phone_key(c.phone) == key]
+        if by_phone:
+            customer = by_phone[0]
+        elif args.get("new_customer"):
+            _need(user, "action_customers_create")
+            if not who:
+                raise ValueError("A new customer needs a name.")
+            new_customer = {"name": who, "phone": phone}
+        else:
+            try:
+                customer = _one(who, named, lambda c: c.name, "customer")
+            except ValueError as exc:
+                raise ValueError(f"{exc} If it's a new customer, say so and it can be added with the sale.")
+
+    method = str(args.get("payment_method") or "cash").strip().lower()
+    paid = args.get("paid") is not False
+    if paid and method not in SALE_METHODS:
+        raise ValueError("payment_method must be cash or visa.")
+    method = SALE_METHODS.get(method, "cash")
+    if not paid:
+        _need(user, "action_pos_settle_later")
+        if customer is None and new_customer is None:
+            raise ValueError("A sale paid later needs the customer's name, so it can be collected.")
+    day = _parse_day(args.get("date"), today_local())
+    if day > today_local():
+        raise ValueError("A sale can't be dated in the future.")
+    try:
+        discount_pct = float(args.get("discount_percent") or 0)
+    except (TypeError, ValueError):
+        raise ValueError("discount_percent must be a number.")
+    if not 0 <= discount_pct <= 100:
+        raise ValueError("discount_percent must be between 0 and 100.")
+    if discount_pct:
+        _need(user, "action_pos_discount")
+
+    products = [p for p in await _active_products(db) if not is_delivery_text(p.name)]
+    lines, items, seen, subtotal = [], [], set(), 0.0
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            raise ValueError("Each item needs a product and a qty.")
+        product = _product_named(raw.get("product"), products)
+        if product.id in seen:
+            raise ValueError(f"{product.name} is listed twice — give it once with the total quantity.")
+        seen.add(product.id)
+        try:
+            qty = float(raw.get("qty"))
+        except (TypeError, ValueError):
+            raise ValueError(f"A quantity is required for {product.name}.")
+        qty = round(_qty_in_unit(qty, raw.get("unit"), product), 3)
+        if qty <= 0:
+            raise ValueError(f"The quantity of {product.name} must be more than 0.")
+        catalogue = float(product.price or 0)
+        price = catalogue
+        if raw.get("unit_price") is not None or raw.get("line_total") is not None:
+            try:
+                price = (float(raw["unit_price"]) if raw.get("unit_price") is not None
+                         else float(raw["line_total"]) / qty)
+            except (TypeError, ValueError, ZeroDivisionError):
+                raise ValueError(f"Couldn't read the price for {product.name}.")
+            price = round(price, 3)
+            if abs(price - catalogue) < 0.0005:
+                price = catalogue
+        if price < 0:
+            raise ValueError(f"The price of {product.name} can't be negative.")
+        if price != catalogue:
+            # The POS's own rules: named customers pay the catalogue price; more than half off needs the right.
+            if customer is not None or new_customer is not None:
+                raise ValueError(f"{product.name} is {catalogue:g} EGP — a named customer pays the catalogue price "
+                                 "at the POS. Leave the price out, or record it as a walk-in sale.")
+            if price < catalogue * 0.5:
+                _need(user, "action_pos_edit_price")
+        if is_stock_tracked_product(product) and float(product.stock or 0) < qty - 1e-9:
+            raise ValueError(f"Not enough {product.name}: {float(product.stock or 0):g} {product.unit or ''} in stock.")
+        unit = product.unit or ""
+        line_total = round(price * qty, 2)
+        subtotal += line_total
+        items.append({"product_id": product.id, "qty": qty, "unit_price": price})
+        label = f"{qty:g} {unit} × {price:g}".replace("  ", " ")
+        if price != catalogue:
+            label += f" (catalogue {catalogue:g})"
+        lines.append([product.name, f"{label} = {line_total:,.2f} EGP"])
+
+    total = round(subtotal - subtotal * discount_pct / 100, 2)
+    head = [["Customer", customer.name if customer else (f"{new_customer['name']} (new customer)" if new_customer
+                                                           else "Walk-in")],
+            ["Date", day.isoformat()],
+            ["Payment", method.title() if paid else "Not paid yet — settle later"]]
+    tail = []
+    if discount_pct:
+        tail.append(["Discount", f"{discount_pct:g}% (−{subtotal - total:,.2f} EGP)"])
+    tail.append(["Total", f"{total:,.2f} EGP"])
+    return {"kind": "pos_sale", "title": "Record POS sale", "lines": head + lines + tail,
+            "payload": {"items": items, "customer_id": customer.id if customer else None,
+                        "new_customer": new_customer, "payment_method": method, "paid": paid,
+                        "discount_percent": discount_pct, "date": day.isoformat(), "total": total}}
+
+
 # name → (description, parameters, permissions, propose function)
 ACTIONS = {
     "propose_expense": (
@@ -507,6 +627,21 @@ ACTIONS = {
         {"client": {"type": "string"}, "amount": {"type": "number"},
          "invoice": {"type": "string", "description": "Invoice number, only if the user named one"}},
         ("page_b2b", "action_b2b_collect"), propose_b2b_payment),
+    "propose_pos_sale": (
+        "PROPOSE recording a shop (POS) sale the user describes (the user confirms; nothing is saved by this call). "
+        "`items`: each product sold with its qty; give `unit` only if the user named one, and `unit_price` or "
+        "`line_total` only if they said what it sold for (else the catalogue price). `customer` is a name or leave "
+        "it out for walk-in; set `new_customer` only if the user says they're new. `paid` false = settle later.",
+        {"items": {"type": "array", "items": {"type": "object", "properties": {
+            "product": {"type": "string", "description": "Product name or SKU"}, "qty": {"type": "number"},
+            "unit": {"type": "string"}, "unit_price": {"type": "number"}, "line_total": {"type": "number"}},
+            "required": ["product", "qty"]}},
+         "customer": {"type": "string"}, "customer_phone": {"type": "string"},
+         "new_customer": {"type": "boolean"},
+         "payment_method": {"type": "string", "enum": ["cash", "visa"]}, "paid": {"type": "boolean"},
+         "discount_percent": {"type": "number"},
+         "date": {"type": "string", "description": "YYYY-MM-DD, default today"}},
+        ("page_pos", "action_pos_create_sale"), propose_pos_sale),
 }
 
 
@@ -673,6 +808,48 @@ async def execute(db, user, token: str) -> dict:
                user=user, ref_type="b2b_client", ref_id=p["client_id"])
         await db.commit()
         return {"ok": True, "message": f"Payment of {p['amount']:,.2f} EGP recorded on {', '.join(numbers)}."}
+
+    if kind == "pos_sale":
+        _need(user, "page_pos", "action_pos_create_sale")
+        from app.models.product import Product
+        from app.schemas.invoice import InvoiceCreate, InvoiceItemCreate
+        from app.services.pos_service import create_invoice
+        if not p["paid"]:
+            _need(user, "action_pos_settle_later")
+        if p.get("discount_percent"):
+            _need(user, "action_pos_discount")
+        products = {pr.id: pr for pr in (await db.execute(select(Product).where(
+            Product.id.in_([i["product_id"] for i in p["items"]])))).scalars().all()}
+        for i in p["items"]:
+            pr = products.get(i["product_id"])
+            if pr is None:
+                raise HTTPException(status_code=404, detail="A product on this sale no longer exists.")
+            if p.get("customer_id") or p.get("new_customer"):
+                if abs(float(pr.price or 0) - float(i["unit_price"])) > 0.0005:
+                    raise HTTPException(status_code=409, detail=f"{pr.name}'s price changed to {float(pr.price):g} "
+                                                                "since this was suggested. Ask again.")
+        customer_id = p.get("customer_id")
+        if not customer_id and p.get("new_customer"):
+            customer_id = await _customer_for(db, user, p["new_customer"])
+        record(db, "Assistant", "action", f"Confirmed: POS sale {p['total']:.2f}", user=user,
+               ref_type="assistant_action", ref_id=body["nonce"])
+        payload = InvoiceCreate(
+            customer_id=customer_id,
+            items=[InvoiceItemCreate(sku=products[i["product_id"]].sku, qty=float(i["qty"]),
+                                     unit_price=float(i["unit_price"])) for i in p["items"]],
+            discount_percent=float(p.get("discount_percent") or 0),
+            notes="Via Ask", payment_method=p["payment_method"] if p["paid"] else "unpaid",
+            settle_later=not p["paid"],
+        )
+        result = await create_invoice(db, payload, user.id, user)       # commits: a real POS sale
+        day = date.fromisoformat(p["date"])
+        await _date_sale(db, result["id"], day)
+        record(db, "Assistant", "record_sale", f"{result['invoice_number']} recorded via Ask dated {day} — "
+                                               f"{result['total']:.2f}", user=user, ref_type="invoice",
+               ref_id=result["id"])
+        await db.commit()
+        status = "" if p["paid"] else " — not paid yet, collect it from the POS"
+        return {"ok": True, "message": f"Sale {result['invoice_number']} recorded — {result['total']:,.2f} EGP{status}."}
 
     raise HTTPException(status_code=400, detail="Unknown action")
 
@@ -987,9 +1164,26 @@ async def _customer_for(db, user, new: dict) -> int:
     return customer.id
 
 
-async def record_invoice(db, user, data: dict) -> dict:
+async def _date_sale(db, invoice_id: int, day: date) -> None:
+    """Date a just-recorded sale to ``day`` (noon local) — the invoice, its stock moves and its journal — like the
+    sales import does for history. Today's sales keep their real time."""
     from app.models.accounting import Journal
     from app.models.inventory import StockMove
+    from app.models.invoice import Invoice
+    if day == today_local():
+        return
+    stamp = datetime.combine(day, dtime(12, 0), tzinfo=app_tz())
+    invoice = (await db.execute(select(Invoice).where(Invoice.id == invoice_id))).scalar_one()
+    invoice.created_at = stamp
+    for move in (await db.execute(select(StockMove).where(
+            StockMove.ref_type == "invoice", StockMove.ref_id == invoice.id))).scalars().all():
+        move.created_at = stamp
+    for journal in (await db.execute(select(Journal).where(Journal.description.in_(
+            [f"Sale - {invoice.invoice_number}", f"Unpaid Sale - {invoice.invoice_number}"])))).scalars().all():
+        journal.created_at = stamp
+
+
+async def record_invoice(db, user, data: dict) -> dict:
     from app.models.invoice import Invoice
     from app.models.product import Product
     from app.schemas.invoice import InvoiceCreate, InvoiceItemCreate
@@ -1049,18 +1243,7 @@ async def record_invoice(db, user, data: dict) -> dict:
     except KeyError:
         raise HTTPException(status_code=400, detail="A product on this invoice no longer exists.")
     result = await create_invoice(db, payload, user.id, user)       # commits: a real POS sale
-
-    # Date it to the invoice's own day (noon local), like the sales import does for history.
-    if day != today_local():
-        stamp = datetime.combine(day, dtime(12, 0), tzinfo=app_tz())
-        invoice = (await db.execute(select(Invoice).where(Invoice.id == result["id"]))).scalar_one()
-        invoice.created_at = stamp
-        for move in (await db.execute(select(StockMove).where(
-                StockMove.ref_type == "invoice", StockMove.ref_id == invoice.id))).scalars().all():
-            move.created_at = stamp
-        for journal in (await db.execute(select(Journal).where(Journal.description.in_(
-                [f"Sale - {invoice.invoice_number}", f"Unpaid Sale - {invoice.invoice_number}"])))).scalars().all():
-            journal.created_at = stamp
+    await _date_sale(db, result["id"], day)
     record(db, "Assistant", "record_pdf_invoice",
            f"{result['invoice_number']} from PDF invoice {number or '?'} dated {day} — {result['total']:.2f}", user=user,
            ref_type="invoice", ref_id=result["id"])

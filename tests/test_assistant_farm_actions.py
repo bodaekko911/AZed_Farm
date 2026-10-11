@@ -63,7 +63,7 @@ def admin():
 
 def farmer():
     """Can record deliveries, nothing else."""
-    return SimpleNamespace(id=2, name="Field", role="cashier", permissions="page_farm,action_farm_delivery_create")
+    return SimpleNamespace(id=2, name="Field", role="viewer", permissions="page_farm,action_farm_delivery_create")
 
 
 def run(coro):
@@ -213,4 +213,93 @@ def test_each_action_follows_its_pages_permission(db):
     assert "propose_farm_delivery" in assistant_service.allowed_actions(farmer())
     assert "propose_spoilage" not in assistant_service.allowed_actions(farmer())
     note, card = propose(adb, farmer(), "propose_b2b_payment", client="joud", amount=10)
+    assert card is None and "permission" in note["error"]
+
+
+# --- a shop sale typed in chat ----------------------------------------------------------------
+
+def _sale(**args):
+    return {"items": [{"product": "tomatoes", "qty": 2}], **args}
+
+
+def test_a_typed_sale_is_proposed_then_recorded_as_a_pos_sale(db):
+    from app.models.invoice import Invoice, InvoiceItem
+    session, adb = db
+    note, card = propose(adb, admin(), "propose_pos_sale", items=[{"product": "tomatoes", "qty": 2},
+                                                                 {"product": "basil", "qty": 0.1, "unit": "kg"}],
+                         payment_method="cash")
+    lines = dict(card["lines"])
+    assert lines["Customer"] == "Walk-in" and lines["Payment"] == "Cash"
+    assert lines["Tomatoes"] == "2 kg × 20 = 40.00 EGP"
+    assert lines["Basil"] == "100 gram × 1 = 100.00 EGP"          # 0.1 kg in the product's own unit
+    assert lines["Total"] == "140.00 EGP"
+    assert session.execute(select(Invoice)).scalars().all() == []   # nothing until Confirm
+
+    out = run(act.execute(adb, admin(), card["token"]))
+    assert out["ok"] and "140.00" in out["message"]
+    inv = session.execute(select(Invoice)).scalar_one()
+    assert (inv.status, inv.payment_method, float(inv.total)) == ("paid", "cash", 140.0)
+    assert sorted(float(i.qty) for i in session.execute(select(InvoiceItem)).scalars()) == [2.0, 100.0]
+    tom = session.get(Product, 1)
+    session.refresh(tom)
+    assert float(tom.stock) == 48.0
+    with pytest.raises(HTTPException) as again:
+        run(act.execute(adb, admin(), card["token"]))
+    assert again.value.status_code == 409
+
+
+def test_a_sale_at_a_price_the_user_gave_and_a_past_date(db):
+    from app.models.invoice import Invoice
+    session, adb = db
+    _n, card = propose(adb, admin(), "propose_pos_sale", items=[{"product": "tomatoes", "qty": 5, "line_total": 90}],
+                       payment_method="visa", date="2026-10-01")
+    assert dict(card["lines"])["Tomatoes"] == "5 kg × 18 (catalogue 20) = 90.00 EGP"
+    run(act.execute(adb, admin(), card["token"]))
+    inv = session.execute(select(Invoice)).scalar_one()
+    assert (inv.payment_method, float(inv.total), str(inv.created_at)[:10]) == ("visa", 90.0, "2026-10-01")
+
+
+def test_a_named_customer_pays_the_catalogue_price(db):
+    from app.models.customer import Customer
+    session, adb = db
+    session.add(Customer(id=5, name="Ahmed Nour", phone="01001234567"))
+    session.commit()
+    note, card = propose(adb, admin(), "propose_pos_sale", customer="ahmed", items=[
+        {"product": "tomatoes", "qty": 1, "unit_price": 15}])
+    assert card is None and "catalogue price" in note["error"]
+    _n, card = propose(adb, admin(), "propose_pos_sale", customer_phone="+20 100 123 4567", items=[
+        {"product": "tomatoes", "qty": 1}])
+    assert dict(card["lines"])["Customer"] == "Ahmed Nour"
+
+
+def test_an_unknown_customer_is_asked_back_or_added_when_new(db):
+    from app.models.customer import Customer
+    session, adb = db
+    note, card = propose(adb, admin(), "propose_pos_sale", **_sale(customer="Mariam Saleh"))
+    assert card is None and "new customer" in note["error"]
+    _n, card = propose(adb, admin(), "propose_pos_sale", **_sale(customer="Mariam Saleh", customer_phone="0122",
+                                                               new_customer=True, paid=False))
+    assert dict(card["lines"])["Customer"] == "Mariam Saleh (new customer)"
+    run(act.execute(adb, admin(), card["token"]))
+    assert session.execute(select(Customer).where(Customer.name == "Mariam Saleh")).scalar_one()
+
+
+def test_a_sale_cannot_take_more_than_is_in_stock_or_pay_later_without_a_name(db):
+    _s, adb = db
+    note, card = propose(adb, admin(), "propose_pos_sale", items=[{"product": "tomatoes", "qty": 80}])
+    assert card is None and "Not enough Tomatoes" in note["error"]
+    note, card = propose(adb, admin(), "propose_pos_sale", **_sale(paid=False))
+    assert card is None and "customer's name" in note["error"]
+
+
+def test_a_sale_follows_the_pos_permissions(db):
+    _s, adb = db
+    cashier = SimpleNamespace(id=3, name="Till", role="cashier", permissions="page_pos,action_pos_create_sale")
+    assert "propose_pos_sale" in assistant_service.allowed_actions(cashier)
+    _n, card = propose(adb, cashier, "propose_pos_sale", **_sale(discount_percent=10))
+    assert dict(card["lines"])["Total"] == "36.00 EGP"           # cashiers may give approved discounts
+    no_discount = SimpleNamespace(id=4, name="Till", role="cashier", permissions="-action_pos_discount")
+    note, card = propose(adb, no_discount, "propose_pos_sale", **_sale(discount_percent=10))
+    assert card is None and "permission" in note["error"]
+    note, card = propose(adb, farmer(), "propose_pos_sale", **_sale())
     assert card is None and "permission" in note["error"]
