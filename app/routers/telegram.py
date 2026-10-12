@@ -143,9 +143,9 @@ async def update_chat(chat_row_id: int, data: ChatIn, db: AsyncSession = Depends
     if data.language in ("ar", "en"):
         chat.language = data.language
     if data.is_active is not None:
-        if data.is_active and not chat.is_active:
-            raise HTTPException(status_code=400, detail="An unlinked chat links again only with a new code.")
-        chat.is_active = data.is_active
+        if data.is_active and not chat.is_active and not await field._still_active(db, chat):
+            raise HTTPException(status_code=400, detail="The linked person is inactive — make a new code instead.")
+        chat.is_active = data.is_active                  # unlink / relink
     record(db, "Telegram", "update_chat", f"Telegram chat #{chat.id} updated: {data.model_dump(exclude_none=True)}",
            user=admin)
     await db.commit()
@@ -153,14 +153,14 @@ async def update_chat(chat_row_id: int, data: ChatIn, db: AsyncSession = Depends
 
 
 @router.delete("/api/admin/chats/{chat_row_id}")
-async def unlink_chat(chat_row_id: int, db: AsyncSession = Depends(get_async_session), admin: User = Depends(require_admin)):
-    """Unlink: the chat stops working at once and needs a new code to link again. The row stays (without the person's
-    access) so its drafts still name the sender and nobody can confirm their own."""
+async def delete_chat(chat_row_id: int, db: AsyncSession = Depends(get_async_session), admin: User = Depends(require_admin)):
+    """Delete a chat from the list. To use the bot again that phone needs a new code. Its drafts stay in the inbox,
+    without a sender name, and the worker is no longer told the outcome."""
     chat = (await db.execute(select(TelegramChat).where(TelegramChat.id == chat_row_id))).scalar_one_or_none()
     if chat is None:
         raise HTTPException(status_code=404, detail="Chat not found")
     name = await field._person_name(db, chat)
-    chat.is_active = False
-    record(db, "Telegram", "unlink_chat", f"Telegram chat unlinked from {name or 'unknown'}", user=admin)
+    await db.delete(chat)
+    record(db, "Telegram", "delete_chat", f"Telegram chat of {name or 'unknown'} deleted from the list", user=admin)
     await db.commit()
     return {"ok": True}

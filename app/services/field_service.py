@@ -894,9 +894,13 @@ async def _draft_and_chat(db, draft_id: int) -> tuple[FieldDraft, Optional[Teleg
     return draft, chat
 
 
+def is_own(reviewer, chat: Optional[TelegramChat]) -> bool:
+    return chat is not None and bool(chat.user_id) and chat.user_id == getattr(reviewer, "id", None)
+
+
 def _not_own(reviewer, chat: Optional[TelegramChat]) -> None:
-    """No one reviews what they sent themselves — not even an admin."""
-    if chat is not None and chat.user_id and chat.user_id == getattr(reviewer, "id", None):
+    """No one reviews what they sent themselves — except an admin, who may (the activity log shows who did)."""
+    if is_own(reviewer, chat) and getattr(reviewer, "role", None) != "admin":
         raise HTTPException(status_code=403, detail="You sent this yourself — someone else has to review it.")
 
 

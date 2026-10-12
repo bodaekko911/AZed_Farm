@@ -558,18 +558,23 @@ def test_permissions_are_the_confirming_managers_and_nobody_reviews_their_own(te
             assert e.value.status_code == 403
             with pytest.raises(HTTPException):
                 await field.reject(db, user, d.id, "no")
-        # The worker's own AZed login (user 2) — even as an admin — can't confirm or reject it.
+        # The worker's own AZed login (user 2) can't confirm or reject it — unless that login is an admin.
+        own = SimpleNamespace(id=2, name="Saeed", role="viewer",
+                              permissions=reviewer().permissions)
         with pytest.raises(HTTPException) as e:
-            await field.confirm(db, admin(uid=2), d.id, body)
+            await field.confirm(db, own, d.id, body)
         assert e.value.status_code == 403 and "yourself" in e.value.detail
         with pytest.raises(HTTPException):
-            await field.reject(db, admin(uid=2), d.id, "mine")
+            await field.reject(db, own, d.id, "mine")
         assert (await drafts(db))[0].status == "in_review" and await count(db, FarmDelivery) == 0
         # A failed recording leaves the draft in review, ready to try again.
         with pytest.raises(HTTPException):
             await field.confirm(db, reviewer(), d.id, {"date": field.today_local().isoformat(),
                                                        "items": [{"farm_id": 1, "product_id": 99, "qty": 20}]})
         assert (await drafts(db))[0].status == "in_review"
+        # An admin may record what they sent themselves.
+        await field.confirm(db, admin(uid=2), d.id, body)
+        assert (await drafts(db))[0].status == "confirmed" and await count(db, FarmDelivery) == 1
     scenario(go)
 
 
@@ -578,8 +583,11 @@ def test_the_inbox_router_marks_own_drafts_and_streams_draft_photos(telegram):
         from app.routers import documents as doc_router
         from app.routers import field_inbox
         d = await in_review(db, factory, telegram, text=None, payload=SHEET)
-        mine = await field_inbox.draft(d.id, db=db, user=admin(uid=2))
+        own = SimpleNamespace(id=2, name="Saeed", role="viewer", permissions=reviewer().permissions)
+        mine = await field_inbox.draft(d.id, db=db, user=own)
         assert mine["own"] and not mine["can_review"]
+        mine_admin = await field_inbox.draft(d.id, db=db, user=admin(uid=2))
+        assert not mine_admin["own"] and mine_admin["own_admin"] and mine_admin["can_review"]
         theirs = await field_inbox.draft(d.id, db=db, user=reviewer())
         assert not theirs["own"] and theirs["can_review"] and theirs["images"]
         listed = (await field_inbox.drafts("in_review", db=db, user=reviewer()))["drafts"]
@@ -638,4 +646,26 @@ def test_the_bot_token_never_reaches_logs_errors_or_the_activity_log(telegram, c
         activity = " ".join(d for (d,) in (await db.execute(select(ActivityLog.description))).all())
         for text in (caplog.text, activity, " ".join(str(r.args) for r in caplog.records)):
             assert TOKEN not in text and "AAH-secretTOKEN" not in text and "/file/bot1" not in text
+    scenario(go)
+
+
+def test_the_admin_can_unlink_relink_and_delete_a_chat(telegram):
+    async def go(db, factory):
+        await link(db)
+        chat_id = (await db.execute(select(TelegramChat.id))).scalar()
+        boss = admin()
+        await tg_router.update_chat(chat_id, tg_router.ChatIn(is_active=False), db=db, admin=boss)
+        await send(db, factory, msg("تالف ٣ كيلو خيار"), transport=model(TEXT_SPOILAGE))
+        assert await count(db, FieldDraft) == 0                                   # unlinked: ignored
+        await tg_router.update_chat(chat_id, tg_router.ChatIn(is_active=True), db=db, admin=boss)
+        await send(db, factory, msg("تالف ٣ كيلو خيار"), transport=model(TEXT_SPOILAGE))
+        assert await count(db, FieldDraft) == 1                                   # relinked: works again
+        # Relinking someone deactivated in HR is refused.
+        await tg_router.update_chat(chat_id, tg_router.ChatIn(is_active=False), db=db, admin=boss)
+        await db.execute(update(Employee).where(Employee.id == 1).values(is_active=False))
+        await db.commit()
+        with pytest.raises(HTTPException):
+            await tg_router.update_chat(chat_id, tg_router.ChatIn(is_active=True), db=db, admin=boss)
+        await tg_router.delete_chat(chat_id, db=db, admin=boss)
+        assert await count(db, TelegramChat) == 0 and await count(db, FieldDraft) == 1    # its drafts stay
     scenario(go)

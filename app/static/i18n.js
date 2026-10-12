@@ -862,7 +862,11 @@
     "No lines were read from the message.": "لم تُقرأ أي بنود من الرسالة.",
     "Check each line against the worker's message.": "راجع كل بند مقابل رسالة العامل.",
     "Not in the message — enter it": "غير موجود في الرسالة — أدخله",
-    "Unclear in the message — check it": "غير واضح في الرسالة — راجعه"
+    "Unclear in the message — check it": "غير واضح في الرسالة — راجعه",
+    "You sent this yourself — as an admin you may still record it.": "أنت أرسلت هذا بنفسك — وبصفتك مسؤولاً يمكنك تسجيله.",
+    "Unlink this chat? It stops working until you relink it.": "إلغاء ربط هذه المحادثة؟ ستتوقف حتى تعيد ربطها.",
+    "Relink": "إعادة الربط",
+    "Delete this chat from the list? To use the bot again the worker will need a new code.": "حذف هذه المحادثة من القائمة؟ سيحتاج العامل كوداً جديداً لاستخدام البوت مرة أخرى."
   };
 
   /* Regex rules for dynamic strings (applied when exact lookup fails). */

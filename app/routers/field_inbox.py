@@ -44,8 +44,10 @@ async def drafts(status: str = "in_review", db: AsyncSession = Depends(get_async
 async def draft(draft_id: int, db: AsyncSession = Depends(get_async_session), user: User = Depends(get_current_user)):
     out = await field.get_draft(db, draft_id)
     own = out.pop("chat_user_id") == user.id
-    out["own"] = own
-    out["can_review"] = (has_permission(user, "action_field_drafts_review") and not own and out["kind"] in reader.KINDS
+    # Your own submission: blocked, except for an admin (who is told it's their own).
+    out["own"] = own and user.role != "admin"
+    out["own_admin"] = own and user.role == "admin"
+    out["can_review"] = (has_permission(user, "action_field_drafts_review") and not out["own"] and out["kind"] in reader.KINDS
                          and all(has_permission(user, p) for p in reader.KINDS[out["kind"]]["permissions"]))
     return out
 

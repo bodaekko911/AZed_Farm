@@ -94,6 +94,7 @@
       panel.replaceChildren(...parts); return;
     }
     if (d.own) parts.push(h("div", { class: "note", text: "You sent this yourself — someone else has to review it." }));
+    else if (d.own_admin) parts.push(h("div", { class: "note", text: "You sent this yourself — as an admin you may still record it." }));
     else if (!d.can_review) parts.push(h("div", { class: "note", text: "You can see this draft but not confirm or reject it (you need the review permission and the permission for this record)." }));
     const make = window.AskDocuments && window.AskDocuments.cards[d.kind];
     if (make) {
@@ -221,11 +222,18 @@
       const lang = h("select", { disabled: !c.is_active, onchange: e => save({ language: e.target.value }) },
         h("option", { value: "ar", text: "العربية" }), h("option", { value: "en", text: "English" }));
       lang.value = c.language;
-      const unlink = c.is_active ? h("button", { class: "act-btn", text: "Unlink", onclick: async () => {
-        if (!confirm("Unlink this chat? The worker will need a new code.")) return;
-        try { await api(`/telegram/api/admin/chats/${c.id}`, undefined, "DELETE"); } catch (e) { alert(e.message); }
-        chats();
-      } }) : h("span", { class: "bad", text: "unlinked" });
+      const unlink = h("span", { class: "act-buttons", style: "margin:0" },
+        c.is_active
+          ? h("button", { class: "act-btn", text: "Unlink", onclick: () => {
+              if (confirm("Unlink this chat? It stops working until you relink it.")) save({ is_active: false });
+            } })
+          : h("button", { class: "act-btn", text: "Relink", onclick: () => save({ is_active: true }) }),
+        h("button", { class: "act-btn", text: "Delete", onclick: async () => {
+          if (!confirm("Delete this chat from the list? To use the bot again the worker will need a new code.")) return;
+          try { await api(`/telegram/api/admin/chats/${c.id}`, undefined, "DELETE"); } catch (e) { alert(e.message); }
+          chats();
+        } }),
+        c.is_active ? "" : h("span", { class: "bad", text: "unlinked" }));
       body.append(h("tr", null, h("td", null, data("span", c.person || "—")), h("td", null, data("span", c.username ? "@" + c.username : "—")),
         h("td", null, kinds), h("td", null, data("span", c.used_today)), h("td", null, limit), h("td", null, lang), h("td", null, unlink)));
     });
