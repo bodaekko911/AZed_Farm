@@ -346,6 +346,138 @@ async def save_provider(data: ProviderIn, db: AsyncSession = Depends(get_async_s
     return await _provider_out(db)
 
 
+# ── Admin: automations (rules that e-mail what they find) ────────────────────
+
+class AutomationIn(BaseModel):
+    enabled: bool = False
+    trigger: str = Field("daily", pattern="^(daily|weekly|monthly|events)$")
+    send_time: str = Field("07:00", max_length=5)
+    weekday: int = Field(5, ge=0, le=6)
+    month_day: int = Field(1, ge=1, le=28)
+    language: str = Field("en", pattern="^(en|ar)$")
+    digest_minutes: int = Field(60, ge=5, le=1440)
+    recipients: str = Field("", max_length=4000)
+    settings: dict = Field(default_factory=dict)
+
+
+class AutomationCapIn(BaseModel):
+    daily_cap: int = Field(40, ge=1, le=500)
+
+
+async def _automations_out(db) -> dict:
+    import json as _json
+    from datetime import datetime as _dt
+    from app.core.time_utils import app_tz
+    from app.models.automation import AutomationRun
+    from app.services import automation_service as auto
+    from app.services import mail_service
+    now_local = _dt.now(app_tz())
+    cfg = await auto.get_settings(db)
+    rules = []
+    for key, spec in auto.rules().items():
+        row = await auto.get_rule(db, key)
+        runs = (await db.execute(select(AutomationRun).where(AutomationRun.rule_key == key)
+                                 .order_by(AutomationRun.started_at.desc(), AutomationRun.id.desc()).limit(10))).scalars().all()
+        rules.append({
+            "key": key, "name": spec.names, "description": spec.descriptions, "kind": spec.trigger,
+            "enabled": row.enabled, "trigger": row.trigger, "send_time": row.send_time, "weekday": row.weekday,
+            "month_day": row.month_day, "language": row.language, "digest_minutes": row.digest_minutes,
+            "recipients": row.recipients or "", "settings": auto.rule_settings(row),
+            "setting_defs": [{"key": s.key, "label": s.label, "kind": s.kind} for s in spec.settings],
+            "last_status": row.last_status,
+            "runs": [{"started": auto._aware(r.started_at).astimezone(app_tz()).strftime("%d %b %H:%M"),
+                      "status": r.status, "items": r.items, "recipients": r.recipients, "error": r.error}
+                     for r in runs],
+        })
+    return {"daily_cap": cfg.daily_cap, "sent_today": await auto.sent_today(db, now_local),
+            "emails_today": await auto.emails_today(db, now_local),
+            "gmail_limit_today": cfg.gmail_limit_day == now_local.date(),
+            "links_ready": bool(auto.link("/")), "mail_configured": mail_service.is_configured(), "rules": rules}
+
+
+@router.get("/api/admin/automations")
+async def automations(db: AsyncSession = Depends(get_async_session), _admin: User = Depends(require_admin)):
+    return await _automations_out(db)
+
+
+@router.post("/api/admin/automations/cap")
+async def automations_cap(data: AutomationCapIn, db: AsyncSession = Depends(get_async_session),
+                          admin: User = Depends(require_admin)):
+    from app.services import automation_service as auto
+    cfg = await auto.get_settings(db)
+    cfg.daily_cap = data.daily_cap
+    record(db, "Automations", "cap", f"Automation e-mails capped at {data.daily_cap} a day", user=admin)
+    await db.commit()
+    return await _automations_out(db)
+
+
+@router.post("/api/admin/automations/{key}")
+async def save_automation(key: str, data: AutomationIn, db: AsyncSession = Depends(get_async_session),
+                          admin: User = Depends(require_admin)):
+    import json as _json
+    from app.services import automation_service as auto
+    from app.services import weekly_brief_service as brief
+    spec = auto.rules().get(key)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="Unknown automation")
+    if (spec.trigger == "events") != (data.trigger == "events"):
+        raise HTTPException(status_code=400, detail="This automation can't use that trigger.")
+    if not brief.valid_time(data.send_time):
+        raise HTTPException(status_code=400, detail="The time must be HH:MM.")
+    good, bad = brief.parse_recipients(data.recipients)
+    if bad:
+        raise HTTPException(status_code=400, detail="Not valid e-mail addresses: " + ", ".join(bad[:5]))
+    values = {}
+    for s in spec.settings:
+        if s.key in data.settings:
+            try:
+                value = float(data.settings[s.key])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"{s.label}: enter a number.")
+            if value < 0 or (s.kind == "percent" and value > 100):
+                raise HTTPException(status_code=400, detail=f"{s.label}: out of range.")
+            values[s.key] = value
+    row = await auto.get_rule(db, key)
+    row.enabled, row.trigger, row.send_time = data.enabled, data.trigger, data.send_time
+    row.weekday, row.month_day, row.language = data.weekday, data.month_day, data.language
+    row.digest_minutes, row.recipients = data.digest_minutes, "\n".join(good)
+    row.settings = _json.dumps({**auto.rule_settings(row), **values})
+    record(db, "Automations", "save", f"Automation {key} {'on' if data.enabled else 'off'}: {data.trigger} "
+                                      f"{data.send_time}; {len(good) or 'brief'} recipient(s)", user=admin)
+    await db.commit()
+    return await _automations_out(db)
+
+
+@router.post("/api/admin/automations/{key}/test")
+async def test_automation(key: str, db: AsyncSession = Depends(get_async_session),
+                          admin: User = Depends(require_admin)):
+    from app.services import automation_service as auto
+    from app.services import weekly_brief_service as brief
+    if key not in auto.rules():
+        raise HTTPException(status_code=404, detail="Unknown automation")
+    good, _bad = brief.parse_recipients(admin.email or "")
+    if not good:
+        raise HTTPException(status_code=400, detail="Your account has no valid e-mail address.")
+    try:
+        await auto.send_test(db, key, good)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=f"Not sent: {exc}")
+    return {"ok": True, "message": f"Test sent to {good[0]}"}
+
+
+@router.get("/admin/automations/{key}/preview", response_class=HTMLResponse)
+async def preview_automation(key: str, db: AsyncSession = Depends(get_async_session),
+                             _admin: User = Depends(require_admin)):
+    """The e-mail the automation would send now — nothing is sent, claimed or counted."""
+    from html import escape
+    from app.services import automation_service as auto
+    if key not in auto.rules():
+        raise HTTPException(status_code=404, detail="Unknown automation")
+    subject, html = await auto.preview(db, key)
+    return HTMLResponse(f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,"
+                        f"initial-scale=1'><title>{escape(subject)}</title><body style='background:#f4f5ef'>{html}")
+
+
 # ── Admin: weekly brief e-mail ───────────────────────────────────────────────
 
 class BriefSettingsIn(BaseModel):
@@ -612,6 +744,11 @@ button.send:disabled{opacity:.5;cursor:default}
 .brief-warn{color:var(--warn)}
 @media (max-width:640px){.brief-form{grid-template-columns:1fr}}
 .admin .full{color:var(--danger);font-weight:600}
+.auto-rule{border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-top:10px}
+.auto-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.auto-runs{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:6px}
+.auto-runs th,.auto-runs td{text-align:start;padding:3px 6px;border-bottom:1px solid var(--border);vertical-align:top}
+.auto-runs th{color:var(--muted);font-weight:500}
 .admin input{width:64px;background:var(--card2);border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:4px 6px;font-family:var(--mono);font-size:12px}
 .admin .acts{display:flex;gap:6px;white-space:nowrap}
 .admin .ghost{padding:4px 9px;font-size:11.5px}
@@ -662,6 +799,20 @@ button.send:disabled{opacity:.5;cursor:default}
             </div>
             <div class="brief-actions"><button class="ghost" id="provider-save">Save</button></div>
             <div id="provider-status" class="brief-note"></div>
+        </div>
+    </details>
+    <details class="admin" id="automations" style="display:none">
+        <summary>Automations · admin</summary>
+        <div class="admin-body">
+            <div class="brief-note">Rules that run on their own and send what they find by e-mail. They only read AZed; nothing is changed.</div>
+            <div id="auto-warn" class="brief-note brief-warn"></div>
+            <div class="brief-actions" style="align-items:center">
+                <span>Daily limit for automation e-mails</span>
+                <input type="number" id="auto-cap" min="1" max="500" style="width:70px">
+                <button class="ghost" id="auto-cap-save">Save</button>
+                <span class="brief-note" id="auto-today"></span>
+            </div>
+            <div id="auto-rules"></div>
         </div>
     </details>
     <details class="admin" id="brief" style="display:none">
@@ -823,7 +974,8 @@ async function loadStatus(){
         if(!s.configured) document.getElementById("notice").innerHTML =
             `<div class="notice">The assistant isn't set up yet. An admin needs to add ASSISTANT_API_KEY and ASSISTANT_MODEL to the server settings.</div>`;
         if(s.is_admin){ document.getElementById("admin").style.display = ""; document.getElementById("brief").style.display = "";
-                        document.getElementById("provider").style.display = ""; }
+                        document.getElementById("provider").style.display = "";
+                        document.getElementById("automations").style.display = ""; }
         docKinds = s.document_kinds || [];
         const canPdf = !!(s.can_record_invoices && window.AskActions);
         const canDocs = !!(docKinds.length && window.AskDocuments);
@@ -999,6 +1151,103 @@ $b("provider").addEventListener("toggle", async e => {
 });
 $b("provider-save").onclick = async () => {
     try{ showProvider(await adminPost("/assistant/api/admin/provider", {mode: $b("provider-mode").value})); toast("Provider saved"); }
+    catch(e){ toast(e.message); }
+};
+
+// Automations (admin)
+const AUTO_DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+function el(tag, attrs, ...kids){
+    const n = document.createElement(tag);
+    for(const k in attrs || {}){
+        if(k === "text") n.textContent = attrs[k];
+        else if(k === "class") n.className = attrs[k];
+        else if(k.startsWith("on")) n.addEventListener(k.slice(2), attrs[k]);
+        else if(attrs[k] !== undefined && attrs[k] !== null && attrs[k] !== false) n.setAttribute(k, attrs[k] === true ? "" : attrs[k]);
+    }
+    kids.flat().forEach(k => { if(k !== null && k !== undefined && k !== false) n.append(k instanceof Node ? k : String(k)); });
+    return n;
+}
+const lbl = text => el("span", {text});
+const data = text => el("span", {text: text == null ? "" : String(text), "data-no-i18n": true});
+function showAutomations(a){
+    $b("auto-cap").value = a.daily_cap;
+    $b("auto-today").replaceChildren(lbl("Automation e-mails today:"), " ", data(`${a.sent_today} / ${a.daily_cap}`), " · ",
+        lbl("All e-mails today (briefs, automations, tests):"), " ", data(`${a.emails_today.emails} (${a.emails_today.recipients} recipients)`));
+    const warns = [];
+    if(!a.mail_configured) warns.push("E-mail isn't set up on the server yet (MAIL_RELAY_URL and MAIL_RELAY_SECRET).");
+    if(!a.links_ready) warns.push("Set PUBLIC_BASE_URL in Railway so e-mails can link to AZed pages.");
+    if(a.gmail_limit_today) warns.push("Gmail daily limit reached — automation e-mails are paused until tomorrow; alerts go out in the next morning brief.");
+    $b("auto-warn").replaceChildren(...warns.map(w => el("div", null, lbl(w))));
+    $b("auto-rules").replaceChildren(...a.rules.map(ruleCard));
+}
+function ruleCard(r){
+    const lang = document.documentElement.lang === "ar" ? "ar" : "en";
+    const on = el("input", {type: "checkbox"}); on.checked = r.enabled;
+    const trig = el("select", null, ...(r.kind === "events" ? [["events", "When something happens"]] :
+        [["daily", "Every day"], ["weekly", "Every week"], ["monthly", "Every month"]]).map(([v, t]) => el("option", {value: v, text: t})));
+    trig.value = r.trigger;
+    const time = el("input", {type: "time", value: r.send_time});
+    const wday = el("select", null, ...AUTO_DAYS.map((d, i) => el("option", {value: String(i), text: d})));
+    wday.value = String(r.weekday);
+    const mday = el("select", null, ...Array.from({length: 28}, (_, i) => el("option", {value: String(i + 1), text: String(i + 1)})));
+    mday.value = String(r.month_day);
+    const digest = el("input", {type: "number", min: 5, max: 1440, value: r.digest_minutes, style: "width:70px"});
+    const language = el("select", null, el("option", {value: "en", text: "English"}), el("option", {value: "ar", text: "العربية"}));
+    language.value = r.language;
+    const to = el("textarea", {placeholder: "Empty = the brief's recipients", "data-no-i18n": true});
+    to.value = r.recipients;
+    const inputs = {};
+    const setRows = r.setting_defs.map(s => {
+        const i = el("input", {type: "number", min: 0, step: "any", value: r.settings[s.key], style: "width:100px"});
+        inputs[s.key] = i;
+        return [el("label", {text: s.label}), el("div", null, i)];
+    });
+    const when = el("div", {class: "brief-check"});
+    function paintWhen(){
+        const t = trig.value;
+        when.replaceChildren(trig, ...(t === "events" ? [lbl("one e-mail at most every"), digest, lbl("minutes (urgent items at once)")] :
+            t === "weekly" ? [lbl("on"), wday, lbl("at"), time] : t === "monthly" ? [lbl("on day"), mday, lbl("at"), time] : [lbl("at"), time]));
+    }
+    trig.onchange = paintWhen; paintWhen();
+    const runs = el("table", {class: "auto-runs"}, el("tr", null, ...["When", "Result", "Items", "Details"].map(t => el("th", {text: t}))),
+        ...r.runs.map(x => el("tr", null, el("td", null, data(x.started)), el("td", {text: x.status}), el("td", null, data(x.items)),
+                                           el("td", null, data(x.error || x.recipients || "")))));
+    const save = el("button", {class: "ghost", text: "Save", onclick: async () => {
+        try{
+            const settings = {}; for(const k in inputs) settings[k] = Number(inputs[k].value);
+            showAutomations(await adminPost(`/assistant/api/admin/automations/${r.key}`, {
+                enabled: on.checked, trigger: trig.value, send_time: time.value, weekday: Number(wday.value),
+                month_day: Number(mday.value), language: language.value, digest_minutes: Number(digest.value) || 60,
+                recipients: to.value, settings}));
+            toast("Automation saved");
+        }catch(e){ toast(e.message); }
+    }});
+    const test = el("button", {class: "ghost", text: "Send test to me", onclick: async () => {
+        test.disabled = true;
+        try{ toast((await adminPost(`/assistant/api/admin/automations/${r.key}/test`, {})).message); loadAutomations(); }
+        catch(e){ toast(e.message); }
+        finally{ test.disabled = false; }
+    }});
+    return el("div", {class: "auto-rule"},
+        el("div", {class: "auto-head"}, el("label", {class: "brief-check"}, on, el("strong", {text: r.name[lang] || r.name.en, "data-no-i18n": true}))),
+        el("div", {class: "brief-note", text: r.description[lang] || r.description.en, "data-no-i18n": true}),
+        el("div", {class: "brief-form"},
+            el("label", {text: "When"}), when,
+            ...setRows.flat(),
+            el("label", {text: "Language"}), el("div", null, language),
+            el("label", {text: "Recipients"}), el("div", null, to, el("div", {class: "brief-note", text: "One e-mail per line. Empty = the brief's recipients."}))),
+        el("div", {class: "brief-actions"}, save, test,
+           el("a", {class: "ghost", href: `/assistant/admin/automations/${r.key}/preview`, target: "_blank", rel: "noopener", style: "text-decoration:none", text: "Preview"})),
+        el("div", {class: "brief-note"}, lbl("Last:"), " ", data(r.last_status || "—")),
+        r.runs.length ? runs : el("div", {class: "brief-note", text: "No runs yet."}));
+}
+async function loadAutomations(){
+    try{ showAutomations(await (await fetch("/assistant/api/admin/automations")).json()); }
+    catch(e){ $b("auto-rules").replaceChildren(lbl("Couldn't load the automations.")); }
+}
+$b("automations").addEventListener("toggle", e => { if(e.target.open) loadAutomations(); });
+$b("auto-cap-save").onclick = async () => {
+    try{ showAutomations(await adminPost("/assistant/api/admin/automations/cap", {daily_cap: Number($b("auto-cap").value) || 40})); toast("Saved"); }
     catch(e){ toast(e.message); }
 };
 

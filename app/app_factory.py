@@ -514,6 +514,72 @@ async def ensure_assistant_settings_table() -> None:
         logger.exception("ensure_assistant_settings_table: failed (could not open DB session)")
 
 
+async def ensure_automation_tables() -> None:
+    """Self-healing guard for the automation tables. Mirrors migration 20261015_0054. Idempotent."""
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal
+
+    statements = [
+        "CREATE TABLE IF NOT EXISTS automation_rules ("
+        " key VARCHAR(40) PRIMARY KEY,"
+        " enabled BOOLEAN NOT NULL DEFAULT FALSE,"
+        " trigger VARCHAR(10) NOT NULL DEFAULT 'daily',"
+        " send_time VARCHAR(5) NOT NULL DEFAULT '07:00',"
+        " weekday INTEGER NOT NULL DEFAULT 5,"
+        " month_day INTEGER NOT NULL DEFAULT 1,"
+        " settings TEXT,"
+        " recipients TEXT,"
+        " language VARCHAR(2) NOT NULL DEFAULT 'en',"
+        " digest_minutes INTEGER NOT NULL DEFAULT 60,"
+        " watermark INTEGER,"
+        " last_period VARCHAR(20),"
+        " last_digest_at TIMESTAMPTZ,"
+        " last_status VARCHAR(300),"
+        " updated_at TIMESTAMPTZ DEFAULT now())",
+        "CREATE TABLE IF NOT EXISTS automation_events ("
+        " id SERIAL PRIMARY KEY,"
+        " rule_key VARCHAR(40) NOT NULL,"
+        " ref VARCHAR(80) NOT NULL,"
+        " payload TEXT NOT NULL,"
+        " urgent BOOLEAN NOT NULL DEFAULT FALSE,"
+        " held BOOLEAN NOT NULL DEFAULT FALSE,"
+        " run_id INTEGER,"
+        " created_at TIMESTAMPTZ DEFAULT now(),"
+        " CONSTRAINT uq_automation_event_ref UNIQUE (rule_key, ref))",
+        "CREATE INDEX IF NOT EXISTS ix_automation_events_rule_key ON automation_events (rule_key)",
+        "CREATE INDEX IF NOT EXISTS ix_automation_events_run_id ON automation_events (run_id)",
+        "CREATE INDEX IF NOT EXISTS ix_automation_events_created_at ON automation_events (created_at)",
+        "CREATE TABLE IF NOT EXISTS automation_runs ("
+        " id SERIAL PRIMARY KEY,"
+        " rule_key VARCHAR(40) NOT NULL,"
+        " period VARCHAR(20),"
+        " started_at TIMESTAMPTZ NOT NULL,"
+        " finished_at TIMESTAMPTZ,"
+        " status VARCHAR(12) NOT NULL DEFAULT 'running',"
+        " items INTEGER NOT NULL DEFAULT 0,"
+        " recipients TEXT,"
+        " error VARCHAR(300))",
+        "CREATE INDEX IF NOT EXISTS ix_automation_runs_rule_key ON automation_runs (rule_key)",
+        "CREATE INDEX IF NOT EXISTS ix_automation_runs_started_at ON automation_runs (started_at)",
+        "CREATE TABLE IF NOT EXISTS automation_settings ("
+        " id INTEGER PRIMARY KEY,"
+        " daily_cap INTEGER NOT NULL DEFAULT 40,"
+        " gmail_limit_day DATE,"
+        " updated_at TIMESTAMPTZ DEFAULT now())",
+    ]
+    try:
+        async with AsyncSessionLocal() as db:
+            for stmt in statements:
+                try:
+                    await db.execute(text(stmt))
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("ensure_automation_tables: statement failed: %s", stmt)
+    except Exception:
+        logger.exception("ensure_automation_tables: failed (could not open DB session)")
+
+
 async def ensure_carbon_methodology() -> None:
     """Self-healing guard for the carbon module's methodology upgrade.
 
@@ -837,6 +903,7 @@ async def lifespan(_: FastAPI):
     await ensure_document_files_tables()
     await ensure_telegram_tables()
     await ensure_assistant_settings_table()
+    await ensure_automation_tables()
     from app.services import assistant_service
     assistant_service.enable_provider_setting()
     await sync_livestock_emissions_on_boot()
@@ -858,7 +925,16 @@ async def lifespan(_: FastAPI):
         field_task = field_service.start_loop()
     except Exception:  # noqa: BLE001  never block startup on the bot
         logger.exception("Field bot loop not started")
+    # Automations: rules that e-mail what they find — checked every minute, in this process.
+    automation_task = None
+    try:
+        from app.services import automation_service
+        automation_task = automation_service.start_loop()
+    except Exception:  # noqa: BLE001  never block startup on automations
+        logger.exception("Automations loop not started")
     yield
+    if automation_task is not None:
+        automation_task.cancel()
     if brief_task is not None:
         brief_task.cancel()
     if field_task is not None:

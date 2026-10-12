@@ -138,6 +138,8 @@ class BaseAppSettings(BaseSettings):
     # How long to wait for the first provider before switching (twice as long for images).
     ASSISTANT_FALLBACK_AFTER_SECONDS: float = 40.0
     TELEGRAM_LOOP: bool = True
+    # Automations (rules that e-mail what they find; managed on the Ask page). Off = no background checks.
+    AUTOMATIONS_LOOP: bool = True
 
     model_config = CONFIG_MODEL
 

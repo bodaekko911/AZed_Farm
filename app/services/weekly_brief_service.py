@@ -546,6 +546,12 @@ async def send(db, *, only_to: Optional[list[str]] = None, period: str = WEEK, e
     if only_to:
         subject = "[Test] " + subject
     await mail_service.send(recipients, subject, html, text)
+    try:
+        from app.services.automation_service import note_email
+        await note_email(db, ("Brief test: " if only_to else "Brief: ") + ("monthly" if period == MONTH else "weekly"),
+                         recipients)
+    except Exception:  # noqa: BLE001  counting must never undo a sent brief
+        logger.warning("brief: e-mail not counted", exc_info=True)
     return {"ok": True, "sent_to": recipients, "subject": subject}
 
 

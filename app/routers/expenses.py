@@ -2135,8 +2135,23 @@ async function loadFarmsDropdown() {
     }
 }
 
+
+/* A link from an AZed e-mail may carry ?search=… — it only fills the search box (nothing else happens), and is
+   ignored when missing or odd. */
+function prefillSearchFromUrl(inputId){
+    try{
+        const value = new URLSearchParams(window.location.search).get("search");
+        if(typeof value !== "string") return;
+        const clean = value.trim().slice(0, 80);
+        if(!clean || /[<>]/.test(clean) || clean.includes(String.fromCharCode(65533))) return;   // odd or malformed
+        const el = document.getElementById(inputId);
+        if(el) el.value = clean;
+    }catch(e){ /* a bad URL changes nothing */ }
+}
+
 // ── Boot ──────────────────────────────────────────────
 async function bootstrapExpensesPage() {
+    prefillSearchFromUrl("exp-search");
     await initUser();
     await Promise.allSettled([
         loadCategories(),

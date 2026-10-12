@@ -3,6 +3,7 @@ from app.models.accounting import Account, Journal, JournalEntry
 from app.models.animal import AnimalGroup, FeedingLog, MortalityLog
 from app.models.receipt import ProductReceipt
 from app.models.assistant_settings import AssistantSettings
+from app.models.automation import AutomationEvent, AutomationRule, AutomationRun, AutomationSettings
 from app.models.brief import WeeklyBriefSettings
 from app.models.document import DocumentFile, DocumentLink
 from app.models.telegram import FieldDraft, TelegramChat, TelegramChatGuard, TelegramLinkCode, TelegramUpdate
@@ -53,6 +54,10 @@ from app.models.user import User
 __all__ = [
     "WeeklyBriefSettings",
     "AssistantSettings",
+    "AutomationEvent",
+    "AutomationRule",
+    "AutomationRun",
+    "AutomationSettings",
     "DocumentFile",
     "DocumentLink",
     "FieldDraft",
