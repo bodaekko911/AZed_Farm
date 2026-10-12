@@ -8,11 +8,11 @@
 (function () {
   "use strict";
   const KIND = { expense_receipt: "Expense receipt", delivery_note: "Supplier delivery note",
-                 harvest_sheet: "Harvest sheet / delivery", spoilage: "Spoilage" };
+                 harvest_sheet: "Harvest sheet / delivery", spoilage: "Spoilage", b2b_sale: "B2B sale" };
   const WARN = { duplicate: "Possible duplicate", totals: "Lines don't add up", new_supplier: "New supplier",
                  unmatched_product: "Product not matched", unmatched_line: "Farm or product not matched",
                  no_category: "No expense category", priced: "Has prices", closest_match: "Product match not certain",
-                 unit: "Unit differs" };
+                 unit: "Unit differs", no_client: "No client" };
 
   function h(tag, attrs, ...kids) {
     const node = document.createElement(tag);

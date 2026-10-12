@@ -578,8 +578,72 @@ async def propose_pos_sale(db, user, args: dict) -> dict:
                         "discount_percent": discount_pct, "date": day.isoformat(), "total": total}}
 
 
+async def propose_b2b_sale(db, user, args: dict) -> dict:
+    """Goods sold to a B2B client, typed in chat ("١٠ كيلو طماطم للمطبخ"): an invoice at the client's prices."""
+    from app.core.product_types import is_stock_tracked_product
+    from app.models.b2b import B2BClient
+    from app.services.document_reader import client_prices
+    raw_items = args.get("items") or []
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("Give at least one product and the quantity.")
+    if len(raw_items) > MAX_SALE_LINES:
+        raise ValueError(f"At most {MAX_SALE_LINES} products in one invoice.")
+    clients = (await db.execute(select(B2BClient).where(or_(B2BClient.is_active.is_(True),
+                                                            B2BClient.is_active.is_(None))))).scalars().all()
+    client = _one(str(args.get("client") or ""), clients, lambda c: c.name, "B2B client")
+    prices = await client_prices(db, client.id)
+    products = [p for p in await _active_products(db) if not is_delivery_text(p.name)]
+    lines, items, seen, subtotal = [], [], set(), 0.0
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            raise ValueError("Each item needs a product and a qty.")
+        product = _product_named(raw.get("product"), products)
+        if product.id in seen:
+            raise ValueError(f"{product.name} is listed twice — give it once with the total quantity.")
+        seen.add(product.id)
+        try:
+            qty = round(_qty_in_unit(float(raw.get("qty")), raw.get("unit"), product), 3)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(str(exc) if "counted in" in str(exc) else f"A quantity is required for {product.name}.")
+        if qty <= 0:
+            raise ValueError(f"The quantity of {product.name} must be more than 0.")
+        if is_stock_tracked_product(product) and float(product.stock or 0) < qty - 1e-9:
+            raise ValueError(f"Not enough {product.name}: {float(product.stock or 0):g} {product.unit or ''} in stock.")
+        source = "client price" if product.id in prices else "catalogue price"
+        price = prices.get(product.id, float(product.price or 0))
+        if raw.get("unit_price") is not None:
+            try:
+                price, source = round(float(raw["unit_price"]), 2), "as said"
+            except (TypeError, ValueError):
+                raise ValueError(f"Couldn't read the price for {product.name}.")
+        line_total = round(price * qty, 2)
+        subtotal += line_total
+        items.append({"product_id": product.id, "qty": qty, "unit_price": price})
+        lines.append([product.name, f"{qty:g} {product.unit or ''} × {price:g} ({source}) = {line_total:,.2f} EGP"
+                      .replace("  ", " ")])
+    pct = float(client.discount_pct or 0)
+    total = round(subtotal - subtotal * pct / 100, 2)
+    terms = (client.payment_terms or "immediate").replace("_", " ")
+    status = "Paid — 100% discount, nothing to collect" if pct >= 100 or total <= 0.005 else f"Unpaid — {terms}"
+    tail = ([["Discount", f"{pct:g}% (−{subtotal - total:,.2f} EGP)"]] if pct else []) + \
+        [["Total", f"{total:,.2f} EGP"], ["Status", status]]
+    return {"kind": "b2b_sale", "title": "Record B2B sale", "lines": [["Client", client.name]] + lines + tail,
+            "payload": {"client_id": client.id, "items": items, "notes": str(args.get("notes") or "")[:300] or None,
+                        "total": total}}
+
+
 # name → (description, parameters, permissions, propose function)
 ACTIONS = {
+    "propose_b2b_sale": (
+        "PROPOSE invoicing goods sold or sent to a B2B client (the user confirms; nothing is saved by this call), "
+        "e.g. \"للمطبخ\" = to the client Habiba Kitchen. `items`: each product with its qty; `unit` only if the user "
+        "named one; `unit_price` only if they said a price (else the client's own price).",
+        {"client": {"type": "string"},
+         "items": {"type": "array", "items": {"type": "object", "properties": {
+             "product": {"type": "string", "description": "Product name or SKU"}, "qty": {"type": "number"},
+             "unit": {"type": "string"}, "unit_price": {"type": "number"}}, "required": ["product", "qty"]}},
+         "notes": {"type": "string"}},
+        ("page_b2b", "action_b2b_invoices_create"), propose_b2b_sale),
     "propose_expense": (
         "PROPOSE adding an expense (the user confirms on screen; nothing is saved by this call). `category` is the "
         "expense category name; `farm` a farm name, 'animals', or leave out for none.",
@@ -808,6 +872,15 @@ async def execute(db, user, token: str) -> dict:
                user=user, ref_type="b2b_client", ref_id=p["client_id"])
         await db.commit()
         return {"ok": True, "message": f"Payment of {p['amount']:,.2f} EGP recorded on {', '.join(numbers)}."}
+
+    if kind == "b2b_sale":
+        from app.services.document_reader import NewImages, record_b2b_sale_with
+        record(db, "Assistant", "action", f"Confirmed: B2B sale to client #{p['client_id']}", user=user,
+               ref_type="assistant_action", ref_id=body["nonce"])
+        out = await record_b2b_sale_with(db, user, p, NewImages([], [], None))
+        inv = out["invoices"][0]
+        return {"ok": True, "message": f"B2B invoice {inv['invoice_number']} for {inv['client']} recorded — "
+                                       f"{inv['total']:,.2f} EGP, stock updated."}
 
     if kind == "pos_sale":
         _need(user, "page_pos", "action_pos_create_sale")

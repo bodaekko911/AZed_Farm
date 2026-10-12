@@ -879,10 +879,87 @@
     return card;
   }
 
+  // ── Review a B2B sale a worker reported by text (Field inbox) ──
+  function b2bSaleCard(d, images, filename, opts) {
+    const clients = d.clients || [];
+    const state = {
+      client_id: d.client_match ? String(d.client_match.id) : "", recorded: false,
+      lines: (d.lines || []).map(l => {
+        const line = { written: [l.product_written || "", l.qty, l.unit].filter(x => x !== null && x !== undefined && x !== "").join(" · "),
+                       product: l.product, candidates: l.candidates, unit: l.unit, pack: l.pack, pQty: l.qty ?? "", pCost: null,
+                       price: l.unit_price ?? (l.product ? l.product.price : "") };
+        return Object.assign(line, inProductUnits(line));
+      }),
+    };
+    const card = h("div", { class: "inv-card" });
+    const problems = h("ul", { class: "inv-problems" });
+    const totalBox = h("div", { class: "inv-total", "data-no-i18n": true });
+    const result = h("div", { class: "act-status" });
+    const recordBtn = h("button", { class: "act-btn act-primary", text: "Record B2B sale" });
+    const client = h("select", { onchange: e => { state.client_id = e.target.value; check(); } },
+      h("option", { value: "", text: "— pick the client —" }),
+      ...clients.map(c => h("option", { value: String(c.id), text: c.name + (c.discount_pct ? ` (−${c.discount_pct}%)` : ""), "data-no-i18n": true })));
+    client.value = state.client_id;
+    if (!state.client_id) client.classList.add("doc-missing");
+    const tbody = h("tbody");
+    state.lines.forEach(l => {
+      const qty = h("input", { type: "number", step: "any", min: "0", value: l.qty, oninput: e => { l.qty = e.target.value; check(); } });
+      const price = h("input", { type: "number", step: "any", min: "0", value: l.price, oninput: e => { l.price = e.target.value; check(); } });
+      const unit = data("span", l.product ? l.product.unit : "", "inv-muted");
+      const conv = h("div", { class: "inv-conv", text: l.note });
+      const pick = picker("products", l.product, l.candidates, "— pick a product —", p => {
+        l.product = p; Object.assign(l, inProductUnits(l)); qty.value = l.qty; conv.textContent = l.note;
+        unit.textContent = p ? p.unit : ""; check();
+      });
+      tbody.append(h("tr", null, h("td", { class: "inv-desc" }, data("div", l.written || "—")),
+        h("td", null, pick, conv), h("td", null, qty, " ", unit), h("td", null, price)));
+    });
+    const table = h("table", { class: "inv-table" },
+      h("thead", null, h("tr", null, ["Written in the message", "Product", "Qty", "Unit price"].map(t => h("th", { text: t })))), tbody);
+    function check() {
+      const issues = [];
+      if (!state.client_id) issues.push(h("li", null, h("span", { text: "Pick the client." })));
+      state.lines.forEach(l => {
+        if (!l.product) issues.push(h("li", null, h("span", { text: "Pick a product for:" }), " ", data("strong", l.written || "—")));
+        if (!(num(l.qty) > 0)) issues.push(h("li", null, h("span", { text: "A quantity must be above 0:" }), " ", data("strong", l.written || "—")));
+        if (num(l.price) === null || num(l.price) < 0) issues.push(h("li", null, h("span", { text: "Enter the price for:" }), " ", data("strong", l.written || "—")));
+      });
+      if (!state.lines.length) issues.push(h("li", null, h("span", { text: "No lines were read from the message." })));
+      problems.replaceChildren(...issues);
+      const c = clients.find(x => String(x.id) === state.client_id) || {};
+      const sub = state.lines.reduce((s, l) => s + (num(l.qty) || 0) * (num(l.price) || 0), 0);
+      const pct = Number(c.discount_pct) || 0;
+      totalBox.textContent = money(sub * (1 - pct / 100)) + " EGP" + (pct >= 100 ? " — paid (100% discount)" : pct ? ` (−${pct}%)` : "");
+      recordBtn.disabled = state.recorded || issues.length > 0;
+      return !issues.length;
+    }
+    recordBtn.onclick = async () => {
+      if (!check()) return;
+      recordBtn.disabled = true; result.replaceChildren(h("span", { text: "Recording…" })); result.className = "act-status";
+      try {
+        const out = await submit(opts, { kind: "b2b_sale", client_id: Number(state.client_id),
+          items: state.lines.map(l => ({ product_id: l.product ? l.product.id : null, qty: num(l.qty), unit_price: num(l.price) })) });
+        state.recorded = true;
+        result.className = "act-status ok";
+        result.replaceChildren("✓ ", h("span", { text: "Recorded" }), " ",
+          data("span", (out.invoices || []).map(x => `${x.invoice_number} (${money(x.total)})`).join(", ")));
+        card.classList.add("done"); card.querySelectorAll("input, select, button").forEach(x => { x.disabled = true; });
+      } catch (e) { result.replaceChildren(h("span", { text: e.message })); result.className = "act-status bad"; check(); }
+    };
+    card.append(
+      h("div", { class: "inv-head" }, h("div", { class: "inv-title", text: "B2B sale" }),
+        h("span", { class: "inv-muted", text: "Invoiced as on the B2B page: the client's discount and terms apply." })),
+      h("div", { class: "inv-row" }, h("span", { class: "inv-label", text: "Client" }), client),
+      table, h("div", { class: "inv-foot" }, totalBox), problems, h("div", { class: "act-buttons" }, recordBtn), result);
+    check();
+    return card;
+  }
+
   window.AskDocuments = {
     start, prepare, number: num,
     // For the Field inbox: the same review cards, recording through its own endpoint and searching through its own.
-    cards: { expense_receipt: expenseCard, delivery_note: deliveryCard, harvest_sheet: harvestCard, spoilage: spoilageCard },
+    cards: { expense_receipt: expenseCard, delivery_note: deliveryCard, harvest_sheet: harvestCard, spoilage: spoilageCard,
+             b2b_sale: b2bSaleCard },
     setSearchUrl: url => { searchUrl = url; },
   };
 })();

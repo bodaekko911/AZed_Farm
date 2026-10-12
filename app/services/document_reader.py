@@ -57,6 +57,8 @@ KINDS = {
                       "permissions": ("page_receive_products", "action_receive_products_create")},
     "harvest_sheet": {"label": "Harvest sheet", "permissions": ("page_farm", "action_farm_delivery_create")},
     # From a worker's text message on the field bot ("تالف ٣ كيلو خيار"), never read from an image.
+    # From a worker's text ("١٠ كيلو طماطم للمطبخ"): goods sold to a B2B client.
+    "b2b_sale": {"label": "B2B sale", "permissions": ("page_b2b", "action_b2b_invoices_create"), "text_only": True},
     "spoilage": {"label": "Spoilage", "permissions": ("page_production", "action_production_log_spoilage"),
                  "text_only": True},
 }
@@ -1066,3 +1068,53 @@ async def record_spoilage_with(db, user, data: dict, evidence: Evidence) -> dict
         out.append(result)
     return {"ok": True, "doc_key": None, "date": day,
             "spoilage": [{"ref_number": r["ref_number"], "product": r["product"], "qty": r["qty"]} for r in out]}
+
+
+# ── B2B sales (from the field bot's text, and Ask) ───────────────────────────
+
+async def b2b_clients(db) -> list[dict]:
+    from app.models.b2b import B2BClient
+    rows = (await db.execute(select(B2BClient).where((B2BClient.is_active.is_(True)) | (B2BClient.is_active.is_(None)))
+                             .order_by(B2BClient.name))).scalars().all()
+    return [{"id": c.id, "name": c.name, "discount_pct": float(c.discount_pct or 0),
+             "terms": c.payment_terms or "immediate"} for c in rows]
+
+
+async def client_prices(db, client_id: int) -> dict[int, float]:
+    """The client's own prices, product id → price (the B2B page's price list for that client)."""
+    from app.models.b2b import B2BClientPrice
+    return {p: float(v) for p, v in (await db.execute(select(B2BClientPrice.product_id, B2BClientPrice.price)
+                                                       .where(B2BClientPrice.client_id == client_id))).all()}
+
+
+async def record_b2b_sale_with(db, user, data: dict, evidence: Evidence) -> dict:
+    """Confirm a reviewed B2B sale: one invoice through the B2B page's own code — stock out, the client's discount
+    and terms, the journals (a 100%-discount client such as the farm's own kitchen is booked as paid)."""
+    from app.models.b2b import B2BClient
+    from app.routers.b2b import InvoiceCreate, InvoiceItemIn, create_invoice
+
+    need_kind(user, "b2b_sale")
+    cid = int(data["client_id"]) if str(data.get("client_id") or "").isdigit() else None
+    client = (await db.execute(select(B2BClient).where(B2BClient.id == cid))).scalar_one_or_none() if cid else None
+    if client is None:
+        raise HTTPException(status_code=400, detail="Pick the B2B client.")
+    raw = [it for it in (data.get("items") or []) if isinstance(it, dict)][:50]
+    if not raw:
+        raise HTTPException(status_code=400, detail="There are no lines to invoice.")
+    items = []
+    for n, it in enumerate(raw, start=1):
+        pid = int(it["product_id"]) if str(it.get("product_id") or "").isdigit() else None
+        if pid is None:
+            raise HTTPException(status_code=400, detail=f"Line {n}: pick the product.")
+        qty, price = number(it.get("qty")), number(it.get("unit_price"))
+        if qty is None or qty <= 0:
+            raise HTTPException(status_code=400, detail=f"Line {n}: the quantity must be above 0.")
+        if price is None or price < 0:
+            raise HTTPException(status_code=400, detail=f"Line {n}: enter the price.")
+        items.append(InvoiceItemIn(product_id=pid, qty=round(qty, 3), unit_price=round(price, 2)))
+    note = _text(data.get("notes"), 300)
+    out = await create_invoice(InvoiceCreate(client_id=client.id, items=items,
+                                             notes=("From the field bot" + (f": {note}" if note else ""))
+                                             if data.get("from_field") else note), db, current_user=user)
+    return {"ok": True, "doc_key": None, "invoices": [{"id": out["id"], "invoice_number": out["invoice_number"],
+                                                       "total": out["total"], "client": client.name}]}

@@ -303,3 +303,42 @@ def test_a_sale_follows_the_pos_permissions(db):
     assert card is None and "permission" in note["error"]
     note, card = propose(adb, farmer(), "propose_pos_sale", **_sale())
     assert card is None and "permission" in note["error"]
+
+
+# --- B2B sale ("للمطبخ") ----------------------------------------------------------------
+
+def test_a_b2b_sale_to_the_kitchen_uses_its_prices_and_is_booked_paid(db):
+    from app.models.b2b import B2BClientPrice, B2BInvoiceItem
+    session, adb = db
+    session.add(B2BClient(id=2, name="Habiba Kitchen", discount_pct=Decimal("100"), outstanding=Decimal("0"),
+                          payment_terms="immediate"))
+    session.add(B2BClientPrice(client_id=2, product_id=1, price=Decimal("15")))
+    session.commit()
+    note, card = propose(adb, admin(), "propose_b2b_sale", client="Habiba Kitchen",
+                         items=[{"product": "tomatoes", "qty": 10}, {"product": "basil", "qty": 0.1, "unit": "kg"}])
+    lines = dict(card["lines"])
+    assert lines["Tomatoes"].startswith("10 kg × 15 (client price)") and lines["Basil"].startswith("100 gram × 1 (catalogue")
+    assert lines["Status"].startswith("Paid") and lines["Total"] == "0.00 EGP"
+    out = run(act.execute(adb, admin(), card["token"]))
+    assert out["ok"] and "Habiba Kitchen" in out["message"]
+    inv = session.execute(select(B2BInvoice).where(B2BInvoice.client_id == 2)).scalar_one()
+    assert (inv.status, float(inv.subtotal), float(inv.total)) == ("paid", 250.0, 0.0)
+    assert sorted((i.product_id, float(i.qty), float(i.unit_price)) for i in
+                  session.execute(select(B2BInvoiceItem)).scalars()) == [(1, 10.0, 15.0), (2, 100.0, 1.0)]
+    tom = session.get(Product, 1)
+    session.refresh(tom)
+    assert float(tom.stock) == 40.0
+
+
+def test_a_b2b_sale_needs_the_invoice_permission_and_stock(db):
+    _s, adb = db
+    note, card = propose(adb, farmer(), "propose_b2b_sale", client="Joud", items=[{"product": "tomatoes", "qty": 1}])
+    assert card is None and "permission" in note["error"]
+    note, card = propose(adb, admin(), "propose_b2b_sale", client="Joud", items=[{"product": "tomatoes", "qty": 60}])
+    assert card is None and "Not enough Tomatoes" in note["error"]
+
+
+def test_ask_knows_the_farms_own_words():
+    from app.services.assistant_service import LOCAL_WORDS
+    assert "للمطبخ" in LOCAL_WORDS and "Habiba Kitchen" in LOCAL_WORDS
+    assert "الساند بونك" in LOCAL_WORDS and "Habiba/SPC" in LOCAL_WORDS and "هالك" in LOCAL_WORDS

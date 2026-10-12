@@ -867,3 +867,55 @@ def test_voice_can_use_its_own_provider(telegram, monkeypatch):
         assert calls[1] == ("https://assistant.test/v1/chat/completions", "Bearer test-key")   # reading stays on Ask's
         assert (await drafts(db))[0].kind == "spoilage"
     scenario(go)
+
+
+# ── B2B sale by text ("للمطبخ") ─────────────────────────────────────────────
+
+TEXT_KITCHEN = {"type": "b2b_sale", "date": None, "farm": None, "farm_match": None, "client": "المطبخ",
+                "client_match": "Habiba Kitchen",
+                "items": [{"product": "طماطم", "product_match": "Tomatoes", "qty": "١٠", "unit": "كيلو"}],
+                "reason": None, "unclear": []}
+
+
+def test_a_sale_to_the_kitchen_by_text_is_approved_and_booked_paid(telegram):
+    async def go(db, factory):
+        from app.models.b2b import B2BClient, B2BClientPrice, B2BInvoice
+        db.add_all([B2BClient(id=7, name="Habiba Kitchen", discount_pct=Decimal("100"), outstanding=Decimal("0"),
+                              payment_terms="immediate"),
+                    B2BClientPrice(client_id=7, product_id=1, price=Decimal("15"))])
+        await db.commit()
+        await approver(db, perms=REVIEW_PERMS + ",page_b2b,action_b2b_invoices_create")
+        await link(db, kinds=("b2b_sale", "spoilage"))
+        seen = []
+        await send(db, factory, msg("١٠ كيلو طماطم للمطبخ"), transport=model(TEXT_KITCHEN, seen=seen))
+        system = seen[0]["messages"][0]["content"]
+        assert '"Habiba Kitchen"' in system and "للمطبخ" in system                  # the client list and the glossary
+        [d] = await drafts(db)
+        body = json.loads(d.draft_json)
+        assert d.kind == "b2b_sale" and body["client_match"]["id"] == 7 and body["lines"][0]["unit_price"] == 15.0
+        assert "Habiba Kitchen" in telegram.texts()[-1] and "١٠٠٪" in telegram.texts()[-1]
+        await send(db, factory, tap(f"fd:ok:{d.id}", d.bot_message_id))
+        assert buttons_to(telegram, MANAGER_CHAT)[0] == f"fa:ok:{d.id}"              # clean: approvable here
+        await send(db, factory, tap(f"fa:ok:{d.id}", 1, chat_id=MANAGER_CHAT))
+        inv = (await db.execute(select(B2BInvoice))).scalar_one()
+        assert (inv.client_id, inv.status, float(inv.total), inv.user_id) == (7, "paid", 0.0, 3)
+        assert "From the field bot" in (inv.notes or "")
+        number = inv.invoice_number
+        tom = await db.get(Product, 1)
+        await db.refresh(tom)
+        assert float(tom.stock) == 40.0
+        assert (await drafts(db))[0].result_refs == number
+    scenario(go)
+
+
+def test_a_sale_with_no_client_found_waits_for_review_in_azed(telegram):
+    async def go(db, factory):
+        await approver(db, perms=REVIEW_PERMS + ",page_b2b,action_b2b_invoices_create")
+        await link(db, kinds=("b2b_sale",))
+        await send(db, factory, msg("١٠ كيلو طماطم لمحل جديد"),
+                   transport=model({**TEXT_KITCHEN, "client": "محل جديد", "client_match": None}))
+        [d] = await drafts(db)
+        assert "no_client" in json.loads(d.warnings) and "missing:client" in json.loads(d.warnings)
+        await send(db, factory, tap(f"fd:ok:{d.id}", d.bot_message_id))
+        assert buttons_to(telegram, MANAGER_CHAT) == [f"fa:no:{d.id}"]
+    scenario(go)

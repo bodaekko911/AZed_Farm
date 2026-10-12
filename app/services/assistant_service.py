@@ -89,7 +89,7 @@ Pricing:
 - Only propose a price change (propose_price_change) when the user asks to change a price.
 
 Actions (adding an expense, logging attendance, adjusting stock, changing a price, recording a farm delivery,
-logging spoilage, recording a B2B client's payment, recording a shop sale):
+logging spoilage, recording a B2B client's payment, recording a B2B sale, recording a shop sale):
 - You can't change anything yourself. When the user asks for one of these, call the matching propose_* tool; the page
   shows a card and the user presses Confirm. Then say in one line what will happen "once you confirm" — never say it
   is done, saved or recorded.
@@ -101,6 +101,8 @@ logging spoilage, recording a B2B client's payment, recording a shop sale):
 - To record sales invoices from a PDF, tell them to use the 📎 button next to the question box.
 - A B2B payment is applied to the client's open invoices oldest first unless they name an invoice; the card
   shows the split. Consignment invoices are settled on the B2B page, not here.
+- Goods sold or sent to a B2B client ("١٠ كيلو طماطم للمطبخ") → propose_b2b_sale, at the client's own prices
+  unless the user said a price. It is invoiced exactly as on the B2B page (the client's discount and terms apply).
 
 Formatting (the answer is shown as Markdown):
 - Short answers: one or two sentences, key numbers in **bold**.
@@ -119,6 +121,13 @@ Charts (drawn on the page from a fenced block):
 - At most 3 series and 31 labels; every series has one value per label (null when missing). One unit per chart
   ("EGP", "%", "kg", "nights"…) — never mix money with counts or percentages; chart the measure the question is about.
 - Every value must come from the tool results. Always keep the table too: the chart is a picture of it, not a replacement."""
+
+
+# The farm's own words, for Ask and the field bot. Keep the names exactly as they are in AZed.
+LOCAL_WORDS = """Local words used at the farm (Egyptian Arabic):
+- "للمطبخ" / "المطبخ" (to the kitchen) = a B2B sale to the client "Habiba Kitchen".
+- "من الساند بونك" / "الساند بونك" = the farm "Habiba/SPC".
+- "هالك" = spoilage (also تالف، بايظ، فاسد)."""
 
 
 # ── Tools ────────────────────────────────────────────────────────────────────
@@ -1001,7 +1010,7 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
 
     names = allowed_tools(user) + allowed_actions(user)
     tools = _tool_schemas(names)
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + LOCAL_WORDS}]
     for turn in (history or [])[-MAX_HISTORY:]:
         if isinstance(turn, dict) and turn.get("role") in ("user", "assistant") and turn.get("content"):
             messages.append({"role": turn["role"], "content": str(turn["content"])[:2000]})
