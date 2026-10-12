@@ -294,6 +294,58 @@ async def admin_set_limit(user_id: int, data: LimitRequest, db: AsyncSession = D
     return {"ok": True}
 
 
+# ── Admin: which AI provider ─────────────────────────────────────────────────
+
+class ProviderIn(BaseModel):
+    mode: str = Field(..., pattern="^(auto|primary|fallback)$")
+
+
+def _host(url: Optional[str]) -> Optional[str]:
+    from urllib.parse import urlparse
+    return urlparse(url).hostname if url else None
+
+
+async def _provider_out(db) -> dict:
+    import time as _time
+    from app.models.assistant_settings import AssistantSettings
+    row = (await db.execute(select(AssistantSettings).where(AssistantSettings.id == 1))).scalar_one_or_none()
+    fb_base = settings.ASSISTANT_FALLBACK_BASE_URL or settings.ASSISTANT_TRANSCRIBE_BASE_URL
+    fb_key = settings.ASSISTANT_FALLBACK_API_KEY or settings.ASSISTANT_TRANSCRIBE_API_KEY
+    left = assistant_service._primary_down_until - _time.monotonic()
+    return {"mode": row.provider_mode if row else "auto",
+            "primary": {"host": _host(settings.ASSISTANT_BASE_URL), "model": settings.ASSISTANT_MODEL,
+                        "vision_model": settings.ASSISTANT_VISION_MODEL or settings.ASSISTANT_MODEL},
+            "fallback": {"host": _host(fb_base), "model": settings.ASSISTANT_FALLBACK_MODEL,
+                         "vision_model": settings.ASSISTANT_FALLBACK_VISION_MODEL,
+                         "ready": bool(fb_base and fb_key and settings.ASSISTANT_FALLBACK_MODEL)},
+            "switched_for": int(left) if left > 0 else 0}
+
+
+@router.get("/api/admin/provider")
+async def provider_settings(db: AsyncSession = Depends(get_async_session), _admin: User = Depends(require_admin)):
+    return await _provider_out(db)
+
+
+@router.post("/api/admin/provider")
+async def save_provider(data: ProviderIn, db: AsyncSession = Depends(get_async_session),
+                        admin: User = Depends(require_admin)):
+    from app.models.assistant_settings import AssistantSettings
+    if data.mode == "fallback" and not (await _provider_out(db))["fallback"]["ready"]:
+        raise HTTPException(status_code=400, detail="The second provider isn't set up — add ASSISTANT_FALLBACK_MODEL "
+                                                    "(and its URL and key) in Railway first.")
+    row = (await db.execute(select(AssistantSettings).where(AssistantSettings.id == 1))).scalar_one_or_none()
+    if row is None:
+        row = AssistantSettings(id=1)
+        db.add(row)
+    row.provider_mode = data.mode
+    record(db, "Assistant", "provider", f"AI provider set to {data.mode}", user=admin)
+    await db.commit()
+    assistant_service.remember_mode(data.mode)
+    if data.mode != "auto":
+        assistant_service._primary_down_until = 0.0
+    return await _provider_out(db)
+
+
 # ── Admin: weekly brief e-mail ───────────────────────────────────────────────
 
 class BriefSettingsIn(BaseModel):
@@ -597,6 +649,21 @@ button.send:disabled{opacity:.5;cursor:default}
             </table>
         </div>
     </details>
+    <details class="admin" id="provider" style="display:none">
+        <summary>AI provider · admin</summary>
+        <div class="admin-body">
+            <div class="brief-form">
+                <label for="provider-mode">Use</label>
+                <div><select id="provider-mode">
+                    <option value="auto">Auto</option>
+                    <option value="primary">First provider only</option>
+                    <option value="fallback">Second provider only</option></select>
+                    <div class="brief-note" id="provider-help"></div></div>
+            </div>
+            <div class="brief-actions"><button class="ghost" id="provider-save">Save</button></div>
+            <div id="provider-status" class="brief-note"></div>
+        </div>
+    </details>
     <details class="admin" id="brief" style="display:none">
         <summary>Weekly &amp; monthly brief e-mail · admin</summary>
         <div class="admin-body">
@@ -755,7 +822,8 @@ async function loadStatus(){
         document.getElementById("scope").innerText = s.can_look_up.length ? `You can ask about: ${s.can_look_up.join(", ")}.` : "";
         if(!s.configured) document.getElementById("notice").innerHTML =
             `<div class="notice">The assistant isn't set up yet. An admin needs to add ASSISTANT_API_KEY and ASSISTANT_MODEL to the server settings.</div>`;
-        if(s.is_admin){ document.getElementById("admin").style.display = ""; document.getElementById("brief").style.display = ""; }
+        if(s.is_admin){ document.getElementById("admin").style.display = ""; document.getElementById("brief").style.display = "";
+                        document.getElementById("provider").style.display = ""; }
         docKinds = s.document_kinds || [];
         const canPdf = !!(s.can_record_invoices && window.AskActions);
         const canDocs = !!(docKinds.length && window.AskDocuments);
@@ -903,6 +971,36 @@ async function sendTest(period, button){
 }
 $b("brief-test").onclick = () => sendTest("week", "brief-test");
 $b("brief-test-month").onclick = () => sendTest("month", "brief-test-month");
+
+// AI provider (admin)
+let providerInfo = null;
+function providerName(p){ return p && p.host ? p.host.replace(/^api\./, "") : "—"; }
+function showProvider(p){
+    providerInfo = p;
+    const sel = $b("provider-mode");
+    sel.options[0].textContent = `Auto — ${providerName(p.primary)} first, ${providerName(p.fallback)} if it doesn't answer`;
+    sel.options[1].textContent = `${providerName(p.primary)} only`;
+    sel.options[2].textContent = `${providerName(p.fallback)} only`;
+    sel.options[0].disabled = sel.options[2].disabled = !p.fallback.ready;
+    sel.value = p.mode;
+    const help = {auto: "Each request goes to the first provider; if it doesn't answer within 40 seconds (80 with photos), it goes to the second, and the next 5 minutes go straight there.",
+                  primary: "Never switches. If the first provider is down, questions and readings fail until it's back.",
+                  fallback: "Everything goes to the second provider. Photos it can't take (no vision model, or more than 3 images) still go to the first."};
+    $b("provider-help").textContent = help[p.mode] || "";
+    const models = `${providerName(p.primary)}: ${p.primary.model || "—"}` + (p.fallback.ready ? ` · ${providerName(p.fallback)}: ${p.fallback.model}`
+        + (p.fallback.vision_model ? ` (photos: ${p.fallback.vision_model})` : " (no photos)") : " · second provider not set up");
+    $b("provider-status").textContent = models + (p.switched_for ? ` · switched to the second provider for the next ${Math.ceil(p.switched_for / 60)} min` : "");
+}
+$b("provider-mode").onchange = () => { if(providerInfo) showProvider({...providerInfo, mode: $b("provider-mode").value}); };
+$b("provider").addEventListener("toggle", async e => {
+    if(!e.target.open) return;
+    try{ showProvider(await (await fetch("/assistant/api/admin/provider")).json()); }
+    catch(err){ $b("provider-status").textContent = "Couldn't load the provider settings."; }
+});
+$b("provider-save").onclick = async () => {
+    try{ showProvider(await adminPost("/assistant/api/admin/provider", {mode: $b("provider-mode").value})); toast("Provider saved"); }
+    catch(e){ toast(e.message); }
+};
 
 document.getElementById("send").onclick = () => send();
 let docKinds = [];

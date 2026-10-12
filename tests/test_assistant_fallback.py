@@ -31,6 +31,8 @@ def providers(monkeypatch):
     monkeypatch.setattr(settings, "ASSISTANT_FALLBACK_AFTER_SECONDS", 40.0)
     monkeypatch.setattr(svc, "RETRY_DELAYS", (0, 0))
     monkeypatch.setattr(svc, "_primary_down_until", 0.0)
+    monkeypatch.setattr(svc, "_mode_from_db", False)
+    monkeypatch.setitem(svc._mode, "value", "auto")
     yield
 
 
@@ -116,3 +118,52 @@ def test_more_than_three_images_stay_with_the_first_provider(monkeypatch):
     transport, calls = provider("500")
     assert post(transport, four).status_code == 500
     assert {c[0] for c in calls} == {"primary.test"}
+
+
+
+def test_the_admin_can_choose_the_first_provider_only(monkeypatch):
+    monkeypatch.setitem(svc._mode, "value", "primary")
+    transport, calls = provider("timeout")
+    with pytest.raises(httpx.ReadTimeout):
+        post(transport)
+    assert {c[0] for c in calls} == {"primary.test"}                               # never switches
+
+
+def test_the_admin_can_choose_the_second_provider_only(monkeypatch):
+    monkeypatch.setitem(svc._mode, "value", "fallback")
+    transport, calls = provider("ok")
+    assert post(transport).status_code == 200
+    assert calls == [("fallback.test", "Bearer groq-key", "fallback-text")]       # the first isn't even tried
+    # Photos it can't take still go to the first provider.
+    image_body = {"model": "vision", "messages": [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA"}}]}]}
+    calls.clear()
+    post(transport, image_body)
+    assert calls == [("primary.test", "Bearer primary-key", "vision")]
+
+
+def test_the_setting_is_read_from_the_database_and_saved_by_an_admin(monkeypatch):
+    from types import SimpleNamespace
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from app.database import Base
+    from app.models.assistant_settings import AssistantSettings
+    from app.routers import assistant as ask_router
+
+    async def go():
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        import app.db.session as session_module
+        monkeypatch.setattr(session_module, "AsyncSessionLocal", factory)
+        admin = SimpleNamespace(id=1, name="Boss", role="admin", permissions=None)
+        async with factory() as db:
+            out = await ask_router.save_provider(ask_router.ProviderIn(mode="fallback"), db=db, admin=admin)
+            assert out["mode"] == "fallback" and out["fallback"]["ready"] and out["fallback"]["host"] == "fallback.test"
+            assert (await db.get(AssistantSettings, 1)).provider_mode == "fallback"
+        # Another worker reads it from the database.
+        monkeypatch.setitem(svc._mode, "value", "auto")
+        svc.enable_provider_setting()
+        assert await svc.provider_mode() == "fallback"
+        await engine.dispose()
+    asyncio.run(go())

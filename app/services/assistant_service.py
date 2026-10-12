@@ -952,6 +952,41 @@ async def _attempts(client: httpx.AsyncClient, base: str, key: str, body: dict, 
     return response
 
 
+PROVIDER_MODES = ("auto", "primary", "fallback")
+MODE_TTL_SECONDS = 30
+_mode = {"value": "auto", "at": 0.0}
+_mode_from_db = False                # turned on at startup; outside the app (tests, scripts) the mode is "auto"
+
+
+def enable_provider_setting() -> None:
+    global _mode_from_db
+    _mode_from_db = True
+    _mode["at"] = 0.0                     # read it on the first call
+
+
+def remember_mode(value: str) -> None:
+    """The worker that saved a new mode uses it at once; the others pick it up within 30 seconds."""
+    _mode.update(value=value if value in PROVIDER_MODES else "auto", at=time.monotonic())
+
+
+async def provider_mode() -> str:
+    """The admin's choice on the Ask page: "auto", "primary" (the first provider only) or "fallback" (only the
+    fallback). Read from the database at most every 30 seconds per worker; "auto" if it can't be read."""
+    if not _mode_from_db or time.monotonic() - _mode["at"] < MODE_TTL_SECONDS:
+        return _mode["value"]
+    _mode["at"] = time.monotonic()
+    try:
+        from app.db.session import AsyncSessionLocal
+        from app.models.assistant_settings import AssistantSettings
+        async with AsyncSessionLocal() as db:
+            value = (await db.execute(select(AssistantSettings.provider_mode)
+                                      .where(AssistantSettings.id == 1))).scalar()
+        _mode["value"] = value if value in PROVIDER_MODES else "auto"
+    except Exception as exc:  # noqa: BLE001  never block a model call on the setting
+        logger.warning("assistant provider setting not read: %s", type(exc).__name__)
+    return _mode["value"]
+
+
 async def post_completion(client: httpx.AsyncClient, body: dict) -> httpx.Response:
     """POST one chat completion, retrying a passing failure of the endpoint. Returns the last response — the caller
     decides what an error status means — or raises ProviderUnavailable when no attempt got an answer.
@@ -959,13 +994,14 @@ async def post_completion(client: httpx.AsyncClient, body: dict) -> httpx.Respon
     With a fallback provider configured, a request the first provider doesn't answer (a timeout, unreachable, or
     still a passing error after the retries) is sent there instead, with the fallback model; for the next few
     minutes requests go straight to the fallback rather than waiting on the first provider again."""
-    import time
     global _primary_down_until
+    mode = await provider_mode()
     fallback = fallback_for(body)
-    if fallback is None:
+    # No fallback for this request (none set, or images it can't take), or the admin chose the first provider only.
+    if fallback is None or mode == "primary":
         return await _attempts(client, settings.ASSISTANT_BASE_URL, settings.ASSISTANT_API_KEY or "", body)
     base, key, model = fallback
-    if time.monotonic() >= _primary_down_until:
+    if mode == "auto" and time.monotonic() >= _primary_down_until:
         wait = settings.ASSISTANT_FALLBACK_AFTER_SECONDS * (2 if _has_images(body) else 1)
         try:
             response = await _attempts(client, settings.ASSISTANT_BASE_URL, settings.ASSISTANT_API_KEY or "", body,

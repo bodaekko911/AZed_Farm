@@ -493,6 +493,27 @@ async def ensure_telegram_tables() -> None:
         logger.exception("ensure_telegram_tables: failed (could not open DB session)")
 
 
+async def ensure_assistant_settings_table() -> None:
+    """Self-healing guard for the AI provider setting. Mirrors migration 20261014_0053. Idempotent."""
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal
+
+    stmt = ("CREATE TABLE IF NOT EXISTS assistant_settings ("
+            " id INTEGER PRIMARY KEY,"
+            " provider_mode VARCHAR(10) NOT NULL DEFAULT 'auto',"
+            " updated_at TIMESTAMPTZ DEFAULT now())")
+    try:
+        async with AsyncSessionLocal() as db:
+            try:
+                await db.execute(text(stmt))
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                logger.exception("ensure_assistant_settings_table: statement failed")
+    except Exception:
+        logger.exception("ensure_assistant_settings_table: failed (could not open DB session)")
+
+
 async def ensure_carbon_methodology() -> None:
     """Self-healing guard for the carbon module's methodology upgrade.
 
@@ -815,6 +836,9 @@ async def lifespan(_: FastAPI):
     await ensure_weekly_brief_table()
     await ensure_document_files_tables()
     await ensure_telegram_tables()
+    await ensure_assistant_settings_table()
+    from app.services import assistant_service
+    assistant_service.enable_provider_setting()
     await sync_livestock_emissions_on_boot()
     await seed_chart_of_accounts()
     from app.core.cache import init_redis_pool, close_redis_pool
@@ -839,6 +863,7 @@ async def lifespan(_: FastAPI):
         brief_task.cancel()
     if field_task is not None:
         field_task.cancel()
+    assistant_service._mode_from_db = False       # back to "auto" outside a running app
     await close_redis_pool()
 
 
