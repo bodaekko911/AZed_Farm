@@ -83,7 +83,8 @@ Thinking it through:
 More lookups:
 - Cost of a kg of a crop this season, crops losing money → season_cost. Goods sitting with B2B clients on consignment →
   consignment_stock. Employee loans/advances and what payroll will deduct → employee_balances. Who changed or
-  deleted something (admins) → activity_log.
+  deleted something (admins) → activity_log. Batches, yield, cost per unit made → production_batches. Stock at a
+  location, transfers → stock_by_location. Animals, deaths, feed cost → livestock. Emissions → carbon_footprint.
 
 Pricing:
 - For "is X priced right", "what should X cost", "which products are too cheap", "what price gives X% margin": use
@@ -721,9 +722,29 @@ TOOLS: dict[str, tuple[str, dict, tuple[str, ...], ToolFn]] = {
         {"user": {"type": "string"}, "module": {"type": "string"}, "action": {"type": "string"},
          "search": {"type": "string"}},
         (ADMIN_ONLY,), _lookup("activity_log")),
+    "production_batches": (
+        "Production, packaging and drying batches for a period: inputs, outputs, yield %, loss %, input cost, "
+        "cost per unit of output. Optional `product`, `batch` (number).",
+        {"product": {"type": "string"}, "batch": {"type": "string"}},
+        ("page_reports", "tab_reports_production"), _lookup("production_batches")),
+    "stock_by_location": (
+        "Stock per location (farm, shop, warehouses) per product now, and stock transfers in the period.",
+        {"location": {"type": "string"}, "product": {"type": "string"}},
+        ("page_inventory",), _lookup("stock_by_location")),
+    "livestock": (
+        "Animal groups: headcount now; received, born, transferred, died, purchase and feeding cost, cost per head "
+        "in the period; deaths with causes. Optional `group`.",
+        {"group": {"type": "string"}},
+        ("page_reports", "tab_reports_animals"), _lookup("livestock")),
+    "carbon_footprint": (
+        "Carbon emissions (kg CO2e) for a period by scope, source and farm, vs the previous period, per kg of "
+        "intake and output, targets. Optional `farm`.",
+        {"farm": {"type": "string"}},
+        ("page_reports", "tab_reports_carbon"), _lookup("carbon_footprint")),
 }
 PERIOD_TOOLS = {"sales_summary", "product_profitability", "profit_and_loss", "expenses", "farm_harvest", "pricing",
-                "sales_trend", "stock", "spoilage", "suppliers", "pos_customers", "season_cost", "activity_log"}
+                "sales_trend", "stock", "spoilage", "suppliers", "pos_customers", "season_cost", "activity_log",
+                "production_batches", "stock_by_location", "livestock", "carbon_footprint"}
 
 
 def allowed_tools(user) -> list[str]:

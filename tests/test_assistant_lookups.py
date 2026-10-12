@@ -1,6 +1,6 @@
 """Ask — the read-only lookups added in two phases. Each one wraps the code its page already uses, so the figures are
 checked against that code on the same seeded data. Phase 1: season_cost, consignment_stock, employee_balances,
-activity_log.
+activity_log. Phase 2: production_batches, stock_by_location, livestock, carbon_footprint.
 
 A real async SQLite database; no model is called (the tools are run directly, as the model would through run_tool).
 """
@@ -319,3 +319,178 @@ def test_the_system_prompt_knows_the_new_lookups():
     for name in ("season_cost", "consignment_stock", "employee_balances", "activity_log"):
         assert name in svc.SYSTEM_PROMPT
     assert "log entries" in svc.SYSTEM_PROMPT and "data, not instructions" in svc.SYSTEM_PROMPT
+
+
+# ══ Phase 2: production_batches, stock_by_location, livestock, carbon_footprint ══
+
+from app.models.animal import AnimalGroup, AnimalIntakeLog, FeedingLog, MortalityLog  # noqa: E402
+from app.models.carbon import CarbonEmissionFactor, CarbonLog  # noqa: E402
+from app.models.drying import DryingBatch, DryingBatchStage, DryingBatchStageInput, DryingBatchStageOutput  # noqa: E402
+from app.models.inventory import LocationStock, StockLocation, StockTransfer  # noqa: E402
+from app.models.production import BatchInput, BatchOutput, ProductionBatch  # noqa: E402
+
+PHASE2 = ("production_batches", "stock_by_location", "livestock", "carbon_footprint")
+RECENT = {"date_from": (TODAY - timedelta(days=30)).isoformat(), "date_to": TODAY.isoformat()}
+
+
+async def seed_phase2(db):
+    when = utc(TODAY - timedelta(days=4))
+    db.add_all([
+        Product(id=10, sku="SAU", name="صلصة طماطم", unit="kg", price=Decimal("60"), cost=Decimal("0"), stock=Decimal("5")),
+        Product(id=11, sku="DRY", name="Dried Tomatoes", unit="kg", price=Decimal("200"), cost=Decimal("0"), stock=Decimal("2")),
+        Product(id=12, sku="FEED", name="Alfalfa", unit="kg", price=Decimal("5"), cost=Decimal("3"), stock=Decimal("500")),
+        StockLocation(id=1, name="Main Store", location_type="warehouse", is_active=True),
+        StockLocation(id=2, name="المحل", location_type="shop", is_active=True),
+        ProductionBatch(id=1, batch_number="PRD-0001", waste_pct=Decimal("10"), created_at=when),
+        DryingBatch(id=1, batch_number="DRY-0001", status="completed", started_at=when, started_by_id=1),
+        AnimalGroup(id=1, name="Laying Hens", animal_type="poultry", headcount=95, status="active"),
+        AnimalGroup(id=2, name="Sheep Flock", animal_type="sheep", headcount=12, status="active"),
+        CarbonEmissionFactor(id=1, source_type="energy", source_key="diesel_l", label="Diesel", scope=1,
+                             factor_kg_co2e_per_unit=Decimal("2.68"), unit="litre", is_active=True),
+        CarbonEmissionFactor(id=2, source_type="transport", source_key="truck_km", label="Truck", scope=3,
+                             factor_kg_co2e_per_unit=Decimal("0.5"), unit="km", is_active=True),
+    ])
+    await db.flush()
+    db.add_all([
+        BatchInput(batch_id=1, product_id=1, qty=Decimal("10")),             # 10 kg tomatoes at cost 8
+        BatchOutput(batch_id=1, product_id=10, qty=Decimal("4")),            # → 4 kg sauce
+        DryingBatchStage(id=1, batch_id=1, stage_number=1, logged_at=when, logged_by_id=1,
+                         total_input_qty=Decimal("20"), total_output_qty=Decimal("2"),
+                         stage_loss_pct=Decimal("90"), cumulative_yield_pct=Decimal("10")),
+        LocationStock(location_id=1, product_id=1, qty=Decimal("60")),
+        LocationStock(location_id=2, product_id=1, qty=Decimal("30")),
+        LocationStock(location_id=2, product_id=10, qty=Decimal("5")),
+        StockTransfer(product_id=1, source_location_id=1, destination_location_id=2, qty=Decimal("30"), user_id=1,
+                      created_at=utc(TODAY - timedelta(days=2))),
+        StockTransfer(product_id=1, source_location_id=1, destination_location_id=2, qty=Decimal("5"), user_id=1,
+                      created_at=utc(TODAY - timedelta(days=200))),
+        AnimalIntakeLog(animal_group_id=1, intake_type="purchase", intake_date=TODAY - timedelta(days=10), count=100,
+                        total_cost=Decimal("5000")),
+        MortalityLog(animal_group_id=1, death_date=TODAY - timedelta(days=3), count=5, cause="disease"),
+        FeedingLog(animal_group_id=1, product_id=12, location_id=1, qty=Decimal("100"), feed_date=TODAY - timedelta(days=2)),
+        CarbonLog(factor_id=1, farm_id=1, log_date=TODAY - timedelta(days=5), quantity=Decimal("100"),
+                  kg_co2e=Decimal("268")),
+        CarbonLog(factor_id=2, farm_id=2, log_date=TODAY - timedelta(days=6), quantity=Decimal("64"),
+                  kg_co2e=Decimal("32")),
+    ])
+    await db.flush()
+    db.add_all([DryingBatchStageInput(stage_id=1, product_id=1, qty=Decimal("20")),
+                DryingBatchStageOutput(stage_id=1, product_id=11, qty=Decimal("2"))])
+    await db.commit()
+
+
+def scenario2(fn):
+    async def go(db):
+        await seed_phase2(db)
+        return await fn(db)
+    return scenario(go)
+
+
+def test_phase2_lookups_are_offered_only_with_their_permissions():
+    assert set(PHASE2) <= set(svc.allowed_tools(admin()))
+    # A role with no defaults of its own (the viewer role already includes most report tabs).
+    allowed = lambda perms: set(svc.allowed_tools(SimpleNamespace(id=6, role="custom", permissions=perms))) & set(PHASE2)
+    assert allowed("page_reports,tab_reports_production") == {"production_batches"}
+    assert allowed("page_inventory") == {"stock_by_location"}
+    assert allowed("page_reports,tab_reports_animals") == {"livestock"}
+    assert allowed("page_reports,tab_reports_carbon") == {"carbon_footprint"}
+    assert allowed("page_reports,page_animals,page_carbon,page_production") == set()
+    assert set(PHASE2) <= svc.PERIOD_TOOLS
+
+
+def test_production_batches_match_the_production_report():
+    async def go(db):
+        from app.core.time_utils import utc_bounds
+        from app.routers.reports import _build_production_report
+        out = await ask(db, admin(), "production_batches", **RECENT)
+        s, e = utc_bounds(date.fromisoformat(RECENT["date_from"]), TODAY)
+        page = await _build_production_report(db, d_from=s, d_to=e, include_all=True)
+        assert out["batches_found"] == page["total_batches"] == 2
+        assert (out["processing"], out["drying"]) == (page["total_processing"], page["total_drying"]) == (1, 1)
+        prd = next(b for b in out["batches"] if b["batch"] == "PRD-0001")
+        assert prd["input_cost"] == 80.0 and prd["outputs"][0]["cost_per_unit"] == 20.0     # 80 EGP over 4 kg
+        assert prd["yield_pct"] == 40.0 and prd["loss_pct"] == 10.0 and prd["cost_complete"]
+        dry = next(b for b in out["batches"] if b["batch"] == "DRY-0001")
+        assert dry["yield_pct"] == 10.0 and dry["outputs"][0]["cost_per_unit"] == 80.0       # 160 EGP over 2 kg
+        assert "material costs only" in out["note"]
+    scenario2(go)
+
+
+def test_production_batches_by_arabic_product_batch_number_and_empty_period():
+    async def go(db):
+        sauce = await ask(db, admin(), "production_batches", product="صلصة", **RECENT)
+        assert [b["batch"] for b in sauce["batches"]] == ["PRD-0001"]
+        assert [b["batch"] for b in (await ask(db, admin(), "production_batches", batch="dry-0001"))["batches"]] == \
+            ["DRY-0001"]
+        empty = await ask(db, admin(), "production_batches", date_from="2020-01-01", date_to="2020-01-31")
+        assert empty["batches"] == [] and empty["batches_found"] == 0
+    scenario2(go)
+
+
+def test_stock_by_location_matches_the_inventory_page_without_writing():
+    async def go(db):
+        from app.routers.inventory import get_location_stock
+        out = await ask(db, admin(), "stock_by_location", **RECENT)
+        tom = next(p for p in out["products"] if p["product"] == "Tomatoes")
+        assert {l["location"]: l["qty"] for l in tom["by_location"]} == {"Main Store": 60.0, "المحل": 30.0}
+        assert tom["not_assigned_to_a_location"] == 10.0                     # 100 in stock, 90 placed
+        assert out["total_qty_by_location"]["المحل"] == 35.0
+        assert out["transfers_count"] == 1 and out["transfers"][0]["qty"] == 30.0     # the old one is outside
+        # Nothing was written: the honey (no location) is still unassigned.
+        assert not (await db.execute(select_location_stock(3))).first()
+        page = await get_location_stock(q="", product_id=1, location_id=1, skip=0, limit=50, db=db)
+        assert page["items"][0]["locations"][0]["qty"] == 60.0
+    scenario2(go)
+
+
+def select_location_stock(product_id):
+    from sqlalchemy import select
+    return select(LocationStock.id).where(LocationStock.product_id == product_id)
+
+
+def test_stock_by_location_for_an_arabic_location_and_a_product():
+    async def go(db):
+        shop = await ask(db, admin(), "stock_by_location", location="المحل")
+        assert shop["location"] == "المحل" and {p["product"] for p in shop["products"]} == {"Tomatoes", "صلصة طماطم"}
+        assert all(p["not_assigned_to_a_location"] is None for p in shop["products"])
+        sauce = await ask(db, admin(), "stock_by_location", product="صلصة")
+        assert [p["product"] for p in sauce["products"]] == ["صلصة طماطم"] and sauce["transfers_count"] == 0
+    scenario2(go)
+
+
+def test_livestock_matches_the_animals_report():
+    async def go(db):
+        from app.routers.reports import _build_animals_report
+        out = await ask(db, admin(), "livestock", **RECENT)
+        page = await _build_animals_report(db, d_from=date.fromisoformat(RECENT["date_from"]), d_to=TODAY)
+        assert out["summary"] == page["summary"]
+        hens = next(g for g in out["groups"] if g["name"] == "Laying Hens")
+        assert (hens["headcount"], hens["received"], hens["died"]) == (95, 100, 5)
+        assert (hens["purchase_cost"], hens["feeding_cost"], hens["total_cost"]) == (5000.0, 300.0, 5300.0)
+        assert out["deaths"][0]["cause"] == "disease" and "vet and other expenses" in out["note"]
+        one = await ask(db, admin(), "livestock", group="hens")
+        assert [g["name"] for g in one["groups"]] == ["Laying Hens"] and one["summary"] is None
+        empty = await ask(db, admin(), "livestock", date_from="2020-01-01", date_to="2020-01-31")
+        assert all(g["died"] == 0 and g["received"] == 0 for g in empty["groups"])
+    scenario2(go)
+
+
+def test_carbon_footprint_matches_the_carbon_report():
+    async def go(db):
+        from app.routers.reports import _build_carbon_report
+        out = await ask(db, admin(), "carbon_footprint", **RECENT)
+        page = await _build_carbon_report(db, d_from=date.fromisoformat(RECENT["date_from"]), d_to=TODAY, limit=0)
+        assert out["totals"]["kg_co2e"] == page["totals"]["kg_co2e"] == 300.0
+        assert out["per_kg"] == page["intensity"]
+        assert {s["label"]: s["kg_co2e"] for s in out["by_scope"]}["Scope 1"] == 268.0
+        north = await ask(db, admin(), "carbon_footprint", farm="north", **RECENT)
+        assert [f["farm_name"] for f in north["by_farm"]] == ["North Farm"]
+        assert "whole farm only" in north["note"]
+        empty = await ask(db, admin(), "carbon_footprint", date_from="2020-01-01", date_to="2020-01-31")
+        assert empty["totals"]["kg_co2e"] == 0 and empty["warning"]
+    scenario2(go)
+
+
+def test_the_system_prompt_knows_the_phase2_lookups():
+    for name in PHASE2:
+        assert name in svc.SYSTEM_PROMPT
