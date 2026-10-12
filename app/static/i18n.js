@@ -867,6 +867,8 @@
     "Unlink this chat? It stops working until you relink it.": "إلغاء ربط هذه المحادثة؟ ستتوقف حتى تعيد ربطها.",
     "Relink": "إعادة الربط",
     "Approves": "يعتمد",
+    "Voice notes:": "الرسائل الصوتية:",
+    "off (set ASSISTANT_TRANSCRIBE_MODEL)": "متوقفة (اضبط ASSISTANT_TRANSCRIBE_MODEL)",
     "No expense category": "فئة المصروف غير محددة",
     "Has prices": "فيه أسعار",
     "Product match not certain": "مطابقة المنتج غير مؤكدة",

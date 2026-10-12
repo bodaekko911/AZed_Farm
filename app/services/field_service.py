@@ -54,6 +54,7 @@ SWEEP_SECONDS = 30
 CODE_TTL = timedelta(hours=24)
 WRONG_CODE_LIMIT = 5
 MAX_FILE_BYTES = 10 * 1024 * 1024
+MAX_VOICE_SECONDS = 120
 PHOTO_SIDE = 1600
 ABANDONED_AFTER = timedelta(hours=48)
 KEEP_REJECTED = timedelta(days=90)
@@ -91,6 +92,10 @@ TEXTS = {
         "not_allowed": "لا يمكنك إرسال هذا النوع. يمكنك إرسال: {kinds}.",
         "unsupported": "أرسل صورة أو ملف PDF أو رسالة نصية قصيرة فقط.",
         "voice": "الرسائل الصوتية غير مدعومة بعد. أرسل نصاً أو صورة من فضلك.",
+        "voice_long": "الرسالة الصوتية طويلة (الحد دقيقتان). أرسل رسالة أقصر.",
+        "voice_unclear": "لم أفهم الرسالة الصوتية. أعد التسجيل بصوت واضح أو اكتبها.",
+        "voice_unavailable": "تحويل الصوت إلى نص غير متاح الآن. اكتب الرسالة من فضلك.",
+        "heard": "🎤 سمعت: «{text}»",
         "too_big": "الملف كبير جداً (الحد ١٠ ميجابايت). أرسله كصورة بدلاً من ملف.",
         "reading": "جارٍ القراءة…",
         "unreadable": "لم أتمكن من قراءة هذا كـ {kinds}. أرسل صورة أوضح من فضلك.",
@@ -146,6 +151,10 @@ TEXTS = {
         "not_allowed": "You can't send that type. You can send: {kinds}.",
         "unsupported": "Please send only a photo, a PDF or a short text message.",
         "voice": "Voice notes aren't supported yet. Please send text or a photo.",
+        "voice_long": "That voice note is too long (2 minutes max). Please send a shorter one.",
+        "voice_unclear": "I couldn't understand the voice note. Record it again clearly, or type it.",
+        "voice_unavailable": "Voice notes can't be turned into text right now. Please type the message.",
+        "heard": "🎤 I heard: \"{text}\"",
         "too_big": "That file is too large (10 MB max). Send it as a photo instead.",
         "reading": "Reading…",
         "unreadable": "I couldn't read that as {kinds}. Please send a clearer photo.",
@@ -383,7 +392,8 @@ def _slim(update: dict) -> Optional[dict]:
         out["document"] = {"file_id": d.get("file_id"), "mime": d.get("mime_type"), "name": (d.get("file_name") or "")[:100],
                            "size": d.get("file_size")}
     if msg.get("voice"):
-        out["voice"] = {"file_id": msg["voice"].get("file_id"), "size": msg["voice"].get("file_size")}
+        out["voice"] = {"file_id": msg["voice"].get("file_id"), "size": msg["voice"].get("file_size"),
+                        "duration": msg["voice"].get("duration")}
     if msg.get("reply_to_message"):
         out["reply_to"] = (msg["reply_to_message"] or {}).get("message_id")
     if not any(k in out for k in ("text", "photo", "document", "voice", "caption")):
@@ -564,7 +574,7 @@ async def handle_message(db, parts: list[dict], transport=None) -> None:
             await db.commit()
             await _say(chat_id, t(lang, "note_added"))
             return
-    if any(p.get("voice") for p in parts):
+    if any(p.get("voice") for p in parts) and not settings.ASSISTANT_TRANSCRIBE_MODEL:
         await _say(chat_id, t(lang, "voice"))
         return
     if any(p.get("other") for p in parts) and not any(p.get("photo") or p.get("document") for p in parts):
@@ -581,12 +591,16 @@ async def handle_message(db, parts: list[dict], transport=None) -> None:
             return
         await submit_document(db, chat, parts, doc_kinds, transport=transport)
         return
-    if text:
+    voice = next((p["voice"] for p in parts if p.get("voice")), None)
+    if voice or text:
         text_kinds = [k for k in kinds if k in ("harvest_sheet", "spoilage")]
         if not text_kinds:
             await _say(chat_id, t(lang, "not_allowed", kinds=kinds_text(lang, kinds)))
             return
-        await submit_text(db, chat, text, first.get("date"), text_kinds, transport=transport)
+        if voice:
+            await submit_voice(db, chat, voice, first.get("date"), text_kinds, transport=transport)
+        else:
+            await submit_text(db, chat, text, first.get("date"), text_kinds, transport=transport)
         return
     await _say(chat_id, t(lang, "unsupported"))
 
@@ -751,8 +765,9 @@ async def _text_call(system: str, text: str, transport=None) -> tuple[dict, dict
 
 
 async def submit_text(db, chat: TelegramChat, text: str, sent_at: Optional[int], kinds: list[str],
-                      transport=None) -> None:
+                      transport=None, source: Optional[str] = None) -> None:
     lang, chat_id = chat.language or "ar", chat.chat_id
+    source = (source or text)[:2000]
     choices = await reader._choices(db)
     names = await reader._product_names(db)
     system = (TEXT_PROMPT + "\nFARMS: " + json.dumps([f["name"] for f in choices["farms"]][:60], ensure_ascii=False)
@@ -765,7 +780,7 @@ async def submit_text(db, chat: TelegramChat, text: str, sent_at: Optional[int],
     _log_read(db, chat, "text", kind, usage, seconds)
     if kind is None or kind not in kinds or not raw.get("items"):
         db.add(FieldDraft(chat_id=chat_id, kind="unreadable", status="unreadable", draft_json="{}", model_call=True,
-                          source_text=text[:2000], created_at=now()))
+                          source_text=source, created_at=now()))
         await db.commit()
         await _say(chat_id, t(lang, "text_unclear") if kind is None or not raw.get("items")
                    else t(lang, "not_allowed", kinds=kinds_text(lang, kinds)))
@@ -784,7 +799,77 @@ async def submit_text(db, chat: TelegramChat, text: str, sent_at: Optional[int],
         draft.pop("duplicates", None)
         draft["missing"] = [m for m in draft.get("missing") or [] if not m.endswith(".farm")]   # a farm is optional
     draft.update({"kind": kind, "pages": 0, **choices, "from_text": True})
-    await _new_draft(db, chat, kind, draft, None, text[:2000])
+    await _new_draft(db, chat, kind, draft, None, source)
+
+
+# ── Voice notes: speech to text, then the same as a typed message ────────────
+
+class _VoiceRefused(Exception):
+    """The provider refused the transcription (no such model, unsupported audio) — retrying won't help."""
+
+
+async def transcribe(audio: bytes, language: str, transport=None) -> str:
+    """One voice note → text, through the provider's OpenAI-style /audio/transcriptions with
+    ASSISTANT_TRANSCRIBE_MODEL. A passing failure of the endpoint is retried like the other model calls."""
+    from app.services.assistant_service import RETRY_DELAYS, RETRYABLE_STATUS
+    url = settings.ASSISTANT_BASE_URL.rstrip("/") + "/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {settings.ASSISTANT_API_KEY}"}
+    data = {"model": settings.ASSISTANT_TRANSCRIBE_MODEL, "response_format": "json",
+            "language": "en" if language == "en" else "ar"}
+    response = None
+    async with httpx.AsyncClient(timeout=90.0, transport=transport) as client:
+        for attempt in range(len(RETRY_DELAYS) + 1):
+            if attempt:
+                await asyncio.sleep(RETRY_DELAYS[attempt - 1])
+            try:
+                response = await client.post(url, headers=headers, data=data,
+                                             files={"file": ("voice.ogg", audio, "audio/ogg")})
+            except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
+                response = None
+                continue
+            if response.status_code not in RETRYABLE_STATUS:
+                break
+    if response is None or response.status_code in RETRYABLE_STATUS:
+        raise RuntimeError("transcription unavailable")                    # processing is retried later
+    if response.status_code >= 400:
+        logger.warning("voice transcription refused: HTTP %s", response.status_code)
+        raise _VoiceRefused()
+    try:
+        return " ".join(str(response.json().get("text") or "").split())
+    except ValueError:
+        return " ".join(response.text.split())
+
+
+async def submit_voice(db, chat: TelegramChat, voice: dict, sent_at: Optional[int], kinds: list[str],
+                       transport=None) -> None:
+    lang, chat_id = chat.language or "ar", chat.chat_id
+    if (voice.get("duration") or 0) > MAX_VOICE_SECONDS:
+        await _say(chat_id, t(lang, "voice_long"))
+        return
+    try:
+        audio = await _fetch(voice.get("file_id") or "", voice.get("size"))
+    except _TooBig:
+        await _say(chat_id, t(lang, "too_big"))
+        return
+    started = time.perf_counter()
+    try:
+        text = await transcribe(audio, lang, transport=transport)
+    except _VoiceRefused:
+        await _say(chat_id, t(lang, "voice_unavailable"))
+        return
+    finally:
+        del audio
+    record(db, "Telegram", "field_voice",
+           f"Field bot voice note from chat {chat.chat_id}: {voice.get('duration') or '?'}s → {len(text)} characters "
+           f"| {time.perf_counter() - started:.1f}s", user=None, ref_type="telegram_chat", ref_id=chat.id)
+    if not text:
+        db.add(FieldDraft(chat_id=chat_id, kind="unreadable", status="unreadable", draft_json="{}", model_call=True,
+                          source_text="🎤", created_at=now()))
+        await db.commit()
+        await _say(chat_id, t(lang, "voice_unclear"))
+        return
+    await _say(chat_id, t(lang, "heard", text=text[:500]))
+    await submit_text(db, chat, text[:2000], sent_at, kinds, transport=transport, source="🎤 " + text)
 
 
 # ── Drafts: summary to the worker, warnings, buttons ─────────────────────────

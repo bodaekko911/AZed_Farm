@@ -192,6 +192,8 @@
       rows.push(h("div", null, h("span", { text: "Bot token:" }), " ", h("span", { class: s.token_set ? "ok" : "bad", text: s.token_set ? "set" : "not set" }),
         " · ", h("span", { text: "Webhook secret:" }), " ", h("span", { class: s.secret_set ? "ok" : "bad", text: s.secret_set ? "set" : "not set" })));
       if (s.bot) rows.push(h("div", null, h("span", { text: "Bot:" }), " ", data("span", "@" + s.bot.username)));
+      rows.push(h("div", null, h("span", { text: "Voice notes:" }), " ",
+        s.voice_model ? data("span", s.voice_model, "ok") : h("span", { class: "bad", text: "off (set ASSISTANT_TRANSCRIBE_MODEL)" })));
       if (s.webhook) {
         const registered = s.webhook.url === s.webhook_url;
         rows.push(h("div", null, h("span", { text: "Webhook:" }), " ",

@@ -789,3 +789,60 @@ def test_nobody_approves_their_own_from_telegram_and_a_failed_record_says_why(te
         assert "لم يُسجَّل" in telegram.texts(OTHER_CHAT)[-1] and "in stock" in telegram.texts(OTHER_CHAT)[-1]
         assert (await drafts(db))[-1].status == "in_review" and await count(db, SpoilageRecord) == 0
     scenario(go)
+
+
+# ══ Phase 3: voice notes ═════════════════════════════════════════════════════
+
+def voice_model(transcript, payload, seen=None, status=200):
+    """The provider: /audio/transcriptions answers with the transcript, /chat/completions with the parsed message."""
+    chat = model(payload, seen=seen)
+
+    def handler(request: httpx.Request):
+        if request.url.path.endswith("/audio/transcriptions"):
+            if seen is not None:
+                seen.append({"transcription": request.content})
+            return httpx.Response(status, json={"text": transcript} if status == 200 else {"error": "no such model"})
+        return chat.handle_request(request)
+    return httpx.MockTransport(handler)
+
+
+def voice_msg(telegram, name="v1", duration=6):
+    telegram.files[name] = b"OggS\x00fake opus audio"
+    return msg(voice={"file_id": name, "duration": duration, "file_size": len(telegram.files[name]),
+                      "mime_type": "audio/ogg"})
+
+
+def test_a_voice_note_is_transcribed_then_read_like_a_typed_message(telegram, monkeypatch):
+    monkeypatch.setattr(settings, "ASSISTANT_TRANSCRIBE_MODEL", "whisper-test")
+
+    async def go(db, factory):
+        await link(db, limit=1)
+        seen = []
+        await send(db, factory, voice_msg(telegram), transport=voice_model("تالف تلاتة كيلو خيار", TEXT_SPOILAGE, seen))
+        upload = seen[0]["transcription"]
+        assert b'name="model"' in upload and b"whisper-test" in upload and b"OggS" in upload
+        assert b"\r\n\r\nar\r\n" in upload                                       # Arabic, the chat's language
+        assert any("تالف تلاتة كيلو خيار" in s["messages"][1]["content"] for s in seen[1:] if "messages" in s)
+        [d] = await drafts(db)
+        assert d.kind == "spoilage" and d.source_text == "🎤 تالف تلاتة كيلو خيار"
+        texts = telegram.texts()
+        assert "سمعت" in texts[-2] and "خيار" in texts[-2] and "Cucumber" in texts[-1]   # what it heard, then the summary
+        # Transcription and reading were one submission: the limit of 1 is now used.
+        await send(db, factory, voice_msg(telegram, "v2"), transport=voice_model("x", TEXT_SPOILAGE))
+        assert "اليومي" in telegram.texts()[-1] and await count(db, FieldDraft) == 1
+    scenario(go)
+
+
+def test_voice_notes_that_are_too_long_unclear_or_refused(telegram, monkeypatch):
+    monkeypatch.setattr(settings, "ASSISTANT_TRANSCRIBE_MODEL", "whisper-test")
+
+    async def go(db, factory):
+        await link(db)
+        await send(db, factory, voice_msg(telegram, "long", duration=300), transport=voice_model("x", TEXT_SPOILAGE))
+        assert "طويلة" in telegram.texts()[-1] and not any(c[0] == "getFile" for c in telegram.calls)
+        await send(db, factory, voice_msg(telegram, "quiet"), transport=voice_model("  ", TEXT_SPOILAGE))
+        assert "لم أفهم" in telegram.texts()[-1]
+        await send(db, factory, voice_msg(telegram, "nomodel"), transport=voice_model("x", TEXT_SPOILAGE, status=400))
+        assert "غير متاح" in telegram.texts()[-1]
+        assert await count(db, FieldDraft, FieldDraft.status == "awaiting_worker") == 0
+    scenario(go)
