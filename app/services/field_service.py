@@ -812,8 +812,8 @@ async def transcribe(audio: bytes, language: str, transport=None) -> str:
     """One voice note → text, through the provider's OpenAI-style /audio/transcriptions with
     ASSISTANT_TRANSCRIBE_MODEL. A passing failure of the endpoint is retried like the other model calls."""
     from app.services.assistant_service import RETRY_DELAYS, RETRYABLE_STATUS
-    url = settings.ASSISTANT_BASE_URL.rstrip("/") + "/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {settings.ASSISTANT_API_KEY}"}
+    url = (settings.ASSISTANT_TRANSCRIBE_BASE_URL or settings.ASSISTANT_BASE_URL).rstrip("/") + "/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {settings.ASSISTANT_TRANSCRIBE_API_KEY or settings.ASSISTANT_API_KEY}"}
     data = {"model": settings.ASSISTANT_TRANSCRIBE_MODEL, "response_format": "json",
             "language": "en" if language == "en" else "ar"}
     response = None

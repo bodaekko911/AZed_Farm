@@ -846,3 +846,24 @@ def test_voice_notes_that_are_too_long_unclear_or_refused(telegram, monkeypatch)
         assert "غير متاح" in telegram.texts()[-1]
         assert await count(db, FieldDraft, FieldDraft.status == "awaiting_worker") == 0
     scenario(go)
+
+
+def test_voice_can_use_its_own_provider(telegram, monkeypatch):
+    monkeypatch.setattr(settings, "ASSISTANT_TRANSCRIBE_MODEL", "whisper-large-v3-turbo")
+    monkeypatch.setattr(settings, "ASSISTANT_TRANSCRIBE_BASE_URL", "https://speech.test/openai/v1")
+    monkeypatch.setattr(settings, "ASSISTANT_TRANSCRIBE_API_KEY", "speech-key")
+    calls = []
+
+    def handler(request: httpx.Request):
+        calls.append((str(request.url), request.headers.get("authorization")))
+        if request.url.path.endswith("/audio/transcriptions"):
+            return httpx.Response(200, json={"text": "تالف تلاتة كيلو خيار"})
+        return model(TEXT_SPOILAGE).handle_request(request)
+
+    async def go(db, factory):
+        await link(db)
+        await send(db, factory, voice_msg(telegram), transport=httpx.MockTransport(handler))
+        assert calls[0] == ("https://speech.test/openai/v1/audio/transcriptions", "Bearer speech-key")
+        assert calls[1] == ("https://assistant.test/v1/chat/completions", "Bearer test-key")   # reading stays on Ask's
+        assert (await drafts(db))[0].kind == "spoilage"
+    scenario(go)

@@ -68,7 +68,8 @@ def _base_url(request: Request) -> str:
 @router.get("/api/admin/status")
 async def status(request: Request, db: AsyncSession = Depends(get_async_session), _admin: User = Depends(require_admin)):
     out = {"token_set": bool(settings.TELEGRAM_BOT_TOKEN), "secret_set": bool(settings.TELEGRAM_WEBHOOK_SECRET),
-           "voice_model": settings.ASSISTANT_TRANSCRIBE_MODEL or None,
+           "voice_model": (settings.ASSISTANT_TRANSCRIBE_MODEL + " @ " + (settings.ASSISTANT_TRANSCRIBE_BASE_URL
+                           or settings.ASSISTANT_BASE_URL)) if settings.ASSISTANT_TRANSCRIBE_MODEL else None,
            "webhook_url": _base_url(request) + "/telegram/api/webhook", "bot": None, "webhook": None, "error": None}
     if settings.TELEGRAM_BOT_TOKEN:
         try:

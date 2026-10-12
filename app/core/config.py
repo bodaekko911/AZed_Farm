@@ -124,6 +124,10 @@ class BaseAppSettings(BaseSettings):
     PUBLIC_BASE_URL: str | None = None
     # Model that turns voice notes into text (phase 3). Empty = voice notes are answered "not supported yet".
     ASSISTANT_TRANSCRIBE_MODEL: str | None = None
+    # Speech to text may come from another provider than Ask (an OpenAI-style /audio/transcriptions endpoint, e.g.
+    # Groq or OpenAI). Empty = ASSISTANT_BASE_URL / ASSISTANT_API_KEY.
+    ASSISTANT_TRANSCRIBE_BASE_URL: str | None = None
+    ASSISTANT_TRANSCRIBE_API_KEY: str | None = None
     TELEGRAM_LOOP: bool = True
 
     model_config = CONFIG_MODEL
