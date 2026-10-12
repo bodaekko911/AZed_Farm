@@ -2,7 +2,7 @@
 dashboard's attention rules, Ask's lookups — so an e-mail's figures match what AZed shows; every item links to the page
 where it can be checked.
 
-Phase 1: the morning brief. (Phase 2: POS sold below cost, big expense. Phase 3: the month-end close checklist.)
+Phase 1: the morning brief. Phase 2: POS sold below cost, big expense. (Phase 3: the month-end close checklist.)
 """
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ class RuleSpec:
     detect: Optional[Callable[..., Awaitable[tuple[list, int]]]] = None      # event rules: (events, new watermark)
     latest_id: Optional[Callable[..., Awaitable[int]]] = None                # event rules: where to start
     head: Optional[Callable[[str], list]] = None                              # event rules: digest table columns
+    rows: Optional[Callable[[dict, str], list]] = None                        # event rules: one stored item → a row
 
     def default_settings(self) -> dict:
         return {s.key: s.default for s in self.settings}
@@ -254,7 +255,8 @@ def held_sections(events: list, lang: str) -> list[Section]:
         spec = rules().get(key)
         name = spec.name(lang) if spec else key
         head = spec.head(lang) if spec and spec.head else []
-        out.append(Section(f"{w['held']} — {name}", head, [p.get("cells") or [p.get("text", "")] for p in payloads]))
+        to_row = spec.rows if spec and spec.rows else (lambda p, _lang: cells(p))
+        out.append(Section(f"{w['held']} — {name}", head, [to_row(p, lang) for p in payloads]))
     return out
 
 
@@ -273,3 +275,272 @@ MORNING_BRIEF = RuleSpec(
 )
 
 RULES: dict[str, RuleSpec] = {MORNING_BRIEF.key: MORNING_BRIEF}
+
+
+# ══ Phase 2: event rules ═════════════════════════════════════════════════════
+# Both poll by primary key above the rule's watermark. The watermark only moves past rows at least SETTLE old:
+# PostgreSQL can commit a lower id after a higher one, and a row still in flight must not be skipped.
+
+SETTLE = timedelta(seconds=60)
+
+W["en"].update({
+    "pos_subject": "POS price alerts", "pos_intro": "Sales where the price charged at the till was below cost, or "
+                                                   "far below the catalogue price.",
+    "below_cost": "Sold below cost", "big_discount": "Discounted more than {pct:g}% below the catalogue price",
+    "invoice": "Invoice", "catalog": "Catalogue", "charged": "Charged", "cost": "Cost", "loss": "Loss",
+    "discount": "Discount", "qty": "Qty", "cashier": "Cashier", "current_cost": "(current cost)",
+    "pos_note": "Cost is the line's cost when it was sold; \"(current cost)\" means the sale line had none, so "
+                "today's product cost was used.",
+    "exp_subject": "Big expenses", "exp_intro": "New expenses of {amount} EGP or more.",
+    "date": "Date", "source": "Source", "entered_by": "Entered by", "receipt": "Receipt",
+    "src_manual": "manual", "src_receive": "received goods", "src_loan": "employee loan", "src_advance": "allowance advance",
+    "src_animals": "animal purchase", "photo": "photo",
+})
+W["ar"].update({
+    "pos_subject": "تنبيهات أسعار نقطة البيع", "pos_intro": "مبيعات كان السعر المحصّل فيها أقل من التكلفة، أو أقل "
+                                                            "كثيراً من سعر الكتالوج.",
+    "below_cost": "بيع بأقل من التكلفة", "big_discount": "خصم أكثر من {pct:g}٪ عن سعر الكتالوج",
+    "invoice": "الفاتورة", "catalog": "الكتالوج", "charged": "المحصّل", "cost": "التكلفة", "loss": "الخسارة",
+    "discount": "الخصم", "qty": "الكمية", "cashier": "الكاشير", "current_cost": "(التكلفة الحالية)",
+    "pos_note": "التكلفة هي تكلفة البند وقت البيع؛ «(التكلفة الحالية)» تعني أن البند لم تُسجّل له تكلفة فاستُخدمت "
+                "تكلفة المنتج اليوم.",
+    "exp_subject": "مصروفات كبيرة", "exp_intro": "مصروفات جديدة بقيمة {amount} ج.م أو أكثر.",
+    "date": "التاريخ", "source": "المصدر", "entered_by": "سجّلها", "receipt": "الإيصال",
+    "src_manual": "يدوي", "src_receive": "استلام بضاعة", "src_loan": "سلفة موظف", "src_advance": "سلفة بدل",
+    "src_animals": "شراء حيوانات", "photo": "صورة",
+})
+
+
+def _cell(text: Any, path: Optional[str] = None) -> Any:
+    """A table cell for a stored event: a link is kept as {"t", "u"} (JSON has no tuples)."""
+    url = link(path) if path else None
+    return {"t": text, "u": url} if url else text
+
+
+def cells(payload: dict) -> list:
+    return [(c["t"], c["u"]) if isinstance(c, dict) and "u" in c else c for c in payload.get("cells") or []]
+
+
+async def _settled_max(db, model) -> Optional[int]:
+    """The highest id old enough that no lower id can still be committing."""
+    from sqlalchemy import func
+    from app.services.automation_service import now_utc
+    return (await db.execute(select(func.max(model.id)).where(model.created_at <= now_utc() - SETTLE))).scalar()
+
+
+# ── POS sold below cost ──────────────────────────────────────────────────────
+
+async def pos_latest(db) -> int:
+    from sqlalchemy import func
+    from app.core.log import ActivityLog
+    return (await db.execute(select(func.max(ActivityLog.id)))).scalar() or 0
+
+
+async def pos_detect(db, after_id: int, cfg: dict) -> tuple[list, int]:
+    """New "pos_sale_with_price_edits" entries: every edited line charged below the line's cost at the time of sale
+    (or today's product cost, said so, when the line has none), and every line discounted more than the set % below
+    the catalogue price."""
+    import json
+    from app.core.log import ActivityLog
+    from app.models.invoice import Invoice, InvoiceItem
+    from app.models.product import Product
+    mark = await _settled_max(db, ActivityLog)
+    if mark is None or mark <= after_id:
+        return [], after_id
+    logs = (await db.execute(select(ActivityLog).where(
+        ActivityLog.id > after_id, ActivityLog.id <= mark, ActivityLog.action == "pos_sale_with_price_edits")
+        .order_by(ActivityLog.id))).scalars().all()
+    pct_limit = float(cfg.get("discount_pct") or 20)
+    urgent_loss = float(cfg.get("urgent_loss") or 1000)
+    events = []
+    for entry in logs:
+        try:
+            body = json.loads(entry.description or "{}")
+        except ValueError:
+            continue
+        invoice_id = body.get("invoice_id")
+        if not isinstance(invoice_id, int):
+            continue
+        number = (await db.execute(select(Invoice.invoice_number).where(Invoice.id == invoice_id))).scalar() \
+            or f"#{invoice_id}"
+        lines = {sku: (name, cost) for sku, name, cost in (await db.execute(
+            select(InvoiceItem.sku, InvoiceItem.name, InvoiceItem.unit_cost).where(InvoiceItem.invoice_id == invoice_id))).all()}
+        for edit in body.get("edits") or []:
+            sku = str(edit.get("sku") or "")
+            try:
+                catalog, sold_at, qty = float(edit["catalog_price"]), float(edit["sold_at"]), float(edit["qty"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            name, cost = lines.get(sku, (None, None))
+            current = cost is None
+            if current:
+                product = (await db.execute(select(Product.name, Product.cost).where(Product.sku == sku))).first()
+                name = name or (product[0] if product else sku)
+                cost = product[1] if product else None
+            cost = float(cost) if cost is not None else None
+            below = cost is not None and cost > 0 and sold_at < cost - 1e-9
+            discount = (catalog - sold_at) / catalog * 100 if catalog > 0 else 0.0
+            if not below and discount < pct_limit:
+                continue
+            loss = round((cost - sold_at) * qty, 2) if below else 0.0
+            events.append({
+                "ref": f"inv:{invoice_id}:{sku}",
+                "urgent": loss >= urgent_loss,
+                "payload": {"type": "below_cost" if below else "big_discount", "loss": loss,
+                            "discount_pct": round(discount, 1), "current_cost": current,
+                            "cells": [_cell(number, f"/invoice/{invoice_id}"), name or sku, money2(catalog),
+                                      money2(sold_at), (money2(cost) if cost is not None else "—") + (" *" if current else ""),
+                                      money(loss) if below else f"{discount:.0f}%", f"{qty:g}", entry.user_name or "—"]},
+            })
+    return events, mark
+
+
+def money2(v: Any) -> str:
+    try:
+        return f"{float(v):,.2f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def pos_head(lang: str) -> list:
+    w = W[lang if lang in W else "en"]
+    return [w["invoice"], w["product"], w["catalog"], w["charged"], w["cost"], f'{w["loss"]} / {w["discount"]}',
+            w["qty"], w["cashier"]]
+
+
+async def pos_digest(db, ctx: dict) -> Report:
+    import json
+    lang = ctx["lang"] if ctx["lang"] in W else "en"
+    w = W[lang]
+    payloads = [json.loads(e.payload or "{}") for e in ctx["events"]]
+    below = [p for p in payloads if p.get("type") == "below_cost"]
+    other = [p for p in payloads if p.get("type") != "below_cost"]
+    sections = []
+    if below:
+        total = sum(float(p.get("loss") or 0) for p in below)
+        sections.append(Section(f'{w["below_cost"]} — {w["loss"]} {money(total)} {w["egp"]}', pos_head(lang),
+                                [cells(p) for p in below],
+                                note=w["pos_note"] if any(p.get("current_cost") for p in below) else None))
+    if other:
+        sections.append(Section(w["big_discount"].format(pct=float(ctx["settings"].get("discount_pct") or 20)),
+                                pos_head(lang), [cells(p) for p in other]))
+    return Report(subject=f"{TITLE} — {w['pos_subject']}", intro=w["pos_intro"], sections=sections,
+                  items=len(payloads))
+
+
+POS_BELOW_COST = RuleSpec(
+    key="pos_below_cost",
+    names={"en": "POS sold below cost", "ar": "بيع بأقل من التكلفة في نقطة البيع"},
+    descriptions={"en": "When a cashier changes a price at the till: lines charged below their cost, and lines "
+                        "discounted more than the set % below the catalogue price. One e-mail per window; a big "
+                        "loss goes at once.",
+                  "ar": "عند تغيير الكاشير للسعر: البنود المباعة بأقل من تكلفتها، والبنود المخفّضة أكثر من النسبة "
+                        "المحددة عن سعر الكتالوج. رسالة واحدة لكل فترة؛ الخسارة الكبيرة فوراً."},
+    trigger="events",
+    settings=[Setting("discount_pct", "Also flag discounts of more than (% below catalogue)", 20, "percent"),
+              Setting("urgent_loss", "Send at once when one line loses at least (EGP)", 1000)],
+    detect=pos_detect, latest_id=pos_latest, digest=pos_digest, head=pos_head, rows=lambda p, lang: cells(p),
+)
+
+
+# ── Big expense ──────────────────────────────────────────────────────────────
+
+async def expense_latest(db) -> int:
+    from sqlalchemy import func
+    from app.models.expense import Expense
+    return (await db.execute(select(func.max(Expense.id)))).scalar() or 0
+
+
+def _source(expense, receipt_ids: set, animal_ids: set) -> str:
+    text = expense.description or ""
+    if expense.id in receipt_ids:
+        return "src_receive"
+    if "[loan:" in text:
+        return "src_loan"
+    if "[alw_adv:" in text:
+        return "src_advance"
+    if expense.id in animal_ids:
+        return "src_animals"
+    return "src_manual"
+
+
+async def expense_detect(db, after_id: int, cfg: dict) -> tuple[list, int]:
+    """New expenses at or above the threshold — payroll's own salary expenses aside (the month-end checklist covers
+    payroll); loans, allowance advances, received goods and animal purchases are kept, with their source."""
+    from sqlalchemy.orm import selectinload
+    from app.models.animal import AnimalIntakeLog
+    from app.models.expense import Expense
+    from app.models.receipt import ProductReceipt
+    mark = await _settled_max(db, Expense)
+    if mark is None or mark <= after_id:
+        return [], after_id
+    threshold = float(cfg.get("threshold") or 5000)
+    urgent = float(cfg.get("urgent_amount") or 20000)
+    rows = (await db.execute(select(Expense).options(
+        selectinload(Expense.category), selectinload(Expense.farm), selectinload(Expense.user))
+        .where(Expense.id > after_id, Expense.id <= mark, Expense.payroll_id.is_(None), Expense.amount >= threshold)
+        .order_by(Expense.id))).scalars().all()
+    ids = [e.id for e in rows] or [-1]
+    receipts = set((await db.execute(select(ProductReceipt.expense_id).where(ProductReceipt.expense_id.in_(ids)))).scalars())
+    animals = set((await db.execute(select(AnimalIntakeLog.expense_id).where(AnimalIntakeLog.expense_id.in_(ids)))).scalars())
+    try:
+        from app.services.expense_service import _expenses_with_documents
+        documented = await _expenses_with_documents(db, ids)
+    except Exception:  # noqa: BLE001
+        documented = set()
+    events = []
+    for e in rows:
+        amount = float(e.amount or 0)
+        farm = "animals" if e.is_animal_expense else (e.farm.name if e.farm else None)
+        events.append({"ref": f"exp:{e.id}", "urgent": amount >= urgent, "payload": {
+            "amount": amount, "source": _source(e, receipts, animals),
+            "ref_number": e.ref_number, "date": e.expense_date.isoformat() if e.expense_date else None,
+            "category": e.category.name if e.category else "—", "farm": farm, "vendor": e.vendor,
+            "entered_by": e.user.name if e.user else None, "expense_id": e.id, "documented": e.id in documented}})
+    return events, mark
+
+
+def expense_head(lang: str) -> list:
+    w = W[lang if lang in W else "en"]
+    return [w["ref"], w["date"], w["amount"], w["category"], w["farm"], w["vendor"], w["source"], w["entered_by"],
+            w["receipt"]]
+
+
+def expense_cells(p: dict, lang: str) -> list:
+    w = W[lang if lang in W else "en"]
+    farm = w["animals"] if p.get("farm") == "animals" else (p.get("farm") or w["no_farm"])
+    receipt = (w["photo"], link(f"/documents/view?ref_type=expense&ref_id={p['expense_id']}")) if p.get("documented") else "—"
+    return [(p.get("ref_number") or "—", link(f"/expenses/?search={quote(p.get('ref_number') or '')}")),
+            p.get("date") or "—", money(p.get("amount")), p.get("category") or "—", farm, p.get("vendor") or "—",
+            w.get(p.get("source") or "src_manual", "—"), p.get("entered_by") or "—", receipt]
+
+
+async def expense_digest(db, ctx: dict) -> Report:
+    import json
+    lang = ctx["lang"] if ctx["lang"] in W else "en"
+    w = W[lang]
+    payloads = [json.loads(e.payload or "{}") for e in ctx["events"]]
+    threshold = float(ctx["settings"].get("threshold") or 5000)
+    total = sum(float(p.get("amount") or 0) for p in payloads)
+    return Report(subject=f"{TITLE} — {w['exp_subject']}",
+                  intro=w["exp_intro"].format(amount=money(threshold)) + f" {w['amount']}: {money(total)} {w['egp']}.",
+                  sections=[Section(w["exp_subject"], expense_head(lang), [expense_cells(p, lang) for p in payloads])],
+                  items=len(payloads))
+
+
+BIG_EXPENSE = RuleSpec(
+    key="big_expense",
+    names={"en": "Big expense", "ar": "مصروف كبير"},
+    descriptions={"en": "Every new expense at or above the amount, with its category, farm, vendor, who entered it "
+                        "and where it came from (manual, received goods, employee loan or advance). Payroll's own "
+                        "salary expenses are left out. A very large one goes at once.",
+                  "ar": "كل مصروف جديد بالقيمة المحددة أو أكثر، مع الفئة والمزرعة والمورد ومن سجّله ومصدره (يدوي، "
+                        "استلام بضاعة، سلفة). مصروفات الرواتب نفسها مستبعدة. المصروف الكبير جداً يُرسل فوراً."},
+    trigger="events",
+    settings=[Setting("threshold", "Report expenses of at least (EGP)", 5000),
+              Setting("urgent_amount", "Send at once from (EGP)", 20000)],
+    detect=expense_detect, latest_id=expense_latest, digest=expense_digest, head=expense_head, rows=expense_cells,
+)
+
+RULES[POS_BELOW_COST.key] = POS_BELOW_COST
+RULES[BIG_EXPENSE.key] = BIG_EXPENSE

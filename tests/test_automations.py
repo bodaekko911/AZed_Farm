@@ -462,3 +462,200 @@ def test_a_url_filter_only_prefills_the_pages_search(page, input_id):
     assert _run_prefill(html, input_id, "?search=%3Cscript%3E") == "before"   # odd: ignored
     assert _run_prefill(html, input_id, "?search=%E0%A4%A") == "before"       # malformed: ignored
     assert first_load
+
+
+
+def test_cleanup_keeps_90_days(env):
+    async def go(db, factory):
+        old = datetime.now(timezone.utc) - timedelta(days=91)
+        db.add_all([AutomationRun(rule_key="morning_brief", started_at=old, status="sent"),
+                    AutomationRun(rule_key="morning_brief", started_at=datetime.now(timezone.utc), status="sent"),
+                    AutomationEvent(rule_key="big_expense", ref="exp:1", payload="{}", run_id=1, created_at=old),
+                    AutomationEvent(rule_key="big_expense", ref="exp:2", payload="{}", created_at=old)])
+        await db.commit()
+        await runs(db)                                   # objects in the session, as in a real tick
+        await auto.cleanup(db)
+        assert len(await runs(db)) == 1
+        assert [r for (r,) in (await db.execute(select(AutomationEvent.ref)))] == ["exp:2"]   # unsent kept
+    scenario(go)
+
+
+# ══ Phase 2: POS sold below cost, big expense ════════════════════════════════
+
+from app.models.customer import Customer  # noqa: E402
+from app.models.document import DocumentLink  # noqa: E402
+from app.models.invoice import Invoice, InvoiceItem  # noqa: E402
+from app.models.receipt import ProductReceipt  # noqa: E402
+
+SETTLED = timedelta(minutes=2)
+
+
+async def settle(db, model):
+    """Rows the poller may read: older than its settle delay (a row still committing is never skipped)."""
+    await db.execute(update(model).values(created_at=datetime.now(timezone.utc) - SETTLED))
+    await db.commit()
+
+
+async def sale_with_edits(db, invoice_id, edits, cashier="Mona", lines=None):
+    """A POS sale whose prices were edited at the till — written exactly as pos_service.create_invoice logs it."""
+    if not await db.get(Customer, 1):
+        db.add(Customer(id=1, name="Walk-in Customer"))
+    db.add(Invoice(id=invoice_id, invoice_number=f"INV-{invoice_id:05d}", customer_id=1, total=Decimal("0"),
+                   status="paid"))
+    await db.flush()
+    for sku, product_id, unit_cost in lines or []:
+        db.add(InvoiceItem(invoice_id=invoice_id, product_id=product_id, sku=sku, name={1: "Tomatoes", 2: "Raw Honey"}[product_id],
+                           qty=Decimal("1"), unit_price=Decimal("1"), total=Decimal("1"),
+                           unit_cost=None if unit_cost is None else Decimal(str(unit_cost))))
+    db.add(ActivityLog(user_id=2, user_name=cashier, user_role="cashier", module="POS",
+                       action="pos_sale_with_price_edits", ref_type="invoice", ref_id=str(invoice_id),
+                       description=json.dumps({"invoice_id": invoice_id, "customer_id": None, "edits": edits,
+                                               "total_discount_vs_catalog": 0})))
+    await db.commit()
+
+
+def test_the_pos_log_format_is_what_the_till_writes():
+    import inspect
+    from app.services import pos_service
+    source = inspect.getsource(pos_service)
+    for key in ('"sku": product.sku', '"catalog_price": catalog_price', '"sold_at": sell_price', '"qty": item.qty',
+                '"pos_sale_with_price_edits"', '"invoice_id": invoice.id', "unit_cost=cost_snapshot(product)"):
+        assert key in source, key
+
+
+def test_pos_sold_below_cost_and_big_discounts_are_reported(env):
+    async def go(db, factory):
+        await enable(db, "pos_below_cost")
+        await auto.tick(db, MORNING_AT)                                  # starts from now
+        await sale_with_edits(db, 1, [
+            {"sku": "TOM", "catalog_price": 20, "sold_at": 6, "qty": 10},     # cost 8 at the time → loses 20
+            {"sku": "HON", "catalog_price": 150, "sold_at": 100, "qty": 1},   # 33% off, above cost
+        ], lines=[("TOM", 1, 8), ("HON", 2, None)])
+        await sale_with_edits(db, 2, [{"sku": "HON", "catalog_price": 150, "sold_at": 145, "qty": 1}],   # 3% off
+                              lines=[("HON", 2, 90)])
+        await settle(db, ActivityLog)
+        await auto.tick(db, MORNING_AT)
+        [mail] = env.sent
+        html = mail["html"]
+        assert "POS price alerts" in mail["subject"] and "Sold below cost" in html and "Mona" in html
+        assert "https://farm.test/invoice/1" in html and "INV-00001" in html and "INV-00002" not in html
+        assert "6.00" in html and "8.00" in html and ">20<" in html                    # charged, cost, loss
+        assert "Discounted more than 20% below" in html and "33%" in html
+        events = (await db.execute(select(AutomationEvent.ref).order_by(AutomationEvent.id))).scalars().all()
+        assert events == ["inv:1:TOM", "inv:1:HON"]
+    scenario(go)
+
+
+def test_a_line_with_no_cost_at_sale_uses_todays_cost_and_says_so(env):
+    async def go(db, factory):
+        await enable(db, "pos_below_cost")
+        await auto.tick(db, MORNING_AT)
+        await sale_with_edits(db, 3, [{"sku": "HON", "catalog_price": 150, "sold_at": 80, "qty": 2}],
+                              lines=[("HON", 2, None)])                       # product cost now: 90
+        await settle(db, ActivityLog)
+        await auto.tick(db, MORNING_AT)
+        html = env.sent[0]["html"]
+        assert "90.00 *" in html and "product cost was used" in html
+    scenario(go)
+
+
+def test_a_big_loss_goes_at_once_and_entries_still_committing_wait(env):
+    async def go(db, factory):
+        await enable(db, "pos_below_cost", digest_minutes=60, last_digest_at=datetime.now(timezone.utc))
+        await auto.tick(db, MORNING_AT)
+        await sale_with_edits(db, 4, [{"sku": "TOM", "catalog_price": 20, "sold_at": 2, "qty": 200}],
+                              lines=[("TOM", 1, 8)])                          # loses 1,200
+        await auto.tick(db, MORNING_AT)
+        assert env.sent == []                                                  # too fresh to read yet
+        await settle(db, ActivityLog)
+        await auto.tick(db, MORNING_AT)
+        assert len(env.sent) == 1 and "1,200" in env.sent[0]["html"]          # urgent: inside the window
+        await auto.tick(db, MORNING_AT)
+        assert len(env.sent) == 1                                              # never twice
+    scenario(go)
+
+
+async def seed_expenses(db):
+    db.add(Payroll(id=2, employee_id=1, period=TODAY.strftime("%Y-%m"), base_salary=Decimal("9000"),
+                   net_salary=Decimal("9000"), paid=True))
+    await db.flush()
+    db.add_all([
+        Expense(id=10, ref_number="EXP-00010", category_id=1, farm_id=1, amount=Decimal("7000"),
+                expense_date=TODAY, vendor="Wataniya", user_id=1),                                # manual
+        Expense(id=11, ref_number="EXP-00011", category_id=2, amount=Decimal("9000"), expense_date=TODAY,
+                payroll_id=2),                                                                  # payroll: skipped
+        Expense(id=12, ref_number="EXP-00012", category_id=1, amount=Decimal("3000"), expense_date=TODAY),   # small
+        Expense(id=13, ref_number="EXP-00013", category_id=2, amount=Decimal("6000"), expense_date=TODAY,
+                description="Salary advance (loan) [loan:5] - Saeed"),                          # loan
+        Expense(id=14, ref_number="EXP-00014", category_id=1, amount=Decimal("8000"), expense_date=TODAY,
+                vendor="Al Baraka"),                                                            # received goods
+    ])
+    await db.flush()
+    db.add(ProductReceipt(ref_number="RCV-1", product_id=1, receive_date=TODAY, qty=Decimal("100"),
+                          total_cost=Decimal("8000"), expense_id=14))
+    db.add(DocumentLink(doc_key="k1", ref_type="expense", ref_id=10))
+    await db.commit()
+    await settle(db, Expense)
+
+
+def test_big_expenses_are_reported_with_their_source(env):
+    async def go(db, factory):
+        await enable(db, "big_expense")
+        await auto.tick(db, MORNING_AT)
+        await seed_expenses(db)
+        await auto.tick(db, MORNING_AT)
+        [mail] = env.sent
+        html = mail["html"]
+        assert "Big expenses" in mail["subject"]
+        for ref in ("EXP-00010", "EXP-00013", "EXP-00014"):
+            assert ref in html and f"https://farm.test/expenses/?search={ref}" in html
+        assert "EXP-00011" not in html and "EXP-00012" not in html
+        assert "manual" in html and "employee loan" in html and "received goods" in html
+        assert "Boss" in html and "North Farm" in html and "Wataniya" in html
+        assert "https://farm.test/documents/view?ref_type=expense&amp;ref_id=10" in html          # the receipt photo
+        assert "21,000" in html                                                                   # 7,000+6,000+8,000
+    scenario(go)
+
+
+def test_a_very_big_expense_goes_at_once_in_arabic(env):
+    async def go(db, factory):
+        await enable(db, "big_expense", language="ar", last_digest_at=datetime.now(timezone.utc))
+        await auto.tick(db, MORNING_AT)
+        db.add(Expense(id=20, ref_number="EXP-00020", category_id=1, amount=Decimal("25000"), expense_date=TODAY))
+        await db.commit()
+        await settle(db, Expense)
+        await auto.tick(db, MORNING_AT)
+        [mail] = env.sent
+        assert 'dir="rtl"' in mail["html"] and "مصروفات كبيرة" in mail["subject"] and "25,000" in mail["html"]
+        assert "يدوي" in mail["html"]
+    scenario(go)
+
+
+def test_capped_alerts_reach_the_morning_brief_in_their_own_columns(env):
+    async def go(db, factory):
+        cfg = await auto.get_settings(db)
+        cfg.daily_cap = 1                                    # digests get nothing; the morning brief keeps its slot
+        await db.commit()
+        await enable(db, "morning_brief", send_time="08:00")
+        await enable(db, "big_expense")
+        await auto.tick(db, MORNING_AT)
+        await seed_expenses(db)
+        await auto.tick(db, MORNING_AT)
+        assert env.sent == []
+        await auto.tick(db, MORNING_AT + timedelta(days=1, hours=1), transport=model())
+        [brief] = env.sent
+        assert "held back" in brief["html"] and "EXP-00013" in brief["html"] and "employee loan" in brief["html"]
+        assert "Source" in brief["html"]                                                     # the rule's own columns
+    scenario(go)
+
+
+def test_the_new_rules_appear_in_the_admin_section(env):
+    async def go(db, factory):
+        from app.routers import assistant
+        out = await assistant.automations(db=db, _admin=None)
+        keys = {r["key"]: r for r in out["rules"]}
+        assert {"morning_brief", "pos_below_cost", "big_expense"} <= set(keys)
+        assert keys["pos_below_cost"]["kind"] == "events" and keys["big_expense"]["settings"]["threshold"] == 5000
+        subject, html = await auto.preview(db, "big_expense", MORNING_AT)
+        assert "Nothing to report" in html and env.sent == []
+    scenario(go)

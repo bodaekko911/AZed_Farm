@@ -544,7 +544,8 @@ async def send_digest(db, row: AutomationRule, now_local: datetime, transport=No
                                .execution_options(synchronize_session=False))
     await db.commit()
     if not claimed.rowcount:                               # another worker took them
-        await db.execute(delete(AutomationRun).where(AutomationRun.id == run_id))
+        await db.execute(delete(AutomationRun).where(AutomationRun.id == run_id)
+                         .execution_options(synchronize_session=False))
         await db.commit()
         return None
     events = (await db.execute(select(AutomationEvent).where(AutomationEvent.run_id == run_id)
@@ -575,9 +576,11 @@ async def send_digest(db, row: AutomationRule, now_local: datetime, transport=No
 
 async def cleanup(db) -> None:
     cutoff = now_utc() - KEEP
-    await db.execute(delete(AutomationRun).where(AutomationRun.started_at < cutoff))
+    await db.execute(delete(AutomationRun).where(AutomationRun.started_at < cutoff)
+                     .execution_options(synchronize_session=False))
     await db.execute(delete(AutomationEvent).where(AutomationEvent.run_id.is_not(None),
-                                                   AutomationEvent.created_at < cutoff))
+                                                   AutomationEvent.created_at < cutoff)
+                     .execution_options(synchronize_session=False))
     await db.commit()
 
 
