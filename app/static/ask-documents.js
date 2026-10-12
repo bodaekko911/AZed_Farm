@@ -437,7 +437,7 @@
   function picker(kind, current, candidates, emptyLabel, onChange, extra) {
     const label = item => kind === "suppliers" ? item.name + (item.phone ? ` · ${item.phone}` : "")
                                                : `${item.name} · ${item.sku} · ${item.unit || ""}`;
-    const wrap = h("div", { class: "inv-picker" });
+    const wrap = h("div", { class: "inv-picker", "data-kind": kind });
     const select = h("select", { class: "inv-select", "data-no-i18n": true });
     const known = new Map();
     const add = (item, selected) => {

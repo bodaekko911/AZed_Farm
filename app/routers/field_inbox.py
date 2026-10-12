@@ -47,6 +47,7 @@ async def draft(draft_id: int, db: AsyncSession = Depends(get_async_session), us
     # Your own submission: blocked, except for an admin (who is told it's their own).
     out["own"] = own and user.role != "admin"
     out["own_admin"] = own and user.role == "admin"
+    out["is_admin"] = user.role == "admin"            # only an admin may change a line's product
     out["can_review"] = (has_permission(user, "action_field_drafts_review") and not out["own"] and out["kind"] in reader.KINDS
                          and all(has_permission(user, p) for p in reader.KINDS[out["kind"]]["permissions"]))
     return out

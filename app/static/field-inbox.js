@@ -110,6 +110,12 @@
       // The photos are shown above, full size; the card's own thumbnails would be empty.
       card.querySelectorAll(".doc-thumbs").forEach(x => x.remove());
       if (d.own || !d.can_review) card.querySelectorAll("button").forEach(b => { b.disabled = true; });
+      else if (!d.is_admin) {
+        // Only an admin may change which product a line is; others record it as matched, or reject it.
+        const pickers = card.querySelectorAll('.inv-picker[data-kind="products"]');
+        pickers.forEach(p => p.querySelectorAll("select, input").forEach(x => { x.disabled = true; x.title = "Only an admin can change the product"; }));
+        if (pickers.length) card.prepend(h("div", { class: "note", text: "Only an admin can change the product on a line." }));
+      }
       parts.push(card);
     }
     if (!d.own && d.can_review) {

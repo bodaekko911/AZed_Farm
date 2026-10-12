@@ -919,3 +919,31 @@ def test_a_sale_with_no_client_found_waits_for_review_in_azed(telegram):
         await send(db, factory, tap(f"fd:ok:{d.id}", d.bot_message_id))
         assert buttons_to(telegram, MANAGER_CHAT) == [f"fa:no:{d.id}"]
     scenario(go)
+
+
+def test_only_an_admin_changes_the_product_on_a_line(telegram):
+    async def go(db, factory):
+        d = await in_review(db, factory, telegram, text="٢٠ كيلو طماطم من المزرعة الشمالية")
+        day = field.today_local().isoformat()
+        swapped = {"date": day, "items": [{"farm_id": 1, "product_id": 2, "qty": 20}]}       # cucumber, not tomatoes
+        with pytest.raises(HTTPException) as e:
+            await field.confirm(db, reviewer(), d.id, swapped)
+        assert e.value.status_code == 403 and "Only an admin" in e.value.detail
+        assert (await drafts(db))[0].status == "in_review" and await count(db, FarmDelivery) == 0
+        # The admin may, and the delivery is of the product they picked.
+        await field.confirm(db, admin(), d.id, swapped)
+        item = (await db.execute(select(FarmDeliveryItem))).scalar_one()
+        assert item.product_id == 2
+        from app.routers import field_inbox
+        assert (await field_inbox.draft(d.id, db=db, user=admin()))["is_admin"]
+        assert not (await field_inbox.draft(d.id, db=db, user=reviewer()))["is_admin"]
+    scenario(go)
+
+
+def test_other_reviewers_may_still_fix_quantities(telegram):
+    async def go(db, factory):
+        d = await in_review(db, factory, telegram, text="٢٠ كيلو طماطم من المزرعة الشمالية")
+        await field.confirm(db, reviewer(), d.id, {"date": field.today_local().isoformat(),
+                                                   "items": [{"farm_id": 1, "product_id": 1, "qty": 18}]})
+        assert float((await db.execute(select(FarmDeliveryItem.qty))).scalar()) == 18.0
+    scenario(go)

@@ -1144,6 +1144,17 @@ def _not_own(reviewer, chat: Optional[TelegramChat]) -> None:
         raise HTTPException(status_code=403, detail="You sent this yourself — someone else has to review it.")
 
 
+def products_changed(kind: str, body: dict, data: dict) -> bool:
+    """Whether the reviewer picked a different product for any line than the one the draft matched (or picked one
+    where none was matched). Only an admin may do that; the others record the products as matched, or reject."""
+    if kind == "expense_receipt":
+        return False                                   # receipt lines are descriptions, not products
+    matched = [(l.get("product") or {}).get("id") for l in body.get("lines") or []]
+    sent = [it.get("product_id") for it in data.get("items") or [] if isinstance(it, dict)]
+    norm = lambda v: int(v) if str(v or "").isdigit() else None
+    return [norm(v) for v in matched] != [norm(v) for v in sent]
+
+
 async def _claim_review(db, draft_id: int) -> None:
     result = await db.execute(update(FieldDraft).where(FieldDraft.id == draft_id, FieldDraft.status == "in_review")
                               .values(status="reviewing").execution_options(synchronize_session=False))
@@ -1162,6 +1173,10 @@ async def confirm(db, reviewer, draft_id: int, data: dict) -> dict:
     reader.need_kind(reviewer, draft.kind)
     if draft.status != "in_review":
         raise HTTPException(status_code=409, detail="This draft was already reviewed.")
+    if getattr(reviewer, "role", None) != "admin" and products_changed(draft.kind, json.loads(draft.draft_json or "{}"),
+                                                                       data):
+        raise HTTPException(status_code=403, detail="Only an admin can change the product on a line. Record it with the "
+                                                    "products as matched, or reject it with a reason.")
     count = (await db.execute(select(func.count(DocumentFile.id)).where(DocumentFile.doc_key == draft.doc_key))).scalar() \
         if draft.doc_key else 0
     evidence = reader.StoredDocument(draft.doc_key, count or 0)

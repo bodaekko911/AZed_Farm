@@ -867,6 +867,7 @@
     "Unlink this chat? It stops working until you relink it.": "إلغاء ربط هذه المحادثة؟ ستتوقف حتى تعيد ربطها.",
     "Relink": "إعادة الربط",
     "Approves": "يعتمد",
+    "Only an admin can change the product on a line.": "تغيير المنتج في أي بند للمسؤول فقط.",
     "What workers sent from the Telegram bot, waiting for you to confirm or reject": "ما أرسله العمال عبر بوت تيليجرام، بانتظار تأكيدك أو رفضك",
     "B2B sale": "بيع لعميل B2B",
     "Record B2B sale": "تسجيل البيع",
