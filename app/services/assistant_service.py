@@ -649,7 +649,8 @@ TOOLS: dict[str, tuple[str, dict, tuple[str, ...], ToolFn]] = {
         {"movement": {"type": "boolean"}, "product": {"type": "string"}},
         ("page_reports", "tab_reports_inventory"), _stock),
     "spoilage": (
-        "Spoilage (waste) for a period: cost, kg, % of farm deliveries and of production, by product and by reason.",
+        "Spoilage (waste; in Arabic هالك or تالف) for a period: cost, kg, % of farm deliveries and of production, by "
+        "product and by reason.",
         {}, ("page_reports", "tab_reports_spoilage"), _spoilage),
     "suppliers": (
         "Suppliers: what we owe each now, and what was received from each in the period (cost and paid on receipt).",

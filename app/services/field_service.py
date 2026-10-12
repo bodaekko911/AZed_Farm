@@ -737,7 +737,7 @@ Return ONLY a JSON object, no prose:
             "qty": 20, "unit": "unit as written (kg, كيلو, box …) or null"}],
  "reason": "for spoilage, the reason as written, or null", "unclear": ["items.0.qty"]}
 Rules:
-- "spoilage" when the message says the produce was spoiled, damaged or thrown away (تالف، بايظ، فاسد، رمي); a
+- "spoilage" when the message says the produce was spoiled, damaged or thrown away (هالك، تالف، بايظ، فاسد، رمي); a
   "farm_delivery" when it reports produce picked or brought in. "other" if it is neither.
 - Arabic-Indic digits (٠١٢٣٤٥٦٧٨٩) as plain numbers. Copy, don't calculate or guess: a value not in the message is null.
 - "farm_match" / "product_match" are suggestions from the lists below, or null — never a name not in the list.

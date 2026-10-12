@@ -615,8 +615,8 @@ ACTIONS = {
          "received_by": {"type": "string"}, "notes": {"type": "string"}},
         ("page_farm", "action_farm_delivery_create"), propose_farm_delivery),
     "propose_spoilage": (
-        "PROPOSE logging spoilage of one product — stock thrown away (the user confirms; nothing is saved by this "
-        "call). Give `unit` only if the user named one.",
+        "PROPOSE logging spoilage of one product — stock thrown away; in Arabic هالك, تالف, بايظ or فاسد (the user "
+        "confirms; nothing is saved by this call). Give `unit` only if the user named one.",
         {"product": {"type": "string", "description": "Product name or SKU"}, "qty": {"type": "number"},
          "unit": {"type": "string"}, "date": {"type": "string", "description": "YYYY-MM-DD, default today"},
          "reason": {"type": "string"}, "farm": {"type": "string"}, "notes": {"type": "string"}},
