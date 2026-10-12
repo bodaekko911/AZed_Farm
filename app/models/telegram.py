@@ -28,6 +28,10 @@ class TelegramChat(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     linked_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     linked_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Phase 2: this chat gets new submissions to approve (chosen per chat; needs an AZed login with the permissions).
+    approver = Column(Boolean, nullable=False, default=False, server_default="false")
+    # The draft whose rejection reason the bot is waiting for from this chat.
+    pending_reject_id = Column(Integer, nullable=True)
 
 
 class TelegramLinkCode(Base):
@@ -104,3 +108,4 @@ class FieldDraft(Base):
     reject_reason = Column(String(300), nullable=True)
     result_refs = Column(String(300), nullable=True)
     images_deleted_at = Column(DateTime(timezone=True), nullable=True)
+    notices = Column(Text, nullable=True)               # JSON [[chat_id, message_id], …] — approval messages sent

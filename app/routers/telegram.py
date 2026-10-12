@@ -58,6 +58,7 @@ class ChatIn(BaseModel):
     daily_limit: Optional[int] = Field(None, ge=1, le=500)
     language: Optional[str] = None
     is_active: Optional[bool] = None
+    approver: Optional[bool] = None
 
 
 def _base_url(request: Request) -> str:
@@ -122,6 +123,7 @@ async def chats(db: AsyncSession = Depends(get_async_session), _admin: User = De
         out.append({"id": c.id, "username": c.username, "person": await field._person_name(db, c),
                     "employee_id": c.employee_id, "user_id": c.user_id, "kinds": field._kinds_of(c),
                     "daily_limit": c.daily_limit, "language": c.language, "is_active": c.is_active,
+                    "approver": bool(c.approver), "has_login": bool(c.user_id),
                     "used_today": await field._used_today(db, c.chat_id),
                     "linked_at": c.linked_at.isoformat() if c.linked_at else None})
     return {"chats": out}
@@ -146,6 +148,11 @@ async def update_chat(chat_row_id: int, data: ChatIn, db: AsyncSession = Depends
         if data.is_active and not chat.is_active and not await field._still_active(db, chat):
             raise HTTPException(status_code=400, detail="The linked person is inactive — make a new code instead.")
         chat.is_active = data.is_active                  # unlink / relink
+    if data.approver is not None:
+        if data.approver and not chat.user_id:
+            raise HTTPException(status_code=400, detail="Approving needs the chat linked to an AZed login — make a new "
+                                                        "code and pick their login.")
+        chat.approver = data.approver
     record(db, "Telegram", "update_chat", f"Telegram chat #{chat.id} updated: {data.model_dump(exclude_none=True)}",
            user=admin)
     await db.commit()

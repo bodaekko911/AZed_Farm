@@ -467,6 +467,10 @@ async def ensure_telegram_tables() -> None:
         "CREATE INDEX IF NOT EXISTS ix_field_drafts_status ON field_drafts (status)",
         "CREATE INDEX IF NOT EXISTS ix_field_drafts_doc_key ON field_drafts (doc_key)",
         "CREATE INDEX IF NOT EXISTS ix_field_drafts_created_at ON field_drafts (created_at)",
+        # Phase 2 (migration 20261013_0052)
+        "ALTER TABLE telegram_chats ADD COLUMN IF NOT EXISTS approver BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE telegram_chats ADD COLUMN IF NOT EXISTS pending_reject_id INTEGER",
+        "ALTER TABLE field_drafts ADD COLUMN IF NOT EXISTS notices TEXT",
     ]
     try:
         async with AsyncSessionLocal() as db:

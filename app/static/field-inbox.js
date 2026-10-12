@@ -10,7 +10,9 @@
   const KIND = { expense_receipt: "Expense receipt", delivery_note: "Supplier delivery note",
                  harvest_sheet: "Harvest sheet / delivery", spoilage: "Spoilage" };
   const WARN = { duplicate: "Possible duplicate", totals: "Lines don't add up", new_supplier: "New supplier",
-                 unmatched_product: "Product not matched", unmatched_line: "Farm or product not matched" };
+                 unmatched_product: "Product not matched", unmatched_line: "Farm or product not matched",
+                 no_category: "No expense category", priced: "Has prices", closest_match: "Product match not certain",
+                 unit: "Unit differs" };
 
   function h(tag, attrs, ...kids) {
     const node = document.createElement(tag);
@@ -217,6 +219,10 @@
         h("input", { type: "checkbox", value: k, checked: c.kinds.includes(k), disabled: !c.is_active,
           onchange: () => save({ kinds: [...kinds.querySelectorAll("input:checked")].map(x => x.value) }) }),
         h("span", { text: KIND[k] || k }))));
+      const approves = h("label", { title: c.has_login ? "Gets new submissions to approve in Telegram" : "Needs an AZed login — link with a new code" },
+        h("input", { type: "checkbox", checked: c.approver, disabled: !c.is_active || !c.has_login,
+          onchange: e => save({ approver: e.target.checked }) }), " ", h("span", { text: "Approves" }));
+      kinds.append(approves);
       const limit = h("input", { type: "number", min: 1, max: 500, value: c.daily_limit, style: "width:64px", disabled: !c.is_active,
         onchange: e => save({ daily_limit: Number(e.target.value) || 30 }) });
       const lang = h("select", { disabled: !c.is_active, onchange: e => save({ language: e.target.value }) },
@@ -239,5 +245,8 @@
     });
   }
 
-  load();
+  load().then(() => {
+    const wanted = Number(new URLSearchParams(location.search).get("draft"));
+    if (wanted) open(wanted, null);
+  });
 })();

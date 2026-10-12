@@ -866,6 +866,11 @@
     "You sent this yourself — as an admin you may still record it.": "أنت أرسلت هذا بنفسك — وبصفتك مسؤولاً يمكنك تسجيله.",
     "Unlink this chat? It stops working until you relink it.": "إلغاء ربط هذه المحادثة؟ ستتوقف حتى تعيد ربطها.",
     "Relink": "إعادة الربط",
+    "Approves": "يعتمد",
+    "No expense category": "فئة المصروف غير محددة",
+    "Has prices": "فيه أسعار",
+    "Product match not certain": "مطابقة المنتج غير مؤكدة",
+    "Unit differs": "الوحدة مختلفة",
     "Delete this chat from the list? To use the bot again the worker will need a new code.": "حذف هذه المحادثة من القائمة؟ سيحتاج العامل كوداً جديداً لاستخدام البوت مرة أخرى."
   };
 

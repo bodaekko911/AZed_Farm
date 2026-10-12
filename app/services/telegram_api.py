@@ -96,6 +96,23 @@ async def clear_buttons(chat_id: int, message_id: int) -> None:
                                           "reply_markup": {"inline_keyboard": []}})
 
 
+async def edit_text(chat_id: int, message_id: int, text: str) -> None:
+    """Replace a message's text; its buttons go with it."""
+    await call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text[:4000]})
+
+
+async def send_files(chat_id: int, files: list[list[str]]) -> None:
+    """Re-send a worker's photos and files to another chat by their Telegram file ids — nothing is uploaded."""
+    photos = [f for kind, f in files if kind == "photo"]
+    if len(photos) > 1:
+        await call("sendMediaGroup", {"chat_id": chat_id, "media": [{"type": "photo", "media": f} for f in photos[:10]]})
+    elif photos:
+        await call("sendPhoto", {"chat_id": chat_id, "photo": photos[0]})
+    for kind, f in files:
+        if kind == "document":
+            await call("sendDocument", {"chat_id": chat_id, "document": f})
+
+
 async def answer_callback(callback_id: str, text: str = "") -> None:
     await call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text[:190]})
 

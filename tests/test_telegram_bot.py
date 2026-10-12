@@ -669,3 +669,123 @@ def test_the_admin_can_unlink_relink_and_delete_a_chat(telegram):
         await tg_router.delete_chat(chat_id, db=db, admin=boss)
         assert await count(db, TelegramChat) == 0 and await count(db, FieldDraft) == 1    # its drafts stay
     scenario(go)
+
+
+# ══ Phase 2: managers approve from Telegram ══════════════════════════════════
+
+MANAGER_CHAT, OTHER_CHAT = 8880001, 8880002
+REVIEW_PERMS = "page_field_inbox,action_field_drafts_review,page_farm,action_farm_delivery_create,page_production," \
+               "action_production_log_spoilage"
+
+
+async def approver(db, *, chat_id=MANAGER_CHAT, user_id=3, perms=REVIEW_PERMS, approves=True):
+    await db.execute(update(User).where(User.id == user_id).values(permissions=perms))
+    db.add(TelegramChat(chat_id=chat_id, username="boss", user_id=user_id, allowed_kinds="spoilage", daily_limit=30,
+                        language="ar", is_active=True, approver=approves))
+    await db.commit()
+
+
+async def sent_for_review(db, factory, telegram, text=None, payload=TEXT_DELIVERY):
+    """A worker's submission, sent for review — which is when approvers are told."""
+    await link(db)
+    if text is None:
+        await send(db, factory, msg(photo=photo(telegram, f"q{next(_uid)}")), transport=model(payload))
+    else:
+        await send(db, factory, msg(text), transport=model(payload))
+    d = (await drafts(db))[-1]
+    await send(db, factory, tap(f"fd:ok:{d.id}", d.bot_message_id))
+    return (await drafts(db))[-1]
+
+
+def buttons_to(telegram, chat_id):
+    last = [m for m in telegram.sent if m["chat_id"] == chat_id][-1]
+    return [b.get("callback_data") for row in last.get("reply_markup", {}).get("inline_keyboard", []) for b in row]
+
+
+def test_only_chosen_approvers_with_the_permissions_are_told(telegram):
+    async def go(db, factory):
+        await approver(db)                                                      # chosen, may review
+        await approver(db, chat_id=OTHER_CHAT, user_id=1, approves=False)      # an admin, but not chosen
+        await approver(db, chat_id=8880003, user_id=2, perms="page_field_inbox")   # chosen, can't review
+        d = await sent_for_review(db, factory, telegram, text="٢٠ كيلو طماطم من المزرعة الشمالية")
+        assert telegram.texts(MANAGER_CHAT) and not telegram.texts(OTHER_CHAT) and not telegram.texts(8880003)
+        text = telegram.texts(MANAGER_CHAT)[-1]
+        assert f"#{d.id}" in text and "Am Saeed" in text and "North Farm" in text and "Tomatoes" in text
+        assert buttons_to(telegram, MANAGER_CHAT) == [f"fa:ok:{d.id}", f"fa:no:{d.id}"]
+        assert json.loads((await drafts(db))[-1].notices)[0][0] == MANAGER_CHAT
+    scenario(go)
+
+
+def test_a_clean_draft_is_approved_from_telegram_through_the_real_services(telegram):
+    async def go(db, factory):
+        await approver(db)
+        d = await sent_for_review(db, factory, telegram, text="٢٠ كيلو طماطم من المزرعة الشمالية")
+        notice = json.loads((await drafts(db))[-1].notices)[0][1]
+        await send(db, factory, tap(f"fa:ok:{d.id}", notice, chat_id=MANAGER_CHAT))
+        delivery = (await db.execute(select(FarmDelivery))).scalar_one()
+        item = (await db.execute(select(FarmDeliveryItem))).scalar_one()
+        assert delivery.user_id == 3 and (item.product_id, float(item.qty)) == (1, 20.0)      # the approving manager
+        [d] = await drafts(db)
+        assert (d.status, d.reviewed_by_id) == ("confirmed", 3)
+        assert "قبولها" in telegram.texts()[-1]                                                # the worker is told
+        edits = [b for m, b in telegram.calls if m == "editMessageText"]
+        assert edits[-1]["message_id"] == notice and "سُجّل" in edits[-1]["text"]           # the notice is closed
+        # A second tap does nothing.
+        await send(db, factory, tap(f"fa:ok:{d.id}", notice, chat_id=MANAGER_CHAT))
+        assert await count(db, FarmDelivery) == 1
+    scenario(go)
+
+
+def test_approval_from_telegram_is_blocked_while_a_draft_has_warnings(telegram):
+    async def go(db, factory):
+        await approver(db)
+        unclear = {**SHEET, "date": field.today_local().isoformat(), "unclear": ["items.0.qty"]}
+        d = await sent_for_review(db, factory, telegram, text=None, payload=unclear)
+        assert buttons_to(telegram, MANAGER_CHAT) == [f"fa:no:{d.id}"]                       # reject only
+        assert "يحتاج مراجعة في AZed" in telegram.texts(MANAGER_CHAT)[-1]
+        assert ("sendPhoto", {"chat_id": MANAGER_CHAT, "photo": json.loads(d.draft_json)["_tg_files"][0][1]}) \
+            in telegram.calls                                                                 # the worker's photo, re-sent
+        # Tapping an old or forged approve button changes nothing.
+        await send(db, factory, tap(f"fa:ok:{d.id}", 1, chat_id=MANAGER_CHAT))
+        assert await count(db, FarmDelivery) == 0 and (await drafts(db))[-1].status == "in_review"
+        # A unit that can't be converted is a warning too.
+        body = {"lines": [{"product": {"id": 1, "unit": "kg", "pack": {"amount": 1000.0, "base": "g"}}, "qty": 3,
+                           "unit": "box", "pack": None, "farm_id": 1, "match": "suggested"}], "missing": [], "unclear": []}
+        assert "unit" in field.warnings_for("harvest_sheet", body)
+        body["lines"][0].update(unit="جرام", pack={"amount": 1.0, "base": "g"}, qty=500)
+        assert field.warnings_for("harvest_sheet", body) == [] and field.product_qty(body["lines"][0]) == (0.5, True)
+    scenario(go)
+
+
+def test_a_manager_rejects_from_telegram_with_a_reason(telegram):
+    async def go(db, factory):
+        await approver(db)
+        d = await sent_for_review(db, factory, telegram, text="٢٠ كيلو طماطم من المزرعة الشمالية")
+        await send(db, factory, tap(f"fa:no:{d.id}", 1, chat_id=MANAGER_CHAT))
+        assert "سبب الرفض" in telegram.texts(MANAGER_CHAT)[-1]
+        await send(db, factory, msg("/cancel", chat_id=MANAGER_CHAT))
+        assert (await drafts(db))[-1].status == "in_review"
+        await send(db, factory, tap(f"fa:no:{d.id}", 1, chat_id=MANAGER_CHAT))
+        await send(db, factory, msg("الكمية أكثر من المعتاد", chat_id=MANAGER_CHAT))
+        [d] = await drafts(db)
+        assert (d.status, d.reject_reason, d.reviewed_by_id) == ("rejected", "الكمية أكثر من المعتاد", 3)
+        assert "الكمية أكثر من المعتاد" in telegram.texts()[-1]                                # the worker is told
+        assert await count(db, FieldDraft) == 1                                                # no model call, no draft
+    scenario(go)
+
+
+def test_nobody_approves_their_own_from_telegram_and_a_failed_record_says_why(telegram):
+    async def go(db, factory):
+        await approver(db, user_id=2)            # the worker's own login (user 2), not an admin
+        d = await sent_for_review(db, factory, telegram, text="تالف ٣ كيلو خيار", payload=TEXT_SPOILAGE)
+        assert not telegram.texts(MANAGER_CHAT)
+        await send(db, factory, tap(f"fa:ok:{d.id}", 1, chat_id=MANAGER_CHAT))
+        assert (await drafts(db))[-1].status == "in_review"
+        # Another manager approves — but there isn't that much cucumber in stock: nothing recorded, they're told why.
+        await approver(db, chat_id=OTHER_CHAT)
+        await db.execute(update(Product).where(Product.id == 2).values(stock=Decimal("1")))
+        await db.commit()
+        await send(db, factory, tap(f"fa:ok:{d.id}", 1, chat_id=OTHER_CHAT))
+        assert "لم يُسجَّل" in telegram.texts(OTHER_CHAT)[-1] and "in stock" in telegram.texts(OTHER_CHAT)[-1]
+        assert (await drafts(db))[-1].status == "in_review" and await count(db, SpoilageRecord) == 0
+    scenario(go)

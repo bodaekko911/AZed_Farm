@@ -109,6 +109,28 @@ TEXTS = {
         "confirmed": "تمت مراجعة «{kind}» المرسلة بتاريخ {date} وقبولها. شكراً!",
         "rejected": "تمت مراجعة «{kind}» المرسلة بتاريخ {date} ولم تُقبل: {reason}",
         "not_yours": "هذا الإرسال لم يعد متاحاً.",
+        "ap_head": "📥 للمراجعة #{id}: {kind}",
+        "ap_from": "من: {name}",
+        "ap_text": "كتب العامل: {text}",
+        "ap_note": "ملاحظة العامل: {text}",
+        "ap_clean": "لا توجد تنبيهات — يمكنك الاعتماد من هنا.",
+        "ap_needs": "⚠ يحتاج مراجعة في AZed: {what}",
+        "ap_ok": "✅ اعتماد وتسجيل",
+        "ap_no": "✖ رفض",
+        "ap_open": "فتح في AZed",
+        "ap_reason": "اكتب سبب الرفض للعامل في رسالة واحدة. أو أرسل /cancel للتراجع.",
+        "ap_reason_cancel": "تم التراجع عن الرفض.",
+        "ap_done_ok": "✅ #{id} سُجّل بواسطة {name}: {refs}",
+        "ap_done_no": "✖ #{id} رُفض بواسطة {name}: {reason}",
+        "ap_failed": "لم يُسجَّل #{id}: {detail}\nافتحه في AZed لمراجعته.",
+        "ap_not_allowed": "لا يمكنك اعتماد هذا من تيليجرام.",
+        "ap_has_warnings": "فيه تنبيهات — راجعه في AZed.",
+        "payment": "الدفع",
+        "warn_names": {"duplicate": "قد يكون مكرراً", "totals": "البنود لا تساوي الإجمالي", "new_supplier": "مورد جديد",
+                       "unmatched_product": "منتج غير مطابق", "unmatched_line": "مزرعة أو منتج غير مطابق",
+                       "no_category": "فئة المصروف غير محددة", "priced": "فيه أسعار — يلزم اختيار فئة المصروف والمدفوع",
+                       "closest_match": "مطابقة منتج غير مؤكدة", "unit": "وحدة مختلفة عن وحدة المنتج",
+                       "missing": "ناقص", "unclear": "غير واضح"},
         "total": "الإجمالي", "date": "التاريخ", "farm": "المزرعة", "vendor": "المورد",
         "kinds": {"harvest_sheet": "كشف حصاد / توريد", "expense_receipt": "إيصال مصروف",
                   "delivery_note": "إذن استلام من مورد", "spoilage": "تالف"},
@@ -142,6 +164,28 @@ TEXTS = {
         "confirmed": "Your {kind} sent on {date} was reviewed and accepted. Thank you!",
         "rejected": "Your {kind} sent on {date} was reviewed and not accepted: {reason}",
         "not_yours": "This submission is no longer available.",
+        "ap_head": "📥 To review #{id}: {kind}",
+        "ap_from": "From: {name}",
+        "ap_text": "The worker wrote: {text}",
+        "ap_note": "Worker's note: {text}",
+        "ap_clean": "No warnings — you can approve it here.",
+        "ap_needs": "⚠ Needs review in AZed: {what}",
+        "ap_ok": "✅ Approve and record",
+        "ap_no": "✖ Reject",
+        "ap_open": "Open in AZed",
+        "ap_reason": "Write the reason for the worker in one message. Or send /cancel to go back.",
+        "ap_reason_cancel": "Rejection cancelled.",
+        "ap_done_ok": "✅ #{id} recorded by {name}: {refs}",
+        "ap_done_no": "✖ #{id} rejected by {name}: {reason}",
+        "ap_failed": "#{id} was not recorded: {detail}\nOpen it in AZed to review it.",
+        "ap_not_allowed": "You can't approve this from Telegram.",
+        "ap_has_warnings": "It has warnings — review it in AZed.",
+        "payment": "Payment",
+        "warn_names": {"duplicate": "possible duplicate", "totals": "lines don't add up", "new_supplier": "new supplier",
+                       "unmatched_product": "product not matched", "unmatched_line": "farm or product not matched",
+                       "no_category": "no expense category", "priced": "has prices — pick the expense category and amount paid",
+                       "closest_match": "product match not certain", "unit": "unit differs from the product's",
+                       "missing": "missing", "unclear": "unclear"},
         "total": "Total", "date": "Date", "farm": "Farm", "vendor": "Vendor",
         "kinds": {"harvest_sheet": "harvest sheet / delivery", "expense_receipt": "expense receipt",
                   "delivery_note": "supplier delivery note", "spoilage": "spoilage"},
@@ -506,6 +550,10 @@ async def handle_message(db, parts: list[dict], transport=None) -> None:
         await _tell_unlinked_once(db, chat_id)
         return
     lang = chat.language or "ar"
+    # An approver who pressed Reject: this message is the reason (no model call, not counted).
+    if chat.pending_reject_id and len(parts) == 1 and text:
+        await _rejection_reason(db, chat, text)
+        return
     # A reply to the bot's summary: the worker's note for that draft (no model call, not counted).
     if first.get("reply_to") and text and len(parts) == 1:
         draft = (await db.execute(select(FieldDraft).where(
@@ -632,7 +680,21 @@ async def submit_document(db, chat: TelegramChat, parts: list[dict], kinds: list
     hashes = [hashlib.sha256(b).hexdigest() for b in blobs]
     key = reader.store_document(db, _Uploader(chat), kind, blobs, hashes, filename, [])
     del blobs
+    draft["_tg_files"] = _file_refs(parts)
     await _new_draft(db, chat, kind, draft, key, caption)
+
+
+def _file_refs(parts: list[dict]) -> list[list[str]]:
+    """The worker's photos and files by Telegram file id — approvers get them re-sent without any upload."""
+    out = []
+    for p in parts:
+        if p.get("photo"):
+            size = _pick_photo(p["photo"])
+            if size:
+                out.append(["photo", size["file_id"]])
+        elif (p.get("document") or {}).get("file_id"):
+            out.append(["document", p["document"]["file_id"]])
+    return out
 
 
 class _Uploader:
@@ -720,16 +782,32 @@ async def submit_text(db, chat: TelegramChat, text: str, sent_at: Optional[int],
         draft = await reader.match_harvest(db, parsed, choices)       # same farm/product matching
         draft["reason"] = reader._text(raw.get("reason"), 200)
         draft.pop("duplicates", None)
+        draft["missing"] = [m for m in draft.get("missing") or [] if not m.endswith(".farm")]   # a farm is optional
     draft.update({"kind": kind, "pages": 0, **choices, "from_text": True})
     await _new_draft(db, chat, kind, draft, None, text[:2000])
 
 
 # ── Drafts: summary to the worker, warnings, buttons ─────────────────────────
 
+def product_qty(line: dict) -> tuple[Optional[float], bool]:
+    """A line's quantity in its product's own unit — as the review card converts it ("2 kg" of a product kept in
+    grams is 2000). False when the written unit differs from the product's and can't be converted."""
+    qty, product = line.get("qty"), line.get("product") or {}
+    if qty is None:
+        return None, True
+    written, own = line.get("pack"), product.get("pack")
+    if written and own and written.get("base") == own.get("base") and own.get("amount"):
+        return round(float(qty) * float(written["amount"]) / float(own["amount"]), 3), True
+    unit, own_unit = (line.get("unit") or "").strip().lower(), (product.get("unit") or "").strip().lower()
+    return float(qty), not (unit and own_unit and unit != own_unit)
+
+
 def warnings_for(kind: str, draft: dict) -> list[str]:
     """Why a draft can't be approved without a closer look: missing or unclear values, totals that don't add up,
-    duplicates, a new supplier, a line with no product or farm. Phase 2 allows approving from Telegram only without."""
+    duplicates, a new supplier, an unmatched or uncertain product, a unit that doesn't convert, anything the review
+    card would ask a person to choose. Approving from Telegram is offered only when there are none."""
     out = [f"missing:{m}" for m in draft.get("missing") or []] + [f"unclear:{u}" for u in draft.get("unclear") or []]
+    lines = draft.get("lines") or []
     if kind == "expense_receipt":
         problem = reader.lines_vs_total(draft.get("items") or [], draft.get("discount"), draft.get("other_charges"),
                                         draft.get("total")) if draft.get("total") is not None else "no total"
@@ -737,18 +815,29 @@ def warnings_for(kind: str, draft: dict) -> list[str]:
             out.append("totals")
         if draft.get("duplicate"):
             out.append("duplicate")
+        if not draft.get("category_match"):
+            out.append("no_category")
     elif kind == "delivery_note":
         if draft.get("duplicate"):
             out.append("duplicate")
         if draft.get("new_supplier"):
             out.append("new_supplier")
-        if any(not l.get("product") for l in draft.get("lines") or []):
+        if any(not l.get("product") for l in lines):
             out.append("unmatched_product")
+        # A priced note needs the expense category and the amount paid — choices only a person makes.
+        if any(l.get("unit_cost") is not None or l.get("line_total") is not None for l in lines):
+            out.append("priced")
     else:
         if draft.get("duplicates"):
             out.append("duplicate")
-        if any(not l.get("product") or not l.get("farm_id") for l in draft.get("lines") or []):
+        need_farm = kind == "harvest_sheet"
+        if any(not l.get("product") or (need_farm and not l.get("farm_id")) for l in lines):
             out.append("unmatched_line")
+    if kind != "expense_receipt":
+        if any(l.get("product") and l.get("match") == "closest" for l in lines):
+            out.append("closest_match")
+        if any(l.get("product") and not product_qty(l)[1] for l in lines):
+            out.append("unit")
     return out
 
 
@@ -772,7 +861,7 @@ def _num(v) -> str:
         return "?"
 
 
-def summary_text(lang: str, kind: str, draft: dict) -> str:
+def summary_text(lang: str, kind: str, draft: dict, for_worker: bool = True) -> str:
     """What the worker sees: type, farm or vendor, date, the lines and the total — and what is missing or unclear."""
     lines = [t(lang, "summary_head", kind=TEXTS.get(lang, TEXTS["ar"])["kinds"].get(kind, kind))]
     if kind == "expense_receipt":
@@ -782,6 +871,8 @@ def summary_text(lang: str, kind: str, draft: dict) -> str:
         for it in (draft.get("items") or [])[:10]:
             lines.append(f"• {it.get('description') or '?'}: {_num(it.get('line_total'))}")
         lines.append(f"{t(lang, 'total')}: {_num(draft.get('total'))}")
+        if draft.get("payment_method"):
+            lines.append(f"{t(lang, 'payment')}: {draft['payment_method']}")
     elif kind == "delivery_note":
         lines.append(f"{t(lang, 'vendor')}: {draft.get('supplier') or '?'}")
         lines.append(f"{t(lang, 'date')}: {draft.get('date') or '?'}")
@@ -797,10 +888,12 @@ def summary_text(lang: str, kind: str, draft: dict) -> str:
             name = (l.get("product") or {}).get("name") or l.get("product_written") or l.get("product") or "?"
             if isinstance(name, dict):
                 name = name.get("name") or "?"
-            farm = farms.get(l.get("farm_id")) or l.get("farm") or "?"
-            lines.append(f"• {farm} — {name}: {_num(l.get('qty'))} {l.get('unit') or ''}".rstrip())
+            farm = farms.get(l.get("farm_id")) or l.get("farm") or ("" if kind == "spoilage" else "?")
+            lines.append(f"• {farm + ' — ' if farm else ''}{name}: {_num(l.get('qty'))} {l.get('unit') or ''}".rstrip())
         if kind == "spoilage" and draft.get("reason"):
             lines.append(f"({draft['reason']})")
+    if not for_worker:                      # an approver sees the warnings listed separately
+        return "\n".join(lines)
     if draft.get("missing"):
         lines.append(t(lang, "missing", fields=_field_names(lang, draft["missing"])))
     if draft.get("unclear"):
@@ -843,6 +936,9 @@ async def _delete_images(db, doc_key: Optional[str]) -> None:
 async def handle_callback(db, cb: dict) -> None:
     chat_id, data = cb.get("chat_id"), cb.get("data") or ""
     parts = data.split(":")
+    if len(parts) == 3 and parts[0] == "fa" and parts[2].isdigit():
+        await handle_approver_tap(db, cb, parts[1], int(parts[2]))
+        return
     if len(parts) != 3 or parts[0] != "fd" or not parts[2].isdigit():
         await _answer(cb)
         return
@@ -869,6 +965,8 @@ async def handle_callback(db, cb: dict) -> None:
         except tg.TelegramError as exc:
             logger.warning("telegram edit failed: %s", tg.redact(exc))
     await _say(chat_id, reply)
+    if draft.status == "in_review":
+        await notify_approvers(db, draft, chat)
 
 
 async def _answer(cb: dict, text: str = "") -> None:
@@ -943,6 +1041,7 @@ async def confirm(db, reviewer, draft_id: int, data: dict) -> dict:
     record(db, "Telegram", "confirm_draft", f"Field draft #{draft_id} ({draft.kind}) confirmed → {refs}",
            user=reviewer, ref_type="field_draft", ref_id=draft_id)
     await db.commit()
+    await _close_notices(db, draft_id, "ap_done_ok", name=reviewer.name, refs=refs)
     if chat is not None:
         lang = chat.language or "ar"
         await _say(chat.chat_id, t(lang, "confirmed", kind=TEXTS.get(lang, TEXTS["ar"])["kinds"].get(draft.kind, draft.kind),
@@ -976,6 +1075,7 @@ async def reject(db, reviewer, draft_id: int, reason: str) -> dict:
     record(db, "Telegram", "reject_draft", f"Field draft #{draft_id} ({draft.kind}) rejected: {reason}",
            user=reviewer, ref_type="field_draft", ref_id=draft_id)
     await db.commit()
+    await _close_notices(db, draft_id, "ap_done_no", name=reviewer.name, reason=reason)
     if chat is not None:
         lang = chat.language or "ar"
         await _say(chat.chat_id, t(lang, "rejected", kind=TEXTS.get(lang, TEXTS["ar"])["kinds"].get(draft.kind, draft.kind),
@@ -1027,6 +1127,193 @@ async def get_draft(db, draft_id: int) -> dict:
             "source_text": draft.source_text, "worker_note": draft.worker_note,
             "warnings": json.loads(draft.warnings or "[]"),
             "sent_at": _aware(draft.sent_for_review_at or draft.created_at).isoformat()}
+
+
+# ── Phase 2: managers approve from Telegram ──────────────────────────────────
+
+async def _approver_user(db, chat: TelegramChat):
+    """The AZed login behind an approver chat, when it is active."""
+    from app.models.user import User
+    if not chat.user_id:
+        return None
+    user = (await db.execute(select(User).where(User.id == chat.user_id))).scalar_one_or_none()
+    return user if user is not None and user.is_active else None
+
+
+def may_approve(user, kind: str, sender_chat: Optional[TelegramChat]) -> bool:
+    """The same rules as the Field inbox: the inbox, the review action, the record's own permissions, not one's own."""
+    if user is None or kind not in reader.KINDS:
+        return False
+    perms = ("page_field_inbox", "action_field_drafts_review") + tuple(reader.KINDS[kind]["permissions"])
+    if not all(has_permission(user, p) for p in perms):
+        return False
+    return not (is_own(user, sender_chat) and user.role != "admin")
+
+
+def _warning_text(lang: str, warnings: list[str]) -> str:
+    names = TEXTS.get(lang, TEXTS["ar"])["warn_names"]
+    shown = []
+    for w in warnings:
+        key, _, field_ = w.partition(":")
+        label = names.get(key, key)
+        if field_:
+            label = f"{label}: {_field_names(lang, [field_])}"
+        if label not in shown:
+            shown.append(label)
+    return "، ".join(shown) if lang == "ar" else ", ".join(shown)
+
+
+def approver_text(lang: str, draft: FieldDraft, body: dict, sender: str, warnings: list[str], choices: dict) -> str:
+    kinds = TEXTS.get(lang, TEXTS["ar"])["kinds"]
+    out = [t(lang, "ap_head", id=draft.id, kind=kinds.get(draft.kind, draft.kind)), t(lang, "ap_from", name=sender)]
+    out += summary_text(lang, draft.kind, {**body, **choices}, for_worker=False).split("\n")[1:]   # without the heading
+    if draft.source_text:
+        out.append(t(lang, "ap_text", text=draft.source_text[:500]))
+    if draft.worker_note:
+        out.append(t(lang, "ap_note", text=draft.worker_note[:500]))
+    out.append(t(lang, "ap_needs", what=_warning_text(lang, warnings)) if warnings else t(lang, "ap_clean"))
+    return "\n".join(out)
+
+
+def _open_link(draft_id: int) -> Optional[str]:
+    base = (settings.PUBLIC_BASE_URL or "").rstrip("/")
+    return f"{base}/field-inbox/?draft={draft_id}" if base.startswith("https://") else None
+
+
+async def notify_approvers(db, draft: FieldDraft, sender_chat: Optional[TelegramChat]) -> int:
+    """Send a draft just sent for review to every chat the admin chose as an approver and whose AZed login may
+    review it. With no warnings it can be approved right there; otherwise only rejected, or opened in AZed."""
+    try:
+        chats = (await db.execute(select(TelegramChat).where(TelegramChat.approver.is_(True),
+                                                             TelegramChat.is_active.is_(True)))).scalars().all()
+    except Exception:                       # the phase 2 columns missing must not break phase 1
+        logger.exception("field bot: approvers not loaded")
+        return 0
+    body = json.loads(draft.draft_json or "{}")
+    warnings = warnings_for(draft.kind, body)
+    sender = await _person_name(db, sender_chat) if sender_chat else "—"
+    files = body.get("_tg_files") or []
+    choices = await reader._choices(db)          # farm names for the summary
+    notices = []
+    for chat in chats:
+        if not await _still_active(db, chat) or not may_approve(await _approver_user(db, chat), draft.kind, sender_chat):
+            continue
+        lang = chat.language or "ar"
+        approve = [] if warnings else [{"text": t(lang, "ap_ok"), "callback_data": f"fa:ok:{draft.id}"}]
+        rows = [approve + [{"text": t(lang, "ap_no"), "callback_data": f"fa:no:{draft.id}"}]]
+        link = _open_link(draft.id)
+        if link:
+            rows.append([{"text": t(lang, "ap_open"), "url": link}])
+        if files:
+            try:
+                await tg.send_files(chat.chat_id, files)
+            except tg.TelegramError as exc:
+                logger.warning("telegram files to approver failed: %s", tg.redact(exc))
+        message_id = await _say(chat.chat_id, approver_text(lang, draft, body, sender, warnings, choices), buttons=rows)
+        if message_id:
+            notices.append([chat.chat_id, message_id])
+    if notices:
+        await db.execute(update(FieldDraft).where(FieldDraft.id == draft.id).values(notices=json.dumps(notices))
+                         .execution_options(synchronize_session=False))
+        await db.commit()
+    return len(notices)
+
+
+async def _close_notices(db, draft_id: int, key: str, **kw) -> None:
+    """Once a draft is decided — here or in AZed — every approval message about it says so and loses its buttons."""
+    try:
+        raw = (await db.execute(select(FieldDraft.notices).where(FieldDraft.id == draft_id))).scalar()
+    except Exception:
+        return
+    for chat_id, message_id in json.loads(raw or "[]"):
+        lang = (await db.execute(select(TelegramChat.language).where(TelegramChat.chat_id == chat_id))).scalar() or "ar"
+        try:
+            await tg.edit_text(chat_id, message_id, t(lang, key, id=draft_id, **kw))
+        except tg.TelegramError as exc:
+            logger.warning("telegram edit failed: %s", tg.redact(exc))
+
+
+def approve_data(kind: str, body: dict) -> dict:
+    """What the review card would send for a draft with nothing left to decide."""
+    lines = body.get("lines") or []
+    if kind == "expense_receipt":
+        farm = body.get("farm_match")
+        return {"vendor": body.get("vendor"), "date": body.get("date"), "receipt_number": body.get("receipt_number"),
+                "payment_method": body.get("payment_method") or "cash", "total": body.get("total"),
+                "discount": body.get("discount") or 0, "other_charges": body.get("other_charges") or 0,
+                "items": body.get("items") or [], "category_id": (body.get("category_match") or {}).get("id"),
+                "farm": "animals" if farm == "animals" else ((farm or {}).get("id") if isinstance(farm, dict) else None),
+                "split": False}
+    if kind == "delivery_note":
+        return {"date": body.get("date"), "document_number": body.get("document_number"),
+                "supplier_id": (body.get("supplier_match") or {}).get("id"), "new_supplier": None,
+                "items": [{"product_id": l["product"]["id"], "qty": product_qty(l)[0], "unit_cost": None} for l in lines],
+                "total": None, "discount": 0, "other_charges": 0, "amount_paid": None}
+    written = lambda l: " · ".join(str(x) for x in (l.get("farm"), l.get("product_written"), l.get("qty"), l.get("unit"))
+                                   if x not in (None, ""))
+    if kind == "harvest_sheet":
+        return {"date": body.get("date"), "received_by": body.get("received_by") or "", "notes": "",
+                "items": [{"farm_id": l.get("farm_id"), "product_id": l["product"]["id"], "qty": product_qty(l)[0],
+                           "written": written(l)} for l in lines]}
+    return {"date": body.get("date"), "reason": body.get("reason"),
+            "items": [{"product_id": l["product"]["id"], "qty": product_qty(l)[0], "farm_id": l.get("farm_id"),
+                       "written": written(l)} for l in lines]}
+
+
+async def _approver_chat(db, chat_id: int) -> tuple[Optional[TelegramChat], Any]:
+    chat = await _linked_chat(db, chat_id) if chat_id else None
+    if chat is None or not chat.approver:
+        return chat, None
+    return chat, await _approver_user(db, chat)
+
+
+async def handle_approver_tap(db, cb: dict, action: str, draft_id: int) -> None:
+    chat, user = await _approver_chat(db, cb.get("chat_id"))
+    lang = (chat.language if chat else None) or "ar"
+    draft = (await db.execute(select(FieldDraft).where(FieldDraft.id == draft_id))).scalar_one_or_none()
+    if draft is None or draft.status != "in_review":
+        await _answer(cb, t(lang, "not_yours"))
+        return
+    sender_chat = (await db.execute(select(TelegramChat).where(TelegramChat.chat_id == draft.chat_id))).scalar_one_or_none()
+    if user is None or not may_approve(user, draft.kind, sender_chat):
+        await _answer(cb, t(lang, "ap_not_allowed"))
+        return
+    if action == "no":
+        chat.pending_reject_id = draft_id
+        await db.commit()
+        await _answer(cb)
+        await _say(chat.chat_id, t(lang, "ap_reason"))
+        return
+    if action != "ok":
+        await _answer(cb)
+        return
+    body = json.loads(draft.draft_json or "{}")
+    if warnings_for(draft.kind, body):                       # checked again: only a clean draft is approved here
+        await _answer(cb, t(lang, "ap_has_warnings"))
+        return
+    await _answer(cb)
+    chat_id = chat.chat_id                    # read now: a failed recording rolls back and expires the row
+    try:
+        await confirm(db, user, draft_id, approve_data(draft.kind, body))
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else (exc.detail or {}).get("message", "error")
+        await _say(chat_id, t(lang, "ap_failed", id=draft_id, detail=str(detail)[:300]))
+
+
+async def _rejection_reason(db, chat: TelegramChat, text: str) -> None:
+    lang, draft_id, chat_id = chat.language or "ar", chat.pending_reject_id, chat.chat_id
+    chat.pending_reject_id = None
+    await db.commit()
+    if text.strip().lower() == "/cancel":
+        await _say(chat_id, t(lang, "ap_reason_cancel"))
+        return
+    user = await _approver_user(db, chat) if chat.approver else None
+    try:
+        if user is None:
+            raise HTTPException(status_code=403, detail=t(lang, "ap_not_allowed"))
+        await reject(db, user, draft_id, text)
+    except HTTPException as exc:
+        await _say(chat_id, t(lang, "ap_failed", id=draft_id, detail=str(exc.detail)[:300]))
 
 
 # ── Sweep: retries, retention, tidy-up — every 30 s in each worker ───────────
