@@ -17,22 +17,14 @@ router = APIRouter(prefix="/audit-log", tags=["Audit Log"])
 
 # ── Data API ──────────────────────────────────────────────────────────────────
 
-@router.get("/data")
-async def audit_log_data(
-    module:     Optional[str] = None,
-    action:     Optional[str] = None,
-    user_name:  Optional[str] = None,
-    date_from:  Optional[date] = None,
-    date_to:    Optional[date] = None,
-    search:     Optional[str] = None,
-    page:       int = Query(1, ge=1),
-    page_size:  int = Query(50, ge=1, le=500),
-    db:         AsyncSession = Depends(get_async_session),
-    _=Depends(require_admin),
-):
+def activity_conditions(*, module=None, action=None, user_name=None, date_from=None, date_to=None, search=None) -> list:
+    """The filters of the activity log — shared by this page and Ask's activity_log lookup, so both show the same
+    rows. ``action`` may be one action or a list of them."""
     conditions = []
     if module:    conditions.append(ActivityLog.module    == module)
-    if action:    conditions.append(ActivityLog.action    == action)
+    if action:
+        conditions.append(ActivityLog.action.in_(action) if isinstance(action, (list, tuple, set))
+                          else ActivityLog.action == action)
     if user_name: conditions.append(ActivityLog.user_name == user_name)
     if date_from:
         start_utc, _ = utc_bounds(date_from, date_from)
@@ -47,6 +39,24 @@ async def audit_log_data(
             ActivityLog.user_name.ilike(like),
             ActivityLog.ref_id.ilike(like),
         ))
+    return conditions
+
+
+@router.get("/data")
+async def audit_log_data(
+    module:     Optional[str] = None,
+    action:     Optional[str] = None,
+    user_name:  Optional[str] = None,
+    date_from:  Optional[date] = None,
+    date_to:    Optional[date] = None,
+    search:     Optional[str] = None,
+    page:       int = Query(1, ge=1),
+    page_size:  int = Query(50, ge=1, le=500),
+    db:         AsyncSession = Depends(get_async_session),
+    _=Depends(require_admin),
+):
+    conditions = activity_conditions(module=module, action=action, user_name=user_name, date_from=date_from,
+                                     date_to=date_to, search=search)
 
     cnt_result = await db.execute(
         select(func.count()).select_from(ActivityLog).where(*conditions)
