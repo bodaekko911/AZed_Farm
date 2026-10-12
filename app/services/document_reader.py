@@ -56,11 +56,16 @@ KINDS = {
     "delivery_note": {"label": "Supplier delivery note",
                       "permissions": ("page_receive_products", "action_receive_products_create")},
     "harvest_sheet": {"label": "Harvest sheet", "permissions": ("page_farm", "action_farm_delivery_create")},
+    # From a worker's text message on the field bot ("تالف ٣ كيلو خيار"), never read from an image.
+    "spoilage": {"label": "Spoilage", "permissions": ("page_production", "action_production_log_spoilage"),
+                 "text_only": True},
 }
+DOCUMENT_KINDS = tuple(k for k, v in KINDS.items() if not v.get("text_only"))
 
 
 def allowed_kinds(user) -> list[str]:
-    return [k for k, v in KINDS.items() if all(has_permission(user, p) for p in v["permissions"])]
+    """The document types ``user`` may read and record (spoilage, which only comes from text, is not one)."""
+    return [k for k in DOCUMENT_KINDS if all(has_permission(user, p) for p in KINDS[k]["permissions"])]
 
 
 def need_kind(user, kind: str) -> None:
@@ -169,6 +174,46 @@ def store_document(db, user, kind: str, blobs: list[bytes], hashes: list[str], f
     for ref_type, ref_id in links:
         db.add(DocumentLink(doc_key=key, ref_type=ref_type, ref_id=ref_id))
     return key
+
+
+class Evidence:
+    """What a recorded document is backed by. ``attach`` adds it to the session with links to the records made
+    (the caller commits with them) and returns the document key, or None."""
+
+    count = 0
+
+    def attach(self, db, user, kind: str, links: list[tuple[str, int]]) -> Optional[str]:
+        raise NotImplementedError
+
+
+class NewImages(Evidence):
+    """Images sent with a web upload — checked against the proof given when they were read."""
+
+    def __init__(self, blobs: list[bytes], hashes: list[str], filename: Optional[str]):
+        self.blobs, self.hashes, self.filename, self.count = blobs, hashes, filename, len(blobs)
+
+    def attach(self, db, user, kind, links):
+        return store_document(db, user, kind, self.blobs, self.hashes, self.filename, links)
+
+
+class StoredDocument(Evidence):
+    """A field draft's images, already stored when the worker sent them: only the links are added."""
+
+    def __init__(self, doc_key: Optional[str], count: int):
+        self.doc_key, self.count = doc_key, count
+
+    def attach(self, db, user, kind, links):
+        if not self.doc_key:
+            return None
+        from app.models.document import DocumentLink
+        for ref_type, ref_id in links:
+            db.add(DocumentLink(doc_key=self.doc_key, ref_type=ref_type, ref_id=ref_id))
+        return self.doc_key
+
+
+def _web_evidence(user, kind: str, data: dict) -> NewImages:
+    blobs, hashes = check_images(user, kind, data.get("images") or [], data.get("proof"))
+    return NewImages(blobs, hashes, _text(data.get("filename"), 150))
 
 
 # ── Reading ──────────────────────────────────────────────────────────────────
@@ -345,6 +390,21 @@ async def read(db, user, kind: str, images: list[str], transport=None) -> tuple[
         kinds = [kind]
     blobs = image_bytes(images)
     hashes = [hashlib.sha256(b).hexdigest() for b in blobs]
+    del blobs
+    draft, usage = await read_core(db, kinds, images, transport=transport)
+    if draft.get("not_this_kind"):
+        draft["kind"] = kind
+        return draft, usage
+    draft["proof"] = proof_for(user, draft["kind"], hashes)
+    return draft, usage
+
+
+async def read_core(db, kinds: list[str], images: list[str], transport=None) -> tuple[dict, dict]:
+    """Read ``images`` as one of ``kinds`` — the caller has already checked who may read them (the web user, or a
+    linked Telegram chat's allowed types). Returns the draft and token usage; nothing is written."""
+    kinds = [k for k in kinds if k in DOCUMENT_KINDS]
+    if not kinds:
+        raise HTTPException(status_code=403, detail="No document type allowed.")
     choices = await _choices(db)
     if "harvest_sheet" in kinds:
         choices["product_names"] = await _product_names(db)
@@ -353,14 +413,14 @@ async def read(db, user, kind: str, images: list[str], transport=None) -> tuple[
     found = raw.get("type") if isinstance(raw, dict) else None
     detected = found if len(kinds) > 1 else kinds[0]
     if detected not in kinds or found == "other":
-        return {"not_this_kind": True, "kind": kind, "pages": len(images)}, usage
+        return {"not_this_kind": True, "kind": kinds[0] if len(kinds) == 1 else "auto", "pages": len(images)}, usage
     if detected == "expense_receipt":
         draft = await match_expense(db, parse_expense(raw), choices)
     elif detected == "delivery_note":
         draft = await match_delivery(db, parse_delivery(raw))
     else:
         draft = await match_harvest(db, parse_harvest(raw), choices)
-    draft.update({"kind": detected, "proof": proof_for(user, detected, hashes), "pages": len(images), **choices})
+    draft.update({"kind": detected, "pages": len(images), **choices})
     return draft, usage
 
 
@@ -500,12 +560,14 @@ async def delivery_duplicate(db, supplier_id: Optional[int], number: Optional[st
 
 
 async def search(db, user, kind: str, q: str) -> list[dict]:
-    """Suppliers (delivery notes) or products (delivery notes and harvest sheets) for the review pickers — only for
+    """Suppliers (delivery notes) or products (delivery notes, harvest sheets, spoilage) for the review pickers — only for
     someone who may record a document that uses them."""
     from app.models.product import Product
     from app.models.supplier import Supplier
     from app.services.assistant_actions import _product_out
-    if kind == "suppliers" or "harvest_sheet" not in allowed_kinds(user):
+    may_products = "harvest_sheet" in allowed_kinds(user) or all(
+        has_permission(user, p) for p in KINDS["spoilage"]["permissions"])
+    if kind == "suppliers" or not may_products:
         need_kind(user, "delivery_note")
     q = (q or "").strip()[:80]
     if len(q) < 2:
@@ -562,6 +624,12 @@ def _describe(receipt_number: Optional[str], items: list[dict]) -> Optional[str]
 
 
 async def record_expense(db, user, data: dict) -> dict:
+    """The web upload path: the images come with the request and must be the ones that were read."""
+    need_kind(user, "expense_receipt")
+    return await record_expense_with(db, user, data, _web_evidence(user, "expense_receipt", data))
+
+
+async def record_expense_with(db, user, data: dict, evidence: Evidence) -> dict:
     """Confirm a reviewed receipt: one expense of the printed total, or one per category when split."""
     from app.models.expense import ExpenseCategory
     from app.models.farm import Farm
@@ -570,7 +638,6 @@ async def record_expense(db, user, data: dict) -> dict:
 
     kind = "expense_receipt"
     need_kind(user, kind)
-    blobs, hashes = check_images(user, kind, data.get("images") or [], data.get("proof"))
 
     try:
         total = _money(data.get("total"))
@@ -641,11 +708,10 @@ async def record_expense(db, user, data: dict) -> dict:
         out = await create_expense_entry(db, payload, user, commit=False)
         created.append(out)
 
-    key = store_document(db, user, kind, blobs, hashes, _text(data.get("filename"), 150),
-                         [("expense", c["id"]) for c in created])
+    key = evidence.attach(db, user, kind, [("expense", c["id"]) for c in created])
     record(db, "Assistant", "record_document",
            f"Expense receipt read by Ask → {', '.join(c['ref_number'] for c in created)} — {total:,.2f}"
-           + (f" from {vendor}" if vendor else "") + f" ({len(blobs)} image(s) kept)",
+           + (f" from {vendor}" if vendor else "") + f" ({evidence.count} image(s) kept)",
            user=user, ref_type="document", ref_id=None)
     await db.commit()
     return {"ok": True, "doc_key": key, "total": float(total),
@@ -678,6 +744,12 @@ async def _supplier_for(db, user, new: dict) -> int:
 
 
 async def record_delivery(db, user, data: dict) -> dict:
+    """The web upload path: the images come with the request and must be the ones that were read."""
+    need_kind(user, "delivery_note")
+    return await record_delivery_with(db, user, data, _web_evidence(user, "delivery_note", data))
+
+
+async def record_delivery_with(db, user, data: dict, evidence: Evidence) -> dict:
     """Confirm a reviewed delivery note: received through the same code as the Receive page — stock, cost, the
     supplier's balance and the journals move exactly as if it were entered there — with its images kept."""
     from app.models.expense import ExpenseCategory
@@ -688,7 +760,6 @@ async def record_delivery(db, user, data: dict) -> dict:
 
     kind = "delivery_note"
     need_kind(user, kind)
-    blobs, hashes = check_images(user, kind, data.get("images") or [], data.get("proof"))
 
     day = _day(data.get("date"))
     if not day:
@@ -781,12 +852,11 @@ async def record_delivery(db, user, data: dict) -> dict:
         confirm_cost=bool(data.get("confirm_cost")),
         items=[BatchReceiptItem(product_id=it["product_id"], qty=it["qty"], unit_cost=it["unit_cost"]) for it in items])
     out = await create_receipt_batch(db, batch, user, commit=False)        # raises 409 "cost_check" before writing
-    key = store_document(db, user, kind, blobs, hashes, _text(data.get("filename"), 150),
-                         [("product_receipt", r["id"]) for r in out["receipts"]])
+    key = evidence.attach(db, user, kind, [("product_receipt", r["id"]) for r in out["receipts"]])
     record(db, "Assistant", "record_document",
            f"Delivery note read by Ask → {', '.join(r['ref_number'] for r in out['receipts'])}"
            + (f" — {out['total_cost']:,.2f}" if priced else " (quantities only)")
-           + (f", doc {number_}" if number_ else "") + f" ({len(blobs)} image(s) kept)",
+           + (f", doc {number_}" if number_ else "") + f" ({evidence.count} image(s) kept)",
            user=user, ref_type="document", ref_id=None)
     await db.commit()
     return {"ok": True, "doc_key": key, "count": out["count"], "total_cost": out["total_cost"],
@@ -852,7 +922,7 @@ async def match_harvest(db, draft: dict, choices: dict) -> dict:
         found = best_matches(without_size(it["product"]), products, lambda p: without_size(p.name), limit=4, floor=0.5)
         if product is None and found:
             product, match = found[0][1], ("name" if found[0][0] >= 0.85 else "closest")
-        lines.append({**it, "farm_id": farm["id"] if farm else None,
+        lines.append({**it, "product_written": it["product"], "farm_id": farm["id"] if farm else None,
                       "product": _product_out(product) if product else None, "match": match,
                       "pack": pack_of("1" + it["unit"]) if it.get("unit") else None,
                       "candidates": [_product_out(p) for _s, p in found if p is not product][:3]})
@@ -891,6 +961,12 @@ async def harvest_duplicates(db, day: Optional[str], pairs: list[tuple]) -> list
 
 
 async def record_harvest(db, user, data: dict) -> dict:
+    """The web upload path: the images come with the request and must be the ones that were read."""
+    need_kind(user, "harvest_sheet")
+    return await record_harvest_with(db, user, data, _web_evidence(user, "harvest_sheet", data))
+
+
+async def record_harvest_with(db, user, data: dict, evidence: Evidence) -> dict:
     """Confirm a reviewed harvest sheet: one farm delivery per farm on the sheet, through the same code the farm page
     and the delivery action use — stock goes up, the delivery is logged — with the sheet's image kept."""
     from app.models.farm import Farm
@@ -899,7 +975,6 @@ async def record_harvest(db, user, data: dict) -> dict:
 
     kind = "harvest_sheet"
     need_kind(user, kind)
-    blobs, hashes = check_images(user, kind, data.get("images") or [], data.get("proof"))
     day = _day(data.get("date"))
     if not day:
         raise HTTPException(status_code=400, detail="Enter the sheet's date.")
@@ -940,12 +1015,54 @@ async def record_harvest(db, user, data: dict) -> dict:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         deliveries.append((delivery, farms[fid].name, len(items)))
-    key = store_document(db, user, kind, blobs, hashes, _text(data.get("filename"), 150),
-                         [("farm_delivery", d.id) for d, _n, _c in deliveries])
+    key = evidence.attach(db, user, kind, [("farm_delivery", d.id) for d, _n, _c in deliveries])
     record(db, "Assistant", "record_document",
            f"Harvest sheet read by Ask → {', '.join(d.delivery_number for d, _n, _c in deliveries)} ({day}, "
-           f"{len(blobs)} image(s) kept)", user=user, ref_type="document", ref_id=None)
+           f"{evidence.count} image(s) kept)", user=user, ref_type="document", ref_id=None)
     await db.commit()
     return {"ok": True, "doc_key": key, "date": day,
             "deliveries": [{"id": d.id, "delivery_number": d.delivery_number, "farm": name, "lines": count}
                            for d, name, count in deliveries]}
+
+
+async def record_spoilage_with(db, user, data: dict, evidence: Evidence) -> dict:
+    """Confirm a reviewed spoilage draft: one spoilage record per line, through the Production page's own code (stock
+    out, the loss journal, the carbon log), with the same stock check."""
+    from app.models.farm import Farm
+    from app.models.product import Product
+    from app.routers.production import SpoilageCreate, create_spoilage
+
+    need_kind(user, "spoilage")
+    day = _day(data.get("date"))
+    if not day:
+        raise HTTPException(status_code=400, detail="Enter the date of the spoilage.")
+    if date.fromisoformat(day) > today_local():
+        raise HTTPException(status_code=400, detail="The date is in the future.")
+    raw = [it for it in (data.get("items") or []) if isinstance(it, dict)][:30]
+    if not raw:
+        raise HTTPException(status_code=400, detail="There are no lines to record.")
+    lines = []
+    for n, it in enumerate(raw, start=1):
+        pid = int(it["product_id"]) if str(it.get("product_id") or "").isdigit() else None
+        product = (await db.execute(select(Product).where(Product.id == pid))).scalar_one_or_none() if pid else None
+        if product is None:
+            raise HTTPException(status_code=400, detail=f"Line {n}: pick the product.")
+        qty = number(it.get("qty"))
+        if qty is None or qty <= 0:
+            raise HTTPException(status_code=400, detail=f"Line {n}: the quantity must be above 0.")
+        if qty > float(product.stock or 0) + 1e-9:
+            raise HTTPException(status_code=400, detail=f"Line {n}: only {float(product.stock or 0):g} "
+                                                        f"{product.unit or ''} of {product.name} is in stock.")
+        fid = int(it["farm_id"]) if str(it.get("farm_id") or "").isdigit() else None
+        if fid and not (await db.execute(select(Farm.id).where(Farm.id == fid))).scalar():
+            raise HTTPException(status_code=400, detail=f"Line {n}: that farm doesn't exist.")
+        lines.append((product, round(qty, 3), fid, _text(it.get("written"), 200)))
+    reason = _text(data.get("reason"), 200)
+    out = []
+    for product, qty, fid, written in lines:
+        result = await create_spoilage(SpoilageCreate(
+            product_id=product.id, qty=qty, spoilage_date=day, reason=reason, farm_id=fid,
+            notes="From the field bot" + (f": {written}" if written else "")), db, current_user=user)
+        out.append(result)
+    return {"ok": True, "doc_key": None, "date": day,
+            "spoilage": [{"ref_number": r["ref_number"], "product": r["product"], "qty": r["qty"]} for r in out]}

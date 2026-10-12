@@ -388,6 +388,99 @@ async def ensure_document_files_tables() -> None:
         logger.exception("ensure_document_files_tables: failed (could not open DB session)")
 
 
+async def ensure_telegram_tables() -> None:
+    """Self-healing guard for the Telegram field bot's tables. Mirrors migration
+    20261012_0051 so the bot works even if alembic is blocked. Idempotent."""
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal
+
+    statements = [
+        "CREATE TABLE IF NOT EXISTS telegram_chats ("
+        " id SERIAL PRIMARY KEY,"
+        " chat_id BIGINT NOT NULL,"
+        " username VARCHAR(64),"
+        " employee_id INTEGER REFERENCES employees(id),"
+        " user_id INTEGER REFERENCES users(id),"
+        " allowed_kinds VARCHAR(200) NOT NULL DEFAULT '',"
+        " daily_limit INTEGER NOT NULL DEFAULT 30,"
+        " language VARCHAR(2) NOT NULL DEFAULT 'ar',"
+        " is_active BOOLEAN NOT NULL DEFAULT TRUE,"
+        " linked_by_id INTEGER REFERENCES users(id),"
+        " linked_at TIMESTAMPTZ DEFAULT now())",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_telegram_chats_chat_id ON telegram_chats (chat_id)",
+        "CREATE INDEX IF NOT EXISTS ix_telegram_chats_employee_id ON telegram_chats (employee_id)",
+        "CREATE INDEX IF NOT EXISTS ix_telegram_chats_user_id ON telegram_chats (user_id)",
+        "CREATE TABLE IF NOT EXISTS telegram_link_codes ("
+        " id SERIAL PRIMARY KEY,"
+        " code_hash VARCHAR(64) NOT NULL,"
+        " employee_id INTEGER REFERENCES employees(id),"
+        " user_id INTEGER REFERENCES users(id),"
+        " allowed_kinds VARCHAR(200) NOT NULL DEFAULT '',"
+        " daily_limit INTEGER NOT NULL DEFAULT 30,"
+        " language VARCHAR(2) NOT NULL DEFAULT 'ar',"
+        " expires_at TIMESTAMPTZ NOT NULL,"
+        " used_at TIMESTAMPTZ,"
+        " used_by_chat_id BIGINT,"
+        " created_by_id INTEGER REFERENCES users(id),"
+        " created_at TIMESTAMPTZ DEFAULT now())",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_telegram_link_codes_code_hash ON telegram_link_codes (code_hash)",
+        "CREATE TABLE IF NOT EXISTS telegram_chat_guard ("
+        " chat_id BIGINT PRIMARY KEY,"
+        " day DATE NOT NULL,"
+        " wrong_codes INTEGER NOT NULL DEFAULT 0,"
+        " told_unlinked BOOLEAN NOT NULL DEFAULT FALSE)",
+        "CREATE TABLE IF NOT EXISTS telegram_updates ("
+        " update_id BIGINT PRIMARY KEY,"
+        " chat_id BIGINT,"
+        " media_group_id VARCHAR(64),"
+        " status VARCHAR(12) NOT NULL DEFAULT 'pending',"
+        " claim VARCHAR(32),"
+        " attempts INTEGER NOT NULL DEFAULT 0,"
+        " payload TEXT,"
+        " received_at TIMESTAMPTZ DEFAULT now(),"
+        " claimed_at TIMESTAMPTZ)",
+        "CREATE INDEX IF NOT EXISTS ix_telegram_updates_chat_id ON telegram_updates (chat_id)",
+        "CREATE INDEX IF NOT EXISTS ix_telegram_updates_media_group_id ON telegram_updates (media_group_id)",
+        "CREATE INDEX IF NOT EXISTS ix_telegram_updates_status ON telegram_updates (status)",
+        "CREATE INDEX IF NOT EXISTS ix_telegram_updates_claim ON telegram_updates (claim)",
+        "CREATE INDEX IF NOT EXISTS ix_telegram_updates_received_at ON telegram_updates (received_at)",
+        "CREATE TABLE IF NOT EXISTS field_drafts ("
+        " id SERIAL PRIMARY KEY,"
+        " chat_id BIGINT NOT NULL,"
+        " kind VARCHAR(30) NOT NULL,"
+        " status VARCHAR(20) NOT NULL DEFAULT 'awaiting_worker',"
+        " draft_json TEXT NOT NULL,"
+        " doc_key VARCHAR(36),"
+        " source_text TEXT,"
+        " worker_note TEXT,"
+        " warnings TEXT,"
+        " model_call BOOLEAN NOT NULL DEFAULT TRUE,"
+        " bot_message_id BIGINT,"
+        " created_at TIMESTAMPTZ DEFAULT now(),"
+        " sent_for_review_at TIMESTAMPTZ,"
+        " reviewed_by_id INTEGER REFERENCES users(id),"
+        " reviewed_at TIMESTAMPTZ,"
+        " reject_reason VARCHAR(300),"
+        " result_refs VARCHAR(300),"
+        " images_deleted_at TIMESTAMPTZ)",
+        "CREATE INDEX IF NOT EXISTS ix_field_drafts_chat_id ON field_drafts (chat_id)",
+        "CREATE INDEX IF NOT EXISTS ix_field_drafts_status ON field_drafts (status)",
+        "CREATE INDEX IF NOT EXISTS ix_field_drafts_doc_key ON field_drafts (doc_key)",
+        "CREATE INDEX IF NOT EXISTS ix_field_drafts_created_at ON field_drafts (created_at)",
+    ]
+    try:
+        async with AsyncSessionLocal() as db:
+            for stmt in statements:
+                try:
+                    await db.execute(text(stmt))
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("ensure_telegram_tables: statement failed: %s", stmt)
+    except Exception:
+        logger.exception("ensure_telegram_tables: failed (could not open DB session)")
+
+
 async def ensure_carbon_methodology() -> None:
     """Self-healing guard for the carbon module's methodology upgrade.
 
@@ -709,6 +802,7 @@ async def lifespan(_: FastAPI):
     await ensure_carbon_methodology()
     await ensure_weekly_brief_table()
     await ensure_document_files_tables()
+    await ensure_telegram_tables()
     await sync_livestock_emissions_on_boot()
     await seed_chart_of_accounts()
     from app.core.cache import init_redis_pool, close_redis_pool
@@ -721,9 +815,18 @@ async def lifespan(_: FastAPI):
         brief_task = weekly_brief_service.start_loop()
     except Exception:  # noqa: BLE001  never block startup on e-mail
         logger.exception("Weekly brief loop not started")
+    # The Telegram field bot's sweep: every 30 s, in this process — retries, album hand-off, retention.
+    field_task = None
+    try:
+        from app.services import field_service
+        field_task = field_service.start_loop()
+    except Exception:  # noqa: BLE001  never block startup on the bot
+        logger.exception("Field bot loop not started")
     yield
     if brief_task is not None:
         brief_task.cancel()
+    if field_task is not None:
+        field_task.cancel()
     await close_redis_pool()
 
 

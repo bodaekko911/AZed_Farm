@@ -1105,6 +1105,9 @@ async def edit_employee(emp_id: int, data: EmployeeUpdate, db: AsyncSession = De
         payload["salary_days_basis"] = basis
     for k, v in payload.items():
         setattr(e, k, v)
+    if payload.get("is_active") is False:
+        from app.services.field_service import deactivate_linked
+        await deactivate_linked(db, employee_id=emp_id)      # their Telegram chat stops at once
     record(db, "HR", "edit_employee",
            f"Edited employee: {e.name}",
            ref_type="employee", ref_id=emp_id)
@@ -1118,6 +1121,8 @@ async def deactivate_employee(emp_id: int, db: AsyncSession = Depends(get_async_
     if not e:
         raise HTTPException(status_code=404, detail="Employee not found")
     e.is_active = False
+    from app.services.field_service import deactivate_linked
+    await deactivate_linked(db, employee_id=emp_id)          # their Telegram chat stops at once
     record(db, "HR", "deactivate_employee",
            f"Deactivated employee: {e.name}",
            ref_type="employee", ref_id=emp_id)

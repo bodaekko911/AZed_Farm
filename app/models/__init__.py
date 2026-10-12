@@ -4,6 +4,7 @@ from app.models.animal import AnimalGroup, FeedingLog, MortalityLog
 from app.models.receipt import ProductReceipt
 from app.models.brief import WeeklyBriefSettings
 from app.models.document import DocumentFile, DocumentLink
+from app.models.telegram import FieldDraft, TelegramChat, TelegramChatGuard, TelegramLinkCode, TelegramUpdate
 from app.models.b2b import (
     B2BClient,
     B2BClientPrice,
@@ -52,6 +53,11 @@ __all__ = [
     "WeeklyBriefSettings",
     "DocumentFile",
     "DocumentLink",
+    "FieldDraft",
+    "TelegramChat",
+    "TelegramChatGuard",
+    "TelegramLinkCode",
+    "TelegramUpdate",
     "Account",
     "ActivityLog",
     "AnimalGroup",

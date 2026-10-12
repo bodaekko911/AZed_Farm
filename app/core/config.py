@@ -116,6 +116,16 @@ class BaseAppSettings(BaseSettings):
     SMTP_SECURITY: str = "starttls"
     WEEKLY_BRIEF_LOOP: bool = True
 
+    # Telegram field bot (workers send photos and short texts; each becomes a draft a manager reviews).
+    # Set as environment variables only. The webhook secret is the X-Telegram-Bot-Api-Secret-Token Telegram sends back.
+    TELEGRAM_BOT_TOKEN: str | None = None
+    TELEGRAM_WEBHOOK_SECRET: str | None = None
+    # The app's public https address, for the webhook and "Open in AZed" links; taken from the admin's request if empty.
+    PUBLIC_BASE_URL: str | None = None
+    # Model that turns voice notes into text (phase 3). Empty = voice notes are answered "not supported yet".
+    ASSISTANT_TRANSCRIBE_MODEL: str | None = None
+    TELEGRAM_LOOP: bool = True
+
     model_config = CONFIG_MODEL
 
     @model_validator(mode="before")

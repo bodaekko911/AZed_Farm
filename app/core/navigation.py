@@ -16,6 +16,8 @@ NAV_GROUPS = [
             {"label": "B2B", "href": "/b2b/", "permission": "page_b2b"},
             {"label": "Reports", "href": "/reports/", "permission": "page_reports"},
             {"label": "Ask", "href": "/assistant/", "permission": "page_assistant"},
+            {"label": "Field inbox", "href": "/field-inbox/", "permission": "page_field_inbox",
+             "badge": "/field-inbox/api/pending-count"},
         ],
     },
     {
@@ -81,7 +83,10 @@ def _render_group(user: User, permissions: set[str], group: dict, active_permiss
         links.append(
             f'<a class="app-nav-menu-item{" active" if active else ""}" '
             f'href="{escape(item["href"])}" role="menuitem"'
-            f'{" aria-current=\"page\"" if active else ""}>{escape(item["label"])}</a>'
+            f'{" aria-current=\"page\"" if active else ""}>{escape(item["label"])}'
+            + (f' <span class="app-nav-badge" data-badge-url="{escape(item["badge"])}" hidden></span>'
+               if item.get("badge") else "")
+            + '</a>'
         )
     return (
         f'<details class="app-nav-group{" active" if is_group_active else ""}">'
@@ -188,6 +193,30 @@ body.light .app-nav-group[open] summary{
   border:1px solid var(--border-strong,rgba(255,255,255,.11));
   border-radius:12px;
   box-shadow:0 22px 50px rgba(0,0,0,.34);
+}
+.app-nav-badge{
+  display:inline-block;
+  min-width:18px;
+  margin-left:6px;
+  padding:1px 6px;
+  border-radius:9px;
+  background:var(--warn,#e0a84a);
+  color:#1a1300;
+  font-size:11px;
+  font-weight:700;
+  line-height:16px;
+  text-align:center;
+}
+.app-nav-badge[hidden]{display:none}
+.app-nav-group.has-badge > summary::after{
+  content:"";
+  display:inline-block;
+  width:7px;
+  height:7px;
+  margin-left:6px;
+  border-radius:50%;
+  background:var(--warn,#e0a84a);
+  vertical-align:middle;
 }
 .app-nav-menu-item{
   display:flex;
@@ -549,4 +578,25 @@ def render_app_header(user: User, active_permission: str | None = None) -> str:
   </div>
 </nav>
 {app_nav_script()}
+<script>
+/* Menu badges (the Field inbox's pending drafts): one small request per badge, after the page has loaded. */
+(function(){{
+  function fill(){{
+    var found = {{}};
+    document.querySelectorAll(".app-nav-badge[data-badge-url]").forEach(function(b){{
+      var url = b.getAttribute("data-badge-url");
+      (found[url] = found[url] || []).push(b);
+    }});
+    Object.keys(found).forEach(function(url){{
+      fetch(url, {{credentials: "same-origin"}}).then(function(r){{ return r.ok ? r.json() : null; }}).then(function(d){{
+        var n = d && Number(d.count) || 0;
+        found[url].forEach(function(b){{ b.textContent = n > 99 ? "99+" : String(n); b.hidden = !n; }});
+        var group = found[url][0].closest(".app-nav-group");
+        if (group && n) group.classList.add("has-badge");
+      }}).catch(function(){{}});
+    }});
+  }}
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fill); else fill();
+}})();
+</script>
 """

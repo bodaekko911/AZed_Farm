@@ -2,9 +2,10 @@
  * Ask — read photos and scans of paper documents (expense receipts …) into records.
  *
  * AskDocuments.start(files, {log, toast, onLimit, kinds})
- *   1. Prepares each file IN THE BROWSER: photos are turned upright (EXIF), scaled to at most 2000 px on the long
- *      side and compressed to JPEG; HEIC/HEIF is converted first where the browser can't open it; a PDF is rendered
- *      page by page. More photos can be added for one document (a long receipt in two parts).
+ *   1. Prepares each file IN THE BROWSER: photos are turned upright (EXIF), scaled to at most 1600 px on the long
+ *      side and saved as a grayscale JPEG of about 200 KB (quality 0.7, lower only if needed) — the server stores
+ *      exactly that and does no image work; HEIC/HEIF is converted first where the browser can't open it; a PDF is
+ *      rendered page by page. More photos can be added for one document (a long receipt in two parts).
  *   2. The user confirms the document type, then the images are read on the server — one question.
  *   3. A review card shows what was read. Values the model couldn't read are empty and marked; values it found hard
  *      to read are highlighted. Nothing is recorded until Record, and only when the lines add up to the printed total.
@@ -15,7 +16,8 @@
  */
 (function () {
   "use strict";
-  const MAX_SIDE = 2000, QUALITY = 0.82, MIN_QUALITY = 0.6, MAX_CHARS = 2300000, MAX_IMAGES = 10;
+  // About 200 KB per image: base64 is 4/3 of the bytes.
+  const MAX_SIDE = 1600, QUALITY = 0.7, MIN_QUALITY = 0.5, MAX_CHARS = Math.ceil(200 * 1024 * 4 / 3) + 32, MAX_IMAGES = 10;
   const HEIC2ANY = "https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js";
 
   // ── tiny DOM helper (same shape as ask-actions.js) ──
@@ -48,6 +50,9 @@
     return out;
   }
 
+  const submit = (opts, body) => (opts && opts.submit) ? opts.submit(body) : post("/assistant/api/documents/record", body);
+  let searchUrl = "/assistant/api/documents/search";
+
   // ── Preparing images ──
   const isHeic = f => /image\/hei[cf]/i.test(f.type || "") || /\.(heic|heif)$/i.test(f.name || "");
   const isPdf = f => (f.type || "") === "application/pdf" || /\.pdf$/i.test(f.name || "");
@@ -72,6 +77,15 @@
       return img;
     } finally { URL.revokeObjectURL(url); }
   }
+  /** Grayscale in place — a document needs no colour, and a gray JPEG is about a third smaller. */
+  function gray(ctx, w, h0) {
+    const img = ctx.getImageData(0, 0, w, h0), px = img.data;
+    for (let i = 0; i < px.length; i += 4) {
+      const y = (px[i] * 77 + px[i + 1] * 150 + px[i + 2] * 29) >> 8;
+      px[i] = px[i + 1] = px[i + 2] = y;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
   function toJpeg(source, w, h0) {
     const scale = Math.min(1, MAX_SIDE / Math.max(w, h0));
     let cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h0 * scale));
@@ -82,11 +96,12 @@
       const ctx = canvas.getContext("2d");
       ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cw, ch);
       ctx.drawImage(source, 0, 0, cw, ch);
+      gray(ctx, cw, ch);
       out = canvas.toDataURL("image/jpeg", quality);
       canvas.width = canvas.height = 0;
       if (out.length <= MAX_CHARS) return out;
-      // Too heavy for the upload cap: lower the quality first, then the size.
-      if (quality > MIN_QUALITY) quality = Math.max(MIN_QUALITY, quality - 0.08);
+      // Still over about 200 KB: lower the quality first, then the size.
+      if (quality > MIN_QUALITY) quality = Math.max(MIN_QUALITY, quality - 0.1);
       else { cw = Math.round(cw * 0.85); ch = Math.round(ch * 0.85); }
     }
     return out;
@@ -94,7 +109,14 @@
   async function prepare(file, onStatus) {
     if (isPdf(file)) {
       if (!window.AskActions || !window.AskActions.renderPages) throw new Error("The PDF reader isn't loaded.");
-      return await window.AskActions.renderPages(file, (i, n) => onStatus(`page ${i}/${n}`), MAX_SIDE);
+      const pages = await window.AskActions.renderPages(file, (i, n) => onStatus(`page ${i}/${n}`), MAX_SIDE);
+      const out = [];
+      for (const page of pages) {             // the same small gray JPEG as a photo
+        const img = new Image();
+        img.src = page; await img.decode();
+        out.push(toJpeg(img, img.naturalWidth, img.naturalHeight));
+      }
+      return out;
     }
     let blob = file, bitmap = null;
     try { bitmap = await decode(blob); } catch (e) { bitmap = null; }
@@ -381,7 +403,7 @@
       if (!check()) return;
       recordBtn.disabled = true; result.replaceChildren(h("span", { text: "Recording…" })); result.className = "act-status";
       try {
-        const out = await post("/assistant/api/documents/record", {
+        const out = await submit(opts, {
           kind: "expense_receipt", images, proof: d.proof, filename, force: state.force,
           vendor: state.vendor, date: state.date, receipt_number: state.receipt_number, payment_method: state.payment_method,
           total: num(state.total), discount: num(state.discount) || 0, other_charges: num(state.other_charges) || 0,
@@ -445,7 +467,7 @@
         results.replaceChildren();
         if (search.value.trim().length < 2) return;
         try {
-          const r = await fetch(`/assistant/api/documents/search?kind=${kind}&q=${encodeURIComponent(search.value.trim())}`);
+          const r = await fetch(`${searchUrl}?kind=${kind}&q=${encodeURIComponent(search.value.trim())}`);
           const out = await r.json();
           (out.results || []).forEach(item => results.append(h("button", { class: "inv-result", type: "button", text: label(item), "data-no-i18n": true,
             onclick: () => { add(item, true); last = select.value; search.hidden = results.hidden = true; search.value = ""; results.replaceChildren(); onChange(item); } })));
@@ -613,7 +635,7 @@
       recordBtn.disabled = true; result.replaceChildren(h("span", { text: "Recording…" })); result.className = "act-status";
       const isPriced = priced();
       try {
-        const out = await post("/assistant/api/documents/record", {
+        const out = await submit(opts, {
           kind: "delivery_note", images, proof: d.proof, filename, force: state.force, confirm_cost: state.confirmCost,
           date: state.date, document_number: state.number,
           supplier_id: state.supplier ? state.supplier.id : null, new_supplier: state.useNew ? state.newSupplier : null,
@@ -660,8 +682,8 @@
     const state = {
       date: d.date || "", received_by: d.received_by || "", notes: d.notes || "", force: false, recorded: false,
       lines: (d.lines || []).map(l => {
-        const line = { written: [l.farm, l.product, l.qty, l.unit].filter(x => x !== null && x !== undefined && x !== "").join(" · "),
-                       wProduct: l.product, unit: l.unit, farm_id: l.farm_id ? String(l.farm_id) : "", product: l.product,
+        const line = { written: [l.farm, l.product_written, l.qty, l.unit].filter(x => x !== null && x !== undefined && x !== "").join(" · "),
+                       wProduct: l.product_written, unit: l.unit, farm_id: l.farm_id ? String(l.farm_id) : "", product: l.product,
                        candidates: l.candidates, match: l.match, pack: l.pack, pQty: l.qty ?? "", pCost: null };
         line.product = l.product;
         return Object.assign(line, inProductUnits(line));
@@ -752,7 +774,7 @@
       if (!check()) return;
       recordBtn.disabled = true; result.replaceChildren(h("span", { text: "Recording…" })); result.className = "act-status";
       try {
-        const out = await post("/assistant/api/documents/record", {
+        const out = await submit(opts, {
           kind: "harvest_sheet", images, proof: d.proof, filename, force: state.force, date: state.date,
           received_by: state.received_by, notes: state.notes,
           items: state.lines.map(l => ({ farm_id: Number(l.farm_id) || null, product_id: l.product ? l.product.id : null,
@@ -777,5 +799,90 @@
     return card;
   }
 
-  window.AskDocuments = { start, prepare, number: num };
+  // ── Review spoilage a worker reported by text (Field inbox) ──
+  function spoilageCard(d, images, filename, opts) {
+    const unclear = new Set(d.unclear || []), missing = new Set(d.missing || []);
+    const state = {
+      date: d.date || "", reason: d.reason || "", recorded: false,
+      lines: (d.lines || []).map(l => ({ written: [l.product_written || "", l.qty, l.unit].filter(x => x !== null && x !== undefined && x !== "").join(" · "),
+                                         farm_id: l.farm_id ? String(l.farm_id) : "", product: l.product, candidates: l.candidates,
+                                         match: l.match, qty: l.qty ?? "" })),
+    };
+    const card = h("div", { class: "inv-card" });
+    const problems = h("ul", { class: "inv-problems" });
+    const result = h("div", { class: "act-status" });
+    const recordBtn = h("button", { class: "act-btn act-primary", text: "Record spoilage" });
+    function flag(input, path) {
+      if (missing.has(path)) { input.classList.add("doc-missing"); input.title = "Not in the message — enter it"; }
+      else if (unclear.has(path)) { input.classList.add("doc-unclear"); input.title = "Unclear in the message — check it"; }
+      input.addEventListener("input", () => input.classList.remove("doc-missing", "doc-unclear"));
+      return input;
+    }
+    const field = (label, input) => h("label", { class: "doc-field" }, h("span", { text: label }), input);
+    const head = h("div", { class: "doc-grid" },
+      field("Date", flag(h("input", { type: "date", value: state.date, max: today(), oninput: e => { state.date = e.target.value; check(); } }), "date")),
+      field("Reason", h("input", { type: "text", value: state.reason, maxlength: 200, "data-no-i18n": true,
+        oninput: e => { state.reason = e.target.value; } })));
+    const tbody = h("tbody");
+    state.lines.forEach((l, i) => {
+      const farm = h("select", { onchange: e => { l.farm_id = e.target.value; } },
+        h("option", { value: "", text: "— no farm —" }),
+        ...(d.farms || []).map(f => h("option", { value: String(f.id), text: f.name, "data-no-i18n": true })));
+      farm.value = l.farm_id;
+      const qty = flag(h("input", { type: "number", step: "any", min: "0", value: l.qty, oninput: e => { l.qty = e.target.value; check(); } }), `items.${i}.qty`);
+      const unit = data("span", l.product ? l.product.unit : "", "inv-muted");
+      const stock = data("div", "", "inv-hint");
+      const paint = () => { stock.textContent = l.product && l.product.stock !== undefined ? `${fmt3(Number(l.product.stock) || 0)} ${l.product.unit || ""}` : ""; };
+      const pick = picker("products", l.product, l.candidates, "— pick a product —", p => {
+        l.product = p; unit.textContent = p ? p.unit : ""; paint(); check();
+      });
+      paint();
+      tbody.append(h("tr", null, h("td", { class: "inv-desc" }, data("div", l.written || "—")),
+        h("td", null, pick, stock), h("td", null, qty, " ", unit), h("td", null, farm)));
+    });
+    const table = h("table", { class: "inv-table" },
+      h("thead", null, h("tr", null, ["Written in the message", "Product (in stock)", "Qty", "Farm"].map(t => h("th", { text: t })))), tbody);
+    function check() {
+      const issues = [];
+      if (!state.date) issues.push(h("li", null, h("span", { text: "Set the date." })));
+      else if (state.date > today()) issues.push(h("li", null, h("span", { text: "The date is in the future." })));
+      state.lines.forEach(l => {
+        if (!l.product) issues.push(h("li", null, h("span", { text: "Pick a product for:" }), " ", data("strong", l.written || "—")));
+        if (!(num(l.qty) > 0)) issues.push(h("li", null, h("span", { text: "A quantity must be above 0:" }), " ", data("strong", l.written || "—")));
+      });
+      if (!state.lines.length) issues.push(h("li", null, h("span", { text: "No lines were read from the message." })));
+      problems.replaceChildren(...issues);
+      recordBtn.disabled = state.recorded || issues.length > 0;
+      return !issues.length;
+    }
+    recordBtn.onclick = async () => {
+      if (!check()) return;
+      recordBtn.disabled = true; result.replaceChildren(h("span", { text: "Recording…" })); result.className = "act-status";
+      try {
+        const out = await submit(opts, {
+          kind: "spoilage", date: state.date, reason: state.reason,
+          items: state.lines.map(l => ({ product_id: l.product ? l.product.id : null, qty: num(l.qty),
+                                         farm_id: Number(l.farm_id) || null, written: l.written })),
+        });
+        state.recorded = true;
+        result.className = "act-status ok";
+        result.replaceChildren("✓ ", h("span", { text: "Recorded" }), " ",
+          data("span", (out.spoilage || []).map(x => `${x.ref_number} (${x.product} ${fmt3(Number(x.qty) || 0)})`).join(", ")));
+        card.classList.add("done"); card.querySelectorAll("input, select, button").forEach(x => { x.disabled = true; });
+      } catch (e) { result.replaceChildren(h("span", { text: e.message })); result.className = "act-status bad"; check(); }
+    };
+    card.append(
+      h("div", { class: "inv-head" }, h("div", { class: "inv-title", text: "Spoilage" }),
+        h("span", { class: "inv-muted", text: "Check each line against the worker's message." })),
+      head, table, problems, h("div", { class: "act-buttons" }, recordBtn), result);
+    check();
+    return card;
+  }
+
+  window.AskDocuments = {
+    start, prepare, number: num,
+    // For the Field inbox: the same review cards, recording through its own endpoint and searching through its own.
+    cards: { expense_receipt: expenseCard, delivery_note: deliveryCard, harvest_sheet: harvestCard, spoilage: spoilageCard },
+    setSearchUrl: url => { searchUrl = url; },
+  };
 })();

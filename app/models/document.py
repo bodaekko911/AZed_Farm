@@ -1,4 +1,5 @@
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, LargeBinary, String
+from sqlalchemy.orm import deferred
 from sqlalchemy.sql import func
 
 from app.database import Base
@@ -24,7 +25,9 @@ class DocumentFile(Base):
     content_type = Column(String(40), nullable=False, default="image/jpeg")
     size_bytes = Column(Integer, nullable=False)
     sha256 = Column(String(64), nullable=False)
-    data = Column(LargeBinary, nullable=False)
+    # Deferred: listing documents (or the drafts and records they support) never loads the image bytes; they are
+    # read only when someone opens the image, in chunks (see app/routers/documents.py).
+    data = deferred(Column(LargeBinary, nullable=False))
     filename = Column(String(150))
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

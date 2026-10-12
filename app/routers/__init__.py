@@ -14,6 +14,7 @@ from app.routers import (
     drying,
     expenses_refactored,
     farm,
+    field_inbox,
     home,
     hr,
     import_data,
@@ -26,6 +27,7 @@ from app.routers import (
     refunds,
     reports,
     suppliers,
+    telegram,
     users,
 )
 
@@ -72,6 +74,8 @@ _base_routers = (
     expenses_refactored.router,
     audit_log.router,
     assistant.router,
+    field_inbox.router,
+    telegram.router,
 )
 
 if _farm_dashboard_router is not None:

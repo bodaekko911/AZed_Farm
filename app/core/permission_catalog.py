@@ -33,6 +33,17 @@ PERMISSION_MATRIX = [
         ],
     },
     {
+        "module": "field_inbox",
+        "resource": "field_drafts",
+        "label": "Field inbox (Telegram bot)",
+        "icon": "farm",
+        "actions": [
+            {"action": "view", "key": "page_field_inbox", "label": "Open the field inbox"},
+            {"action": "review", "key": "action_field_drafts_review",
+             "label": "Confirm or reject what workers sent (also needs the permission for the record itself)"},
+        ],
+    },
+    {
         "module": "reports",
         "resource": "reports",
         "label": "Reports",
@@ -323,6 +334,8 @@ ROLE_DEFINITIONS = {
         "permissions": {
             "page_dashboard",
             "page_assistant",
+            "page_field_inbox",
+            "action_field_drafts_review",
             "page_reports",
             "tab_reports_sales",
             "tab_reports_inventory",

@@ -156,6 +156,16 @@ def recording(draft, **over):
     return body
 
 
+async def image_data(db, file_id) -> bytes:
+    """The stored bytes — a deferred column, read explicitly as the image route does."""
+    return (await db.execute(select(DocumentFile.data).where(DocumentFile.id == file_id))).scalar()
+
+
+async def served(resp) -> bytes:
+    """What the streamed image route sends."""
+    return b"".join([chunk async for chunk in resp.body_iterator])
+
+
 async def count(db, model):
     return (await db.execute(select(func.count()).select_from(model))).scalar()
 
@@ -218,7 +228,7 @@ def test_a_reviewed_receipt_becomes_one_expense_with_its_images_kept():
         assert "Diesel" in exp.description and "Receipt ٤٥٢١" in exp.description
         assert exp.journal_id and await count(db, Journal) == 1
         files = (await db.execute(select(DocumentFile).order_by(DocumentFile.page_no))).scalars().all()
-        assert [f.page_no for f in files] == [1, 2] and files[0].data.startswith(b"\xff\xd8")
+        assert [f.page_no for f in files] == [1, 2] and (await image_data(db, files[0].id)).startswith(b"\xff\xd8")
         assert {f.doc_key for f in files} == {out["doc_key"]}
         [link] = (await db.execute(select(DocumentLink))).scalars().all()
         assert (link.ref_type, link.ref_id, link.doc_key) == ("expense", exp.id, out["doc_key"])
@@ -356,7 +366,7 @@ def test_the_receipt_image_is_served_only_to_those_who_may_see_expenses():
         out = await reader.record_expense(db, admin(), recording(d))
         f = (await db.execute(select(DocumentFile).order_by(DocumentFile.page_no))).scalars().first()
         resp = await doc_router.document_file(f.id, db=db, user=admin())
-        assert resp.media_type == "image/jpeg" and resp.body == f.data
+        assert resp.media_type == "image/jpeg" and await served(resp) == await image_data(db, f.id)
         assert resp.headers["cache-control"].startswith("private")
         with pytest.raises(HTTPException) as hidden:
             await doc_router.document_file(f.id, db=db, user=cashier())
@@ -608,7 +618,7 @@ def test_delivery_notes_follow_the_receive_permissions():
         d = await read_note(db)
         out = await reader.record_delivery(db, admin(), receiving(d))
         f = (await db.execute(select(DocumentFile))).scalars().first()
-        assert (await doc_router.document_file(f.id, db=db, user=receiver())).body == f.data
+        assert await served(await doc_router.document_file(f.id, db=db, user=receiver())) == await image_data(db, f.id)
         with pytest.raises(HTTPException):
             await doc_router.document_file(f.id, db=db, user=cashier())
         page = await doc_router.document_view("product_receipt", out["receipts"][0]["id"], db=db, user=receiver())
@@ -737,7 +747,7 @@ def test_harvest_sheets_follow_the_farm_delivery_permissions():
         d = await read_sheet(db, user=farmhand())
         out = await reader.record_harvest(db, farmhand(), recording_sheet(d))
         f = (await db.execute(select(DocumentFile))).scalars().first()
-        assert (await doc_router.document_file(f.id, db=db, user=farmhand())).body == f.data
+        assert await served(await doc_router.document_file(f.id, db=db, user=farmhand())) == await image_data(db, f.id)
         with pytest.raises(HTTPException):
             await doc_router.document_file(f.id, db=db, user=receiver())
         with pytest.raises(HTTPException):

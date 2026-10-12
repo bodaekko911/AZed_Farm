@@ -157,6 +157,9 @@ async def update_user(user_id: int, data: UserUpdate, db: AsyncSession = Depends
     if data.name      is not None: u.name      = data.name
     if data.role      is not None: u.role      = data.role
     if data.is_active is not None: u.is_active = data.is_active
+    if data.is_active is False:
+        from app.services.field_service import deactivate_linked
+        await deactivate_linked(db, user_id=u.id)            # their Telegram chat stops at once
     if data.email     is not None:
         dup = await db.execute(select(User).where(User.email == data.email, User.id != user_id))
         if dup.scalar_one_or_none():
@@ -219,7 +222,11 @@ async def delete_user(user_id: int, db: AsyncSession = Depends(get_async_session
     from app.models.refund import RetailRefund
     from app.models.spoilage import SpoilageRecord
     from app.models.supplier import Purchase, SupplierPayment
+    from app.models.document import DocumentFile
+    from app.models.telegram import FieldDraft, TelegramChat, TelegramLinkCode
+    from app.services.field_service import deactivate_linked
 
+    await deactivate_linked(db, user_id=user_id)
     user_id_tables = [
         (Journal, "user_id"),
         (B2BInvoice, "user_id"),
@@ -241,6 +248,12 @@ async def delete_user(user_id: int, db: AsyncSession = Depends(get_async_session
         (SpoilageRecord, "user_id"),
         (Purchase, "user_id"),
         (SupplierPayment, "user_id"),
+        (DocumentFile, "user_id"),
+        (TelegramChat, "user_id"),
+        (TelegramChat, "linked_by_id"),
+        (TelegramLinkCode, "user_id"),
+        (TelegramLinkCode, "created_by_id"),
+        (FieldDraft, "reviewed_by_id"),
     ]
 
     for model, column_name in user_id_tables:
