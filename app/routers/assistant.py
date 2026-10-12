@@ -31,6 +31,10 @@ TOOL_LABELS = {
     "payroll": "Payroll", "farm_harvest": "Farm harvest", "sales_trend": "Sales trend",
     "stock": "Inventory", "spoilage": "Spoilage", "suppliers": "Suppliers", "pos_customers": "POS customers",
     "account_balances": "Account balances", "pricing": "Pricing",
+    "season_cost": "Season cost per crop", "consignment_stock": "Consignment stock",
+    "employee_balances": "Employee loans & advances", "activity_log": "Activity log",
+    "production_batches": "Production batches", "stock_by_location": "Stock by location",
+    "livestock": "Animals", "carbon_footprint": "Carbon footprint",
 }
 
 
@@ -50,7 +54,8 @@ async def status(db: AsyncSession = Depends(get_async_session), user: User = Dep
         "configured": assistant_service.is_configured(),
         "daily_limit": limit or None,
         "questions_left": max(limit - used, 0) if limit else None,
-        "can_look_up": [TOOL_LABELS[t] for t in assistant_service.allowed_tools(user)],
+        # A lookup without a label shows its own name — it must never break the page.
+        "can_look_up": [TOOL_LABELS.get(t, t.replace("_", " ")) for t in assistant_service.allowed_tools(user)],
         "is_admin": user.role == "admin",
         "can_record_invoices": has_permission(user, "page_pos") and has_permission(user, "action_pos_create_sale"),
         "document_kinds": _document_kinds(user),

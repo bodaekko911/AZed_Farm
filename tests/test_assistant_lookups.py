@@ -494,3 +494,18 @@ def test_carbon_footprint_matches_the_carbon_report():
 def test_the_system_prompt_knows_the_phase2_lookups():
     for name in PHASE2:
         assert name in svc.SYSTEM_PROMPT
+
+
+
+def test_every_lookup_has_a_label_on_the_ask_page():
+    """The Ask page's status call names each lookup the user may run; a missing label once broke the whole page."""
+    from app.routers.assistant import TOOL_LABELS
+    assert set(svc.TOOLS) <= set(TOOL_LABELS)
+
+
+def test_the_ask_page_status_works_for_an_admin_with_every_lookup():
+    async def go(db):
+        from app.routers import assistant
+        out = await assistant.status(db=db, user=admin())
+        assert out["is_admin"] and "Season cost per crop" in out["can_look_up"] and "Activity log" in out["can_look_up"]
+    scenario(go)
