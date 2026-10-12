@@ -333,14 +333,22 @@ async def ensure_weekly_brief_table() -> None:
         " last_status VARCHAR(300),"
         " updated_at TIMESTAMPTZ DEFAULT now())"
     )
+    # A table made before the monthly brief existed lacks its columns: add them.
+    statements = [stmt] + [
+        "ALTER TABLE weekly_brief_settings ADD COLUMN IF NOT EXISTS monthly_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE weekly_brief_settings ADD COLUMN IF NOT EXISTS monthly_day INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE weekly_brief_settings ADD COLUMN IF NOT EXISTS last_sent_month VARCHAR(7)",
+        "ALTER TABLE weekly_brief_settings ADD COLUMN IF NOT EXISTS last_status VARCHAR(300)",
+    ]
     try:
         async with AsyncSessionLocal() as db:
-            try:
-                await db.execute(text(stmt))
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                logger.exception("ensure_weekly_brief_table: statement failed")
+            for one in statements:
+                try:
+                    await db.execute(text(one))
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("ensure_weekly_brief_table: statement failed: %s", one)
     except Exception:
         logger.exception("ensure_weekly_brief_table: failed (could not open DB session)")
 

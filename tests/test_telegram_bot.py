@@ -826,7 +826,7 @@ def test_a_voice_note_is_transcribed_then_read_like_a_typed_message(telegram, mo
         [d] = await drafts(db)
         assert d.kind == "spoilage" and d.source_text == "🎤 تالف تلاتة كيلو خيار"
         texts = telegram.texts()
-        assert "سمعت" in texts[-2] and "خيار" in texts[-2] and "Cucumber" in texts[-1]   # what it heard, then the summary
+        assert "سمعت" in texts[-1] and "خيار" in texts[-1] and "Cucumber" in texts[-1]   # what it heard, with the summary
         # Transcription and reading were one submission: the limit of 1 is now used.
         await send(db, factory, voice_msg(telegram, "v2"), transport=voice_model("x", TEXT_SPOILAGE))
         assert "اليومي" in telegram.texts()[-1] and await count(db, FieldDraft) == 1

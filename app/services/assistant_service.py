@@ -889,29 +889,84 @@ class ProviderUnavailable(Exception):
     """The model endpoint couldn't be reached at all, after the retries."""
 
 
-async def post_completion(client: httpx.AsyncClient, body: dict) -> httpx.Response:
-    """POST one chat completion, retrying a passing failure of the endpoint. Returns the last response — the caller
-    decides what an error status means — or raises ProviderUnavailable when no attempt got an answer."""
+# After the first provider fails, requests go straight to the fallback for a while instead of waiting on it again.
+FALLBACK_HOLD_SECONDS = 300
+FALLBACK_MAX_IMAGES = 3            # Groq's vision model takes at most 3 images per request
+_primary_down_until = 0.0
+
+
+def _image_count(body: dict) -> int:
+    return sum(1 for m in body.get("messages") or [] if isinstance(m, dict) and isinstance(m.get("content"), list)
+               for p in m["content"] if isinstance(p, dict) and p.get("type") == "image_url")
+
+
+def _has_images(body: dict) -> bool:
+    return _image_count(body) > 0
+
+
+def fallback_for(body: dict) -> Optional[tuple[str, str, str]]:
+    """(base URL, key, model) of the second provider for this request, or None when there is none."""
+    images = _image_count(body)
+    if images > FALLBACK_MAX_IMAGES:
+        return None                    # too many for the fallback: stays with the first provider
+    model = settings.ASSISTANT_FALLBACK_VISION_MODEL if images else settings.ASSISTANT_FALLBACK_MODEL
+    base = settings.ASSISTANT_FALLBACK_BASE_URL or settings.ASSISTANT_TRANSCRIBE_BASE_URL
+    key = settings.ASSISTANT_FALLBACK_API_KEY or settings.ASSISTANT_TRANSCRIBE_API_KEY
+    return (base, key, model) if model and base and key else None
+
+
+async def _attempts(client: httpx.AsyncClient, base: str, key: str, body: dict, timeout=None,
+                    label: str = "assistant") -> httpx.Response:
+    """POST with the retries for passing failures. Returns the last response, or raises ProviderUnavailable when
+    no attempt got an answer. A timeout is not retried here (it raises httpx.TimeoutException)."""
     import asyncio
-    url = settings.ASSISTANT_BASE_URL.rstrip("/") + "/chat/completions"
-    headers = {"Authorization": f"Bearer {settings.ASSISTANT_API_KEY}"}
+    url = base.rstrip("/") + "/chat/completions"
+    headers = {"Authorization": f"Bearer {key}"}
+    extra = {"timeout": timeout} if timeout else {}
     response = None
     for attempt in range(len(RETRY_DELAYS) + 1):
         if attempt:
             await asyncio.sleep(RETRY_DELAYS[attempt - 1])
         try:
-            response = await client.post(url, headers=headers, json=body)
+            response = await client.post(url, headers=headers, json=body, **extra)
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as exc:
-            logger.warning("assistant endpoint unreachable (attempt %d): %r", attempt + 1, exc)
+            logger.warning("%s endpoint unreachable (attempt %d): %s", label, attempt + 1, type(exc).__name__)
             response = None
             continue
         if response.status_code not in RETRYABLE_STATUS:
             return response
-        logger.warning("assistant endpoint returned %s (attempt %d of %d): %s", response.status_code, attempt + 1,
+        logger.warning("%s endpoint returned %s (attempt %d of %d): %s", label, response.status_code, attempt + 1,
                        len(RETRY_DELAYS) + 1, response.text[:200])
     if response is None:
         raise ProviderUnavailable()
     return response
+
+
+async def post_completion(client: httpx.AsyncClient, body: dict) -> httpx.Response:
+    """POST one chat completion, retrying a passing failure of the endpoint. Returns the last response — the caller
+    decides what an error status means — or raises ProviderUnavailable when no attempt got an answer.
+
+    With a fallback provider configured, a request the first provider doesn't answer (a timeout, unreachable, or
+    still a passing error after the retries) is sent there instead, with the fallback model; for the next few
+    minutes requests go straight to the fallback rather than waiting on the first provider again."""
+    import time
+    global _primary_down_until
+    fallback = fallback_for(body)
+    if fallback is None:
+        return await _attempts(client, settings.ASSISTANT_BASE_URL, settings.ASSISTANT_API_KEY or "", body)
+    base, key, model = fallback
+    if time.monotonic() >= _primary_down_until:
+        wait = settings.ASSISTANT_FALLBACK_AFTER_SECONDS * (2 if _has_images(body) else 1)
+        try:
+            response = await _attempts(client, settings.ASSISTANT_BASE_URL, settings.ASSISTANT_API_KEY or "", body,
+                                       timeout=httpx.Timeout(wait, connect=10.0))
+            if response.status_code not in RETRYABLE_STATUS:
+                return response
+        except (ProviderUnavailable, httpx.TimeoutException) as exc:
+            logger.warning("assistant provider didn't answer (%s) — switching to the fallback", type(exc).__name__)
+        _primary_down_until = time.monotonic() + FALLBACK_HOLD_SECONDS
+    logger.info("assistant request sent to the fallback provider (%s)", model)
+    return await _attempts(client, base, key, {**body, "model": model}, label="fallback")
 
 
 async def _chat(client: httpx.AsyncClient, messages: list, tools: list, allow_tools: bool,

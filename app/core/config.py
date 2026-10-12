@@ -128,6 +128,15 @@ class BaseAppSettings(BaseSettings):
     # Groq or OpenAI). Empty = ASSISTANT_BASE_URL / ASSISTANT_API_KEY.
     ASSISTANT_TRANSCRIBE_BASE_URL: str | None = None
     ASSISTANT_TRANSCRIBE_API_KEY: str | None = None
+    # A second provider for when the first doesn't answer (a timeout, or a passing error after the retries): the same
+    # request is sent there with these models. Empty base URL / key = the voice provider's (e.g. Groq for both).
+    # No fallback model = no fallback; no vision model = requests with images don't fall back.
+    ASSISTANT_FALLBACK_MODEL: str | None = None
+    ASSISTANT_FALLBACK_VISION_MODEL: str | None = None
+    ASSISTANT_FALLBACK_BASE_URL: str | None = None
+    ASSISTANT_FALLBACK_API_KEY: str | None = None
+    # How long to wait for the first provider before switching (twice as long for images).
+    ASSISTANT_FALLBACK_AFTER_SECONDS: float = 40.0
     TELEGRAM_LOOP: bool = True
 
     model_config = CONFIG_MODEL

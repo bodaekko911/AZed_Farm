@@ -765,8 +765,10 @@ async def _text_call(system: str, text: str, transport=None) -> tuple[dict, dict
 
 
 async def submit_text(db, chat: TelegramChat, text: str, sent_at: Optional[int], kinds: list[str],
-                      transport=None, source: Optional[str] = None) -> None:
+                      transport=None, source: Optional[str] = None, heard: Optional[str] = None) -> None:
+    """``heard``: for a voice note, what was understood — shown with the result, so a retry never repeats it."""
     lang, chat_id = chat.language or "ar", chat.chat_id
+    lead = (heard + "\n\n") if heard else ""
     source = (source or text)[:2000]
     choices = await reader._choices(db)
     names = await reader._product_names(db)
@@ -782,7 +784,7 @@ async def submit_text(db, chat: TelegramChat, text: str, sent_at: Optional[int],
         db.add(FieldDraft(chat_id=chat_id, kind="unreadable", status="unreadable", draft_json="{}", model_call=True,
                           source_text=source, created_at=now()))
         await db.commit()
-        await _say(chat_id, t(lang, "text_unclear") if kind is None or not raw.get("items")
+        await _say(chat_id, lead + t(lang, "text_unclear") if kind is None or not raw.get("items")
                    else t(lang, "not_allowed", kinds=kinds_text(lang, kinds)))
         return
     # The message's own date when it names none: the day the worker sent it — a fact, not a guess.
@@ -799,7 +801,7 @@ async def submit_text(db, chat: TelegramChat, text: str, sent_at: Optional[int],
         draft.pop("duplicates", None)
         draft["missing"] = [m for m in draft.get("missing") or [] if not m.endswith(".farm")]   # a farm is optional
     draft.update({"kind": kind, "pages": 0, **choices, "from_text": True})
-    await _new_draft(db, chat, kind, draft, None, source)
+    await _new_draft(db, chat, kind, draft, None, source, lead=lead)
 
 
 # ── Voice notes: speech to text, then the same as a typed message ────────────
@@ -868,8 +870,8 @@ async def submit_voice(db, chat: TelegramChat, voice: dict, sent_at: Optional[in
         await db.commit()
         await _say(chat_id, t(lang, "voice_unclear"))
         return
-    await _say(chat_id, t(lang, "heard", text=text[:500]))
-    await submit_text(db, chat, text[:2000], sent_at, kinds, transport=transport, source="🎤 " + text)
+    await submit_text(db, chat, text[:2000], sent_at, kinds, transport=transport, source="🎤 " + text,
+                      heard=t(lang, "heard", text=text[:500]))
 
 
 # ── Drafts: summary to the worker, warnings, buttons ─────────────────────────
@@ -995,7 +997,7 @@ def _stored(draft: dict) -> dict:
 
 
 async def _new_draft(db, chat: TelegramChat, kind: str, draft: dict, doc_key: Optional[str],
-                     source_text: Optional[str]) -> FieldDraft:
+                     source_text: Optional[str], lead: str = "") -> FieldDraft:
     lang = chat.language or "ar"
     row = FieldDraft(chat_id=chat.chat_id, kind=kind, status="awaiting_worker",
                      draft_json=json.dumps(_stored(draft), ensure_ascii=False, default=str), doc_key=doc_key,
@@ -1003,7 +1005,7 @@ async def _new_draft(db, chat: TelegramChat, kind: str, draft: dict, doc_key: Op
                      created_at=now())
     db.add(row)
     await db.commit()
-    message_id = await _say(chat.chat_id, summary_text(lang, kind, draft), buttons=[[
+    message_id = await _say(chat.chat_id, lead + summary_text(lang, kind, draft), buttons=[[
         {"text": t(lang, "btn_ok"), "callback_data": f"fd:ok:{row.id}"},
         {"text": t(lang, "btn_cancel"), "callback_data": f"fd:x:{row.id}"}]])
     if message_id:
