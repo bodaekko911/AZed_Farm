@@ -1027,6 +1027,10 @@ async def _chat(client: httpx.AsyncClient, messages: list, tools: list, allow_to
         raise HTTPException(status_code=502, detail="The assistant service did not answer. Try again in a minute.")
     if response.status_code >= 400:
         logger.warning("assistant endpoint returned %s: %s", response.status_code, response.text[:300])
+        if response.status_code == 429:
+            raise HTTPException(status_code=502, detail="The AI provider's per-minute limit was reached (too much text "
+                                                        "in a short time). Try again in about a minute — or, on a free "
+                                                        "plan, switch the AI provider back to Auto.")
         raise HTTPException(status_code=502, detail="The assistant service did not answer. Try again in a minute.")
     return response.json()
 
