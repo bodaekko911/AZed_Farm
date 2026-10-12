@@ -592,6 +592,18 @@ body {
             </div>
         </a>
 
+        <a href="/field-inbox/" class="module-card c-green" data-permission="page_field_inbox">
+            <div class="card-icon">&#128229;</div>
+            <div class="card-body">
+                <div class="card-name">Field inbox</div>
+                <div class="card-desc">What workers sent from the Telegram bot, waiting for you to confirm or reject</div>
+            </div>
+            <div class="card-footer">
+                <span class="card-tag" id="field-inbox-count" data-no-i18n>Telegram</span>
+                <span class="card-arrow">&nearr;</span>
+            </div>
+        </a>
+
             <a href="/b2b/" class="module-card c-sky" data-permission="page_b2b">
                 <div class="card-icon">&#128188;</div>
                 <div class="card-body">
@@ -773,6 +785,17 @@ setInterval(setDateTime, 30000);
             card.style.display = "none";
         }
     });
+
+    // The Field inbox card shows how many submissions are waiting.
+    if(canAccess("page_field_inbox")){
+        fetch("/field-inbox/api/pending-count", {credentials: "same-origin"})
+            .then(r => r.ok ? r.json() : null)
+            .then(d => {
+                const tag = document.getElementById("field-inbox-count");
+                const n = d && Number(d.count) || 0;
+                if(tag && n){ tag.textContent = "⏳ " + n; tag.style.color = "var(--warn, #e0a84a)"; tag.style.opacity = "1"; }
+            }).catch(() => {});
+    }
 
     if(userRole === "admin"){
         let c = document.getElementById("card-users");
