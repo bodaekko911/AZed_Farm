@@ -659,3 +659,156 @@ def test_the_new_rules_appear_in_the_admin_section(env):
         subject, html = await auto.preview(db, "big_expense", MORNING_AT)
         assert "Nothing to report" in html and env.sent == []
     scenario(go)
+
+
+# ══ Phase 3: the month-end close checklist ═══════════════════════════════════
+
+from app.models.b2b import Consignment, ConsignmentItem, ConsignmentSale, ConsignmentSaleItem  # noqa: E402
+from app.models.inventory import StockMove  # noqa: E402
+from app.models.supplier import Supplier  # noqa: E402
+from app.models.telegram import FieldDraft  # noqa: E402
+
+RUN_DAY = TODAY.replace(day=3)
+RUN_AT = datetime.combine(RUN_DAY, time(8, 5), tzinfo=app_tz())
+LAST = RUN_DAY.replace(day=1) - timedelta(days=1)          # the month being closed
+FIRST = LAST.replace(day=1)
+MONTH = FIRST.strftime("%Y-%m")
+
+
+def at(day: date, hour=10):
+    from app.core.time_utils import utc_bounds
+    return utc_bounds(day, day)[0] + timedelta(hours=hour)
+
+
+async def seed_month(db):
+    """A month with something wrong in every check."""
+    db.add_all([
+        Employee(id=2, name="Paid & posted", is_active=True), Employee(id=3, name="Not paid", is_active=True),
+        Employee(id=4, name="No payroll", is_active=True), Employee(id=5, name="Left", is_active=False),
+        Employee(id=6, name="Starts later", is_active=True, hire_date=RUN_DAY + timedelta(days=10)),
+        Employee(id=7, name="Paid not posted", is_active=True),
+        Product(id=5, sku="JAM", name="Mystery Jam", unit="jar", price=Decimal("50"), cost=Decimal("0"),
+                stock=Decimal("10"), is_active=True),
+        Product(id=6, sku="OIL", name="Olive Oil", unit="litre", price=Decimal("200"), cost=Decimal("80"),
+                stock=Decimal("50"), is_active=True),
+        B2BClient(id=2, name="Old Shop", outstanding=Decimal("0")), B2BClient(id=3, name="New Shop", outstanding=Decimal("0")),
+        B2BClient(id=4, name="Settled Shop", outstanding=Decimal("0")),
+        Supplier(id=1, name="Al Baraka Farms", balance=Decimal("5000")),
+    ])
+    await db.flush()
+    db.add_all([
+        Payroll(id=10, employee_id=1, period=MONTH, base_salary=Decimal("6000"), net_salary=Decimal("6000"), paid=True),
+        Payroll(id=11, employee_id=2, period=MONTH, base_salary=Decimal("5000"), net_salary=Decimal("5000"), paid=True),
+        Payroll(id=12, employee_id=3, period=MONTH, base_salary=Decimal("4000"), net_salary=Decimal("4000"), paid=False),
+        Payroll(id=13, employee_id=7, period=MONTH, base_salary=Decimal("3000"), net_salary=Decimal("3000"), paid=True,
+                paid_at=at(LAST)),
+    ])
+    await db.flush()
+    db.add_all([Expense(id=40, ref_number="EXP-00040", category_id=2, amount=Decimal("6000"), expense_date=LAST, payroll_id=10),
+                Expense(id=41, ref_number="EXP-00041", category_id=2, amount=Decimal("5000"), expense_date=LAST, payroll_id=11)])
+    # Consignment: Old Shop reported 5 sold 40 days ago, never settled; New Shop reported on the last day; Settled
+    # Shop reported 4 and settled 4.
+    for sale_id, cid, qty, when in ((1, 2, 5, RUN_DAY - timedelta(days=40)), (2, 3, 3, LAST), (3, 4, 4, FIRST)):
+        db.add(ConsignmentSale(id=sale_id, client_id=cid, amount=0, created_at=at(when)))
+        await db.flush()
+        db.add(ConsignmentSaleItem(sale_id=sale_id, product_id=1, qty=Decimal(str(qty)), unit_price=1, total=qty))
+    db.add(Consignment(id=1, ref_number="CON-1", client_id=4, status="active", created_at=at(FIRST)))
+    await db.flush()
+    db.add(ConsignmentItem(consignment_id=1, product_id=1, qty_sent=10, qty_sold=4, qty_returned=0, unit_price=1))
+    db.add(ProductReceipt(ref_number="RCV-9", product_id=1, receive_date=FIRST - timedelta(days=20), qty=Decimal("10"),
+                          total_cost=Decimal("5000"), amount_paid=Decimal("0"), supplier_id=1))
+    # Stock adjustments: one worth 1,600 at cost (flagged), one small, one outside the month.
+    db.add_all([
+        StockMove(product_id=6, type="adjust", qty=Decimal("-20"), note="Broken bottles", user_id=1, created_at=at(LAST)),
+        StockMove(product_id=1, type="adjust", qty=Decimal("2"), note="Recount", user_id=1, created_at=at(FIRST)),
+        StockMove(product_id=1, type="adjust", qty=Decimal("50"), note="Other month", user_id=1,
+                  created_at=at(FIRST - timedelta(days=3))),
+        StockMove(product_id=1, type="out", qty=Decimal("-5"), note="A sale", created_at=at(LAST)),
+    ])
+    # A sale of a product with no cost, in the month.
+    if not await db.get(Customer, 1):
+        db.add(Customer(id=1, name="Walk-in Customer"))
+    db.add(Invoice(id=50, invoice_number="INV-00050", customer_id=1, total=Decimal("100"), status="paid",
+                   created_at=at(LAST)))
+    await db.flush()
+    db.add(InvoiceItem(invoice_id=50, product_id=5, sku="JAM", name="Mystery Jam", qty=Decimal("2"),
+                       unit_price=Decimal("50"), total=Decimal("100")))
+    db.add(FieldDraft(id=1, chat_id=1, kind="harvest_sheet", status="in_review", draft_json="{}", created_at=at(LAST)))
+    await db.commit()
+
+
+async def checks(db, lang="en"):
+    report = await ar.month_end_build(db, {"now_local": RUN_AT, "settings": {"adjust_flag": 1000,
+                                                                            "consignment_days": 30},
+                                           "lang": lang, "held": [], "events": []})
+    summary = {row[0][0]: (row[1], row[2]) for row in report.sections[0].rows}
+    return report, summary
+
+
+def test_the_month_end_checklist_finds_every_problem(env):
+    async def go(db, factory):
+        await seed_month(db)
+        report, summary = await checks(db)
+        w = ar.W["en"]
+        assert summary[w["c_payroll"]] == (w["fail"], 2)                 # not paid + no payroll (not the leaver/starter)
+        assert summary[w["c_payroll_exp"]] == (w["fail"], 1)             # paid, nothing posted
+        assert summary[w["c_consignment"]] == (w["fail"], 2)             # Old Shop fails; New Shop needs attention
+        assert summary[w["c_suppliers"]] == (w["info"], 1)
+        assert summary[w["c_adjust"]] == (w["attention"], 2)             # the 1,600 one is flagged
+        assert summary[w["c_nocost"]] == (w["fail"], 1)
+        assert summary[w["c_drafts"]] == (w["fail"], 1)
+        assert MONTH in report.subject
+        html, _text = auto.render(report, "en")
+        assert "Not paid" in html and "No payroll" in html and "Left" not in html and "Starts later" not in html
+        assert "Paid not posted" in html and "https://farm.test/hr/?search=Paid%20not%20posted" in html
+        assert "Old Shop" in html and "New Shop" in html and "Settled Shop" not in html
+        assert "⚠️ Needs attention" in html and "https://farm.test/b2b/#client/2" in html
+        assert "Al Baraka Farms" in html and "https://farm.test/suppliers/?search=Al%20Baraka%20Farms" in html
+        assert (FIRST - timedelta(days=20)).isoformat() in html                                   # unpaid since
+        assert "Broken bottles" in html and "1,600 ⚠️" in html and "Other month" not in html
+        assert "Total adjustments in the month: 1,616 EGP" in html
+        assert "https://farm.test/products/?search=Mystery%20Jam" in html
+        assert "https://farm.test/field-inbox/?draft=1" in html
+    scenario(go)
+
+
+def test_a_clean_month_passes(env):
+    async def go(db, factory):
+        await db.execute(update(Employee).values(is_active=False))
+        await db.commit()
+        report, summary = await checks(db)
+        w = ar.W["en"]
+        for key in ("c_payroll", "c_payroll_exp", "c_consignment", "c_nocost"):
+            assert summary[w[key]][0] == w["pass"], key
+        assert len(report.sections) == 1 or all(w["pass"] not in s.title for s in report.sections[1:])
+    scenario(go)
+
+
+def test_the_month_end_runs_once_on_its_day_in_arabic(env):
+    async def go(db, factory):
+        await seed_month(db)
+        await enable(db, "month_end", trigger="monthly", month_day=3, send_time="08:00", language="ar")
+        assert await auto.tick(db, RUN_AT) == ["month_end: sent"]
+        assert await auto.tick(db, RUN_AT + timedelta(hours=1)) == []
+        [mail] = env.sent
+        assert "إقفال الشهر" in mail["subject"] and MONTH in mail["subject"] and 'dir="rtl"' in mail["html"]
+        assert "❌ غير سليم" in mail["html"]
+        [ran] = await runs(db, "month_end")
+        assert (ran.status, ran.period) == ("sent", RUN_DAY.isoformat())
+    scenario(go)
+
+
+@pytest.mark.parametrize("page,input_id", [("hr", "emp-search"), ("suppliers", "search"), ("products", "search")])
+def test_url_filters_on_hr_suppliers_and_products(page, input_id):
+    from app.routers import hr, products, suppliers
+    user = SimpleNamespace(id=1, name="B", email="b@x", role="admin", permissions=None)
+    html = {"hr": hr.hr_ui, "suppliers": suppliers.suppliers_ui, "products": products.products_ui}[page](current_user=user)
+    html = html if isinstance(html, str) else html.body.decode()          # the HR page returns an HTMLResponse
+    init = html.index("async function init(){")
+    assert html.index(f'prefillSearchFromUrl("{input_id}")', init) < html.index("await", init)   # before any load
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    assert _run_prefill(html, input_id, "?search=Al%20Baraka%20Farms") == "Al Baraka Farms"
+    assert _run_prefill(html, input_id, "") == "before"
+    assert _run_prefill(html, input_id, "?search=%3Cimg%3E") == "before"
+    assert _run_prefill(html, input_id, "?search=%E0%A4%A") == "before"

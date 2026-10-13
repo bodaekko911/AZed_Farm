@@ -867,6 +867,8 @@
     "Unlink this chat? It stops working until you relink it.": "إلغاء ربط هذه المحادثة؟ ستتوقف حتى تعيد ربطها.",
     "Relink": "إعادة الربط",
     "Approves": "يعتمد",
+    "Flag a stock adjustment worth at least (EGP)": "نبّه على تعديل مخزون بقيمة (ج.م) أو أكثر",
+    "Unsettled consignment reports fail after (days)": "بلاغات الأمانة غير المُسوّاة تفشل بعد (يوم)",
     "Also flag discounts of more than (% below catalogue)": "نبّه أيضاً على الخصم أكثر من (٪ تحت الكتالوج)",
     "Send at once when one line loses at least (EGP)": "أرسل فوراً إذا خسر بند واحد على الأقل (ج.م)",
     "Report expenses of at least (EGP)": "أبلغ عن المصروفات من (ج.م)",

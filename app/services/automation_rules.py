@@ -2,7 +2,7 @@
 dashboard's attention rules, Ask's lookups — so an e-mail's figures match what AZed shows; every item links to the page
 where it can be checked.
 
-Phase 1: the morning brief. Phase 2: POS sold below cost, big expense. (Phase 3: the month-end close checklist.)
+Phase 1: the morning brief. Phase 2: POS sold below cost, big expense. Phase 3: the month-end close checklist.
 """
 from __future__ import annotations
 
@@ -544,3 +544,248 @@ BIG_EXPENSE = RuleSpec(
 
 RULES[POS_BELOW_COST.key] = POS_BELOW_COST
 RULES[BIG_EXPENSE.key] = BIG_EXPENSE
+
+
+# ══ Phase 3: the month-end close checklist ═══════════════════════════════════
+# Only checks AZed's data can actually support. (Expenses always have a category in AZed, so there is no
+# "expenses without a category" check; the app has no stock count for its own inventory, so manual stock adjustments
+# are listed instead.)
+
+W["en"].update({
+    "me_subject": "Month-end close — {month}", "me_intro": "Checks for {month}. Each one says whether it passes and "
+                                                         "links to where it can be fixed.",
+    "check": "Check", "status": "Status", "count": "Count",
+    "pass": "✅ Pass", "fail": "❌ Fail", "attention": "⚠️ Needs attention", "info": "ℹ️ Information",
+    "c_payroll": "Payroll created and paid for every active employee", "c_payroll_exp": "Payroll expenses posted",
+    "c_consignment": "Consignment sales reported but not settled", "c_suppliers": "What we owe suppliers",
+    "c_adjust": "Manual stock adjustments", "c_nocost": "Products sold with no cost",
+    "c_drafts": "Field inbox items still waiting",
+    "employee": "Employee", "problem": "Problem", "net": "Net", "no_payroll": "no payroll for the month",
+    "not_paid": "not marked paid", "no_expense": "paid, but no expense posted", "paid_on": "Paid on",
+    "reported": "Reported sold", "settled": "Settled", "gap": "Not settled", "oldest": "Oldest unsettled report",
+    "supplier": "Supplier", "since": "Unpaid since", "when": "Date", "by": "By", "reason": "Reason",
+    "flag": "Over {amount}", "adj_total": "Total adjustments in the month: {value} EGP at today's cost "
+                                        "({count} adjustment(s)).",
+    "cons_note": "An indicator: AZed doesn't link a reported sale to the Settle that follows, so this compares the "
+                 "quantities per client. Under {days} days old it needs attention; older, it fails.",
+    "adj_note": "Value = quantity × today's product cost (a stock move doesn't keep its cost).",
+    "sup_note": "\"Unpaid since\" is the oldest received delivery from that supplier that isn't fully paid.",
+    "submitted": "Sent", "type": "Type", "value_cost": "Value at today's cost",
+})
+W["ar"].update({
+    "me_subject": "إقفال الشهر — {month}", "me_intro": "فحوصات شهر {month}. كل فحص يوضح إن كان سليماً ومعه رابط "
+                                                   "لإصلاحه.",
+    "check": "الفحص", "status": "الحالة", "count": "العدد",
+    "pass": "✅ سليم", "fail": "❌ غير سليم", "attention": "⚠️ يحتاج انتباه", "info": "ℹ️ للعلم",
+    "c_payroll": "رواتب الشهر مُعدّة ومدفوعة لكل الموظفين النشطين", "c_payroll_exp": "مصروفات الرواتب مسجّلة",
+    "c_consignment": "مبيعات أمانة مُبلّغ عنها ولم تُسوَّ", "c_suppliers": "المستحق للموردين",
+    "c_adjust": "تعديلات المخزون اليدوية", "c_nocost": "منتجات بيعت بدون تكلفة",
+    "c_drafts": "عناصر ما زالت في صندوق الميدان",
+    "employee": "الموظف", "problem": "المشكلة", "net": "الصافي", "no_payroll": "لا يوجد راتب للشهر",
+    "not_paid": "لم يُعلَّم كمدفوع", "no_expense": "مدفوع بدون مصروف مسجّل", "paid_on": "تاريخ الدفع",
+    "reported": "مُبلّغ كمباع", "settled": "مُسوّى", "gap": "غير مُسوّى", "oldest": "أقدم بلاغ غير مُسوّى",
+    "supplier": "المورد", "since": "غير مدفوع منذ", "when": "التاريخ", "by": "بواسطة", "reason": "السبب",
+    "flag": "أكثر من {amount}", "adj_total": "إجمالي التعديلات في الشهر: {value} ج.م بتكلفة اليوم ({count} تعديل).",
+    "cons_note": "مؤشر: AZed لا يربط البلاغ عن البيع بالتسوية التالية له، لذا تُقارن الكميات لكل عميل. أقل من {days} "
+                 "يوماً يحتاج انتباه؛ أقدم من ذلك غير سليم.",
+    "adj_note": "القيمة = الكمية × تكلفة المنتج اليوم (حركة المخزون لا تحفظ تكلفتها).",
+    "sup_note": "«غير مدفوع منذ» هو أقدم استلام من المورد لم يُدفع بالكامل.",
+    "submitted": "أُرسل", "type": "النوع", "value_cost": "القيمة بتكلفة اليوم",
+})
+
+
+def _month_of(run_day: date) -> tuple[date, date]:
+    """The month before the run's month."""
+    last = run_day.replace(day=1) - timedelta(days=1)
+    return last.replace(day=1), last
+
+
+async def check_payroll(db, first: date, last: date, w: dict) -> list:
+    from app.models.expense import Expense
+    from app.models.hr import Employee, Payroll
+    period = first.strftime("%Y-%m")
+    active = [e for e in (await db.execute(select(Employee).where(Employee.is_active.is_(True))
+                                           .order_by(Employee.name))).scalars().all()
+              if not e.hire_date or e.hire_date <= last]
+    rows = {p.employee_id: p for p in (await db.execute(select(Payroll).where(Payroll.period == period))).scalars().all()}
+    names = {e.id: e.name for e in (await db.execute(select(Employee))).scalars().all()}
+    problems = [[_hr(e.name), w["no_payroll"], "—"] for e in active if e.id not in rows]
+    problems += [[_hr(names.get(p.employee_id, "?")), w["not_paid"], money(p.net_salary)]
+                 for p in rows.values() if not p.paid]
+    posted = set((await db.execute(select(Expense.payroll_id).where(
+        Expense.payroll_id.in_([p.id for p in rows.values()] or [-1])))).scalars().all())
+    missing_exp = [[_hr(names.get(p.employee_id, "?")), money(p.paid_amount if p.paid_amount is not None else p.net_salary),
+                    (_aware_day(p.paid_at) or "—")] for p in rows.values() if p.paid and p.id not in posted]
+    return [
+        {"key": "c_payroll", "status": "fail" if problems else "pass", "count": len(problems), "link": "/hr/",
+         "head": [w["employee"], w["problem"], w["net"]], "rows": problems},
+        {"key": "c_payroll_exp", "status": "fail" if missing_exp else "pass", "count": len(missing_exp), "link": "/hr/",
+         "head": [w["employee"], w["net"], w["paid_on"]], "rows": missing_exp},
+    ]
+
+
+def _hr(name: str) -> tuple:
+    return (name, link(f"/hr/?search={quote(name or '')}"))
+
+
+def _aware_day(value) -> Optional[str]:
+    from app.core.time_utils import to_app_tz
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        from datetime import timezone
+        value = value.replace(tzinfo=timezone.utc)
+    return to_app_tz(value).date().isoformat()
+
+
+async def check_consignment(db, last: date, run_day: date, days: int, w: dict) -> dict:
+    """Per client: quantity reported sold on payments vs quantity settled; the oldest report not yet covered."""
+    from sqlalchemy import func
+    from app.models.b2b import B2BClient, Consignment, ConsignmentItem, ConsignmentSale, ConsignmentSaleItem
+    _s, end = utc_bounds(last, last)
+    sales = (await db.execute(
+        select(ConsignmentSale.client_id, ConsignmentSale.created_at, func.coalesce(func.sum(ConsignmentSaleItem.qty), 0))
+        .join(ConsignmentSaleItem, ConsignmentSaleItem.sale_id == ConsignmentSale.id)
+        .where(ConsignmentSale.created_at <= end)
+        .group_by(ConsignmentSale.id, ConsignmentSale.client_id, ConsignmentSale.created_at)
+        .order_by(ConsignmentSale.created_at))).all()
+    settled = dict((await db.execute(
+        select(Consignment.client_id, func.coalesce(func.sum(ConsignmentItem.qty_sold), 0))
+        .join(ConsignmentItem, ConsignmentItem.consignment_id == Consignment.id)
+        .group_by(Consignment.client_id))).all())
+    names = dict((await db.execute(select(B2BClient.id, B2BClient.name))).all())
+    by_client: dict = {}
+    for cid, when, qty in sales:
+        by_client.setdefault(cid, []).append((when, float(qty or 0)))
+    rows, worst = [], "pass"
+    for cid, reports in by_client.items():
+        reported = sum(q for _w, q in reports)
+        done = float(settled.get(cid) or 0)
+        if reported - done <= 0.0005:
+            continue
+        covered, oldest = done, None
+        for when, qty in reports:                       # settled quantities cover the oldest reports first
+            if covered >= qty - 0.0005:
+                covered -= qty
+                continue
+            oldest = _aware_day(when)
+            break
+        age = (run_day - date.fromisoformat(oldest)).days if oldest else 0
+        state = "fail" if age >= days else "attention"
+        worst = "fail" if state == "fail" or worst == "fail" else "attention"
+        rows.append([(names.get(cid, f"#{cid}"), link(f"/b2b/#client/{cid}")), f"{reported:g}", f"{done:g}",
+                     f"{reported - done:g}", oldest or "—", w[state]])
+    return {"key": "c_consignment", "status": worst, "count": len(rows), "link": "/b2b/",
+            "head": [w["client"], w["reported"], w["settled"], w["gap"], w["oldest"], w["status"]], "rows": rows,
+            "note": w["cons_note"].format(days=days)}
+
+
+async def check_suppliers(db, run_day: date, w: dict) -> dict:
+    from sqlalchemy import func
+    from app.models.receipt import ProductReceipt
+    from app.models.supplier import Supplier
+    owed = (await db.execute(select(Supplier).where(Supplier.balance > 0).order_by(Supplier.balance.desc()))).scalars().all()
+    since = dict((await db.execute(
+        select(ProductReceipt.supplier_id, func.min(ProductReceipt.receive_date))
+        .where(ProductReceipt.supplier_id.in_([s.id for s in owed] or [-1]),
+               func.coalesce(ProductReceipt.total_cost, 0) > func.coalesce(ProductReceipt.amount_paid, 0))
+        .group_by(ProductReceipt.supplier_id))).all())
+    rows = [[(s.name, link(f"/suppliers/?search={quote(s.name)}")), money(s.balance),
+             since[s.id].isoformat() if since.get(s.id) else "—",
+             (run_day - since[s.id]).days if since.get(s.id) else "—"] for s in owed[:20]]
+    return {"key": "c_suppliers", "status": "info", "count": len(owed), "link": "/suppliers/",
+            "head": [w["supplier"], w["owed"], w["since"], w["days"]], "rows": rows, "note": w["sup_note"],
+            "total": round(sum(float(s.balance or 0) for s in owed), 2)}
+
+
+async def check_adjustments(db, first: date, last: date, flag_at: float, w: dict) -> dict:
+    from app.models.inventory import StockMove
+    from app.models.product import Product
+    from app.models.user import User
+    s, e = utc_bounds(first, last)
+    moves = (await db.execute(
+        select(StockMove, Product.name, Product.sku, Product.unit, Product.cost, User.name)
+        .join(Product, Product.id == StockMove.product_id).outerjoin(User, User.id == StockMove.user_id)
+        .where(StockMove.type == "adjust", StockMove.created_at >= s, StockMove.created_at <= e)
+        .order_by(Product.name, StockMove.created_at))).all()
+    rows, total, flagged = [], 0.0, 0
+    for m, name, sku, unit, cost, who in moves:
+        qty = float(m.qty or 0)
+        value = abs(qty) * float(cost or 0)
+        total += value
+        big = value >= flag_at
+        flagged += big
+        rows.append([(name, link(f"/inventory/?search={quote(sku or name)}")), f"{qty:+g} {unit or ''}".strip(),
+                     money(value) + (" ⚠️" if big else ""), _aware_day(m.created_at) or "—", who or "—",
+                     (m.note or "—")[:120]])
+    return {"key": "c_adjust", "status": "attention" if flagged else "info", "count": len(moves), "link": "/inventory/",
+            "head": [w["product"], w["qty"], w["value_cost"], w["when"], w["by"], w["reason"]],
+            "rows": rows, "note": w["adj_total"].format(value=money(total), count=len(moves)) + " " + w["adj_note"]
+            + (" " + w["flag"].format(amount=money(flag_at)) + " ⚠️" if flagged else ""),
+            "total": round(total, 2), "flagged": flagged}
+
+
+async def check_no_cost(db, first: date, last: date, w: dict) -> dict:
+    from app.routers.reports import _build_profitability_report
+    s, e = utc_bounds(first, last)
+    r = await _build_profitability_report(db, d_from=s, d_to=e)
+    names = list(r.get("products_missing_cost") or [])
+    return {"key": "c_nocost", "status": "fail" if names else "pass", "count": len(names), "link": "/products/",
+            "head": [w["product"]], "rows": [[(n, link(f"/products/?search={quote(n)}"))] for n in names[:30]]}
+
+
+async def check_drafts(db, last: date, w: dict) -> Optional[dict]:
+    try:
+        from app.models.telegram import FieldDraft
+        _s, end = utc_bounds(last, last)
+        async with db.begin_nested():
+            drafts = (await db.execute(select(FieldDraft).where(FieldDraft.status == "in_review",
+                                                                FieldDraft.created_at <= end)
+                                       .order_by(FieldDraft.created_at))).scalars().all()
+    except Exception:  # noqa: BLE001  the Telegram bot's tables may not be there
+        return None
+    rows = [[(f"#{d.id}", link(f"/field-inbox/?draft={d.id}")), d.kind, _aware_day(d.created_at) or "—"] for d in drafts]
+    return {"key": "c_drafts", "status": "fail" if drafts else "pass", "count": len(drafts), "link": "/field-inbox/",
+            "head": ["#", w["type"], w["submitted"]], "rows": rows}
+
+
+async def month_end_build(db, ctx: dict) -> Report:
+    lang = ctx["lang"] if ctx["lang"] in W else "en"
+    w = W[lang]
+    cfg = ctx["settings"]
+    run_day = ctx["now_local"].date()
+    first, last = _month_of(run_day)
+    month = first.strftime("%Y-%m")
+    checks = await check_payroll(db, first, last, w)
+    checks.append(await check_consignment(db, last, run_day, int(cfg.get("consignment_days") or 30), w))
+    checks.append(await check_suppliers(db, run_day, w))
+    checks.append(await check_adjustments(db, first, last, float(cfg.get("adjust_flag") or 1000), w))
+    checks.append(await check_no_cost(db, first, last, w))
+    drafts = await check_drafts(db, last, w)
+    if drafts:
+        checks.append(drafts)
+    summary = Section(w["check"], [w["check"], w["status"], w["count"]],
+                      [[(w[c["key"]], link(c["link"])), w[c["status"]], c["count"]] for c in checks])
+    sections = [summary]
+    for c in checks:
+        if c["rows"] and c["status"] != "pass":
+            sections.append(Section(f'{w[c["key"]]} — {w[c["status"]]}', c["head"], c["rows"], note=c.get("note")))
+    return Report(subject=f"{TITLE} — {w['me_subject'].format(month=month)}",
+                  intro=w["me_intro"].format(month=month), sections=sections, items=len(checks))
+
+
+MONTH_END = RuleSpec(
+    key="month_end",
+    names={"en": "Month-end close checklist", "ar": "قائمة إقفال الشهر"},
+    descriptions={"en": "Once a month, for the month before: payroll created, paid and posted; consignment sales "
+                        "reported but not settled; what we owe suppliers and since when; manual stock adjustments; "
+                        "products sold with no cost; Field inbox items still waiting.",
+                  "ar": "مرة في الشهر عن الشهر السابق: الرواتب مُعدّة ومدفوعة ومسجّلة؛ مبيعات الأمانة غير المُسوّاة؛ "
+                        "المستحق للموردين ومنذ متى؛ تعديلات المخزون اليدوية؛ منتجات بيعت بدون تكلفة؛ صندوق الميدان."},
+    trigger="monthly", send_time="08:00", month_day=3,
+    settings=[Setting("adjust_flag", "Flag a stock adjustment worth at least (EGP)", 1000),
+              Setting("consignment_days", "Unsettled consignment reports fail after (days)", 30, "days")],
+    build=month_end_build,
+)
+
+RULES[MONTH_END.key] = MONTH_END
