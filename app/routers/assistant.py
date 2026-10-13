@@ -145,7 +145,7 @@ async def read_invoices(request: Request, db: AsyncSession = Depends(get_async_s
                                    f"{assistant_service.timing_text(total_s, model_s, total_s - model_s)}", user=user)
     await db.commit()
     used, limit = await assistant_service.limit_state(db, user)
-    return {"filename": filename, "invoices": matched,
+    return {"filename": filename, "invoices": matched, "notice": usage.get("notice"),
             "timing": {"seconds": round(total_s, 1), "model_seconds": round(model_s, 1),
                        "lookup_seconds": round(total_s - model_s, 1)},
             "can_create_customers": has_permission(user, "action_customers_create"),

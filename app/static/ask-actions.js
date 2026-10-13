@@ -335,6 +335,7 @@
       if (!data.invoices.length) { status.textContent = "No invoices were found in that PDF."; return; }
       const took = data.timing ? ` (read in ${data.timing.seconds}s)` : "";
       status.textContent = `Found ${data.invoices.length} invoice${data.invoices.length > 1 ? "s" : ""}${took}. Check each one — only invoices whose total matches the PDF can be recorded.`;
+      if (data.notice) bubble.append(h("div", { class: "act-status bad", text: data.notice }));
       const cardsEls = data.invoices.map(inv => invoiceCard(inv, data.filename, toast, !!data.can_create_customers));
       bubble.append(...cardsEls);
       if (cardsEls.length > 1) {

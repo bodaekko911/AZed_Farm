@@ -975,16 +975,45 @@ def _num(value) -> Optional[float]:
         return None
 
 
-async def read_invoices(pages: list[str], transport: Optional[httpx.AsyncBaseTransport] = None) -> tuple[list[dict], dict]:
-    """Page images → the invoices printed on them, as the model reads them. Returns (invoices, token usage)."""
+# One reply can only be so long: a PDF of many receipts makes more JSON than fits, and a reply cut off mid-way can't
+# be read. So the reply limit is generous; if it is still cut off, the pages are read one at a time (an invoice that
+# runs onto the next page is joined back up), and on a single crowded page every complete invoice is kept.
+READ_MAX_TOKENS = 16000
+PAGE_NOTE = """
+This is page {n} of {total}. If the page STARTS with the rest of an invoice begun on an earlier page (items or totals
+with no invoice header), put that part first as its own entry with "continues_previous": true."""
+
+
+def _salvage(text: str) -> list[dict]:
+    """The complete invoice objects in a reply that was cut off."""
+    at = (text or "").find("[", (text or "").find('"invoices"'))
+    if at < 0:
+        return []
+    decoder, out, i = json.JSONDecoder(), [], at + 1
+    while i < len(text):
+        while i < len(text) and text[i] in " \r\n\t,":
+            i += 1
+        if i >= len(text) or text[i] != "{":
+            break
+        try:
+            obj, i = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            break                                   # the one that was cut off
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+async def _read_once(pages: list[str], note: str, transport) -> tuple[list[dict], dict, bool]:
+    """One model call. Returns (raw invoices, usage, complete?)."""
     model = settings.ASSISTANT_VISION_MODEL or settings.ASSISTANT_MODEL
     content: list[dict] = [{"type": "text", "text": f"{len(pages)} page(s) follow. Extract every invoice."}]
     content += [{"type": "image_url", "image_url": {"url": page}} for page in pages]
-    body = {"model": model, "max_tokens": 4000, "temperature": 0,
-            "messages": [{"role": "system", "content": EXTRACT_PROMPT}, {"role": "user", "content": content}]}
+    body = {"model": model, "max_tokens": READ_MAX_TOKENS, "temperature": 0,
+            "messages": [{"role": "system", "content": EXTRACT_PROMPT + note}, {"role": "user", "content": content}]}
     from app.services.assistant_service import RETRYABLE_STATUS, ProviderUnavailable, post_completion
     try:
-        async with httpx.AsyncClient(timeout=120.0, transport=transport) as client:
+        async with httpx.AsyncClient(timeout=180.0, transport=transport) as client:
             response = await post_completion(client, body)
     except (ProviderUnavailable, httpx.TimeoutException):
         raise HTTPException(status_code=502, detail="The AI service didn't answer. Try again in a minute.")
@@ -997,13 +1026,63 @@ async def read_invoices(pages: list[str], transport: Optional[httpx.AsyncBaseTra
                                                     "model may not read images — set ASSISTANT_VISION_MODEL.")
     data = response.json()
     usage = {k: int((data.get("usage") or {}).get(k) or 0) for k in ("prompt_tokens", "completion_tokens")}
-    message = ((data.get("choices") or [{}])[0]).get("message") or {}
+    choice = (data.get("choices") or [{}])[0]
+    text = (choice.get("message") or {}).get("content") or ""
+    cut_off = choice.get("finish_reason") in ("length", "max_tokens")
     try:
-        parsed = _json_from(message.get("content") or "")
+        parsed = _json_from(text)
+        found = [i for i in (parsed.get("invoices") or []) if isinstance(i, dict)]
+        return found, usage, not cut_off
     except (ValueError, json.JSONDecodeError):
-        raise HTTPException(status_code=502, detail="Couldn't make sense of the PDF. Try a clearer scan.")
+        logger.warning("invoice extraction: reply not readable (finish_reason=%s, %d chars)",
+                       choice.get("finish_reason"), len(text))
+        return _salvage(text), usage, False
+
+
+def _join_pages(per_page: list[list[dict]]) -> list[dict]:
+    """Invoices read page by page, with the part of an invoice that ran onto the next page joined back to it."""
+    out: list[dict] = []
+    for found in per_page:
+        for inv in found:
+            if inv.get("continues_previous") and out:
+                prev = out[-1]
+                prev["items"] = list(prev.get("items") or []) + list(inv.get("items") or [])
+                for key in ("total", "discount", "shipping", "shipping_label", "delivery_area", "paid"):
+                    if inv.get(key) is not None and prev.get(key) in (None, "", 0):
+                        prev[key] = inv[key]
+                continue
+            out.append(dict(inv))
+    return out
+
+
+async def read_invoices(pages: list[str], transport: Optional[httpx.AsyncBaseTransport] = None) -> tuple[list[dict], dict]:
+    """Page images → the invoices printed on them, as the model reads them. Returns (invoices, token usage); the
+    usage carries a "notice" when some invoices couldn't be read."""
+    raw, usage, complete = await _read_once(pages, "", transport)
+    notice = None
+    if not complete and len(pages) > 1:
+        # Too many invoices for one reply: one page at a time, joined back up.
+        per_page, cut = [], []
+        for n, page in enumerate(pages, start=1):
+            found, page_usage, page_complete = await _read_once([page], PAGE_NOTE.format(n=n, total=len(pages)),
+                                                                transport)
+            for k in usage:
+                usage[k] += page_usage[k]
+            per_page.append(found)
+            if not page_complete:
+                cut.append(n)
+        raw = _join_pages(per_page)
+        if cut:
+            notice = (f"Page {', '.join(map(str, cut))} had more invoices than could be read at once — the ones shown "
+                      "were read completely; split that page into a separate PDF for the rest.")
+    elif not complete:
+        notice = ("This page had more invoices than could be read at once — the ones shown were read completely; "
+                  "upload the rest separately.") if raw else None
+    if not raw and not complete:
+        raise HTTPException(status_code=502, detail="Couldn't make sense of the PDF. Try a clearer scan, or fewer "
+                                                    "pages at a time.")
     invoices = []
-    for inv in (parsed.get("invoices") or [])[:50]:
+    for inv in raw[:50]:
         if not isinstance(inv, dict):
             continue
         items = []
@@ -1028,6 +1107,8 @@ async def read_invoices(pages: list[str], transport: Optional[httpx.AsyncBaseTra
                          "shipping_label": (str(inv.get("shipping_label") or "")[:80] or None),
                          "delivery_area": (str(inv.get("delivery_area") or "")[:120] or None),
                          "paid": inv.get("paid") if isinstance(inv.get("paid"), bool) else None})
+    if notice:
+        usage["notice"] = notice
     return invoices, usage
 
 

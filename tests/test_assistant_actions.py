@@ -476,3 +476,60 @@ def test_a_price_change_is_proposed_then_applied_once_and_refused_if_the_price_m
         text, none = await act.propose(db, cashier(), "propose_price_change", json.dumps({"product": "honey", "new_price": 1}))
         assert none is None and "permission" in json.loads(text)["error"]
     scenario(go)
+
+
+# ── A PDF with more receipts than one reply can hold ─────────────────────────
+
+def _invoice(n, items=1, header=True):
+    inv = {"items": [{"description": f"Item {n}.{k}", "sku": None, "qty": 1, "unit_price": 10, "line_total": 10}
+                     for k in range(items)], "total": 10 * items, "paid": True}
+    if header:
+        inv.update(number=f"R-{n}", date="2026-10-01", customer=None)
+    return inv
+
+
+def reply(content, finish="stop"):
+    return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": content},
+                                                  "finish_reason": finish}],
+                                     "usage": {"prompt_tokens": 1000, "completion_tokens": 16000 if finish == "length" else 500}})
+
+
+def test_a_reply_cut_off_on_many_pages_is_read_page_by_page_and_joined_up():
+    seen = []
+    full = json.dumps({"invoices": [_invoice(n) for n in range(1, 40)]})
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        system = body["messages"][0]["content"]
+        if "This is page 1 of 2" in system:
+            return reply(json.dumps({"invoices": [_invoice(1), _invoice(2, items=2)]}))
+        if "This is page 2 of 2" in system:          # the rest of R-2 runs onto page 2, then R-3
+            cont = _invoice(2, header=False)
+            cont["continues_previous"] = True
+            cont["total"] = 30
+            return reply(json.dumps({"invoices": [cont, _invoice(3)]}))
+        return reply(full[:len(full) // 2], finish="length")         # all pages at once: cut off
+
+    page = "data:image/jpeg;base64,/9j/AAAA"
+    invoices, usage = run(act.read_invoices([page, page], transport=httpx.MockTransport(handler)))
+    assert [i["number"] for i in invoices] == ["R-1", "R-2", "R-3"]
+    assert len(invoices[1]["items"]) == 3 and invoices[1]["total"] == 20.0     # its own total kept, items joined
+    assert len(seen) == 3 and seen[0]["max_tokens"] == act.READ_MAX_TOKENS
+    assert "notice" not in usage and usage["prompt_tokens"] == 3000
+
+
+def test_a_crowded_single_page_keeps_every_complete_invoice_and_says_so():
+    full = json.dumps({"invoices": [_invoice(n) for n in range(1, 30)]})
+    cut = full[:full.index('"R-6"') + 10]                     # cut off in the middle of invoice 6
+    transport = httpx.MockTransport(lambda request: reply(cut, finish="length"))
+    invoices, usage = run(act.read_invoices(["data:image/jpeg;base64,/9j/AAAA"], transport=transport))
+    assert [i["number"] for i in invoices] == ["R-1", "R-2", "R-3", "R-4", "R-5"]
+    assert "upload the rest separately" in usage["notice"]
+
+
+def test_a_reply_that_isnt_json_at_all_still_fails_plainly():
+    transport = httpx.MockTransport(lambda request: reply("Sorry, I can't read this."))
+    with pytest.raises(HTTPException) as e:
+        run(act.read_invoices(["data:image/jpeg;base64,/9j/AAAA"], transport=transport))
+    assert "Couldn't make sense of the PDF" in e.value.detail
