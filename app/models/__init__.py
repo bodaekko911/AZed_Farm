@@ -4,6 +4,7 @@ from app.models.animal import AnimalGroup, FeedingLog, MortalityLog
 from app.models.receipt import ProductReceipt
 from app.models.assistant_settings import AssistantSettings
 from app.models.automation import AutomationEvent, AutomationRule, AutomationRun, AutomationSettings
+from app.models.quotation import B2BQuotation, B2BQuotationItem, B2BQuotationSettings
 from app.models.brief import WeeklyBriefSettings
 from app.models.document import DocumentFile, DocumentLink
 from app.models.telegram import FieldDraft, TelegramChat, TelegramChatGuard, TelegramLinkCode, TelegramUpdate
@@ -58,6 +59,9 @@ __all__ = [
     "AutomationRule",
     "AutomationRun",
     "AutomationSettings",
+    "B2BQuotation",
+    "B2BQuotationItem",
+    "B2BQuotationSettings",
     "DocumentFile",
     "DocumentLink",
     "FieldDraft",

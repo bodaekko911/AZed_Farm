@@ -1,0 +1,127 @@
+{% extends "base_print.html" %}
+{#- The printed quotation. It gets only quotation_service.printable(): no cost, no margin, ever. -#}
+
+{% block page_title %}{{ q.text.title }} {{ q.number }}{% endblock %}
+
+{% block print_button_label %}{{ q.text.title }}{% endblock %}
+
+{% block extra_styles %}
+{% if q.rtl %}
+body { direction: rtl; font-family: Arial, "Segoe UI", Tahoma, sans-serif; }
+table.items th, table.items td { text-align: right; }
+table.items th.right, table.items td.right { text-align: left; }
+table.totals .amount { text-align: left; }
+.totals-wrap { justify-content: flex-start; }
+.customer-block td { padding: 2px 0 2px 12px; }
+{% endif %}
+.quote-title { font-size: 22px; font-weight: 800; color: {{ BRAND.primary_color }}; margin-bottom: 6px; }
+.lead { margin: 10px 0 14px; font-size: 13px; color: #333; }
+.line-note { color: #666; font-size: 11.5px; margin-top: 2px; }
+.block-title { font-size: 14px; font-weight: 700; margin: 18px 0 6px; color: {{ BRAND.primary_color }}; }
+.estimates { border-collapse: collapse; min-width: 320px; font-size: 12.5px; }
+.estimates th, .estimates td { padding: 6px 12px; border: 1px solid #e0e0e0; }
+.estimates th { background: #f2f7f2; font-weight: 700; }
+.estimates td.amount { font-family: monospace; }
+.text-block { white-space: pre-line; font-size: 12px; color: #333; line-height: 1.6; }
+.details td { padding: 2px 14px 2px 0; font-size: 12.5px; }
+table.totals tr.total-final td, table.totals tr.total-final .label { color: #fff; }
+{% endblock %}
+
+{% block content %}
+<div class="header-top">
+    <table class="inv-meta">
+        <tr><td colspan="2"><div class="quote-title">{{ q.text.title }}</div></td></tr>
+        <tr><td class="label">{{ q.text.number }}:</td><td><b>{{ q.number }}</b></td></tr>
+        <tr><td class="label">{{ q.text.date }}:</td><td>{{ q.quote_date }}</td></tr>
+        <tr><td class="label">{{ q.text.valid_until }}:</td><td><b>{{ q.valid_until }}</b></td></tr>
+    </table>
+    <div class="logo-block">
+        <img src="{{ BRAND.logo_path }}" alt="{{ BRAND.company_name }}" style="height:110px;object-fit:contain;">
+        <div class="company-name">{{ BRAND.company_name }}</div>
+        <div class="company-sub" style="margin-top:4px">{{ q.text.registry }}: {{ BRAND.commercial_registry }}</div>
+        <div class="company-sub">{{ q.text.tax_id }}: {{ BRAND.tax_id }}</div>
+    </div>
+</div>
+
+<table class="customer-block">
+    <tr><td style="color:#555">{{ q.text.to }}:</td><td><b>{{ q.recipient }}</b></td></tr>
+    {% if q.is_prospect %}
+        {% if q.prospect.contact %}<tr><td style="color:#555">{{ q.text.contact }}:</td><td>{{ q.prospect.contact }}</td></tr>{% endif %}
+        {% if q.prospect.phone %}<tr><td style="color:#555">{{ q.text.phone }}:</td><td>{{ q.prospect.phone }}</td></tr>{% endif %}
+        {% if q.prospect.area %}<tr><td style="color:#555">{{ q.text.area }}:</td><td>{{ q.prospect.area }}</td></tr>{% endif %}
+    {% endif %}
+    {% if q.email %}<tr><td style="color:#555">{{ q.text.email }}:</td><td>{{ q.email }}</td></tr>{% endif %}
+</table>
+
+<p class="lead">{{ q.text.greeting }}</p>
+
+<table class="items">
+    <thead>
+        <tr>
+            <th>{{ q.text.product }}</th>
+            <th class="center">{{ q.text.qty }}</th>
+            <th class="center">{{ q.text.unit_price }}</th>
+            <th class="center">{{ q.text.discount }}</th>
+            <th class="center">{{ q.text.frequency }}</th>
+            <th class="right">{{ q.text.line_total }}</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for l in q.lines %}
+        <tr>
+            <td>{{ l.product }}{% if l.note %}<div class="line-note">{{ l.note }}</div>{% endif %}</td>
+            <td class="center"><bdi>{{ "%g" | format(l.qty) }} {{ l.unit }}</bdi></td>
+            <td class="center">{{ "{:,.2f}".format(l.unit_price) }}</td>
+            <td class="center">{% if l.line_discount_pct %}{{ "%g" | format(l.line_discount_pct) }}%{% endif %}</td>
+            <td class="center">{{ q.text[l.frequency] }}</td>
+            <td class="right">{{ "{:,.2f}".format(l.line_total) }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<div class="totals-wrap">
+    <table class="totals">
+        <tr><td class="label">{{ q.text.subtotal }}</td><td class="amount">{{ "{:,.2f}".format(q.totals.subtotal) }}</td></tr>
+        {% if q.totals.discount_total > 0 %}
+        <tr class="discount-row"><td class="label">{{ q.text.discounts }}</td><td class="amount">{{ "{:,.2f}".format(q.totals.discount_total) }}</td></tr>
+        {% endif %}
+        <tr><td class="label">{{ q.text.delivery_fee }}</td>
+            <td class="amount">{% if q.totals.delivery_fee > 0 %}{{ "{:,.2f}".format(q.totals.delivery_fee) }}{% else %}{{ q.text.delivery_included }}{% endif %}</td></tr>
+        <tr class="total-final"><td class="label">{{ q.text.total }} ({{ q.text.currency }})</td><td class="amount">{{ "{:,.2f}".format(q.totals.total) }}</td></tr>
+    </table>
+</div>
+
+{% if q.has_recurring %}
+<div class="block-title">{{ q.text.estimates }}</div>
+<table class="estimates">
+    <tr><th></th><th>{{ q.text.per_week }}</th><th>{{ q.text.per_month }}</th></tr>
+    <tr><td>{{ q.text.produce }}</td><td class="amount">{{ "{:,.2f}".format(q.totals.weekly_produce) }}</td><td class="amount">{{ "{:,.2f}".format(q.totals.monthly_produce) }}</td></tr>
+    <tr><td>{{ q.text.delivery }}</td>
+        {% if q.totals.weekly_delivery > 0 %}
+        <td class="amount">{{ "{:,.2f}".format(q.totals.weekly_delivery) }}</td><td class="amount">{{ "{:,.2f}".format(q.totals.monthly_delivery) }}</td>
+        {% else %}<td>{{ q.text.delivery_included }}</td><td>{{ q.text.delivery_included }}</td>{% endif %}
+    </tr>
+    <tr><th>{{ q.text.total }} ({{ q.text.currency }})</th><th class="amount">{{ "{:,.2f}".format(q.totals.weekly_value) }}</th><th class="amount">{{ "{:,.2f}".format(q.totals.monthly_value) }}</th></tr>
+</table>
+{% endif %}
+
+{% if q.delivery_area or q.delivery_day or q.payment_terms_label %}
+<div class="block-title">{{ q.text.delivery_details }}</div>
+<table class="details">
+    {% if q.delivery_area %}<tr><td style="color:#555">{{ q.text.delivery_area }}:</td><td>{{ q.delivery_area }}</td></tr>{% endif %}
+    {% if q.delivery_day %}<tr><td style="color:#555">{{ q.text.delivery_day }}:</td><td>{{ q.delivery_day }}</td></tr>{% endif %}
+    {% if q.payment_terms_label %}<tr><td style="color:#555">{{ q.text.payment_terms }}:</td><td>{{ q.payment_terms_label }}</td></tr>{% endif %}
+</table>
+{% endif %}
+
+{% if q.notes %}<div class="block-title">{{ q.text.notes }}</div><div class="text-block">{{ q.notes }}</div>{% endif %}
+{% if q.terms %}<div class="block-title">{{ q.text.terms }}</div><div class="text-block">{{ q.terms }}</div>{% endif %}
+
+<p class="lead" style="margin-top:16px">{{ q.text.closing }}</p>
+
+<div class="footer-sign">
+    <div class="sign-block"><div class="sign-line"></div><div>{{ q.text.accepted_by }}</div></div>
+    <div class="sign-block"><div class="sign-line"></div><div>{{ q.text.signed_date }}</div></div>
+</div>
+{% endblock %}

@@ -2630,6 +2630,7 @@ td.name{color:var(--text);font-weight:600;}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px;}
 </style>
     <script src="/static/auth-guard.js"></script>
+    <script src="/static/b2b-quotations.js" defer></script>
 </head>
 <body>
 """ + render_app_header(current_user, "page_b2b") + """
@@ -2659,6 +2660,7 @@ td.name{color:var(--text);font-weight:600;}
             <button class="tab"        id="tab-analysis"  onclick="switchTab('analysis')">Client Analysis</button>
             <button class="tab"        id="tab-refunds"   onclick="switchTab('refunds')">Client Refund</button>
             <button class="tab"        id="tab-pricelists" onclick="switchTab('pricelists')">&#127991; Price Lists</button>
+            <button class="tab"        id="tab-quotations" onclick="switchTab('quotations')">Quotations</button>
         </div>
         <div style="display:flex;gap:10px;">
             <button class="btn btn-blue"  id="btn-add-client"  onclick="openClientModal()">+ Add Client</button>
@@ -2821,6 +2823,9 @@ td.name{color:var(--text);font-weight:600;}
 
     <!-- CONSIGNMENT SETTLE (inline cards, no separate tab) -->
     <div id="section-consignments" style="display:none"></div>
+
+    <!-- QUOTATIONS (app/static/b2b-quotations.js) -->
+    <div id="section-quotations" style="display:none"></div>
 
     <!-- PRICE LISTS -->
     <div id="section-pricelists" style="display:none">
@@ -3073,6 +3078,10 @@ async function logout(){
           let refundEl = document.getElementById("tab-refunds");
           if(refundEl) refundEl.style.display = "none";
       }
+      if(!hasPermission("tab_b2b_quotations", u)){
+          let el = document.getElementById("tab-quotations");
+          if(el) el.style.display = "none";
+      }
       if(!hasPermission("tab_b2b_clients", u) && hasPermission("tab_b2b_invoices", u)){
           setTimeout(() => switchTab("invoices"), 0);
       }
@@ -3128,9 +3137,10 @@ function switchTab(tab){
         invoices: "tab_b2b_invoices",
         refunds: "tab_b2b_invoices",
         consignments: "tab_b2b_consignment",
+        quotations: "tab_b2b_quotations",
     };
     if(required[tab] && !hasPermission(required[tab])) return;
-    ["clients","analysis","invoices","refunds","consignments","pricelists"].forEach(t=>{
+    ["clients","analysis","invoices","refunds","consignments","pricelists","quotations"].forEach(t=>{
         let el = document.getElementById("section-"+t);
         if(el) el.style.display = t===tab?"":"none";
         let tb = document.getElementById("tab-"+t);
@@ -3142,6 +3152,7 @@ function switchTab(tab){
     if(tab==="invoices")   loadInvoices();
     if(tab==="refunds")    prepareRefundTab();
     if(tab==="pricelists") initPriceListTab();
+    if(tab==="quotations" && window.B2BQuotations) window.B2BQuotations.open();
 }
 
 /* ── CLIENT ANALYSIS ── */

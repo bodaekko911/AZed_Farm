@@ -580,6 +580,59 @@ async def ensure_automation_tables() -> None:
         logger.exception("ensure_automation_tables: failed (could not open DB session)")
 
 
+async def ensure_quotation_tables() -> None:
+    """Self-healing guard for the B2B quotation tables. Mirrors migration 20261016_0055. Idempotent."""
+    from sqlalchemy import text
+    from app.db.session import AsyncSessionLocal
+
+    statements = [
+        "CREATE TABLE IF NOT EXISTS b2b_quotations ("
+        " id SERIAL PRIMARY KEY, number VARCHAR(20),"
+        " client_id INTEGER REFERENCES b2b_clients(id),"
+        " prospect_name VARCHAR(200), prospect_contact VARCHAR(150), prospect_phone VARCHAR(50),"
+        " prospect_email VARCHAR(150), prospect_area VARCHAR(120),"
+        " quote_date DATE NOT NULL, valid_until DATE NOT NULL,"
+        " status VARCHAR(12) NOT NULL DEFAULT 'draft', language VARCHAR(2) NOT NULL DEFAULT 'en',"
+        " delivery_area VARCHAR(120), delivery_day VARCHAR(40), delivery_fee NUMERIC(12,2) NOT NULL DEFAULT 0,"
+        " payment_terms VARCHAR(50), notes TEXT, terms TEXT,"
+        " subtotal NUMERIC(14,2) NOT NULL DEFAULT 0, discount_total NUMERIC(14,2) NOT NULL DEFAULT 0,"
+        " total NUMERIC(14,2) NOT NULL DEFAULT 0, weekly_value NUMERIC(14,2) NOT NULL DEFAULT 0,"
+        " monthly_value NUMERIC(14,2) NOT NULL DEFAULT 0,"
+        " below_cost_approved_by_id INTEGER REFERENCES users(id), below_cost_approved_at TIMESTAMPTZ,"
+        " sent_at TIMESTAMPTZ, sent_to VARCHAR(150), decided_at TIMESTAMPTZ,"
+        " decided_by_id INTEGER REFERENCES users(id), reject_reason VARCHAR(300),"
+        " created_by_id INTEGER REFERENCES users(id),"
+        " created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now())",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_b2b_quotations_number ON b2b_quotations (number)",
+        "CREATE INDEX IF NOT EXISTS ix_b2b_quotations_client_id ON b2b_quotations (client_id)",
+        "CREATE INDEX IF NOT EXISTS ix_b2b_quotations_status ON b2b_quotations (status)",
+        "CREATE TABLE IF NOT EXISTS b2b_quotation_items ("
+        " id SERIAL PRIMARY KEY,"
+        " quotation_id INTEGER NOT NULL REFERENCES b2b_quotations(id) ON DELETE CASCADE,"
+        " product_id INTEGER NOT NULL REFERENCES products(id),"
+        " qty NUMERIC(12,3) NOT NULL, unit VARCHAR(30), unit_price NUMERIC(14,2) NOT NULL,"
+        " line_discount_pct NUMERIC(6,2) NOT NULL DEFAULT 0, line_total NUMERIC(14,2) NOT NULL,"
+        " frequency VARCHAR(14) NOT NULL DEFAULT 'once', note VARCHAR(200), unit_cost NUMERIC(12,3),"
+        " sort INTEGER NOT NULL DEFAULT 0)",
+        "CREATE INDEX IF NOT EXISTS ix_b2b_quotation_items_quotation_id ON b2b_quotation_items (quotation_id)",
+        "CREATE TABLE IF NOT EXISTS b2b_quotation_settings ("
+        " id INTEGER PRIMARY KEY, terms_en TEXT, terms_ar TEXT,"
+        " target_margin_pct NUMERIC(6,2) NOT NULL DEFAULT 30, validity_days INTEGER NOT NULL DEFAULT 14,"
+        " updated_at TIMESTAMPTZ DEFAULT now())",
+    ]
+    try:
+        async with AsyncSessionLocal() as db:
+            for stmt in statements:
+                try:
+                    await db.execute(text(stmt))
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("ensure_quotation_tables: statement failed: %s", stmt)
+    except Exception:
+        logger.exception("ensure_quotation_tables: failed (could not open DB session)")
+
+
 async def ensure_carbon_methodology() -> None:
     """Self-healing guard for the carbon module's methodology upgrade.
 
@@ -904,6 +957,7 @@ async def lifespan(_: FastAPI):
     await ensure_telegram_tables()
     await ensure_assistant_settings_table()
     await ensure_automation_tables()
+    await ensure_quotation_tables()
     from app.services import assistant_service
     assistant_service.enable_provider_setting()
     await sync_livestock_emissions_on_boot()
