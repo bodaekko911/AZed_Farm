@@ -298,3 +298,147 @@ def test_a_quotation_never_moves_stock_or_creates_an_invoice():
         await db.refresh(veg)
         assert float(veg.stock) == 100.0 and (await db.execute(select(B2BInvoice.id))).first() is None
     scenario(go)
+
+
+# ══ Phase 2: convert to invoice, prospect to client ══════════════════════════
+
+from app.core.product_types import SERVICE_ITEM_TYPE  # noqa: E402
+from app.models.accounting import Account, Journal  # noqa: E402
+
+
+async def accepted(db, **over):
+    """An accepted quotation, with what invoicing needs: ledger accounts and a Dahab delivery item."""
+    if not await db.get(Account, 1):
+        db.add_all([Account(id=1, code="1100", name="Receivables", type="asset", balance=0),
+                    Account(id=2, code="2200", name="Deferred revenue", type="liability", balance=0),
+                    Account(id=3, code="4000", name="Sales", type="revenue", balance=0),
+                    Product(id=9, sku="DLV-DAHAB", name="Dahab delivery", unit="trip", price=Decimal("100"),
+                            cost=Decimal("0"), stock=Decimal("0"), is_active=True, item_type=SERVICE_ITEM_TYPE)])
+        await db.commit()
+    q, _ = await qs.save(db, admin(), weekly_offer(**over))
+    await qs.set_status(db, admin(), await qs.load(db, q.id), "accepted")
+    return q.id
+
+
+def test_an_accepted_quotation_becomes_an_invoice_through_the_existing_code():
+    async def go(db):
+        from app.models.b2b import B2BInvoiceItem
+        qid = await accepted(db)
+        out = await qs.convert_to_invoice(db, manager(), await qs.load(db, qid))
+        inv = (await db.execute(select(B2BInvoice))).scalar_one()
+        assert inv.quotation_id == qid and out["delivery"] == "first delivery" and "QUO-00001" in inv.notes
+        assert abs(float(inv.total) - 1792.0) <= 0.05
+        assert out["rounding_difference"] == 0.0                              # 18.00 / 0.9 = 20.00 exactly
+        lines = {i.product_id: i for i in (await db.execute(select(B2BInvoiceItem))).scalars()}
+        assert set(lines) == {1, 2, 9}                                        # vegetables, honey, Dahab delivery
+        veg, honey = await db.get(Product, 1), await db.get(Product, 2)
+        await db.refresh(veg)
+        await db.refresh(honey)
+        assert (float(veg.stock), float(honey.stock)) == (80.0, 30.0)          # stock out, as with any invoice
+        assert (await db.execute(select(Journal.id))).first()                   # the invoice's own journal
+        client = await db.get(B2BClient, 1)
+        await db.refresh(client)
+        assert float(client.outstanding) == float(inv.total)
+        view = await qr.get_quotation(qid, db=db)
+        assert [i["invoice_number"] for i in view["invoices"]] == [inv.invoice_number]
+    scenario(go)
+
+
+def test_weekly_quotations_invoice_one_delivery_at_a_time():
+    async def go(db):
+        from app.models.b2b import B2BInvoiceItem
+        qid = await accepted(db)
+        await qs.convert_to_invoice(db, admin(), await qs.load(db, qid))
+        second = await qs.convert_to_invoice(db, admin(), await qs.load(db, qid))
+        assert second["delivery"] == "next delivery"
+        items = (await db.execute(select(B2BInvoiceItem.product_id)
+                                  .where(B2BInvoiceItem.invoice_id == second["invoice_id"]))).scalars().all()
+        assert sorted(items) == [1, 9]                                          # the weekly vegetables and their delivery
+        once = await accepted(db, lines=[{"product_id": 2, "qty": 1}])
+        await qs.convert_to_invoice(db, admin(), await qs.load(db, once))
+        with pytest.raises(HTTPException) as e:
+            await qs.convert_to_invoice(db, admin(), await qs.load(db, once))
+        assert e.value.status_code == 409
+    scenario(go)
+
+
+def test_converting_checks_stock_now_and_needs_an_accepted_client_quotation():
+    async def go(db):
+        qid = await accepted(db)
+        await db.execute(update(Product).where(Product.id == 1).values(stock=Decimal("5")))
+        await db.commit()
+        with pytest.raises(HTTPException) as e:
+            await qs.convert_to_invoice(db, admin(), await qs.load(db, qid))
+        assert "Not enough stock" in str(e.value.detail)
+        assert (await db.execute(select(B2BInvoice.id))).first() is None
+        draft, _ = await qs.save(db, admin(), weekly_offer())
+        with pytest.raises(HTTPException) as e:
+            await qs.convert_to_invoice(db, admin(), await qs.load(db, draft.id))
+        assert e.value.status_code == 409
+        prospect, _ = await qs.save(db, admin(), {"prospect_name": "Reef Hotel", "lines": [{"product_id": 2, "qty": 1}]})
+        await qs.set_status(db, admin(), await qs.load(db, prospect.id), "accepted")
+        with pytest.raises(HTTPException) as e:
+            await qs.convert_to_invoice(db, admin(), await qs.load(db, prospect.id))
+        assert "Make them a B2B client first" in e.value.detail
+    scenario(go)
+
+
+def test_a_delivery_fee_needs_a_delivery_item_or_is_left_out_on_purpose():
+    async def go(db):
+        qid = await accepted(db, delivery_area="Nuweiba")
+        with pytest.raises(HTTPException) as e:
+            await qs.convert_to_invoice(db, admin(), await qs.load(db, qid))
+        assert e.value.detail["needs_delivery_item"]
+        out = await qs.convert_to_invoice(db, admin(), await qs.load(db, qid), skip_delivery=True)
+        assert "not invoiced" in out["note"] and abs(out["total"] - 1692.0) <= 0.05
+    scenario(go)
+
+
+def test_a_full_discount_client_is_invoiced_as_paid():
+    async def go(db):
+        db.add(B2BClient(id=5, name="Habiba Kitchen", discount_pct=Decimal("100"), payment_terms="immediate",
+                         outstanding=Decimal("0")))
+        await db.commit()
+        # Every line nets to zero for a 100% client: below cost, so an admin approves it.
+        qid = await accepted(db, client_id=5, delivery_fee=0, approve_below_cost=True)
+        out = await qs.convert_to_invoice(db, admin(), await qs.load(db, qid))
+        inv = await db.get(B2BInvoice, out["invoice_id"])
+        assert inv.status == "paid" and float(inv.total) == 0.0
+    scenario(go)
+
+
+def test_a_prospect_becomes_a_client_in_one_step():
+    async def go(db):
+        q, _ = await qs.save(db, admin(), {"prospect_name": "Sharm Reef Hotel", "prospect_contact": "Chef Ali",
+                                           "prospect_phone": "0100 111 2222", "prospect_email": "chef@reef.test",
+                                           "prospect_area": "Sharm El Sheikh", "payment_terms": "net15",
+                                           "lines": [{"product_id": 1, "qty": 5}]})
+        clerk = SimpleNamespace(id=2, name="Mona", role="viewer", permissions="page_b2b,tab_b2b_quotations")
+        with pytest.raises(HTTPException) as e:
+            await qs.make_client(db, clerk, await qs.load(db, q.id))
+        assert e.value.status_code == 403
+        out = await qs.make_client(db, manager(), await qs.load(db, q.id))
+        client = await db.get(B2BClient, out["client_id"])
+        assert (client.name, client.contact_person, client.email, client.address, client.payment_terms) == \
+            ("Sharm Reef Hotel", "Chef Ali", "chef@reef.test", "Sharm El Sheikh", "net15")
+        loaded = await qs.load(db, q.id)
+        assert loaded.client_id == client.id and qs.recipient_name(loaded) == "Sharm Reef Hotel"
+        assert loaded.items[0].unit_price == Decimal("20.00")                  # prices stay as quoted
+        # The same prospect again: offered the existing client instead of a duplicate.
+        again, _ = await qs.save(db, admin(), {"prospect_name": "sharm reef hotel", "lines": [{"product_id": 1, "qty": 1}]})
+        with pytest.raises(HTTPException) as e:
+            await qs.make_client(db, manager(), await qs.load(db, again.id))
+        assert e.value.status_code == 409 and e.value.detail["existing"][0]["id"] == client.id
+        linked = await qs.make_client(db, manager(), await qs.load(db, again.id), link_client_id=client.id)
+        assert linked["created"] is False and (await qs.load(db, again.id)).client_id == client.id
+    scenario(go)
+
+
+def test_converting_needs_both_the_convert_and_the_invoice_permission():
+    route = next(r for r in qr.router.routes if getattr(r, "path", "") == "/b2b/api/quotations/{quotation_id}/invoice")
+    needed = set()
+    for dep in route.dependant.dependencies:
+        for cell in (dep.call.__closure__ or ()):
+            if isinstance(cell.cell_contents, str):
+                needed.add(cell.cell_contents)
+    assert {"action_b2b_quotations_convert", "action_b2b_invoices_create"} <= needed

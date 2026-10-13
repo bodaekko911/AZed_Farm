@@ -384,6 +384,119 @@ async def duplicate(db, user, q: B2BQuotation) -> tuple[B2BQuotation, list]:
     return await save(db, user, data)
 
 
+# ── Convert to invoice, prospect to client (phase 2) ─────────────────────────
+
+async def invoices_of(db, quotation_id: int) -> list[dict]:
+    from app.models.b2b import B2BInvoice
+    rows = (await db.execute(select(B2BInvoice).where(B2BInvoice.quotation_id == quotation_id)
+                             .order_by(B2BInvoice.id))).scalars().all()
+    return [{"id": i.id, "invoice_number": i.invoice_number, "total": float(i.total or 0), "status": i.status,
+             "created_at": i.created_at.isoformat() if i.created_at else None} for i in rows]
+
+
+async def convert_to_invoice(db, user, q: B2BQuotation, *, skip_delivery: bool = False) -> dict:
+    """An accepted quotation → a B2B invoice through the existing invoice code (its stock, journal and credit checks,
+    with stock checked now). The first invoice carries every line; with weekly lines, later ones carry the recurring
+    lines only — one delivery each, created by hand (no recurring invoices are scheduled).
+
+    The invoice code takes the client's discount off the prices it is given, and the quotation's prices already
+    have it, so each line goes in at its price before the client's discount: the invoice comes out at the quoted
+    amount (a few piasters of rounding are reported, never hidden)."""
+    from app.models.b2b import B2BInvoice
+    from app.models.product import Product
+    from app.routers.b2b import InvoiceCreate, InvoiceItemIn, create_invoice
+    from app.services.assistant_actions import pick_delivery
+    if q.status != "accepted":
+        raise HTTPException(status_code=409, detail="Only an accepted quotation can be invoiced.")
+    if q.client_id is None:
+        raise HTTPException(status_code=409, detail="This quotation is for a prospect. Make them a B2B client first.")
+    earlier = await invoices_of(db, q.id)
+    first = not earlier
+    lines = [i for i in q.items if first or FREQUENCIES.get(i.frequency, 0) > 0]
+    if not lines:
+        raise HTTPException(status_code=409, detail="This quotation is already invoiced and has no weekly lines left "
+                                                    "to deliver again.")
+    client_pct = client_discount(q.client)
+    keep = Decimal("1") - client_pct / Decimal("100")
+
+    def before_client_discount(net: Decimal, catalogue: Decimal) -> float:
+        if keep <= 0:                                  # a 100% client: the invoice nets to zero whatever the price
+            return float(catalogue)
+        return float((net / keep).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+    items, expected = [], Decimal("0")
+    for i in lines:
+        net = Decimal(str(i.unit_price)) * (Decimal("1") - Decimal(str(i.line_discount_pct or 0)) / Decimal("100"))
+        items.append(InvoiceItemIn(product_id=i.product_id, qty=float(i.qty),
+                                   unit_price=before_client_discount(net, Decimal(str(i.product.price or 0)))))
+        expected += Decimal(str(i.line_total))
+    fee = money(q.delivery_fee)
+    delivery_note = None
+    if fee > 0 and not skip_delivery:
+        products = (await db.execute(select(Product))).scalars().all()
+        delivery = pick_delivery(products, q.delivery_area, q.prospect_area)
+        if delivery is None:
+            raise HTTPException(status_code=400, detail={
+                "message": f"There is no delivery item for {q.delivery_area or 'this area'} to charge the "
+                           f"{fee:.2f} EGP delivery fee. Add a product such as '{(q.delivery_area or 'Area')} delivery', "
+                           "or invoice without the fee.", "needs_delivery_item": True})
+        items.append(InvoiceItemIn(product_id=delivery.id, qty=1, unit_price=before_client_discount(fee, fee)))
+        expected += fee
+    elif fee > 0:
+        delivery_note = f"Delivery fee of {fee:.2f} EGP not invoiced (left out on purpose)."
+    which = "first delivery" if first else "next delivery"
+    out = await create_invoice(InvoiceCreate(client_id=q.client_id, items=items,
+                                             notes=f"From quotation {q.number} ({which})"), db, current_user=user)
+    await db.execute(update(B2BInvoice).where(B2BInvoice.id == out["id"]).values(quotation_id=q.id)
+                     .execution_options(synchronize_session=False))
+    record(db, "B2B", "quotation_invoiced", f"{q.number} → {out['invoice_number']} ({which}), {out['total']:.2f}"
+           + (f"; {delivery_note}" if delivery_note else ""), user=user, ref_type="b2b_quotation", ref_id=q.id)
+    await db.commit()
+    expected_total = float(money(expected)) if keep > 0 else 0.0      # the quoted prices already have the discount
+    gap = round(float(out["total"]) - expected_total, 2)
+    return {"ok": True, "invoice_id": out["id"], "invoice_number": out["invoice_number"], "total": out["total"],
+            "delivery": which, "rounding_difference": gap if abs(gap) >= 0.01 else 0.0, "note": delivery_note}
+
+
+async def make_client(db, user, q: B2BQuotation, link_client_id: Optional[int] = None) -> dict:
+    """A prospect becomes a B2B client in one step (through the B2B page's own client code), or is linked to a client
+    that already exists. The quotation then belongs to that client; its prices stay as quoted."""
+    from app.models.b2b import B2BClient
+    from app.routers.b2b import ClientCreate, create_client
+    from app.services.assistant_actions import _norm, phone_key
+    if q.client_id is not None:
+        raise HTTPException(status_code=409, detail="This quotation is already for a B2B client.")
+    if link_client_id:
+        client = await _client(db, link_client_id)
+        q.client_id = client.id
+        record(db, "B2B", "quotation_client", f"{q.number}: prospect {q.prospect_name} linked to client {client.name}",
+               user=user, ref_type="b2b_quotation", ref_id=q.id)
+        await db.commit()
+        return {"ok": True, "client_id": client.id, "client": client.name, "created": False}
+    if not has_permission(user, "action_b2b_clients_create"):
+        raise HTTPException(status_code=403, detail="You don't have permission to create B2B clients.")
+    clients = (await db.execute(select(B2BClient))).scalars().all()
+    key = phone_key(q.prospect_phone)
+    same = [c for c in clients if _norm(c.name) == _norm(q.prospect_name)
+            or (key and phone_key(c.phone) == key)
+            or (q.prospect_email and (c.email or "").strip().lower() == q.prospect_email.strip().lower())]
+    if same:
+        raise HTTPException(status_code=409, detail={
+            "message": f"{same[0].name} already looks like this prospect. Link the quotation to that client instead?",
+            "existing": [{"id": c.id, "name": c.name} for c in same[:3]]})
+    terms = q.payment_terms if q.payment_terms in ("cash", "immediate", "net15", "net30", "net60", "consignment",
+                                                   "full_payment", "credit") else "cash"
+    made = await create_client(ClientCreate(name=q.prospect_name, contact_person=q.prospect_contact,
+                                            phone=q.prospect_phone, email=q.prospect_email, address=q.prospect_area,
+                                            payment_terms=terms, discount_pct=0,
+                                            notes=f"Created from quotation {q.number}"), db, current_user=user)
+    q.client_id = made["id"]
+    record(db, "B2B", "quotation_client", f"{q.number}: prospect {q.prospect_name} made a B2B client",
+           user=user, ref_type="b2b_quotation", ref_id=q.id)
+    await db.commit()
+    return {"ok": True, "client_id": made["id"], "client": made["name"], "created": True}
+
+
 # ── Reading it back ──────────────────────────────────────────────────────────
 
 def recipient_name(q: B2BQuotation, client=None) -> str:

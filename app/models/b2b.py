@@ -55,6 +55,8 @@ class B2BInvoice(Base):
     notes           = Column(Text)
     import_batch_id = Column(String(64), nullable=True, index=True)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
+    # The quotation this invoice was made from (Quotations → Convert to invoice).
+    quotation_id    = Column(Integer, ForeignKey("b2b_quotations.id"), nullable=True, index=True)
 
     client          = relationship("B2BClient", back_populates="invoices")
     user            = relationship("User")

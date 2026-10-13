@@ -333,6 +333,41 @@
       act.push(btn("Accepted", () => setStatus("accepted"), "btn-green"));
       act.push(btn("Rejected", () => { const r = prompt("Why was it rejected?"); if (r) setStatus("rejected", r); }, "btn-danger"));
     }
+    if (can.convert && q.status === "accepted" && !q.is_prospect && (!q.invoices.length || q.has_recurring)) {
+      const label = !q.invoices.length ? (q.has_recurring ? "Create the first delivery's invoice" : "Create the invoice")
+                                       : "Create the next delivery's invoice";
+      act.push(btn(label, () => convert(false), "btn-green"));
+    }
+    if (q.is_prospect && can.create) act.push(btn("Make a B2B client", () => makeClient(null), "btn-teal"));
+    async function convert(skipDelivery) {
+      if (!skipDelivery && !confirm("Create a B2B invoice now? Stock is checked and taken out as with any invoice.")) return;
+      try {
+        const out = await api(`/b2b/api/quotations/${q.id}/invoice`, { skip_delivery: skipDelivery });
+        toast(`${out.invoice_number} created`);
+        const notes = [];
+        if (out.rounding_difference) notes.push(`Rounding difference: ${out.rounding_difference} EGP`);
+        if (out.note) notes.push(out.note);
+        if (notes.length) alert(notes.join("\n"));
+        bg.remove(); load(); openView(q.id);
+      } catch (e) {
+        if (e.detail && e.detail.needs_delivery_item) {
+          if (confirm(e.message + "\n\nCreate the invoice without the delivery fee?")) convert(true);
+        } else toast(e.message);
+      }
+    }
+    async function makeClient(linkId) {
+      if (!linkId && !confirm("Add this prospect to B2B as a client? The quotation then belongs to the client.")) return;
+      try {
+        const out = await api(`/b2b/api/quotations/${q.id}/client`, { link_client_id: linkId });
+        toast(out.created ? `${out.client} added as a B2B client` : `Linked to ${out.client}`);
+        opts = null; await open(); openView(q.id);
+        bg.remove();
+      } catch (e) {
+        const found = e.detail && e.detail.existing;
+        if (found && found.length && confirm(e.message + "\n\n" + found[0].name)) makeClient(found[0].id);
+        else if (!found) toast(e.message);
+      }
+    }
     if (can.create && q.status === "expired") act.push(btn("Renew", async () => {
       const until = prompt("New valid until date (YYYY-MM-DD)", plusDays(today(), opts.settings.validity_days || 14));
       if (!until) return;
@@ -367,7 +402,11 @@
         h("tr", null, h("td", { text: "Discounts" }), h("td", null, data("span", money(t.discount_total)))),
         h("tr", null, h("td", { text: "Delivery fee" }), h("td", null, t.delivery_fee ? data("span", money(t.delivery_fee)) : lbl("Delivery included"))),
         h("tr", null, h("td", { text: "Total" }), h("td", null, data("span", money(t.total))))),
-      est, h("div", { class: "q-actions" }, ...act));
+      est,
+      q.invoices.length ? h("div", null, h("div", { class: "modal-title", style: "font-size:14px;margin-top:14px", text: "Invoices from this quotation" }),
+        ...q.invoices.map(i => h("div", null, h("a", { href: `/b2b/invoice/${i.id}/print`, target: "_blank", rel: "noopener", "data-no-i18n": true, text: i.invoice_number }),
+          " ", data("span", money(i.total)), " ", data("span", (i.created_at || "").slice(0, 10), "q-muted")))) : null,
+      h("div", { class: "q-actions" }, ...act));
   }
 
   // ── settings ──

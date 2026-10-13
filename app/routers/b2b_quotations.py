@@ -50,7 +50,18 @@ class SettingsIn(BaseModel):
 
 async def _out(db, q: B2BQuotation) -> dict:
     cfg = await qs.get_settings(db)
-    return qs.serialize(q, Decimal(str(cfg.target_margin_pct)), for_staff=True)
+    out = qs.serialize(q, Decimal(str(cfg.target_margin_pct)), for_staff=True)
+    out["invoices"] = await qs.invoices_of(db, q.id)
+    out["has_recurring"] = out["totals"]["deliveries_per_week"] > 0
+    return out
+
+
+class ConvertIn(BaseModel):
+    skip_delivery: bool = False
+
+
+class MakeClientIn(BaseModel):
+    link_client_id: Optional[int] = None
 
 
 @router.get("/api/quotations/options")
@@ -75,7 +86,9 @@ async def options(db: AsyncSession = Depends(get_async_session), user: User = De
         "can": {"create": has_permission(user, "action_b2b_quotations_create"),
                 "send": has_permission(user, "action_b2b_quotations_send"),
                 "below_cost": has_permission(user, qs.BELOW_COST_PERMISSION),
-                "convert": has_permission(user, "action_b2b_quotations_convert")},
+                "convert": has_permission(user, "action_b2b_quotations_convert")
+                           and has_permission(user, "action_b2b_invoices_create"),
+                "create_client": has_permission(user, "action_b2b_clients_create")},
     }
 
 
@@ -216,6 +229,24 @@ async def email_quotation(quotation_id: int, db: AsyncSession = Depends(get_asyn
            ref_id=q.id)
     await db.commit()
     return {"ok": True, "message": f"{q.number} sent to {to}", "quotation": await _out(db, await qs.load(db, q.id))}
+
+
+@router.post("/api/quotations/{quotation_id}/invoice",
+             dependencies=[Depends(require_permission("action_b2b_quotations_convert")),
+                           Depends(require_permission("action_b2b_invoices_create"))])
+async def convert_quotation(quotation_id: int, data: ConvertIn, db: AsyncSession = Depends(get_async_session),
+                            user: User = Depends(get_current_user)):
+    """Accepted quotation → a B2B invoice, through the existing invoice code (stock checked now)."""
+    out = await qs.convert_to_invoice(db, user, await qs.load(db, quotation_id), skip_delivery=data.skip_delivery)
+    return {**out, "quotation": await _out(db, await qs.load(db, quotation_id))}
+
+
+@router.post("/api/quotations/{quotation_id}/client", dependencies=[CREATE])
+async def quotation_client(quotation_id: int, data: MakeClientIn, db: AsyncSession = Depends(get_async_session),
+                           user: User = Depends(get_current_user)):
+    """Make the prospect a B2B client (needs the B2B create-client right), or link an existing client."""
+    out = await qs.make_client(db, user, await qs.load(db, quotation_id), data.link_client_id)
+    return {**out, "quotation": await _out(db, await qs.load(db, quotation_id))}
 
 
 @router.get("/quotation/{quotation_id}/print", response_class=HTMLResponse)

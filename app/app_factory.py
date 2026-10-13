@@ -615,6 +615,8 @@ async def ensure_quotation_tables() -> None:
         " frequency VARCHAR(14) NOT NULL DEFAULT 'once', note VARCHAR(200), unit_cost NUMERIC(12,3),"
         " sort INTEGER NOT NULL DEFAULT 0)",
         "CREATE INDEX IF NOT EXISTS ix_b2b_quotation_items_quotation_id ON b2b_quotation_items (quotation_id)",
+        "ALTER TABLE b2b_invoices ADD COLUMN IF NOT EXISTS quotation_id INTEGER REFERENCES b2b_quotations(id)",
+        "CREATE INDEX IF NOT EXISTS ix_b2b_invoices_quotation_id ON b2b_invoices (quotation_id)",
         "CREATE TABLE IF NOT EXISTS b2b_quotation_settings ("
         " id INTEGER PRIMARY KEY, terms_en TEXT, terms_ar TEXT,"
         " target_margin_pct NUMERIC(6,2) NOT NULL DEFAULT 30, validity_days INTEGER NOT NULL DEFAULT 14,"
