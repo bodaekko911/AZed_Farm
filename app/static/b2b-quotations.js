@@ -432,5 +432,11 @@
         } })));
   }
 
-  window.B2BQuotations = { open };
+  /** Open one quotation on top of the tab (from a link such as /b2b/?quotation=12). */
+  async function show(id) {
+    await open();
+    if (Number(id) > 0) openView(Number(id));
+  }
+
+  window.B2BQuotations = { open, show };
 })();

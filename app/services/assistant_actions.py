@@ -632,8 +632,125 @@ async def propose_b2b_sale(db, user, args: dict) -> dict:
                         "total": total}}
 
 
+QUOTE_FREQUENCIES = {"once": "once", "one time": "once", "weekly": "weekly", "every week": "weekly",
+                     "twice weekly": "twice_weekly", "twice a week": "twice_weekly", "twice_weekly": "twice_weekly",
+                     "مرة": "once", "أسبوعي": "weekly", "اسبوعي": "weekly", "أسبوعيا": "weekly", "كل أسبوع": "weekly",
+                     "مرتين": "twice_weekly", "مرتين أسبوعيا": "twice_weekly", "مرتين في الأسبوع": "twice_weekly"}
+
+
+async def propose_quotation(db, user, args: dict) -> dict:
+    """A price offer typed in chat. A known B2B client gets its own discount; an unknown name is a prospect, who
+    needs a phone or e-mail first. Nothing is sent: confirming saves a DRAFT, opened from the B2B Quotations tab."""
+    from decimal import Decimal
+    from app.models.b2b import B2BClient
+    from app.services import quotation_service as qs
+    raw_items = args.get("items") or []
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("Give at least one product and its quantity.")
+    if len(raw_items) > MAX_SALE_LINES:
+        raise ValueError(f"At most {MAX_SALE_LINES} products in one quotation.")
+    name = str(args.get("client") or "").strip()
+    if not name:
+        raise ValueError("Who is the quotation for? Give the hotel, restaurant or lodge's name.")
+    clients = (await db.execute(select(B2BClient).where(or_(B2BClient.is_active.is_(True),
+                                                            B2BClient.is_active.is_(None))))).scalars().all()
+    client, prospect = None, None
+    try:
+        client = _one(name, clients, lambda c: c.name, "B2B client")
+    except ValueError as exc:
+        if "could be several" in str(exc):
+            raise
+        phone, email = str(args.get("phone") or "").strip(), str(args.get("email") or "").strip()
+        if not phone and not email:
+            raise ValueError(f"{name} isn't a B2B client yet, so the quotation will be for a new prospect. Ask the "
+                             "user for their phone or e-mail (and the contact person) first.")
+        prospect = {"prospect_name": name[:200], "prospect_contact": str(args.get("contact") or "")[:150] or None,
+                    "prospect_phone": phone[:50] or None, "prospect_email": email[:150] or None,
+                    "prospect_area": str(args.get("delivery_area") or "")[:120] or None}
+    products = [p for p in await _active_products(db) if not is_delivery_text(p.name)]
+    lines, seen = [], set()
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            raise ValueError("Each item needs a product and a qty.")
+        product = _product_named(raw.get("product"), products)
+        if product.id in seen:
+            raise ValueError(f"{product.name} is listed twice — give it once.")
+        seen.add(product.id)
+        try:
+            qty = round(_qty_in_unit(float(raw.get("qty")), raw.get("unit"), product), 3)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(str(exc) if "counted in" in str(exc) else f"A quantity is required for {product.name}.")
+        freq = QUOTE_FREQUENCIES.get(_norm(raw.get("frequency") or "once").replace("_", " "), None) or \
+            QUOTE_FREQUENCIES.get(str(raw.get("frequency") or "once").strip().lower())
+        if freq is None:
+            raise ValueError("frequency must be one time, weekly or twice a week.")
+        line = {"product_id": product.id, "qty": qty, "frequency": freq, "note": str(raw.get("note") or "")[:200] or None,
+                "line_discount_pct": float(raw.get("discount_percent") or 0)}
+        if raw.get("unit_price") is not None:
+            line["unit_price"] = float(raw["unit_price"])
+        lines.append(line)
+    cfg = await qs.get_settings(db)
+    priced, checks = await qs.priced_lines(db, lines, client, Decimal(str(cfg.target_margin_pct)))
+    below = [c["product"] for c in checks if c["below_cost"]]
+    if below:
+        raise ValueError(f"{', '.join(below)} would be priced below cost. That can't be confirmed from here — the user "
+                         "should create this quotation on the B2B page (Quotations tab), where an admin can approve it.")
+    fee = float(args.get("delivery_fee") or 0)
+    if fee < 0:
+        raise ValueError("The delivery fee can't be negative.")
+    t = qs.totals([{"qty": l["qty"], "unit_price": l["unit_price"], "line_discount_pct": l["line_discount_pct"],
+                    "frequency": l["frequency"]} for l in priced], fee)
+    by_id = {p.id: p for p in products}
+    freq_text = {"once": "one time", "weekly": "weekly", "twice_weekly": "twice a week"}
+    card = [["For", client.name + (f" (discount {float(client.discount_pct or 0):g}%)" if client and client.discount_pct
+                                   else "") if client else f"{name} (new prospect)"]]
+    for l, c in zip(priced, checks):
+        p = by_id[l["product_id"]]
+        text = f"{float(l['qty']):g} {p.unit or ''} × {float(l['unit_price']):,.2f}".replace("  ", " ")
+        if l["line_discount_pct"]:
+            text += f" − {float(l['line_discount_pct']):g}%"
+        text += f" = {float(l['line_total']):,.2f} EGP, {freq_text[l['frequency']]}"
+        if c["no_cost"]:
+            text += " · no cost recorded"
+        elif c["below_target"]:
+            text += f" · margin {c['margin_pct']:g}%, below the {float(cfg.target_margin_pct):g}% target"
+        card.append([p.name, text])
+    if args.get("delivery_area") or args.get("delivery_day"):
+        card.append(["Delivery", ", ".join(x for x in (args.get("delivery_area"), args.get("delivery_day")) if x)])
+    card.append(["Delivery fee", f"{fee:,.2f} EGP" if fee else "included"])
+    card.append(["Total", f"{float(t['total']):,.2f} EGP"])
+    if t["deliveries_per_week"]:
+        card.append(["Estimated", f"{float(t['weekly_value']):,.2f} EGP a week, {float(t['monthly_value']):,.2f} a month"])
+    valid_days = int(args.get("valid_days") or cfg.validity_days or 14)
+    card.append(["Valid", f"{valid_days} days — saved as a DRAFT, not sent"])
+    payload = {"client_id": client.id if client else None, **(prospect or {}),
+               "delivery_area": args.get("delivery_area"), "delivery_day": args.get("delivery_day"),
+               "delivery_fee": fee, "language": "ar" if args.get("language") == "ar" else "en",
+               "notes": str(args.get("notes") or "")[:2000] or None,
+               "valid_until": (today_local() + timedelta(days=max(1, min(valid_days, 180)))).isoformat(),
+               "lines": [{"product_id": l["product_id"], "qty": float(l["qty"]), "unit_price": float(l["unit_price"]),
+                          "line_discount_pct": float(l["line_discount_pct"]), "frequency": l["frequency"],
+                          "note": l["note"]} for l in priced]}
+    return {"kind": "quotation", "title": "Draft quotation", "lines": card, "payload": payload}
+
+
 # name → (description, parameters, permissions, propose function)
 ACTIONS = {
+    "propose_quotation": (
+        "PROPOSE a draft price offer (quotation) for a B2B client or a new prospect (the user confirms; it is saved as "
+        "a draft and never sent). `items`: product, qty, `unit` only if named, `frequency` once / weekly / twice "
+        "weekly, `unit_price` / `discount_percent` only if the user said. Prices default to the client's own.",
+        {"client": {"type": "string", "description": "Client or prospect name"},
+         "items": {"type": "array", "items": {"type": "object", "properties": {
+             "product": {"type": "string"}, "qty": {"type": "number"}, "unit": {"type": "string"},
+             "frequency": {"type": "string", "enum": ["once", "weekly", "twice_weekly"]},
+             "unit_price": {"type": "number"}, "discount_percent": {"type": "number"}, "note": {"type": "string"}},
+             "required": ["product", "qty"]}},
+         "delivery_area": {"type": "string"}, "delivery_day": {"type": "string"}, "delivery_fee": {"type": "number"},
+         "phone": {"type": "string"}, "email": {"type": "string"}, "contact": {"type": "string"},
+         "language": {"type": "string", "enum": ["en", "ar"]}, "valid_days": {"type": "integer"},
+         "notes": {"type": "string"}},
+        ("page_b2b", "tab_b2b_quotations", "action_b2b_quotations_create"), propose_quotation),
     "propose_b2b_sale": (
         "PROPOSE invoicing goods sold or sent to a B2B client (the user confirms; nothing is saved by this call), "
         "e.g. \"للمطبخ\" = to the client Habiba Kitchen. `items`: each product with its qty; `unit` only if the user "
@@ -872,6 +989,15 @@ async def execute(db, user, token: str) -> dict:
                user=user, ref_type="b2b_client", ref_id=p["client_id"])
         await db.commit()
         return {"ok": True, "message": f"Payment of {p['amount']:,.2f} EGP recorded on {', '.join(numbers)}."}
+
+    if kind == "quotation":
+        _need(user, "page_b2b", "tab_b2b_quotations", "action_b2b_quotations_create")
+        from app.services import quotation_service as qs
+        record(db, "Assistant", "action", "Confirmed: draft quotation", user=user, ref_type="assistant_action",
+               ref_id=body["nonce"])
+        q, _checks = await qs.save(db, user, {**p, "approve_below_cost": False})
+        return {"ok": True, "message": f"Draft quotation {q.number} saved — {float(q.total):,.2f} EGP. It wasn't sent; "
+                                       "open it to print or e-mail it.", "link": f"/b2b/?quotation={q.id}"}
 
     if kind == "b2b_sale":
         from app.services.document_reader import NewImages, record_b2b_sale_with

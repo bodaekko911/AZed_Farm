@@ -435,3 +435,58 @@ async def carbon_footprint(db, args: dict) -> dict:
         "targets": pick(r["targets"], "label", "target_kg", "actual_kg", "progress_pct", "status"),
         "warning": r["warning"], "note": note,
     }
+
+
+# ── quotations (B2B price offers) ────────────────────────────────────────────
+
+async def quotations(db, args: dict) -> dict:
+    """Open, sent and expired quotations now; for the period, how many were made, their value, and how much was
+    accepted. Read only: a quotation past its date counts as expired here even if the B2B page hasn't been opened."""
+    from app.core.time_utils import today_local as _today
+    from app.models.b2b import B2BClient
+    from app.models.quotation import B2BQuotation
+    from app.services.assistant_service import _dates
+    d_from, d_to = await _dates(db, args)
+    today = _today()
+    names = dict((await db.execute(select(B2BClient.id, B2BClient.name))).all())
+    rows = (await db.execute(select(B2BQuotation))).scalars().all()
+
+    def status(q):
+        return "expired" if q.status in ("draft", "sent") and q.valid_until < today else q.status
+
+    def who(q):
+        return names.get(q.client_id) if q.client_id else (q.prospect_name or "—")
+
+    if args.get("client"):
+        wanted = set(_matches(str(args["client"]), sorted({who(q) for q in rows}), lambda n: n))
+        rows = [q for q in rows if who(q) in wanted]
+    open_now = sorted((q for q in rows if status(q) in ("draft", "sent")), key=lambda q: q.valid_until)
+    in_period = [q for q in rows if d_from <= q.quote_date <= d_to]
+    decided = [q for q in in_period if status(q) in ("accepted", "rejected", "expired")]
+    accepted = [q for q in in_period if status(q) == "accepted"]
+    by_who: dict = {}
+    for q in in_period:
+        row = by_who.setdefault(who(q), {"recipient": who(q), "prospect": q.client_id is None, "quoted": 0,
+                                         "quoted_value": 0.0, "accepted": 0, "accepted_value": 0.0})
+        row["quoted"] += 1
+        row["quoted_value"] = round(row["quoted_value"] + float(q.total or 0), 2)
+        if status(q) == "accepted":
+            row["accepted"] += 1
+            row["accepted_value"] = round(row["accepted_value"] + float(q.total or 0), 2)
+    return {
+        "as_of": today.isoformat(), "period": f"{d_from} to {d_to}",
+        "open_now": {"draft": sum(1 for q in open_now if q.status == "draft"),
+                     "sent": sum(1 for q in open_now if q.status == "sent"),
+                     "expired_not_renewed": sum(1 for q in rows if status(q) == "expired"),
+                     "soonest_to_expire": [{"number": q.number, "recipient": who(q), "status": q.status,
+                                            "valid_until": q.valid_until.isoformat(), "total": float(q.total or 0)}
+                                           for q in open_now[:TOP_N]]},
+        "in_period": {"quotations": len(in_period), "value_quoted": round(sum(float(q.total or 0) for q in in_period), 2),
+                      "accepted": len(accepted), "value_accepted": round(sum(float(q.total or 0) for q in accepted), 2),
+                      "rejected": sum(1 for q in in_period if status(q) == "rejected"),
+                      "acceptance_rate_pct": round(len(accepted) / len(decided) * 100, 1) if decided else None,
+                      "weekly_value_accepted": round(sum(float(q.weekly_value or 0) for q in accepted), 2)},
+        "by_recipient": sorted(by_who.values(), key=lambda r: -r["quoted_value"])[:TOP_N],
+        "note": "Acceptance rate = accepted ÷ (accepted + rejected + expired) among the period's quotations; open ones "
+                "aren't counted yet. Values are the quotation totals (delivery fee included).",
+    }

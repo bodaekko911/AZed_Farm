@@ -442,3 +442,121 @@ def test_converting_needs_both_the_convert_and_the_invoice_permission():
             if isinstance(cell.cell_contents, str):
                 needed.add(cell.cell_contents)
     assert {"action_b2b_quotations_convert", "action_b2b_invoices_create"} <= needed
+
+
+# ══ Phase 3: the Ask action and lookup ═══════════════════════════════════════
+
+import json  # noqa: E402
+
+from app.services import assistant_actions as act  # noqa: E402
+from app.services import assistant_service as svc  # noqa: E402
+
+
+async def propose(db, who, **args):
+    text, card = await act.propose(db, who, "propose_quotation", json.dumps(args))
+    return json.loads(text), card
+
+
+ASK = {"client": "blue lagoon", "delivery_area": "Dahab", "delivery_day": "Friday",
+       "items": [{"product": "mixed vegetables", "qty": 20, "frequency": "weekly"},
+                 {"product": "honey", "qty": 10}]}
+
+
+def test_propose_quotation_shows_a_card_and_confirming_saves_a_draft_only(monkeypatch):
+    sent = []
+
+    async def fake_send(*a, **k):
+        sent.append(a)
+    monkeypatch.setattr(mail_service, "send", fake_send)
+
+    async def go(db):
+        note, card = await propose(db, admin(), **ASK)
+        lines = dict(card["lines"])
+        assert lines["For"] == "Blue Lagoon Lodge (discount 10%)"
+        assert lines["Mixed vegetables"].startswith("20 kg × 18.00 = 360.00 EGP, weekly")
+        assert lines["Raw Honey"].startswith("10 jar × 135.00 = 1,350.00 EGP, one time")
+        assert lines["Total"] == "1,710.00 EGP" and "a week" in lines["Estimated"] and "DRAFT" in lines["Valid"]
+        assert (await db.execute(select(B2BQuotation.id))).first() is None            # nothing until confirmed
+        out = await act.execute(db, admin(), card["token"])
+        q = (await db.execute(select(B2BQuotation))).scalar_one()
+        assert out["link"] == f"/b2b/?quotation={q.id}" and q.number in out["message"]
+        assert (q.status, q.client_id, q.delivery_area, q.delivery_day) == ("draft", 1, "Dahab", "Friday")
+        assert sent == [] and q.sent_at is None                                         # never sent
+        with pytest.raises(HTTPException):
+            await act.execute(db, admin(), card["token"])                               # once only
+    scenario(go)
+
+
+def test_an_unknown_name_is_a_prospect_who_needs_contact_details():
+    async def go(db):
+        note, card = await propose(db, admin(), **{**ASK, "client": "Sharm Reef Hotel"})
+        assert card is None and "phone or e-mail" in note["error"]
+        note, card = await propose(db, admin(), **{**ASK, "client": "Sharm Reef Hotel", "phone": "01001112222",
+                                                   "contact": "Chef Ali", "delivery_area": "Sharm El Sheikh"})
+        assert dict(card["lines"])["For"] == "Sharm Reef Hotel (new prospect)"
+        assert dict(card["lines"])["Mixed vegetables"].startswith("20 kg × 20.00")       # catalogue price
+        await act.execute(db, admin(), card["token"])
+        q = (await db.execute(select(B2BQuotation))).scalar_one()
+        assert (q.client_id, q.prospect_name, q.prospect_phone, q.prospect_area) == \
+            (None, "Sharm Reef Hotel", "01001112222", "Sharm El Sheikh")
+    scenario(go)
+
+
+def test_below_cost_cant_be_confirmed_from_the_card_and_units_convert():
+    async def go(db):
+        note, card = await propose(db, admin(), client="blue lagoon",
+                                   items=[{"product": "mixed vegetables", "qty": 10, "unit_price": 7}])
+        assert card is None and "below cost" in note["error"] and "Quotations tab" in note["error"]
+        note, card = await propose(db, admin(), client="blue lagoon",
+                                   items=[{"product": "mixed vegetables", "qty": 500, "unit": "g"}])
+        assert dict(card["lines"])["Mixed vegetables"].startswith("0.5 kg")
+        note, card = await propose(db, admin(), client="blue lagoon",
+                                   items=[{"product": "honey", "qty": 1, "unit_price": 120}])
+        assert "below the 30% target" in dict(card["lines"])["Raw Honey"]                 # a warning, still allowed
+    scenario(go)
+
+
+def test_propose_quotation_needs_the_create_permission():
+    async def go(db):
+        viewer = SimpleNamespace(id=7, name="V", role="custom", permissions="page_b2b,tab_b2b_quotations")
+        note, card = await propose(db, viewer, **ASK)
+        assert card is None and "permission" in note["error"]
+        assert "propose_quotation" not in svc.allowed_actions(viewer)
+        assert "propose_quotation" in svc.allowed_actions(manager())
+    scenario(go)
+
+
+def test_the_quotations_lookup_counts_values_and_acceptance_without_changing_anything():
+    async def go(db):
+        a, _ = await qs.save(db, admin(), weekly_offer())                                  # accepted
+        await qs.set_status(db, admin(), await qs.load(db, a.id), "accepted")
+        r, _ = await qs.save(db, admin(), weekly_offer())                                  # rejected
+        await qs.set_status(db, admin(), await qs.load(db, r.id), "rejected", "Too far")
+        o, _ = await qs.save(db, admin(), {"prospect_name": "Reef Hotel", "prospect_email": "x@reef.test",
+                                           "lines": [{"product_id": 2, "qty": 2}]})          # open, sent
+        await qs.set_status(db, admin(), await qs.load(db, o.id), "sent")
+        x, _ = await qs.save(db, admin(), weekly_offer())                                  # past its date
+        await db.execute(update(B2BQuotation).where(B2BQuotation.id == x.id)
+                         .values(valid_until=TODAY - timedelta(days=1)))
+        await db.commit()
+        out = json.loads(await svc.run_tool(db, manager(), "quotations", "{}"))
+        assert out["open_now"]["sent"] == 1 and out["open_now"]["expired_not_renewed"] == 1
+        period = out["in_period"]
+        assert (period["quotations"], period["accepted"], period["rejected"]) == (4, 1, 1)
+        assert period["acceptance_rate_pct"] == round(1 / 3 * 100, 1)                     # accepted ÷ decided
+        assert period["value_accepted"] == 1792.0 and period["weekly_value_accepted"] == 442.0
+        lagoon = next(r for r in out["by_recipient"] if r["recipient"] == "Blue Lagoon Lodge")
+        assert (lagoon["quoted"], lagoon["accepted"]) == (3, 1)
+        assert (await db.get(B2BQuotation, x.id)).status == "draft"                       # read only: not rewritten
+        reef = json.loads(await svc.run_tool(db, manager(), "quotations", json.dumps({"client": "reef"})))
+        assert [r["recipient"] for r in reef["by_recipient"]] == ["Reef Hotel"]
+        empty = json.loads(await svc.run_tool(db, manager(), "quotations",
+                                              json.dumps({"date_from": "2020-01-01", "date_to": "2020-01-31"})))
+        assert empty["in_period"]["quotations"] == 0 and empty["in_period"]["acceptance_rate_pct"] is None
+    scenario(go)
+
+
+def test_the_quotations_lookup_is_offered_with_the_tab_permission_only():
+    assert "quotations" in svc.allowed_tools(manager())
+    assert "quotations" not in svc.allowed_tools(SimpleNamespace(id=8, role="custom", permissions="page_b2b"))
+    assert "propose_quotation" in svc.SYSTEM_PROMPT and "quotations" in svc.SYSTEM_PROMPT

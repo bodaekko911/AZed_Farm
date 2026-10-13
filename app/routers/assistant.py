@@ -34,7 +34,7 @@ TOOL_LABELS = {
     "season_cost": "Season cost per crop", "consignment_stock": "Consignment stock",
     "employee_balances": "Employee loans & advances", "activity_log": "Activity log",
     "production_batches": "Production batches", "stock_by_location": "Stock by location",
-    "livestock": "Animals", "carbon_footprint": "Carbon footprint",
+    "livestock": "Animals", "carbon_footprint": "Carbon footprint", "quotations": "Quotations",
 }
 
 

@@ -85,6 +85,7 @@ More lookups:
   consignment_stock. Employee loans/advances and what payroll will deduct → employee_balances. Who changed or
   deleted something (admins) → activity_log. Batches, yield, cost per unit made → production_batches. Stock at a
   location, transfers → stock_by_location. Animals, deaths, feed cost → livestock. Emissions → carbon_footprint.
+  Quotations (price offers) and how many get accepted → quotations.
 
 Pricing:
 - For "is X priced right", "what should X cost", "which products are too cheap", "what price gives X% margin": use
@@ -95,7 +96,8 @@ Pricing:
 - Only propose a price change (propose_price_change) when the user asks to change a price.
 
 Actions (adding an expense, logging attendance, adjusting stock, changing a price, recording a farm delivery,
-logging spoilage, recording a B2B client's payment, recording a B2B sale, recording a shop sale):
+logging spoilage, recording a B2B client's payment, recording a B2B sale, recording a shop sale, drafting a
+quotation):
 - You can't change anything yourself. When the user asks for one of these, call the matching propose_* tool; the page
   shows a card and the user presses Confirm. Then say in one line what will happen "once you confirm" — never say it
   is done, saved or recorded.
@@ -109,6 +111,8 @@ logging spoilage, recording a B2B client's payment, recording a B2B sale, record
   shows the split. Consignment invoices are settled on the B2B page, not here.
 - Goods sold or sent to a B2B client ("١٠ كيلو طماطم للمطبخ") → propose_b2b_sale, at the client's own prices
   unless the user said a price. It is invoiced exactly as on the B2B page (the client's discount and terms apply).
+- A price offer for a hotel, restaurant or lodge → propose_quotation. It only saves a DRAFT (never sends it); an
+  unknown name is a prospect — ask for their phone or e-mail if the tool says so.
 
 Formatting (the answer is shown as Markdown):
 - Short answers: one or two sentences, key numbers in **bold**.
@@ -741,10 +745,15 @@ TOOLS: dict[str, tuple[str, dict, tuple[str, ...], ToolFn]] = {
         "intake and output, targets. Optional `farm`.",
         {"farm": {"type": "string"}},
         ("page_reports", "tab_reports_carbon"), _lookup("carbon_footprint")),
+    "quotations": (
+        "B2B quotations (price offers): open, sent and expired now; for the period, how many, value quoted vs accepted, "
+        "acceptance rate, by client or prospect. Optional `client`.",
+        {"client": {"type": "string"}},
+        ("page_b2b", "tab_b2b_quotations"), _lookup("quotations")),
 }
 PERIOD_TOOLS = {"sales_summary", "product_profitability", "profit_and_loss", "expenses", "farm_harvest", "pricing",
                 "sales_trend", "stock", "spoilage", "suppliers", "pos_customers", "season_cost", "activity_log",
-                "production_batches", "stock_by_location", "livestock", "carbon_footprint"}
+                "production_batches", "stock_by_location", "livestock", "carbon_footprint", "quotations"}
 
 
 def allowed_tools(user) -> list[str]:

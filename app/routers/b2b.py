@@ -3082,6 +3082,13 @@ async function logout(){
           let el = document.getElementById("tab-quotations");
           if(el) el.style.display = "none";
       }
+      // A link such as /b2b/?quotation=12 (from Ask) opens that quotation; anything odd is ignored.
+      try{
+          const wantQuote = Number(new URLSearchParams(window.location.search).get("quotation"));
+          if(wantQuote > 0 && Number.isInteger(wantQuote) && hasPermission("tab_b2b_quotations", u)){
+              setTimeout(() => { switchTab("quotations"); if(window.B2BQuotations) window.B2BQuotations.show(wantQuote); }, 0);
+          }
+      }catch(e){}
       if(!hasPermission("tab_b2b_clients", u) && hasPermission("tab_b2b_invoices", u)){
           setTimeout(() => switchTab("invoices"), 0);
       }

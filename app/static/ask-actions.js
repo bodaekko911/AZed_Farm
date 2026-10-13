@@ -71,6 +71,7 @@
         try {
           const out = await post("/assistant/api/actions/confirm", { token: p.token });
           status.textContent = "✓ " + out.message; status.className = "act-status ok";
+          if (out.link) status.append(" ", h("a", { href: out.link, target: "_blank", rel: "noopener", text: "Open" }));
           confirm.remove(); cancel.remove();
         } catch (e) {
           status.textContent = e.message; status.className = "act-status bad";
