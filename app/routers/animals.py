@@ -14,6 +14,7 @@ Reversing a feeding (delete) re-credits both stock totals.
 """
 from __future__ import annotations
 
+import json
 from datetime import date as date_type, datetime, timezone
 from decimal import Decimal
 from typing import Optional
@@ -27,7 +28,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.log import record
 from app.core.navigation import render_app_header
-from app.core.permissions import require_permission
+from app.core.permissions import has_permission, require_permission
 from app.database import get_async_session
 from app.models.animal import AnimalGroup, FeedingLog, MortalityLog, AnimalIntakeLog
 from app.models.expense import Expense, ExpenseCategory
@@ -374,7 +375,7 @@ async def archive_group(
 
 # ── Feeding Log API ─────────────────────────────────────────────────
 
-@router.get("/api/feedings")
+@router.get("/api/feedings", dependencies=[Depends(require_permission("tab_animals_feedings"))])
 async def list_feedings(
     limit: int = Query(100, ge=1, le=500),
     group_id: Optional[int] = None,
@@ -549,7 +550,7 @@ async def delete_feeding(
 
 # ── Mortality Log API ───────────────────────────────────────────────
 
-@router.get("/api/deaths")
+@router.get("/api/deaths", dependencies=[Depends(require_permission("tab_animals_deaths"))])
 async def list_deaths(
     limit: int = Query(100, ge=1, le=500),
     group_id: Optional[int] = None,
@@ -669,7 +670,7 @@ async def delete_death(
 
 # ── Animal Intake (Receive) API ──────────────────────────────────────
 
-@router.get("/api/intakes")
+@router.get("/api/intakes", dependencies=[Depends(require_permission("tab_animals_receive"))])
 async def list_intakes(
     limit: int = Query(100, ge=1, le=500),
     group_id: Optional[int] = None,
@@ -1145,9 +1146,35 @@ async def analyze_animals(
 
 # ── HTML Page ───────────────────────────────────────────────────────
 
+# (tab key, permission, label) for each tab on the Animals page, in order.
+# Analyze keeps the permission it always had — it IS the cost-analysis view.
+ANIMAL_TABS = (
+    ("groups",   "tab_animals_groups",     "Animal Groups"),
+    ("feedings", "tab_animals_feedings",   "Feeding Log"),
+    ("deaths",   "tab_animals_deaths",     "Mortality Log"),
+    ("receive",  "tab_animals_receive",    "Receive"),
+    ("analyze",  "action_animals_analyze", "Analyze"),
+)
+
+
 @router.get("/", response_class=HTMLResponse)
 async def animals_page(current_user: User = Depends(require_permission("page_animals"))):
     header = render_app_header(current_user, active_permission="page_animals")
+    # Each tab is its own permission, so a user can be given the feeding log
+    # without the mortality log, and so on. The page still needs the groups
+    # list behind the scenes (every form picks a group), so that is loaded for
+    # anyone on the page; what a tab shows is gated here and on its API.
+    allowed = [key for key, perm, _ in ANIMAL_TABS if has_permission(current_user, perm)]
+    first = allowed[0] if allowed else ""
+    tab_buttons = "".join(
+        f'<button class="tab{" active" if key == first else ""}" id="tab-{key}" '
+        f'onclick="switchTab(&quot;{key}&quot;)">{label}</button>'
+        for key, perm, label in ANIMAL_TABS if key in allowed
+    ) or '<div class="empty" style="padding:14px 0">You have not been given any Animals tab. Ask an administrator.</div>'
+    allowed_js = json.dumps(allowed)
+    first_js = json.dumps(first)
+    hide_today = "" if "feedings" in allowed else ' style="display:none"'
+    hide_deaths = "" if "deaths" in allowed else ' style="display:none"'
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -1262,26 +1289,22 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
             <div class="stat-label">Total Headcount</div>
             <div class="stat-value" id="stat-heads">—</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card"{hide_today}>
             <div class="stat-label">Feedings Today</div>
             <div class="stat-value" id="stat-today">—</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card"{hide_deaths}>
             <div class="stat-label">Deaths This Month</div>
             <div class="stat-value" id="stat-deaths">—</div>
         </div>
     </div>
 
     <div class="tabs">
-        <button class="tab active" id="tab-groups"   onclick="switchTab('groups')">Animal Groups</button>
-        <button class="tab"        id="tab-feedings" onclick="switchTab('feedings')">Feeding Log</button>
-        <button class="tab"        id="tab-deaths"   onclick="switchTab('deaths')">Mortality Log</button>
-        <button class="tab"        id="tab-receive"  onclick="switchTab('receive')">Receive</button>
-        <button class="tab"        id="tab-analyze"  onclick="switchTab('analyze')">Analyze</button>
+        {tab_buttons}
     </div>
 
     <!-- GROUPS -->
-    <div id="groups-section">
+    <div id="groups-section" style="display:none">
         <div class="toolbar">
             <div class="search-box">
                 <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
@@ -1655,17 +1678,20 @@ function showToast(msg){{
 }}
 
 /* ── TABS ── */
+// The tabs this user may open, decided on the server. A tab not in the list
+// has no button, and its section is never shown.
+const ALLOWED_TABS = {allowed_js};
+const FIRST_TAB = {first_js};
+const ALL_TABS = ["groups", "feedings", "deaths", "receive", "analyze"];
+
 function switchTab(tab){{
-    document.getElementById("tab-groups").classList.toggle("active",   tab==="groups");
-    document.getElementById("tab-feedings").classList.toggle("active", tab==="feedings");
-    document.getElementById("tab-deaths").classList.toggle("active",   tab==="deaths");
-    document.getElementById("tab-receive").classList.toggle("active",  tab==="receive");
-    document.getElementById("tab-analyze").classList.toggle("active",  tab==="analyze");
-    document.getElementById("groups-section").style.display   = tab==="groups"   ? "" : "none";
-    document.getElementById("feedings-section").style.display = tab==="feedings" ? "" : "none";
-    document.getElementById("deaths-section").style.display   = tab==="deaths"   ? "" : "none";
-    document.getElementById("receive-section").style.display  = tab==="receive"  ? "" : "none";
-    document.getElementById("analyze-section").style.display  = tab==="analyze"  ? "" : "none";
+    if (!ALLOWED_TABS.includes(tab)) return;
+    ALL_TABS.forEach(t => {{
+        const btn = document.getElementById("tab-" + t);
+        if (btn) btn.classList.toggle("active", t === tab);
+        const sec = document.getElementById(t + "-section");
+        if (sec) sec.style.display = t === tab ? "" : "none";
+    }});
     if (tab==="feedings") loadFeedings();
     if (tab==="deaths")   loadDeaths();
     if (tab==="receive")  loadIntakes();
@@ -1674,7 +1700,11 @@ function switchTab(tab){{
 
 /* ── INIT ── */
 async function init(){{
-    await Promise.all([loadGroups(), loadFarmsAndLocations(), loadProducts(), loadDeaths({{silent:true}})]);
+    if (FIRST_TAB) switchTab(FIRST_TAB);
+    const loads = [loadGroups(), loadFarmsAndLocations(), loadProducts()];
+    // Only for the stat card, and only for someone who may see the log.
+    if (ALLOWED_TABS.includes("deaths")) loads.push(loadDeaths({{silent:true}}));
+    await Promise.all(loads);
 }}
 
 async function loadFarmsAndLocations(){{
