@@ -35,6 +35,7 @@
 .inv-total{margin-left:auto;font-weight:700;font-size:13.5px}
 .inv-ok{color:var(--green)}.inv-bad{color:var(--danger)}
 .inv-hint{color:var(--warn);font-size:11.5px;margin-top:3px}.inv-hint:empty{display:none}
+.inv-learn{display:flex;gap:6px;align-items:center;font-size:11.5px;color:var(--sub);margin-top:4px;cursor:pointer}.inv-learn[hidden]{display:none}.inv-learn input{margin:0}
 .inv-conv{color:var(--blue);font-size:11.5px;margin-top:3px}.inv-conv:empty{display:none}
 .inv-new{margin:-2px 0 10px 80px;padding:8px 10px;border:1px dashed var(--border2);border-radius:8px}
 .inv-new[hidden]{display:none}

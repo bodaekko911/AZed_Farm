@@ -29,7 +29,7 @@
     $("type").append(el("option", { value: t.key, text: t.label }));
     $("f-type").append(el("option", { value: t.key, text: t.label }));
   });
-  if (cfg.canManage) { $("add").hidden = false; $("act-h").textContent = ""; }
+  if (cfg.canManage) { $("add").hidden = false; $("import").hidden = false; $("act-h").textContent = ""; }
 
   async function load() {
     const p = new URLSearchParams();
@@ -156,6 +156,49 @@
     try { await api(`/vocabulary/api/entries/${row.id}`, { method: "DELETE" }); } catch (e) { alert(e.message); }
     load();
   }
+
+  // ── CSV import: preview first, then import what the server re-checks ──
+  const STATUS = { add: "Will be added", duplicate: "Already there", conflict: "Clashes", unmatched: "Couldn't match" };
+  let importText = "";
+  async function preview(file) {
+    importText = await file.text();
+    $("imp-msg").textContent = ""; $("imp-msg").className = "msg";
+    $("imp-rows").textContent = "";
+    let found = [];
+    try {
+      found = (await api("/vocabulary/api/import/preview", { method: "POST", body: JSON.stringify({ csv: importText }) })).rows;
+    } catch (e) {
+      $("imp-msg").className = "msg err"; $("imp-msg").textContent = e.message; found = [];
+    }
+    const counts = {};
+    found.forEach(r => {
+      counts[r.status] = (counts[r.status] || 0) + 1;
+      $("imp-rows").append(el("tr", null,
+        el("td", { class: "muted", text: String(r.line) }),
+        el("td", null, el("strong", { text: r.alias || "—" })),
+        el("td", { text: r.type }),
+        el("td", { text: r.target || r.record || "" }),
+        el("td", null, el("span", { class: "st-" + r.status, text: STATUS[r.status] || r.status }),
+           r.message ? el("div", { class: "muted", text: r.message }) : null)));
+    });
+    $("imp-sum").textContent = Object.keys(STATUS).filter(k => counts[k]).map(k => `${STATUS[k]}: ${counts[k]}`).join(" · ");
+    $("imp-go").disabled = !counts.add;
+    $("imp").classList.add("open");
+  }
+  $("import").addEventListener("click", () => $("import-file").click());
+  $("import-file").addEventListener("change", e => { const f = e.target.files[0]; e.target.value = ""; if (f) preview(f); });
+  $("imp-cancel").addEventListener("click", () => $("imp").classList.remove("open"));
+  $("imp-go").addEventListener("click", async () => {
+    $("imp-go").disabled = true;
+    try {
+      const out = await api("/vocabulary/api/import", { method: "POST", body: JSON.stringify({ csv: importText }) });
+      $("imp").classList.remove("open");
+      load();
+      alert(`Imported ${out.added} alias${out.added === 1 ? "" : "es"}.`);
+    } catch (e) {
+      $("imp-msg").className = "msg err"; $("imp-msg").textContent = e.message; $("imp-go").disabled = false;
+    }
+  });
 
   $("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(load, 250); });
   $("type").addEventListener("change", load);

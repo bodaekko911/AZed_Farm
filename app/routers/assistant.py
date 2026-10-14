@@ -18,6 +18,7 @@ from app.models.user import User
 from app.core.config import settings
 from app.core.log import record
 from app.services import assistant_actions, assistant_service
+from app.services import vocabulary_service as vocab
 
 router = APIRouter(
     prefix="/assistant",
@@ -149,6 +150,7 @@ async def read_invoices(request: Request, db: AsyncSession = Depends(get_async_s
             "timing": {"seconds": round(total_s, 1), "model_seconds": round(model_s, 1),
                        "lookup_seconds": round(total_s - model_s, 1)},
             "can_create_customers": has_permission(user, "action_customers_create"),
+            "can_learn": vocab.may_learn(user),
             "questions_left": max(limit - used, 0) if limit else None, "daily_limit": limit or None}
 
 
@@ -211,7 +213,7 @@ async def read_document(request: Request, db: AsyncSession = Depends(get_async_s
                                    f"{assistant_service.timing_text(total_s, total_s, 0)}", user=user)
     await db.commit()
     used, limit = await assistant_service.limit_state(db, user)
-    return {"filename": filename, "document": draft,
+    return {"filename": filename, "document": draft, "can_learn": vocab.may_learn(user),
             "timing": {"seconds": round(total_s, 1)},
             "questions_left": max(limit - used, 0) if limit else None, "daily_limit": limit or None}
 
@@ -225,13 +227,14 @@ async def record_document(request: Request, db: AsyncSession = Depends(get_async
         assert isinstance(data, dict)
     except (ValueError, AssertionError):
         raise HTTPException(status_code=400, detail="Couldn't read the document.")
-    if data.get("kind") == "expense_receipt":
-        return await document_reader.record_expense(db, user, data)
-    if data.get("kind") == "delivery_note":
-        return await document_reader.record_delivery(db, user, data)
-    if data.get("kind") == "harvest_sheet":
-        return await document_reader.record_harvest(db, user, data)
-    raise HTTPException(status_code=400, detail="Unknown document type.")
+    recorders = {"expense_receipt": document_reader.record_expense, "delivery_note": document_reader.record_delivery,
+                 "harvest_sheet": document_reader.record_harvest}
+    kind = data.get("kind")
+    if kind not in recorders:
+        raise HTTPException(status_code=400, detail="Unknown document type.")
+    out = await recorders[kind](db, user, data)
+    # Only now, with the document recorded: the corrections the user asked to be remembered.
+    return {**out, **await vocab.learn(db, user, data.get("remember"), kind)}
 
 
 @router.get("/api/documents/search")
@@ -693,6 +696,7 @@ button.send:disabled{opacity:.5;cursor:default}
 .inv-total{margin-left:auto;font-weight:700;font-size:13.5px}
 .inv-ok{color:var(--green)}.inv-bad{color:var(--danger)}
 .inv-hint{color:var(--warn);font-size:11.5px;margin-top:3px}.inv-hint:empty{display:none}
+.inv-learn{display:flex;gap:6px;align-items:center;font-size:11.5px;color:var(--sub);margin-top:4px;cursor:pointer}.inv-learn[hidden]{display:none}.inv-learn input{margin:0}
 .inv-conv{color:var(--blue);font-size:11.5px;margin-top:3px}.inv-conv:empty{display:none}
 .inv-new{margin:-2px 0 10px 80px;padding:8px 10px;border:1px dashed var(--border2);border-radius:8px}
 .inv-new[hidden]{display:none}

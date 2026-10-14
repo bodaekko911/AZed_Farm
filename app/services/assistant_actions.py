@@ -1579,5 +1579,7 @@ async def record_invoice(db, user, data: dict) -> dict:
            f"{result['invoice_number']} from PDF invoice {number or '?'} dated {day} — {result['total']:.2f}", user=user,
            ref_type="invoice", ref_id=result["id"])
     await db.commit()
+    # Only now, with the sale recorded: the corrections the user asked to be remembered.
+    learned = await vocab.learn(db, user, data.get("remember"), "pdf_invoice")
     return {"ok": True, "invoice_number": result["invoice_number"], "total": result["total"], "date": day.isoformat(),
-            "customer_id": customer_id}
+            "customer_id": customer_id, **learned}

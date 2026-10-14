@@ -98,6 +98,39 @@ async def remove(entry_id: int, db: AsyncSession = Depends(get_async_session),
     return {"ok": True}
 
 
+class CsvIn(BaseModel):
+    csv: str = Field(..., max_length=2_000_000)
+
+
+@router.get("/api/export")
+async def export(db: AsyncSession = Depends(get_async_session)):
+    """Every alias as CSV: alias, type, record (its name; the group for an area), note."""
+    from fastapi.responses import Response
+    return Response(content="﻿" + await vocab.export_csv(db), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": 'attachment; filename="vocabulary.csv"'})
+
+
+@router.post("/api/import/preview")
+async def import_preview(data: CsvIn, db: AsyncSession = Depends(get_async_session),
+                         user: User = Depends(require_permission(MANAGE))):
+    """What importing the file would do, row by row. Nothing is saved."""
+    try:
+        rows = await vocab.preview_import(db, data.csv)
+    except vocab.VocabularyError as exc:
+        raise vocab.http_error(exc)
+    keep = ("line", "alias", "type", "record", "note", "status", "message", "target")
+    return {"rows": [{k: r[k] for k in keep} for r in rows]}
+
+
+@router.post("/api/import")
+async def import_commit(data: CsvIn, db: AsyncSession = Depends(get_async_session),
+                        user: User = Depends(require_permission(MANAGE))):
+    try:
+        return await vocab.import_csv(db, user, data.csv)
+    except vocab.VocabularyError as exc:
+        raise vocab.http_error(exc)
+
+
 @router.get("/", response_class=HTMLResponse)
 def page(current_user: User = Depends(require_permission("page_vocabulary"))):
     cfg = json.dumps({"canManage": has_permission(current_user, MANAGE), "types": _types()}).replace("</", "<\\/")
@@ -149,6 +182,8 @@ th{color:var(--muted);font-weight:500;font-size:12px}
 .picklist button:hover,.picklist button.on{background:var(--card2)}
 .msg{font-size:12.5px;line-height:1.5}.msg.err{color:var(--danger)}.msg.warn{color:var(--warn)}
 .actions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+a.btn{text-decoration:none;display:inline-block}
+.st-add{color:var(--green)}.st-duplicate{color:var(--muted)}.st-conflict{color:var(--warn)}.st-unmatched{color:var(--danger)}
 </style>
 <script src="/static/auth-guard.js"></script>
 </head>
@@ -161,6 +196,9 @@ th{color:var(--muted);font-weight:500;font-size:12px}
     <div class="bar">
         <input id="q" type="search" placeholder="Search aliases, records or notes…">
         <select id="type"><option value="">All types</option></select>
+        <a class="btn ghost" id="export" href="/vocabulary/api/export">Export CSV</a>
+        <button class="btn ghost" id="import" hidden>Import CSV</button>
+        <input type="file" id="import-file" accept=".csv,text/csv,.txt" hidden>
         <button class="btn" id="add" hidden>+ Add alias</button>
     </div>
     <div class="card"><table>
@@ -187,6 +225,21 @@ th{color:var(--muted);font-weight:500;font-size:12px}
     <div class="actions">
         <button class="btn ghost" id="f-cancel">Cancel</button>
         <button class="btn" id="f-save">Save</button>
+    </div>
+</div></div>
+<div class="modalbg" id="imp"><div class="modal" style="max-width:820px">
+    <h3>Import preview</h3>
+    <div class="muted">Nothing is saved until you press Import. Columns: alias, type, record (name or id; the group
+        for an area), note.</div>
+    <div class="muted" id="imp-sum"></div>
+    <div class="card" style="max-height:52vh;overflow:auto"><table>
+        <thead><tr><th>Row</th><th>Alias</th><th>Type</th><th>Means</th><th>Result</th></tr></thead>
+        <tbody id="imp-rows"></tbody>
+    </table></div>
+    <div class="msg" id="imp-msg"></div>
+    <div class="actions">
+        <button class="btn ghost" id="imp-cancel">Cancel</button>
+        <button class="btn" id="imp-go">Import</button>
     </div>
 </div></div>
 <script type="application/json" id="vocab-cfg">""" + cfg + """</script>

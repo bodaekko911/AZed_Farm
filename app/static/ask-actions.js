@@ -121,6 +121,31 @@
     return pages;
   }
 
+  // ── "Remember 'X' as Y": offered when the user replaces a wrong or missing match ──
+  // Shown only to someone who may manage the vocabulary, only when there is written text, and only once the record
+  // picked differs from the one the server matched. Ticking it saves nothing: the alias goes with the record request
+  // and is saved by the server only after the invoice or document is recorded.
+  function remember(canLearn, type, written, original) {
+    const cb = h("input", { type: "checkbox" });
+    const said = h("strong", { "data-no-i18n": true }), means = h("strong", { "data-no-i18n": true });
+    const box = h("label", { class: "inv-learn", hidden: true }, cb, h("span", { text: "Remember" }), said,
+      h("span", { text: "as" }), means);
+    const text = String(written || "").trim();
+    const first = original && original.id !== undefined ? String(original.id) : (original ? String(original) : "");
+    let current = null;
+    function update(record) {
+      current = record && record.id !== undefined && record.id !== null && record.id !== "" ? record : null;
+      const show = !!(canLearn && text && current && String(current.id) !== first);
+      box.hidden = !show;
+      if (!show) cb.checked = false;
+      said.textContent = `“${text}”`; means.textContent = current ? current.name : "";
+    }
+    update(original && original.id !== undefined ? original : null);
+    return { el: box, update, value: () => (!box.hidden && cb.checked && current)
+      ? { type, alias: text, record_id: Number(current.id) } : null };
+  }
+  const remembered = boxes => boxes.map(b => b.value()).filter(Boolean);
+
   // ── Picker: a select of likely matches, plus search ──
   function picker(kind, current, candidates, allowWalkIn, onChange, extra) {
     const wrap = h("div", { class: "inv-picker" });
@@ -173,7 +198,8 @@
   }
 
   // ── One invoice to review ──
-  function invoiceCard(inv, filename, toast, canCreateCustomers) {
+  function invoiceCard(inv, filename, toast, canCreateCustomers, canLearn) {
+    const learnCustomer = remember(canLearn, "pos_customer", inv.customer, inv.customer_match);
     const state = {
       customer: inv.customer_match || null,
       newCustomer: inv.new_customer ? Object.assign({}, inv.new_customer) : null,
@@ -260,12 +286,17 @@
       inv.customer ? h("span", { class: "inv-muted", text: `on PDF: ${inv.customer}` }) : null,
       picker("customers", state.customer, inv.customer_candidates, true, c => {
         state.useNew = c === "__new"; state.customer = state.useNew ? null : c;
+        learnCustomer.update(state.customer);
         newBox.hidden = !state.useNew; check();
-      }, customerExtra));
+      }, customerExtra), learnCustomer.el);
 
     // lines
     const tbody = h("tbody");
+    const learnLines = [];
     state.lines.forEach(l => {
+      // A delivery line is picked from the address, not from its words: nothing to learn there.
+      const learn = remember(canLearn && !l.delivery, "product", l.description, l.product);
+      learnLines.push(learn);
       const lineTotal = h("td", { class: "num" });
       const paint = () => { lineTotal.textContent = money((Number(l.qty) || 0) * (Number(l.price) || 0)); };
       const qty = h("input", { type: "number", step: "any", min: "0", value: l.qty, oninput: e => { l.qty = e.target.value; paint(); check(); } });
@@ -275,6 +306,7 @@
       const conv = h("div", { class: "inv-conv", text: l.note || (l.match === "delivery" && l.product ? "Delivery item chosen from the address" : "") });
       const pick = picker("products", l.product, l.candidates, false, p => {
         l.product = p;
+        learn.update(p);
         hint.textContent = "";
         // A different product may count in a different size: redo the conversion from the PDF's figures.
         Object.assign(l, inProductUnits(l));
@@ -282,7 +314,7 @@
         paint(); check();
       });
       paint();
-      tbody.append(h("tr", null, h("td", { class: "inv-desc", text: l.description || "—" }), h("td", null, pick, hint, conv),
+      tbody.append(h("tr", null, h("td", { class: "inv-desc", text: l.description || "—" }), h("td", null, pick, hint, conv, learn.el),
         h("td", null, qty), h("td", null, price), lineTotal));
     });
     const table = h("table", { class: "inv-table" },
@@ -304,9 +336,11 @@
           new_customer: state.useNew ? state.newCustomer : null,
           paid: state.paid, discount: state.discount, pdf_total: state.pdfTotal, filename, force: state.force,
           items: state.lines.map(l => ({ product_id: l.product ? l.product.id : null, qty: Number(l.qty), unit_price: Number(l.price) })),
+          remember: remembered([learnCustomer, ...learnLines]),
         });
         state.recorded = true;
-        result.textContent = `✓ Recorded as ${out.invoice_number} (${money(out.total)}, ${out.date})`;
+        result.textContent = `✓ Recorded as ${out.invoice_number} (${money(out.total)}, ${out.date})` +
+          (out.learned ? ` · remembered ${out.learned}` : "") + ((out.notes || []).length ? ` · ${out.notes.join(" ")}` : "");
         result.className = "act-status ok";
         card.classList.add("done"); card.querySelectorAll("input, select, button").forEach(x => { x.disabled = true; });
       } catch (e) {
@@ -337,7 +371,7 @@
       const took = data.timing ? ` (read in ${data.timing.seconds}s)` : "";
       status.textContent = `Found ${data.invoices.length} invoice${data.invoices.length > 1 ? "s" : ""}${took}. Check each one — only invoices whose total matches the PDF can be recorded.`;
       if (data.notice) bubble.append(h("div", { class: "act-status bad", text: data.notice }));
-      const cardsEls = data.invoices.map(inv => invoiceCard(inv, data.filename, toast, !!data.can_create_customers));
+      const cardsEls = data.invoices.map(inv => invoiceCard(inv, data.filename, toast, !!data.can_create_customers, !!data.can_learn));
       bubble.append(...cardsEls);
       if (cardsEls.length > 1) {
         bubble.append(h("div", { class: "act-buttons" }, h("button", {
@@ -352,5 +386,5 @@
   }
 
   // renderPages is shared with ask-documents.js (photos and scans of receipts …).
-  window.AskActions = { cards, pdf, renderPages };
+  window.AskActions = { cards, pdf, renderPages, remember, remembered };
 })();

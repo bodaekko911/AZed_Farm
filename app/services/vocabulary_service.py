@@ -332,5 +332,227 @@ async def delete_entry(db, user, entry_id: int) -> None:
     invalidate()
 
 
+# ── CSV: alias, type, record (name or id; the group for an area), note ───────
+
+CSV_COLUMNS = ("alias", "type", "record", "note")
+MAX_IMPORT_ROWS = 2000
+
+
+def _type_of(text: Any) -> Optional[str]:
+    """A type as written in a file: its key ("b2b_client") or its label ("B2B client")."""
+    key = normalize(text).replace(" ", "_")
+    for kind in ALL_TYPES:
+        label = ENTITY_TYPES[kind][0] if kind in ENTITY_TYPES else "Area"
+        if key in (kind, normalize(label).replace(" ", "_")):
+            return kind
+    return None
+
+
+async def export_csv(db) -> str:
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")
+    w.writerow(CSV_COLUMNS)
+    for e in await list_entries(db):
+        w.writerow([e["alias"], e["type"], e["target"], e["note"]])
+    return buf.getvalue()
+
+
+def _read_csv(text: str) -> list[dict]:
+    import csv
+    import io
+    text = (text or "").lstrip("﻿")
+    try:
+        dialect = csv.Sniffer().sniff(text[:2048], delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+    rows = [r for r in csv.reader(io.StringIO(text), dialect) if any((c or "").strip() for c in r)]
+    if not rows:
+        raise VocabularyError("The file is empty.")
+    head = [normalize(c).replace(" ", "_") for c in rows[0]]
+    if "alias" not in head or "type" not in head:
+        raise VocabularyError("The first row must be the header: alias, type, record, note.")
+    if len(rows) - 1 > MAX_IMPORT_ROWS:
+        raise VocabularyError(f"At most {MAX_IMPORT_ROWS} rows per file.")
+    idx = {name: head.index(name) for name in CSV_COLUMNS if name in head}
+    cell = lambda r, name: (r[idx[name]].strip() if name in idx and idx[name] < len(r) else "")
+    return [{"line": n, **{name: cell(r, name) for name in CSV_COLUMNS}} for n, r in enumerate(rows[1:], start=2)]
+
+
+async def preview_import(db, text: str) -> list[dict]:
+    """Every row of the file with what importing it would do — nothing is saved. Status is one of:
+    add · duplicate (already there, or twice in the file) · conflict (the alias already means another record) ·
+    unmatched (unknown type, no such record, several records of that name, or no alias)."""
+    rows = _read_csv(text)
+    existing = {(e.entity_type, e.alias_key): e for e in (await db.execute(select(VocabularyEntry))).scalars()}
+    groups = set(await area_group_names(db))
+    names: dict[str, dict[str, list[tuple[int, str]]]] = {}
+    ids: dict[str, dict[int, str]] = {}
+
+    async def records_of(kind: str):
+        if kind not in names:
+            model = model_for(kind)
+            names[kind], ids[kind] = {}, {}
+            for rid, name in (await db.execute(select(model.id, model.name))).all():
+                names[kind].setdefault(normalize(name), []).append((rid, name))
+                ids[kind][rid] = name
+        return names[kind], ids[kind]
+
+    seen: set = set()
+    out = []
+    for r in rows:
+        row = {**r, "status": "add", "message": "", "kind": None, "record_id": None, "group": None, "target": ""}
+        out.append(row)
+        kind = _type_of(r["type"])
+        key = normalize(r["alias"])
+        if not key:
+            row.update(status="unmatched", message="No alias")
+            continue
+        if kind is None:
+            row.update(status="unmatched", message=f"Unknown type '{r['type']}'")
+            continue
+        row["kind"] = kind
+        if kind == AREA:
+            group = normalize(r["record"])
+            if not group:
+                row.update(status="unmatched", message="No area group")
+                continue
+            owner = existing.get((AREA, group))
+            if group not in groups and owner is not None and owner.target_key != group:
+                row.update(status="unmatched",
+                           message=f"'{r['record']}' is a spelling in the area group '{owner.target_key}'")
+                continue
+            row.update(group=group, target=group)
+            if group not in groups:
+                row["message"] = f"New area group '{group}'"
+            target_match = lambda e: e.target_key == group
+        else:
+            by_name, by_id = await records_of(kind)
+            text_ref = r["record"]
+            if text_ref.isdigit() and int(text_ref) in by_id:
+                rid, rname = int(text_ref), by_id[int(text_ref)]
+            else:
+                hits = by_name.get(normalize(text_ref), [])
+                if not hits:
+                    row.update(status="unmatched", message=f"No {ENTITY_TYPES[kind][0].lower()} called '{text_ref}'")
+                    continue
+                if len(hits) > 1:
+                    row.update(status="unmatched",
+                               message=f"{len(hits)} records are called '{text_ref}' — use the id instead")
+                    continue
+                rid, rname = hits[0]
+            row.update(record_id=rid, target=rname)
+            target_match = lambda e, rid=rid: e.record_id == rid
+        if (kind, key) in seen:
+            row.update(status="duplicate", message="Already earlier in this file")
+            continue
+        taken = existing.get((kind, key))
+        if taken is not None:
+            if target_match(taken):
+                row.update(status="duplicate", message="Already in the vocabulary")
+            else:
+                where = taken.target_key if kind == AREA else (ids.get(kind, {}).get(taken.record_id)
+                                                               or f"#{taken.record_id}")
+                row.update(status="conflict", message=f"'{r['alias']}' already means '{where}'")
+            continue
+        seen.add((kind, key))
+        if kind != AREA:
+            other = [n for rid2, n in (await records_of(kind))[0].get(key, []) if rid2 != row["record_id"]]
+            if other:
+                row["message"] = f"Also the real name of '{other[0]}'"
+    return out
+
+
+async def import_csv(db, user, text: str) -> dict:
+    """Add the file's "add" rows — re-checked here, never trusted from the preview — in one transaction."""
+    rows = await preview_import(db, text)
+    added = 0
+    for r in rows:
+        if r["status"] != "add":
+            continue
+        if r["kind"] == AREA:
+            groups = await area_group_names(db)
+            await create_entry(db, user, kind=AREA, alias=r["alias"], note=r["note"] or None, source="import",
+                               commit=False, **({"group": r["group"]} if r["group"] in groups
+                                                else {"new_group": r["group"]}))
+        else:
+            await create_entry(db, user, kind=r["kind"], alias=r["alias"], record_id=r["record_id"],
+                               note=r["note"] or None, source="import", commit=False)
+        added += 1
+    if added:
+        record(db, "Vocabulary", "import", f"Imported {added} alias(es) from a CSV file", user=user,
+               ref_type="vocabulary")
+    await db.commit()
+    invalidate()
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {"added": added, "counts": counts}
+
+
+MANAGE = "action_vocabulary_manage"
+
+# What each review screen may teach: the types it lets the user correct.
+LEARNABLE = {
+    "pdf_invoice": ("pos_customer", "product"),
+    "expense_receipt": ("expense_category", "farm"),
+    "delivery_note": ("supplier", "product"),
+    "harvest_sheet": ("product", "farm"),
+    "spoilage": ("product",),
+    "b2b_sale": ("b2b_client", "product"),
+}
+MAX_LEARN = 60
+
+
+def may_learn(user) -> bool:
+    from app.core.permissions import has_permission
+    return bool(user) and has_permission(user, MANAGE)
+
+
+async def learn(db, user, remember: Any, screen: str) -> dict:
+    """Save the "Remember 'X' as Y" choices ticked on a review screen — called only AFTER the invoice or document was
+    recorded, so nothing is learned from a review that was abandoned or refused.
+
+    Quietly does nothing for someone without the vocabulary permission (the option is not shown to them). Each
+    choice is checked like one typed on the Vocabulary page; one that would clash with an existing alias is not
+    saved and comes back as a note, never as an error — the record itself is already saved."""
+    out = {"learned": 0, "notes": []}
+    if not isinstance(remember, list) or not remember or not may_learn(user):
+        return out
+    allowed = LEARNABLE.get(screen, ())
+    from app.services.assistant_actions import without_size
+    for item in remember[:MAX_LEARN]:
+        if not isinstance(item, dict) or item.get("type") not in allowed:
+            continue
+        kind, alias = item["type"], str(item.get("alias") or "").strip()
+        if kind == "product":
+            alias = " ".join(without_size(alias).split())      # matched without its pack size, so stored without it
+        try:
+            record_id = int(item.get("record_id"))
+        except (TypeError, ValueError):
+            continue
+        key = normalize(alias)
+        if not key:
+            continue
+        target = await _record(db, kind, record_id)
+        if target is None or normalize(target.name) == key:
+            continue                                            # gone, or the alias IS its name: nothing to learn
+        existing = (await db.execute(select(VocabularyEntry).where(
+            VocabularyEntry.entity_type == kind, VocabularyEntry.alias_key == key))).scalars().first()
+        if existing is not None and existing.record_id == record_id:
+            continue                                            # already known
+        try:
+            await create_entry(db, user, kind=kind, alias=alias[:MAX_ALIAS], record_id=record_id,
+                               note="Learned from a correction", source="learned", commit=False)
+            out["learned"] += 1
+        except VocabularyError as exc:
+            out["notes"].append(f"Not remembered: {exc}")
+    if out["learned"]:
+        await db.commit()
+    invalidate()
+    return out
+
+
 def http_error(exc: VocabularyError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))

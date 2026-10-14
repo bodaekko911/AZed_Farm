@@ -37,6 +37,10 @@
   const round2 = v => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
   const num = v => (v === "" || v === null || v === undefined || isNaN(Number(v))) ? null : Number(v);
   const today = () => new Date().toISOString().slice(0, 10);
+  // "Remember 'X' as Y" (ask-actions.js, loaded first on every page that shows these cards).
+  const remember = (...a) => window.AskActions.remember(...a);
+  const remembered = boxes => window.AskActions.remembered(boxes);
+  const byId = (list, id) => (list || []).find(x => String(x.id) === String(id)) || null;
 
   async function post(url, body) {
     const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -183,6 +187,7 @@
         const out = await post("/assistant/api/documents/read", { kind: choice.value, images, filename: name });
         opts.onLimit && opts.onLimit(out.questions_left, out.daily_limit);
         const d = out.document;
+        d.can_learn = !!out.can_learn;
         if (d.not_this_kind) {
           status.replaceChildren(h("span", { class: "inv-bad", text: "This doesn't look like that kind of document. Check the type and the photos." }));
           chooser.querySelectorAll("button, select").forEach(x => { x.disabled = false; });
@@ -255,7 +260,10 @@
         ...(d.farms || []).map(f => h("option", { value: String(f.id), text: f.name, "data-no-i18n": true })));
       s.value = value; return s;
     };
-    const category = h("select", { onchange: e => { state.category_id = e.target.value; check(); } }, catOptions(state.category_id));
+    const learnCat = remember(d.can_learn, "expense_category", d.category, d.category_match);
+    const learnFarm = remember(d.can_learn, "farm", d.farm, d.farm_match === "animals" ? null : d.farm_match);
+    const category = h("select", { onchange: e => { state.category_id = e.target.value;
+      learnCat.update(byId(d.categories, e.target.value)); check(); } }, catOptions(state.category_id));
     if (d.category && !d.category_match) category.title = d.category;
     const method = h("select", { onchange: e => { state.payment_method = e.target.value; } },
       h("option", { value: "cash", text: "Cash" }), h("option", { value: "card", text: "Card" }),
@@ -267,8 +275,9 @@
       field("Date", flag(h("input", { type: "date", value: state.date, max: today(), oninput: e => { state.date = e.target.value; check(); } }), "date")),
       field("Receipt no.", textIn("receipt_number", 40)),
       field("Paid by", method),
-      field("Category", category),
-      field("Farm", farmSelect(state.farm, v => { state.farm = v; })));
+      field("Category", h("div", null, category, learnCat.el)),
+      field("Farm", h("div", null, farmSelect(state.farm, v => { state.farm = v; learnFarm.update(byId(d.farms, v)); }),
+                      learnFarm.el)));
     const suggestion = h("div", { class: "inv-muted" });
     if (d.category_match) suggestion.append(h("span", { text: "Category suggested by the assistant — confirm or change it." }));
 
@@ -410,6 +419,7 @@
           items: state.lines.map(l => ({ description: l.description, qty: num(l.qty), unit_price: num(l.unit_price), line_total: num(l.line_total) })),
           category_id: state.split ? null : Number(state.category_id), farm: state.farm || null,
           split: state.split, allocations: state.split ? allocations() : null,
+          remember: remembered(state.split ? [learnFarm] : [learnCat, learnFarm]),
         });
         state.recorded = true;
         result.className = "act-status ok";
@@ -539,11 +549,13 @@
       newBox.append(h("div", { class: "inv-muted", text: "Not in Azed yet — it will be added when you receive:" }),
         h("div", { class: "inv-new-fields" }, f("name", "Name"), f("phone", "Phone")));
     }
+    const learnSupplier = remember(d.can_learn, "supplier", d.supplier, d.supplier_match);
     const supplierRow = h("div", { class: "inv-row" }, h("span", { class: "inv-label", text: "Supplier" }),
       d.supplier ? data("span", d.supplier, "inv-muted") : null,
       picker("suppliers", state.supplier, d.supplier_candidates, "— no supplier (paid in cash) —", s => {
-        state.useNew = s === "__new"; state.supplier = state.useNew ? null : s; newBox.hidden = !state.useNew; check();
-      }, state.newSupplier ? { label: `➕ ${state.newSupplier.name}`, selected: state.useNew } : null));
+        state.useNew = s === "__new"; state.supplier = state.useNew ? null : s; learnSupplier.update(state.supplier);
+        newBox.hidden = !state.useNew; check();
+      }, state.newSupplier ? { label: `➕ ${state.newSupplier.name}`, selected: state.useNew } : null), learnSupplier.el);
 
     const cats = h("select", { onchange: e => { state.category_id = e.target.value; check(); } },
       h("option", { value: "", text: "— pick a category —" }),
@@ -562,7 +574,10 @@
 
     // Lines
     const tbody = h("tbody");
+    const learnLines = [];
     state.lines.forEach((l, i) => {
+      const learn = remember(d.can_learn, "product", l.description, l.product);
+      learnLines.push(learn);
       const amt = h("td", { class: "num" });
       const paint = () => { const q = num(l.qty), c = num(l.cost); amt.textContent = q !== null && c !== null ? money(q * c) : "—"; };
       const qty = flag(h("input", { type: "number", step: "any", min: "0", value: l.qty, oninput: e => { l.qty = e.target.value; paint(); check(); } }), `items.${i}.qty`);
@@ -571,7 +586,7 @@
       const conv = h("div", { class: "inv-conv", text: l.note });
       const unit = data("span", l.product ? l.product.unit : "", "inv-muted");
       const pick = picker("products", l.product, l.candidates, "— pick a product —", p => {
-        l.product = p; hint.textContent = "";
+        l.product = p; hint.textContent = ""; learn.update(p);
         Object.assign(l, inProductUnits(l));      // a different product may count in a different size
         qty.value = l.qty; cost.value = l.cost; conv.textContent = l.note; unit.textContent = p ? p.unit : "";
         paint(); check();
@@ -580,7 +595,7 @@
       const printed = [l.pQty !== "" ? l.pQty : "?", l.unit || "", l.pCost !== "" ? `@ ${money(l.pCost)}` : ""].join(" ");
       tbody.append(h("tr", null,
         h("td", { class: "inv-desc" }, data("div", l.description || "—"), data("div", printed, "inv-muted")),
-        h("td", null, pick, hint, conv), h("td", null, qty, " ", unit), h("td", null, cost), amt));
+        h("td", null, pick, hint, conv, learn.el), h("td", null, qty, " ", unit), h("td", null, cost), amt));
     });
     const table = h("table", { class: "inv-table" },
       h("thead", null, h("tr", null, ["On the note", "Product", "Qty", "Unit cost", "Line"].map(t => h("th", { text: t })))), tbody);
@@ -643,6 +658,7 @@
           total: isPriced ? num(state.total) : null, discount: num(state.discount) || 0, other_charges: num(state.other_charges) || 0,
           amount_paid: isPriced ? (num(state.paid) || 0) : null,
           expense_category_id: isPriced ? Number(state.category_id) : null, farm: state.farm || null, location_id: state.location_id || null,
+          remember: remembered([learnSupplier, ...learnLines]),
         });
         state.recorded = true; costBox.hidden = true;
         result.className = "act-status ok";
@@ -710,8 +726,14 @@
         oninput: e => { state.notes = e.target.value; } })));
 
     const tbody = h("tbody");
+    const learnLines = [];
     state.lines.forEach((l, i) => {
-      const farm = flag(h("select", { onchange: e => { l.farm_id = e.target.value; check(); } },
+      const raw = (d.lines || [])[i] || {};
+      const learnProduct = remember(d.can_learn, "product", l.wProduct, l.product);
+      // The farm as written on this line, else the sheet's own farm heading.
+      const learnFarm = remember(d.can_learn, "farm", raw.farm || d.farm, l.farm_id ? { id: l.farm_id } : null);
+      learnLines.push(learnProduct, learnFarm);
+      const farm = flag(h("select", { onchange: e => { l.farm_id = e.target.value; learnFarm.update(byId(d.farms, l.farm_id)); check(); } },
         h("option", { value: "", text: "— pick the farm —" }),
         ...(d.farms || []).map(f => h("option", { value: String(f.id), text: f.name, "data-no-i18n": true }))), `items.${i}.farm`);
       farm.value = l.farm_id;
@@ -728,14 +750,14 @@
                       h("span", { text: "enter the quantity in" }), " ", data("span", l.product.unit));
       };
       const pick = picker("products", l.product, l.candidates, "— pick a product —", p => {
-        l.product = p; l.match = null;
+        l.product = p; l.match = null; learnProduct.update(p);
         Object.assign(l, inProductUnits(l));
         qty.value = l.qty; conv.textContent = l.note; unit.textContent = p ? p.unit : "";
         paintHint(); check();
       });
       paintHint();
       tbody.append(h("tr", null, h("td", { class: "inv-desc" }, data("div", l.written || "—")),
-        h("td", null, farm), h("td", null, pick, hint, conv), h("td", null, qty, " ", unit)));
+        h("td", null, farm, learnFarm.el), h("td", null, pick, hint, conv, learnProduct.el), h("td", null, qty, " ", unit)));
     });
     const table = h("table", { class: "inv-table" },
       h("thead", null, h("tr", null, ["Written on the sheet", "Farm", "Product", "Qty"].map(t => h("th", { text: t })))), tbody);
@@ -779,6 +801,7 @@
           received_by: state.received_by, notes: state.notes,
           items: state.lines.map(l => ({ farm_id: Number(l.farm_id) || null, product_id: l.product ? l.product.id : null,
                                          qty: num(l.qty), written: l.written })),
+          remember: remembered(learnLines),
         });
         state.recorded = true;
         result.className = "act-status ok";
@@ -824,7 +847,10 @@
       field("Reason", h("input", { type: "text", value: state.reason, maxlength: 200, "data-no-i18n": true,
         oninput: e => { state.reason = e.target.value; } })));
     const tbody = h("tbody");
+    const learnLines = [];
     state.lines.forEach((l, i) => {
+      const learn = remember(d.can_learn, "product", ((d.lines || [])[i] || {}).product_written, l.product);
+      learnLines.push(learn);
       const farm = h("select", { onchange: e => { l.farm_id = e.target.value; } },
         h("option", { value: "", text: "— no farm —" }),
         ...(d.farms || []).map(f => h("option", { value: String(f.id), text: f.name, "data-no-i18n": true })));
@@ -834,11 +860,11 @@
       const stock = data("div", "", "inv-hint");
       const paint = () => { stock.textContent = l.product && l.product.stock !== undefined ? `${fmt3(Number(l.product.stock) || 0)} ${l.product.unit || ""}` : ""; };
       const pick = picker("products", l.product, l.candidates, "— pick a product —", p => {
-        l.product = p; unit.textContent = p ? p.unit : ""; paint(); check();
+        l.product = p; learn.update(p); unit.textContent = p ? p.unit : ""; paint(); check();
       });
       paint();
       tbody.append(h("tr", null, h("td", { class: "inv-desc" }, data("div", l.written || "—")),
-        h("td", null, pick, stock), h("td", null, qty, " ", unit), h("td", null, farm)));
+        h("td", null, pick, stock, learn.el), h("td", null, qty, " ", unit), h("td", null, farm)));
     });
     const table = h("table", { class: "inv-table" },
       h("thead", null, h("tr", null, ["Written in the message", "Product (in stock)", "Qty", "Farm"].map(t => h("th", { text: t })))), tbody);
@@ -863,6 +889,7 @@
           kind: "spoilage", date: state.date, reason: state.reason,
           items: state.lines.map(l => ({ product_id: l.product ? l.product.id : null, qty: num(l.qty),
                                          farm_id: Number(l.farm_id) || null, written: l.written })),
+          remember: remembered(learnLines),
         });
         state.recorded = true;
         result.className = "act-status ok";
@@ -896,23 +923,27 @@
     const totalBox = h("div", { class: "inv-total", "data-no-i18n": true });
     const result = h("div", { class: "act-status" });
     const recordBtn = h("button", { class: "act-btn act-primary", text: "Record B2B sale" });
-    const client = h("select", { onchange: e => { state.client_id = e.target.value; check(); } },
+    const learnClient = remember(d.can_learn, "b2b_client", d.client_written, d.client_match);
+    const client = h("select", { onchange: e => { state.client_id = e.target.value; learnClient.update(byId(clients, e.target.value)); check(); } },
       h("option", { value: "", text: "— pick the client —" }),
       ...clients.map(c => h("option", { value: String(c.id), text: c.name + (c.discount_pct ? ` (−${c.discount_pct}%)` : ""), "data-no-i18n": true })));
     client.value = state.client_id;
     if (!state.client_id) client.classList.add("doc-missing");
     const tbody = h("tbody");
-    state.lines.forEach(l => {
+    const learnLines = [];
+    state.lines.forEach((l, i) => {
+      const learn = remember(d.can_learn, "product", ((d.lines || [])[i] || {}).product_written, l.product);
+      learnLines.push(learn);
       const qty = h("input", { type: "number", step: "any", min: "0", value: l.qty, oninput: e => { l.qty = e.target.value; check(); } });
       const price = h("input", { type: "number", step: "any", min: "0", value: l.price, oninput: e => { l.price = e.target.value; check(); } });
       const unit = data("span", l.product ? l.product.unit : "", "inv-muted");
       const conv = h("div", { class: "inv-conv", text: l.note });
       const pick = picker("products", l.product, l.candidates, "— pick a product —", p => {
-        l.product = p; Object.assign(l, inProductUnits(l)); qty.value = l.qty; conv.textContent = l.note;
+        l.product = p; learn.update(p); Object.assign(l, inProductUnits(l)); qty.value = l.qty; conv.textContent = l.note;
         unit.textContent = p ? p.unit : ""; check();
       });
       tbody.append(h("tr", null, h("td", { class: "inv-desc" }, data("div", l.written || "—")),
-        h("td", null, pick, conv), h("td", null, qty, " ", unit), h("td", null, price)));
+        h("td", null, pick, conv, learn.el), h("td", null, qty, " ", unit), h("td", null, price)));
     });
     const table = h("table", { class: "inv-table" },
       h("thead", null, h("tr", null, ["Written in the message", "Product", "Qty", "Unit price"].map(t => h("th", { text: t })))), tbody);
@@ -938,7 +969,8 @@
       recordBtn.disabled = true; result.replaceChildren(h("span", { text: "Recording…" })); result.className = "act-status";
       try {
         const out = await submit(opts, { kind: "b2b_sale", client_id: Number(state.client_id),
-          items: state.lines.map(l => ({ product_id: l.product ? l.product.id : null, qty: num(l.qty), unit_price: num(l.price) })) });
+          items: state.lines.map(l => ({ product_id: l.product ? l.product.id : null, qty: num(l.qty), unit_price: num(l.price) })),
+          remember: remembered([learnClient, ...learnLines]) });
         state.recorded = true;
         result.className = "act-status ok";
         result.replaceChildren("✓ ", h("span", { text: "Recorded" }), " ",
@@ -949,7 +981,7 @@
     card.append(
       h("div", { class: "inv-head" }, h("div", { class: "inv-title", text: "B2B sale" }),
         h("span", { class: "inv-muted", text: "Invoiced as on the B2B page: the client's discount and terms apply." })),
-      h("div", { class: "inv-row" }, h("span", { class: "inv-label", text: "Client" }), client),
+      h("div", { class: "inv-row" }, h("span", { class: "inv-label", text: "Client" }), client, learnClient.el),
       table, h("div", { class: "inv-foot" }, totalBox), problems, h("div", { class: "act-buttons" }, recordBtn), result);
     check();
     return card;

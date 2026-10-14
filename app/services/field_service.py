@@ -1205,6 +1205,11 @@ async def confirm(db, reviewer, draft_id: int, data: dict) -> dict:
     record(db, "Telegram", "confirm_draft", f"Field draft #{draft_id} ({draft.kind}) confirmed → {refs}",
            user=reviewer, ref_type="field_draft", ref_id=draft_id)
     await db.commit()
+    # Only now, with the draft recorded: the corrections the reviewer asked to be remembered.
+    from app.services import vocabulary_service as vocab
+    learned = await vocab.learn(db, reviewer, data.get("remember"), draft.kind)
+    if isinstance(out, dict):
+        out = {**out, **learned}
     await _close_notices(db, draft_id, "ap_done_ok", name=reviewer.name, refs=refs)
     if chat is not None:
         lang = chat.language or "ar"

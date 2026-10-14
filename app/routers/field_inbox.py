@@ -48,6 +48,9 @@ async def draft(draft_id: int, db: AsyncSession = Depends(get_async_session), us
     out["own"] = own and user.role != "admin"
     out["own_admin"] = own and user.role == "admin"
     out["is_admin"] = user.role == "admin"            # only an admin may change a line's product
+    from app.services import vocabulary_service as vocab
+    if isinstance(out.get("draft"), dict):
+        out["draft"]["can_learn"] = vocab.may_learn(user)   # offer "Remember 'X' as Y" on the review card
     out["can_review"] = (has_permission(user, "action_field_drafts_review") and not out["own"] and out["kind"] in reader.KINDS
                          and all(has_permission(user, p) for p in reader.KINDS[out["kind"]]["permissions"]))
     return out
