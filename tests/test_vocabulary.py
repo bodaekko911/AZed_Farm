@@ -307,8 +307,11 @@ def test_the_local_words_aliases_resolve_exactly_as_before():
     scenario(go)
 
 
-def test_the_prompt_still_carries_the_local_words():
-    assert "للمطبخ" in assistant_service.LOCAL_WORDS and "هالك" in assistant_service.LOCAL_WORDS
+def test_the_prompt_no_longer_hard_codes_the_record_aliases():
+    """They are in the vocabulary now — one place to edit them. "هالك" stays: it is a word, not a record."""
+    words = assistant_service.LOCAL_WORDS
+    assert "Habiba Kitchen" not in words and "Habiba/SPC" not in words
+    assert "هالك" in words and "exactly as the user wrote it" in words
 
 
 # ── Every call site resolves through the vocabulary ──────────────────────────

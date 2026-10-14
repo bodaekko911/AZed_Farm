@@ -339,6 +339,13 @@ def test_a_b2b_sale_needs_the_invoice_permission_and_stock(db):
 
 
 def test_ask_knows_the_farms_own_words():
+    """The farm's names for records moved to the business vocabulary (seeded by the 0058 migration and resolved by
+    the matching — tests/test_vocabulary.py proves they mean the same records); the prompt keeps "هالك" and tells the
+    model to pass those names on untranslated."""
     from app.services.assistant_service import LOCAL_WORDS
-    assert "للمطبخ" in LOCAL_WORDS and "Habiba Kitchen" in LOCAL_WORDS
-    assert "الساند بونك" in LOCAL_WORDS and "Habiba/SPC" in LOCAL_WORDS and "هالك" in LOCAL_WORDS
+    from tests.test_vocabulary import _migration
+    seeds = {(kind, alias): name for kind, name, alias in _migration().RECORD_SEEDS}
+    assert seeds == {("b2b_client", "المطبخ"): "Habiba Kitchen", ("b2b_client", "للمطبخ"): "Habiba Kitchen",
+                     ("farm", "الساند بونك"): "Habiba/SPC", ("farm", "من الساند بونك"): "Habiba/SPC"}
+    assert "المطبخ" in LOCAL_WORDS and "don't translate" in LOCAL_WORDS and "هالك" in LOCAL_WORDS
+    assert "Habiba Kitchen" not in LOCAL_WORDS and "Habiba/SPC" not in LOCAL_WORDS

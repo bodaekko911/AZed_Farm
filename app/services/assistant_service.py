@@ -134,9 +134,12 @@ Charts (drawn on the page from a fenced block):
 
 
 # The farm's own words, for Ask and the field bot. Keep the names exactly as they are in AZed.
+# Local names for records ("المطبخ" = the client Habiba Kitchen, "الساند بونك" = the farm Habiba/SPC) live in the
+# business vocabulary, edited on the Vocabulary page; the matching resolves them, so the model only has to pass a
+# name on as it was written.
 LOCAL_WORDS = """Local words used at the farm (Egyptian Arabic):
-- "للمطبخ" / "المطبخ" (to the kitchen) = a B2B sale to the client "Habiba Kitchen".
-- "من الساند بونك" / "الساند بونك" = the farm "Habiba/SPC".
+- Local names, nicknames and abbreviations of products, clients, farms, suppliers and employees are known to the
+  system: pass a name exactly as the user wrote it (e.g. "المطبخ", "الساند بونك") — don't translate it.
 - "هالك" = spoilage (also تالف، بايظ، فاسد)."""
 
 
