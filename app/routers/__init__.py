@@ -30,6 +30,7 @@ from app.routers import (
     suppliers,
     telegram,
     users,
+    vocabulary,
 )
 
 _log = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ _base_routers = (
     assistant.router,
     field_inbox.router,
     telegram.router,
+    vocabulary.router,
 )
 
 if _farm_dashboard_router is not None:

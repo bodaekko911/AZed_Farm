@@ -43,7 +43,9 @@ from sqlalchemy import or_, select
 from app.core.config import settings
 from app.core.log import ActivityLog, record
 from app.core.permissions import has_permission
+from app.core.text_norm import normalize
 from app.core.time_utils import app_tz, today_local
+from app.services import vocabulary_service as vocab
 
 logger = logging.getLogger(__name__)
 
@@ -92,17 +94,32 @@ def _need(user, *permissions: str) -> None:
 # ── Name matching ────────────────────────────────────────────────────────────
 
 def _norm(text: Any) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^\w؀-ۿ]+", " ", str(text or "").lower())).strip()
+    """Names as compared — see app.core.text_norm (Arabic spellings unified, digits to 0-9)."""
+    return normalize(text)
 
 
-def best_matches(needle: str, rows: list, name_of, limit: int = 5, floor: float = 0.45) -> list[tuple[float, Any]]:
-    """Rows ranked by how well their name matches `needle`: exact, then all-words-contained, then similarity."""
+def _id_of(row: Any) -> Any:
+    return row.get("id") if isinstance(row, dict) else getattr(row, "id", None)
+
+
+def best_matches(needle: str, rows: list, name_of, limit: int = 5, floor: float = 0.45, *,
+                 kind: Optional[str] = None, id_of=None) -> list[tuple[float, Any]]:
+    """Rows ranked by how well their name matches `needle`: exact, then all-words-contained, then similarity.
+
+    With ``kind`` (product, farm, b2b_client…) the business vocabulary is checked first: a needle that is exactly an
+    alias gives its record a score of 1.0, ranked ahead of everything — "خس بلدي" is "Local Lettuce" however unlike
+    the spelling. An alias of an inactive record is skipped. Then the ranking below runs unchanged."""
     n = _norm(needle)
     if not n:
         return []
+    alias_id = vocab.record_for(kind, n) if kind else None
+    get_id = id_of or _id_of
     words = n.split()
     scored = []
     for row in rows:
+        if alias_id is not None and get_id(row) == alias_id and vocab.is_live(row):
+            scored.append((1.0, 0, row))
+            continue
         name = _norm(name_of(row))
         if not name:
             continue
@@ -113,14 +130,14 @@ def best_matches(needle: str, rows: list, name_of, limit: int = 5, floor: float 
         else:
             score = difflib.SequenceMatcher(None, n, name).ratio()
         if score >= floor:
-            scored.append((round(score, 3), row))
-    scored.sort(key=lambda s: -s[0])
-    return scored[:limit]
+            scored.append((round(score, 3), 1, row))
+    scored.sort(key=lambda s: (-s[0], s[1]))
+    return [(score, row) for score, _alias_first, row in scored[:limit]]
 
 
-def _one(needle: str, rows: list, name_of, what: str) -> Any:
+def _one(needle: str, rows: list, name_of, what: str, kind: Optional[str] = None) -> Any:
     """Exactly one confident match, or a ValueError the model can relay ("did you mean …?")."""
-    found = best_matches(needle, rows, name_of)
+    found = best_matches(needle, rows, name_of, kind=kind)
     if not found:
         raise ValueError(f"No {what} matches '{needle}'.")
     top_score, top = found[0]
@@ -149,6 +166,7 @@ def _money(value: Any) -> Decimal:
 # ── Chat actions: propose ────────────────────────────────────────────────────
 
 async def propose_expense(db, user, args: dict) -> dict:
+    await vocab.ready(db)
     from app.models.expense import ExpenseCategory
     from app.models.farm import Farm
     try:
@@ -166,7 +184,8 @@ async def propose_expense(db, user, args: dict) -> dict:
     # Only id/name — list_categories() would load every expense of every category.
     categories = [{"id": i, "name": n} for i, n in (await db.execute(
         select(ExpenseCategory.id, ExpenseCategory.name).where(ExpenseCategory.is_active == "1"))).all()]
-    category = _one(str(args.get("category") or ""), categories, lambda c: c["name"], "expense category")
+    category = _one(str(args.get("category") or ""), categories, lambda c: c["name"], "expense category",
+                    kind="expense_category")
 
     farm_id, farm_label, animals = None, "No farm (shared)", False
     farm_text = str(args.get("farm") or "").strip()
@@ -174,7 +193,7 @@ async def propose_expense(db, user, args: dict) -> dict:
         animals, farm_label = True, "Animals"
     elif farm_text and farm_text.lower() not in ("none", "no farm", "shared"):
         farms = (await db.execute(select(Farm))).scalars().all()
-        farm = _one(farm_text, farms, lambda f: f.name, "farm")
+        farm = _one(farm_text, farms, lambda f: f.name, "farm", kind="farm")
         farm_id, farm_label = farm.id, farm.name
 
     vendor = (str(args.get("vendor") or "").strip() or None)
@@ -194,9 +213,10 @@ async def propose_expense(db, user, args: dict) -> dict:
 
 
 async def propose_attendance(db, user, args: dict) -> dict:
+    await vocab.ready(db)
     from app.models.hr import Attendance, Employee
     employees = (await db.execute(select(Employee).where(Employee.is_active.is_(True)))).scalars().all()
-    employee = _one(str(args.get("employee") or ""), employees, lambda e: e.name, "employee")
+    employee = _one(str(args.get("employee") or ""), employees, lambda e: e.name, "employee", kind="employee")
     d_from = _parse_day(args.get("date_from") or args.get("date"), today_local())
     d_to = _parse_day(args.get("date_to"), d_from)
     if d_from > d_to:
@@ -237,13 +257,14 @@ async def propose_attendance(db, user, args: dict) -> dict:
 
 
 async def propose_stock(db, user, args: dict) -> dict:
+    await vocab.ready(db)
     from app.core.product_types import is_stock_tracked_product
     from app.models.product import Product
     products = (await db.execute(select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))))\
         .scalars().all()
     needle = str(args.get("product") or "").strip()
     by_sku = [p for p in products if (p.sku or "").lower() == needle.lower()]
-    product = by_sku[0] if by_sku else _one(needle, products, lambda p: p.name, "product")
+    product = by_sku[0] if by_sku else _one(needle, products, lambda p: p.name, "product", kind="product")
     if not is_stock_tracked_product(product):
         raise ValueError(f"{product.name} doesn't track stock.")
     current = float(product.stock or 0)
@@ -271,12 +292,13 @@ async def propose_stock(db, user, args: dict) -> dict:
 
 
 async def propose_price(db, user, args: dict) -> dict:
+    await vocab.ready(db)
     from app.models.product import Product
     products = (await db.execute(select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))))\
         .scalars().all()
     needle = str(args.get("product") or "").strip()
     by_sku = [p for p in products if (p.sku or "").lower() == needle.lower()]
-    product = by_sku[0] if by_sku else _one(needle, products, lambda p: p.name, "product")
+    product = by_sku[0] if by_sku else _one(needle, products, lambda p: p.name, "product", kind="product")
     try:
         new = round(float(args.get("new_price")), 3)
     except (TypeError, ValueError):
@@ -318,13 +340,14 @@ async def _active_products(db) -> list:
 def _product_named(needle: str, products: list):
     needle = str(needle or "").strip()
     by_sku = [p for p in products if (p.sku or "").lower() == needle.lower()]
-    return by_sku[0] if by_sku else _one(needle, products, lambda p: p.name, "product")
+    return by_sku[0] if by_sku else _one(needle, products, lambda p: p.name, "product", kind="product")
 
 
 async def propose_farm_delivery(db, user, args: dict) -> dict:
+    await vocab.ready(db)
     from app.models.farm import Farm
     farms = (await db.execute(select(Farm).where(or_(Farm.is_active == 1, Farm.is_active.is_(None))))).scalars().all()
-    farm = _one(str(args.get("farm") or ""), farms, lambda f: f.name, "farm")
+    farm = _one(str(args.get("farm") or ""), farms, lambda f: f.name, "farm", kind="farm")
     day = _parse_day(args.get("date"), today_local())
     if day > today_local():
         raise ValueError("A delivery can't be dated in the future.")
@@ -364,6 +387,7 @@ async def propose_farm_delivery(db, user, args: dict) -> dict:
 
 
 async def propose_spoilage(db, user, args: dict) -> dict:
+    await vocab.ready(db)
     from app.models.farm import Farm
     product = _product_named(args.get("product"), await _active_products(db))
     try:
@@ -384,7 +408,7 @@ async def propose_spoilage(db, user, args: dict) -> dict:
     farm_text = str(args.get("farm") or "").strip()
     if farm_text and farm_text.lower() not in ("none", "no farm"):
         farms = (await db.execute(select(Farm))).scalars().all()
-        farm = _one(farm_text, farms, lambda f: f.name, "farm")
+        farm = _one(farm_text, farms, lambda f: f.name, "farm", kind="farm")
         farm_id, farm_label = farm.id, farm.name
     reason = (str(args.get("reason") or "").strip() or None)
     notes = (str(args.get("notes") or "").strip() or None)
@@ -414,6 +438,7 @@ async def _open_invoices(db, client_id: int) -> list:
 
 
 async def propose_b2b_payment(db, user, args: dict) -> dict:
+    await vocab.ready(db)
     from app.models.b2b import B2BClient
     try:
         amount = round(float(args.get("amount")), 2)
@@ -422,7 +447,7 @@ async def propose_b2b_payment(db, user, args: dict) -> dict:
     if amount <= 0:
         raise ValueError("The amount must be more than 0.")
     clients = (await db.execute(select(B2BClient))).scalars().all()
-    client = _one(str(args.get("client") or ""), clients, lambda c: c.name, "B2B client")
+    client = _one(str(args.get("client") or ""), clients, lambda c: c.name, "B2B client", kind="b2b_client")
     invoices = await _open_invoices(db, client.id)
     wanted = str(args.get("invoice") or "").strip().lower()
     if wanted:
@@ -460,10 +485,12 @@ async def propose_b2b_payment(db, user, args: dict) -> dict:
 
 SALE_METHODS = {"cash": "cash", "visa": "visa", "card": "visa", "credit card": "visa", "كاش": "cash",
                 "نقدي": "cash", "فيزا": "visa"}
+SALE_METHODS.update({normalize(k): v for k, v in list(SALE_METHODS.items())})
 MAX_SALE_LINES = 30
 
 
 async def propose_pos_sale(db, user, args: dict) -> dict:
+    await vocab.ready(db)
     """A shop sale typed in chat: products and quantities, the customer (or walk-in), how it was paid."""
     from app.core.product_types import is_stock_tracked_product
     from app.models.customer import Customer
@@ -491,7 +518,7 @@ async def propose_pos_sale(db, user, args: dict) -> dict:
             new_customer = {"name": who, "phone": phone}
         else:
             try:
-                customer = _one(who, named, lambda c: c.name, "customer")
+                customer = _one(who, named, lambda c: c.name, "customer", kind="pos_customer")
             except ValueError as exc:
                 raise ValueError(f"{exc} If it's a new customer, say so and it can be added with the sale.")
 
@@ -579,6 +606,7 @@ async def propose_pos_sale(db, user, args: dict) -> dict:
 
 
 async def propose_b2b_sale(db, user, args: dict) -> dict:
+    await vocab.ready(db)
     """Goods sold to a B2B client, typed in chat ("١٠ كيلو طماطم للمطبخ"): an invoice at the client's prices."""
     from app.core.product_types import is_stock_tracked_product
     from app.models.b2b import B2BClient
@@ -590,7 +618,7 @@ async def propose_b2b_sale(db, user, args: dict) -> dict:
         raise ValueError(f"At most {MAX_SALE_LINES} products in one invoice.")
     clients = (await db.execute(select(B2BClient).where(or_(B2BClient.is_active.is_(True),
                                                             B2BClient.is_active.is_(None))))).scalars().all()
-    client = _one(str(args.get("client") or ""), clients, lambda c: c.name, "B2B client")
+    client = _one(str(args.get("client") or ""), clients, lambda c: c.name, "B2B client", kind="b2b_client")
     prices = await client_prices(db, client.id)
     products = [p for p in await _active_products(db) if not is_delivery_text(p.name)]
     lines, items, seen, subtotal = [], [], set(), 0.0
@@ -636,9 +664,11 @@ QUOTE_FREQUENCIES = {"once": "once", "one time": "once", "weekly": "weekly", "ev
                      "twice weekly": "twice_weekly", "twice a week": "twice_weekly", "twice_weekly": "twice_weekly",
                      "مرة": "once", "أسبوعي": "weekly", "اسبوعي": "weekly", "أسبوعيا": "weekly", "كل أسبوع": "weekly",
                      "مرتين": "twice_weekly", "مرتين أسبوعيا": "twice_weekly", "مرتين في الأسبوع": "twice_weekly"}
+QUOTE_FREQUENCIES.update({normalize(k): v for k, v in list(QUOTE_FREQUENCIES.items())})
 
 
 async def propose_quotation(db, user, args: dict) -> dict:
+    await vocab.ready(db)
     """A price offer typed in chat. A known B2B client gets its own discount; an unknown name is a prospect, who
     needs a phone or e-mail first. Nothing is sent: confirming saves a DRAFT, opened from the B2B Quotations tab."""
     from decimal import Decimal
@@ -656,7 +686,7 @@ async def propose_quotation(db, user, args: dict) -> dict:
                                                             B2BClient.is_active.is_(None))))).scalars().all()
     client, prospect = None, None
     try:
-        client = _one(name, clients, lambda c: c.name, "B2B client")
+        client = _one(name, clients, lambda c: c.name, "B2B client", kind="b2b_client")
     except ValueError as exc:
         if "could be several" in str(exc):
             raise
@@ -1252,8 +1282,7 @@ def phone_key(phone: Any) -> str:
 # name is the area, looked for in the invoice's shipping text, delivery area and address (Arabic or English).
 
 DELIVERY_WORDS = ("delivery", "shipping", "توصيل", "شحن", "ديليفري", "دليفري")
-AREA_ALIASES = [("sharm", "شرم"), ("dahab", "دهب"), ("nuweiba", "نويبع"), ("taba", "طابا"), ("cairo", "القاهرة"),
-                ("hurghada", "الغردقة"), ("el tor", "الطور")]
+# Area spellings (شرم ↔ sharm) live in the business vocabulary as area groups — edited on the Vocabulary page.
 _AREA_SKIP = {"el", "al", "the", "area", "fee", "fees", "charge", "charges", "zone", "to", "for", "ال"}
 
 
@@ -1268,11 +1297,12 @@ def _area_words(name: str) -> list[str]:
 
 
 def pick_delivery(products: list, *texts: Any):
-    """The delivery item whose area appears in `texts`, or None when no area can be told."""
+    """The delivery item whose area appears in `texts`, or None when no area can be told. The caller loads the
+    vocabulary first (``await vocab.ready(db)``): an area group's spellings stand for each other."""
     text = " " + _norm(" ".join(str(t or "") for t in texts)) + " "
-    for latin, arabic in AREA_ALIASES:                      # شرم ↔ sharm, دهب ↔ dahab …
-        if latin in text or arabic in text:
-            text += f" {latin} {arabic} "
+    for spellings in vocab.area_groups():                   # شرم ↔ sharm, دهب ↔ dahab …
+        if any(w in text for w in spellings):
+            text += " " + " ".join(sorted(spellings)) + " "
     for p in products:
         if is_delivery_text(p.name) and any(w in text for w in _area_words(p.name)):
             return p
@@ -1280,6 +1310,7 @@ def pick_delivery(products: list, *texts: Any):
 
 
 WALK_IN_WORDS = {"", "cash", "walk in", "walkin", "walk in customer", "نقدي", "نقدى", "عميل نقدي"}
+WALK_IN_WORDS |= {normalize(w) for w in WALK_IN_WORDS}
 
 
 def _customer_out(c) -> dict:
@@ -1334,6 +1365,7 @@ async def match_invoices(db, invoices: list[dict]) -> list[dict]:
     from app.models.invoice import Invoice
     from app.models.product import Product
     from app.services.barcode_service import normalize_barcode_value
+    await vocab.ready(db)
     customers = (await db.execute(select(Customer))).scalars().all()
     products = (await db.execute(select(Product).where(or_(Product.is_active.is_(True), Product.is_active.is_(None)))))\
         .scalars().all()
@@ -1345,7 +1377,7 @@ async def match_invoices(db, invoices: list[dict]) -> list[dict]:
         named = [c for c in customers if c.name != "Walk-in Customer"]
         key = phone_key(inv.get("customer_phone"))
         by_phone = [c for c in named if key and phone_key(c.phone) == key]
-        found = [] if walk_in else best_matches(name, named, lambda c: c.name)
+        found = [] if walk_in else best_matches(name, named, lambda c: c.name, kind="pos_customer")
         customer = by_phone[0] if by_phone else (found[0][1] if found and found[0][0] >= 0.85 else None)
         # Not in Azed yet → offer to create it with what the invoice says (pre-selected on the card).
         new_customer = None
@@ -1373,7 +1405,7 @@ async def match_invoices(db, invoices: list[dict]) -> list[dict]:
             # review card says how sure it is, and the user can change it before recording.
             # Sizes are left out of the comparison: "tomato (500g)" is the same item as "Tomato (1g)".
             candidates = best_matches(without_size(it["description"]), goods, lambda p: without_size(p.name),
-                                      limit=4, floor=0.0)
+                                      limit=4, floor=0.0, kind="product")
             if product is None and candidates:
                 _score, product = candidates[0]
                 a, b = _norm(without_size(it["description"])).split(), _norm(without_size(product.name)).split()
@@ -1381,6 +1413,8 @@ async def match_invoices(db, invoices: list[dict]) -> list[dict]:
                 # on spelling alone ("Rw hony" ~ "Raw Honey") is "closest" and the card says to check it.
                 agree = bool(a and b) and (all(w in b for w in a) or all(w in a for w in b))
                 match = "name" if agree else "closest"
+                if vocab.record_for("product", without_size(it["description"])) == product.id:
+                    match = "alias"
             lines.append({**it, "product": _product_out(product) if product else None, "match": match,
                           "pack": pack_of(it["description"]),
                           "candidates": [_product_out(p) for _s, p in candidates if p is not product][:3]})
@@ -1407,13 +1441,22 @@ async def search(db, kind: str, q: str) -> list[dict]:
     q = (q or "").strip()
     if len(q) < 2:
         return []
+    await vocab.ready(db)
     if kind == "customers":
-        rows = (await db.execute(select(Customer).where(or_(Customer.name.ilike(f"%{q}%"), Customer.phone.ilike(f"%{q}%")))
+        # Records whose alias contains what was typed come first: searching "الموجة" finds the customer by its
+        # local name as well as its official one.
+        named = vocab.ids_matching("pos_customer", q)
+        rows = (await db.execute(select(Customer).where(or_(Customer.name.ilike(f"%{q}%"), Customer.phone.ilike(f"%{q}%"),
+                                                            Customer.id.in_(named or [0])))
                                  .order_by(Customer.name).limit(15))).scalars().all()
+        rows.sort(key=lambda c: c.id not in named)
         return [_customer_out(c) for c in rows]
+    named = vocab.ids_matching("product", q)
     rows = (await db.execute(select(Product).where(
         or_(Product.is_active.is_(True), Product.is_active.is_(None)),
-        or_(Product.name.ilike(f"%{q}%"), Product.sku.ilike(f"%{q}%"))).order_by(Product.name).limit(15))).scalars().all()
+        or_(Product.name.ilike(f"%{q}%"), Product.sku.ilike(f"%{q}%"), Product.id.in_(named or [0])))
+        .order_by(Product.name).limit(15))).scalars().all()
+    rows.sort(key=lambda p: p.id not in named)
     return [_product_out(p) for p in rows]
 
 
@@ -1437,8 +1480,10 @@ async def _customer_for(db, user, new: dict) -> int:
     name = str(new.get("name") or "").strip()[:150]
     phone = str(new.get("phone") or "").strip()[:30]
     key = phone_key(phone)
+    await vocab.ready(db)
+    alias_id = vocab.record_for("pos_customer", name)
     for c in (await db.execute(select(Customer).where(Customer.name != "Walk-in Customer"))).scalars().all():
-        if (key and phone_key(c.phone) == key) or _norm(c.name) == _norm(name):
+        if (key and phone_key(c.phone) == key) or _norm(c.name) == _norm(name) or c.id == alias_id:
             return c.id
     _need(user, "action_customers_create")
     customer = Customer(name=name, phone=phone or None, email=(str(new.get("email") or "").strip()[:150] or None),

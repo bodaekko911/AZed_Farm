@@ -433,6 +433,8 @@ async def convert_to_invoice(db, user, q: B2BQuotation, *, skip_delivery: bool =
     fee = money(q.delivery_fee)
     delivery_note = None
     if fee > 0 and not skip_delivery:
+        from app.services import vocabulary_service as vocab
+        await vocab.ready(db)          # the area groups pick_delivery reads
         products = (await db.execute(select(Product))).scalars().all()
         delivery = pick_delivery(products, q.delivery_area, q.prospect_area)
         if delivery is None:
@@ -475,9 +477,12 @@ async def make_client(db, user, q: B2BQuotation, link_client_id: Optional[int] =
         return {"ok": True, "client_id": client.id, "client": client.name, "created": False}
     if not has_permission(user, "action_b2b_clients_create"):
         raise HTTPException(status_code=403, detail="You don't have permission to create B2B clients.")
+    from app.services import vocabulary_service as vocab
+    await vocab.ready(db)
     clients = (await db.execute(select(B2BClient))).scalars().all()
     key = phone_key(q.prospect_phone)
-    same = [c for c in clients if _norm(c.name) == _norm(q.prospect_name)
+    alias_id = vocab.record_for("b2b_client", q.prospect_name)    # "فندق الموجة" is the client's local name
+    same = [c for c in clients if _norm(c.name) == _norm(q.prospect_name) or c.id == alias_id
             or (key and phone_key(c.phone) == key)
             or (q.prospect_email and (c.email or "").strip().lower() == q.prospect_email.strip().lower())]
     if same:

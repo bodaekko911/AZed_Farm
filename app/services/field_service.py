@@ -821,11 +821,17 @@ async def submit_text(db, chat: TelegramChat, text: str, sent_at: Optional[int],
 async def match_b2b_sale(db, parsed: dict, raw: dict, choices: dict, clients: list[dict]) -> dict:
     """The client (the model's suggestion from the list, else the written name) and each product with the client's
     own price — or the catalogue price where the client has none."""
+    from app.services import vocabulary_service as vocab
     from app.services.assistant_actions import _norm, best_matches
+    await vocab.ready(db)
     by_name = {_norm(c["name"]): c for c in clients}
-    client = by_name.get(_norm(raw.get("client_match") or ""))
+    by_id = {c["id"]: c for c in clients}
+    # The client as written, when it is a known local name ("المطبخ"), wins over the model's suggestion.
+    client = by_id.get(vocab.record_for("b2b_client", raw.get("client"))) if raw.get("client") else None
+    if client is None:
+        client = by_name.get(_norm(raw.get("client_match") or ""))
     if client is None and raw.get("client"):
-        found = best_matches(str(raw["client"]), clients, lambda c: c["name"], limit=1, floor=0.85)
+        found = best_matches(str(raw["client"]), clients, lambda c: c["name"], limit=1, floor=0.85, kind="b2b_client")
         client = found[0][1] if found else None
     draft = await reader.match_harvest(db, parsed, choices)
     draft.pop("duplicates", None)

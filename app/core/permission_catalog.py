@@ -33,6 +33,18 @@ PERMISSION_MATRIX = [
         ],
     },
     {
+        "module": "vocabulary",
+        "resource": "vocabulary",
+        "label": "Vocabulary",
+        "icon": "reports",
+        "actions": [
+            {"action": "view", "key": "page_vocabulary",
+             "label": "See the business vocabulary (local names for products, clients, farms, employees…)"},
+            {"action": "manage", "key": "action_vocabulary_manage",
+             "label": "Add, edit, delete and import vocabulary entries"},
+        ],
+    },
+    {
         "module": "field_inbox",
         "resource": "field_drafts",
         "label": "Field inbox (Telegram bot)",
@@ -353,6 +365,7 @@ ROLE_DEFINITIONS = {
         "permissions": {
             "page_dashboard",
             "page_assistant",
+            "page_vocabulary",
             "page_field_inbox",
             "action_field_drafts_review",
             "page_reports",

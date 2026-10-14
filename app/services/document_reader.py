@@ -427,17 +427,21 @@ async def read_core(db, kinds: list[str], images: list[str], transport=None) -> 
 
 
 async def match_expense(db, draft: dict, choices: dict) -> dict:
+    from app.services import vocabulary_service as vocab
     from app.services.assistant_actions import best_matches
+    await vocab.ready(db)
     category = None
     if draft.get("category"):
-        found = best_matches(draft["category"], choices["categories"], lambda c: c["name"], limit=1, floor=0.85)
+        found = best_matches(draft["category"], choices["categories"], lambda c: c["name"], limit=1, floor=0.85,
+                             kind="expense_category")
         category = found[0][1] if found else None
     farm = None
     if draft.get("farm"):
         if draft["farm"].strip().lower() in ("animals", "animal", "الحيوانات", "حيوانات"):
             farm = "animals"
         else:
-            found = best_matches(draft["farm"], choices["farms"], lambda f: f["name"], limit=1, floor=0.85)
+            found = best_matches(draft["farm"], choices["farms"], lambda f: f["name"], limit=1, floor=0.85,
+                                 kind="farm")
             farm = found[0][1] if found else None
     # The vendor is optional (a worker's handwritten note may not name a shop): only what recording needs is flagged.
     missing = [k for k in ("total", "date") if draft.get(k) in (None, "")]
@@ -500,8 +504,10 @@ async def match_delivery(db, draft: dict) -> dict:
     from app.models.supplier import Supplier
     from app.services.assistant_actions import (_norm, _product_out, best_matches, is_delivery_text, pack_of,
                                                 phone_key, without_size)
+    from app.services import vocabulary_service as vocab
     from app.services.barcode_service import normalize_barcode_value
 
+    await vocab.ready(db)
     suppliers = (await db.execute(select(Supplier))).scalars().all()
     supplier, candidates, new_supplier = None, [], None
     key = phone_key(draft.get("supplier_phone"))
@@ -509,7 +515,7 @@ async def match_delivery(db, draft: dict) -> dict:
     if by_phone:
         supplier = by_phone[0]
     elif draft.get("supplier"):
-        found = best_matches(draft["supplier"], suppliers, lambda x: x.name, limit=4)
+        found = best_matches(draft["supplier"], suppliers, lambda x: x.name, limit=4, kind="supplier")
         if found and found[0][0] >= 0.85:
             supplier = found[0][1]
         candidates = [x for _s, x in found if x is not supplier]
@@ -524,12 +530,15 @@ async def match_delivery(db, draft: dict) -> dict:
     for it in draft["items"]:
         product = by_sku.get(normalize_barcode_value(it["sku"])) if it.get("sku") else None
         match = "sku" if product else None
-        found = best_matches(without_size(it["description"]), goods, lambda p: without_size(p.name), limit=4, floor=0.0)
+        found = best_matches(without_size(it["description"]), goods, lambda p: without_size(p.name), limit=4, floor=0.0,
+                             kind="product")
         if product is None and found:
             _score, product = found[0]
             a, b = _norm(without_size(it["description"])).split(), _norm(without_size(product.name)).split()
             agree = bool(a and b) and (all(w in b for w in a) or all(w in a for w in b))
             match = "name" if agree else "closest"
+            if vocab.record_for("product", without_size(it["description"])) == product.id:
+                match = "alias"
         # What one counted unit holds: a size in the item's name ("Honey 500g" × 10), else the printed unit (kg).
         printed = pack_of(it["description"]) or (pack_of("1" + it["unit"]) if it.get("unit") else None)
         lines.append({**it, "product": _product_out(product) if product else None, "match": match, "pack": printed,
@@ -574,15 +583,23 @@ async def search(db, user, kind: str, q: str) -> list[dict]:
     q = (q or "").strip()[:80]
     if len(q) < 2:
         return []
+    from app.services import vocabulary_service as vocab
+    await vocab.ready(db)
     like = f"%{q}%"
     if kind == "suppliers":
-        rows = (await db.execute(select(Supplier).where((Supplier.name.ilike(like)) | (Supplier.phone.ilike(like)))
+        named = vocab.ids_matching("supplier", q)
+        rows = (await db.execute(select(Supplier).where((Supplier.name.ilike(like)) | (Supplier.phone.ilike(like))
+                                                        | Supplier.id.in_(named or [0]))
                                  .order_by(Supplier.name).limit(15))).scalars().all()
+        rows.sort(key=lambda x: x.id not in named)
         return [supplier_out(x) for x in rows]
     if kind == "products":
+        named = vocab.ids_matching("product", q)
         rows = (await db.execute(select(Product).where(
             (Product.is_active.is_(True)) | (Product.is_active.is_(None)),
-            (Product.name.ilike(like)) | (Product.sku.ilike(like))).order_by(Product.name).limit(15))).scalars().all()
+            (Product.name.ilike(like)) | (Product.sku.ilike(like)) | Product.id.in_(named or [0]))
+            .order_by(Product.name).limit(15))).scalars().all()
+        rows.sort(key=lambda p: p.id not in named)
         return [_product_out(p) for p in rows]
     raise HTTPException(status_code=400, detail="kind must be suppliers or products")
 
@@ -731,9 +748,12 @@ async def _supplier_for(db, user, new: dict) -> int:
     phone = _text(new.get("phone"), 50)
     if not name:
         raise HTTPException(status_code=400, detail="Give the new supplier a name.")
+    from app.services import vocabulary_service as vocab
     key = phone_key(phone)
+    await vocab.ready(db)
+    alias_id = vocab.record_for("supplier", name)
     for x in (await db.execute(select(Supplier))).scalars().all():
-        if (key and phone_key(x.phone) == key) or _norm(x.name) == _norm(name):
+        if (key and phone_key(x.phone) == key) or _norm(x.name) == _norm(name) or x.id == alias_id:
             return x.id
     if not has_permission(user, "action_suppliers_create"):
         raise HTTPException(status_code=403, detail="You can't add suppliers — pick an existing one.")
@@ -900,14 +920,21 @@ async def match_harvest(db, draft: dict, choices: dict) -> dict:
     from app.models.product import Product
     from app.services.assistant_actions import (_norm, _product_out, best_matches, is_delivery_text, pack_of,
                                                 without_size)
+    from app.services import vocabulary_service as vocab
+    await vocab.ready(db)
     farms = choices["farms"]
     by_name = {_norm(f["name"]): f for f in farms}
+    farm_by_id = {f["id"]: f for f in farms}
 
     def farm_for(written: Optional[str], suggested: Optional[str]) -> Optional[dict]:
+        # What the sheet says in the farm's own local name wins over the model's suggestion.
+        alias_id = vocab.record_for("farm", written) if written else None
+        if alias_id in farm_by_id:
+            return farm_by_id[alias_id]
         if suggested and _norm(suggested) in by_name:
             return by_name[_norm(suggested)]
         if written:
-            found = best_matches(written, farms, lambda f: f["name"], limit=1, floor=0.85)
+            found = best_matches(written, farms, lambda f: f["name"], limit=1, floor=0.85, kind="farm")
             return found[0][1] if found else None
         return None
 
@@ -915,13 +942,19 @@ async def match_harvest(db, draft: dict, choices: dict) -> dict:
     products = [p for p in (await db.execute(select(Product).where(
         (Product.is_active.is_(True)) | (Product.is_active.is_(None))))).scalars().all() if not is_delivery_text(p.name)]
     product_by_name = {_norm(p.name): p for p in products}
+    product_by_id = {p.id: p for p in products}
     lines = []
     for it in draft["items"]:
         farm = farm_for(it.get("farm"), it.get("farm_match")) or sheet_farm
         product, match = None, None
-        if it.get("product_match") and _norm(it["product_match"]) in product_by_name:
+        # The written word as a known local name wins over the model's suggestion: "خس بلدي" is Local Lettuce.
+        alias_id = vocab.record_for("product", without_size(it["product"]))
+        if alias_id in product_by_id:
+            product, match = product_by_id[alias_id], "alias"
+        elif it.get("product_match") and _norm(it["product_match"]) in product_by_name:
             product, match = product_by_name[_norm(it["product_match"])], "suggested"
-        found = best_matches(without_size(it["product"]), products, lambda p: without_size(p.name), limit=4, floor=0.5)
+        found = best_matches(without_size(it["product"]), products, lambda p: without_size(p.name), limit=4, floor=0.5,
+                             kind="product")
         if product is None and found:
             product, match = found[0][1], ("name" if found[0][0] >= 0.85 else "closest")
         lines.append({**it, "product_written": it["product"], "farm_id": farm["id"] if farm else None,

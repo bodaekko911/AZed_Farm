@@ -779,6 +779,26 @@ def _tool_schemas(names: list[str]) -> list[dict]:
     return schemas
 
 
+# Lookup arguments that name a record, and the vocabulary type they are resolved in. A local name ("خس بلدي") is
+# replaced by the record's real name before the lookup filters by it, so every lookup — however it compares names —
+# understands the vocabulary. profit_and_loss's "farm" is an id, not a name, so it is left alone.
+_NAME_ARGS = {"product": "product", "farm": "farm", "client": "b2b_client", "employee": "employee"}
+_SEARCH_ARG = {"products": "product", "expenses": "expense_category"}
+_ID_ARGS = {("profit_and_loss", "farm")}
+
+
+async def resolve_aliases(db, tool: str, args: dict) -> dict:
+    from app.services import vocabulary_service as vocab
+    out = dict(args)
+    wanted = [(key, kind) for key, kind in _NAME_ARGS.items() if (tool, key) not in _ID_ARGS]
+    if tool in _SEARCH_ARG:
+        wanted.append(("search", _SEARCH_ARG[tool]))
+    for key, kind in wanted:
+        if isinstance(out.get(key), str) and out[key].strip():
+            out[key] = await vocab.expand(db, kind, out[key])
+    return out
+
+
 async def run_tool(db: AsyncSession, user, name: str, raw_args: str) -> str:
     """Run one lookup for this user; always returns a string for the model."""
     if name not in TOOLS or name not in allowed_tools(user):
@@ -787,6 +807,7 @@ async def run_tool(db: AsyncSession, user, name: str, raw_args: str) -> str:
         args = json.loads(raw_args or "{}")
         if not isinstance(args, dict):
             raise ValueError("arguments must be an object")
+        args = await resolve_aliases(db, name, args)
         nested = getattr(db, "begin_nested", None)
         if nested is None:
             result = await TOOLS[name][3](db, args)
