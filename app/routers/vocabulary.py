@@ -98,6 +98,92 @@ async def remove(entry_id: int, db: AsyncSession = Depends(get_async_session),
     return {"ok": True}
 
 
+class UnitWordIn(BaseModel):
+    product_id: int
+    word: str = Field(..., max_length=vocab.MAX_WORD)
+    amount: float
+    amount_unit: Optional[str] = Field(None, max_length=20)
+    note: Optional[str] = Field(None, max_length=500)
+
+
+class TermIn(BaseModel):
+    term: str = Field(..., max_length=vocab.MAX_TERM)
+    definition: str = Field(..., max_length=vocab.MAX_DEFINITION)
+
+
+@router.get("/api/unit-words")
+async def unit_words(q: Optional[str] = None, db: AsyncSession = Depends(get_async_session)):
+    return {"unit_words": await vocab.list_unit_words(db, q)}
+
+
+@router.post("/api/unit-words")
+async def add_unit_word(data: UnitWordIn, db: AsyncSession = Depends(get_async_session),
+                        user: User = Depends(require_permission(MANAGE))):
+    try:
+        row = await vocab.save_unit_word(db, user, product_id=data.product_id, word=data.word, amount=data.amount,
+                                         amount_unit=data.amount_unit, note=data.note)
+    except vocab.VocabularyError as exc:
+        raise vocab.http_error(exc)
+    return {"ok": True, "id": row.id}
+
+
+@router.put("/api/unit-words/{entry_id}")
+async def edit_unit_word(entry_id: int, data: UnitWordIn, db: AsyncSession = Depends(get_async_session),
+                         user: User = Depends(require_permission(MANAGE))):
+    try:
+        await vocab.save_unit_word(db, user, product_id=data.product_id, word=data.word, amount=data.amount,
+                                   amount_unit=data.amount_unit, note=data.note, entry_id=entry_id)
+    except vocab.VocabularyError as exc:
+        raise vocab.http_error(exc)
+    return {"ok": True}
+
+
+@router.delete("/api/unit-words/{entry_id}")
+async def remove_unit_word(entry_id: int, db: AsyncSession = Depends(get_async_session),
+                           user: User = Depends(require_permission(MANAGE))):
+    try:
+        await vocab.delete_unit_word(db, user, entry_id)
+    except vocab.VocabularyError as exc:
+        raise vocab.http_error(exc)
+    return {"ok": True}
+
+
+@router.get("/api/terms")
+async def terms(db: AsyncSession = Depends(get_async_session)):
+    """The business terms, and how much of the assistant's TERMS_CAP characters they use."""
+    return await vocab.list_terms(db)
+
+
+@router.post("/api/terms")
+async def add_term(data: TermIn, db: AsyncSession = Depends(get_async_session),
+                   user: User = Depends(require_permission(MANAGE))):
+    try:
+        row = await vocab.save_term(db, user, term=data.term, definition=data.definition)
+    except vocab.VocabularyError as exc:
+        raise vocab.http_error(exc)
+    return {"ok": True, "id": row.id}
+
+
+@router.put("/api/terms/{entry_id}")
+async def edit_term(entry_id: int, data: TermIn, db: AsyncSession = Depends(get_async_session),
+                    user: User = Depends(require_permission(MANAGE))):
+    try:
+        await vocab.save_term(db, user, term=data.term, definition=data.definition, entry_id=entry_id)
+    except vocab.VocabularyError as exc:
+        raise vocab.http_error(exc)
+    return {"ok": True}
+
+
+@router.delete("/api/terms/{entry_id}")
+async def remove_term(entry_id: int, db: AsyncSession = Depends(get_async_session),
+                      user: User = Depends(require_permission(MANAGE))):
+    try:
+        await vocab.delete_term(db, user, entry_id)
+    except vocab.VocabularyError as exc:
+        raise vocab.http_error(exc)
+    return {"ok": True}
+
+
 class CsvIn(BaseModel):
     csv: str = Field(..., max_length=2_000_000)
 
@@ -183,6 +269,14 @@ th{color:var(--muted);font-weight:500;font-size:12px}
 .msg{font-size:12.5px;line-height:1.5}.msg.err{color:var(--danger)}.msg.warn{color:var(--warn)}
 .actions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
 a.btn{text-decoration:none;display:inline-block}
+.tabs{display:flex;gap:6px;margin:18px 0 0;flex-wrap:wrap}
+.tab{background:var(--card);border:1px solid var(--border);color:var(--sub);border-radius:20px;padding:6px 14px;
+     font-size:13px;cursor:pointer;font-family:var(--sans)}
+.tab.on{border-color:var(--lime);color:var(--text)}
+[id^="tab-"] > .sub{margin-top:14px}
+.meter{flex:0 0 200px;height:8px;border-radius:6px;background:var(--card2);border:1px solid var(--border);overflow:hidden}
+.meter-bar{height:100%;background:var(--lime);width:0}
+.meter-bar.full{background:var(--warn)}
 .st-add{color:var(--green)}.st-duplicate{color:var(--muted)}.st-conflict{color:var(--warn)}.st-unmatched{color:var(--danger)}
 </style>
 <script src="/static/auth-guard.js"></script>
@@ -193,6 +287,12 @@ a.btn{text-decoration:none;display:inline-block}
     <div class="title">Vocabulary</div>
     <div class="sub">Local names, nicknames and abbreviations people use for products, clients, farms and more. Ask, PDF
         invoices, documents and the field inbox all understand them. An alias means one record of its type.</div>
+    <div class="tabs">
+        <button class="tab on" data-tab="aliases">Aliases</button>
+        <button class="tab" data-tab="units">Unit words</button>
+        <button class="tab" data-tab="terms">Business terms</button>
+    </div>
+    <div id="tab-aliases">
     <div class="bar">
         <input id="q" type="search" placeholder="Search aliases, records or notes…">
         <select id="type"><option value="">All types</option></select>
@@ -205,7 +305,57 @@ a.btn{text-decoration:none;display:inline-block}
         <thead><tr><th>Alias</th><th>Type</th><th>Means</th><th>Note</th><th>Source</th><th id="act-h"></th></tr></thead>
         <tbody id="rows"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
     </table></div>
+    </div>
+
+    <div id="tab-units" hidden>
+        <div class="sub">A local unit of one product and what it holds — a قفص (crate) of tomatoes is 20 kg. Harvest
+            sheets, the field inbox and Ask convert quantities with these, and always show the sum.</div>
+        <div class="bar">
+            <input id="u-q" type="search" placeholder="Search products or unit words…">
+            <button class="btn" id="u-add" hidden>+ Add unit word</button>
+        </div>
+        <div class="card"><table>
+            <thead><tr><th>Product</th><th>Unit word</th><th>Holds</th><th>Note</th><th></th></tr></thead>
+            <tbody id="u-rows"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+        </table></div>
+    </div>
+
+    <div id="tab-terms" hidden>
+        <div class="sub">Short definitions the assistant should know — “the box” is the weekly vegetable box. They are
+            given to it as definitions, never as instructions.</div>
+        <div class="bar">
+            <div class="meter"><div class="meter-bar" id="t-bar"></div></div>
+            <span class="muted" id="t-used"></span>
+            <button class="btn" id="t-add" hidden>+ Add term</button>
+        </div>
+        <div class="card"><table>
+            <thead><tr><th>Term</th><th>Means</th><th>Source</th><th></th></tr></thead>
+            <tbody id="t-rows"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+        </table></div>
+    </div>
 </div>
+
+<div class="modalbg" id="u-dlg"><div class="modal">
+    <h3 id="u-title">Add unit word</h3>
+    <label>Product<input id="u-search" type="search" placeholder="Search products…"></label>
+    <div class="picklist" id="u-list"></div>
+    <div class="muted" id="u-picked"></div>
+    <label>Unit word<input id="u-word" maxlength="60" placeholder="e.g. قفص"></label>
+    <label>One of it holds
+        <span style="display:flex;gap:6px"><input id="u-amount" type="number" step="any" min="0" style="flex:1">
+        <select id="u-unit"></select></span></label>
+    <label>Note (optional)<input id="u-note" maxlength="500"></label>
+    <div class="msg" id="u-msg"></div>
+    <div class="actions"><button class="btn ghost" id="u-cancel">Cancel</button><button class="btn" id="u-save">Save</button></div>
+</div></div>
+
+<div class="modalbg" id="t-dlg"><div class="modal">
+    <h3 id="t-title">Add term</h3>
+    <label>Term<input id="t-term" maxlength="80" placeholder="e.g. the box"></label>
+    <label>Means<textarea id="t-def" maxlength="400" rows="3" placeholder="e.g. the weekly vegetable box product"></textarea></label>
+    <div class="msg" id="t-msg"></div>
+    <div class="actions"><button class="btn ghost" id="t-cancel">Cancel</button><button class="btn" id="t-save">Save</button></div>
+</div></div>
 
 <div class="modalbg" id="dlg"><div class="modal">
     <h3 id="dlg-title">Add alias</h3>
@@ -244,5 +394,6 @@ a.btn{text-decoration:none;display:inline-block}
 </div></div>
 <script type="application/json" id="vocab-cfg">""" + cfg + """</script>
 <script src="/static/vocabulary.js"></script>
+<script src="/static/vocabulary-units-terms.js"></script>
 </body>
 </html>"""

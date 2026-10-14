@@ -51,10 +51,12 @@ from app.models.spoilage import SpoilageRecord
 from app.models.supplier import Purchase, PurchaseItem, Supplier, SupplierPayment
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
-from app.models.vocabulary import VocabularyEntry
+from app.models.vocabulary import BusinessTerm, ProductUnitWord, VocabularyEntry
 
 __all__ = [
     "VocabularyEntry",
+    "ProductUnitWord",
+    "BusinessTerm",
     "WeeklyBriefSettings",
     "AssistantSettings",
     "AutomationEvent",

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, event
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, event
 from sqlalchemy.sql import func
 
 from app.core.text_norm import normalize
@@ -50,3 +50,53 @@ def _seed_areas(table, connection, **_kw):
     """A brand-new vocabulary (create_all on a fresh database) starts with the delivery areas, as the migration
     gives an existing one."""
     connection.execute(table.insert(), area_seed_rows())
+
+
+class ProductUnitWord(Base):
+    """A local unit for one product and what it holds in the product's own unit: a "قفص" (crate) of tomatoes is
+    20 kg, a "ربطة" (bunch) of mint 0.25 kg. Used only to convert quantities — never to pick the product."""
+    __tablename__ = "product_unit_words"
+    __table_args__ = (UniqueConstraint("product_id", "word_key", name="uq_unit_word_product_word"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    word = Column(String(60), nullable=False)
+    word_key = Column(String(60), nullable=False)
+    qty = Column(Numeric(14, 4), nullable=False)            # in the product's own unit
+    note = Column(Text)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by_name = Column(String(120))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class BusinessTerm(Base):
+    """A short definition the assistant should know — "the box" = the weekly vegetable box product. Given to the
+    model as data inside a fenced block, never as an instruction."""
+    __tablename__ = "business_terms"
+
+    id = Column(Integer, primary_key=True, index=True)
+    term = Column(String(80), nullable=False)
+    term_key = Column(String(80), nullable=False, unique=True)
+    definition = Column(String(400), nullable=False)
+    source = Column(String(20), nullable=False, default="manual")
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by_name = Column(String(120))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+# "هالك" drives behaviour in code (the field bot routes it to spoilage) and stays there; as a term the assistant
+# also has it spelled out.
+TERM_SEEDS = [("هالك", "spoilage — produce thrown away as damaged or rotten (also تالف، بايظ، فاسد)")]
+
+
+def term_seed_rows(have: set | None = None) -> list[dict]:
+    have = have or set()
+    return [{"term": t, "term_key": normalize(t), "definition": d, "source": "seed"}
+            for t, d in TERM_SEEDS if normalize(t) not in have]
+
+
+@event.listens_for(BusinessTerm.__table__, "after_create")
+def _seed_terms(table, connection, **_kw):
+    connection.execute(table.insert(), term_seed_rows())

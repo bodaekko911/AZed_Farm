@@ -24,7 +24,9 @@ then dated to the invoice's own date.
 from __future__ import annotations
 
 import base64
+import contextvars
 import difflib
+import functools
 import hashlib
 import hmac
 import json
@@ -317,9 +319,36 @@ async def propose_price(db, user, args: dict) -> dict:
             "payload": {"product_id": product.id, "old_price": old, "new_price": new}}
 
 
+# Unit-word conversions made while one proposal is prepared, shown on its card ("3 قفص × 20 kg = 60 kg").
+_CONVERSIONS: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar("unit_conversions", default=None)
+
+
+def _shows_conversions(fn):
+    """A proposal that converts a typed quantity through a product's unit word says so on its card."""
+    @functools.wraps(fn)
+    async def wrapper(db, user, args: dict) -> dict:
+        token = _CONVERSIONS.set([])
+        try:
+            proposal = await fn(db, user, args)
+            made = _CONVERSIONS.get() or []
+        finally:
+            _CONVERSIONS.reset(token)
+        if made:
+            proposal["lines"].append(["Converted", "; ".join(made)])
+        return proposal
+    return wrapper
+
+
 def _qty_in_unit(qty: float, said_unit: Any, product) -> float:
-    """``qty`` in the product's own unit. A unit the user named is converted when it is the same kind (g ↔ kg,
-    ml ↔ L); anything else is refused rather than guessed."""
+    """``qty`` in the product's own unit. A unit word of the product ("قفص" of tomatoes = 20 kg) converts first;
+    a unit the user named is converted when it is the same kind (g ↔ kg, ml ↔ L); anything else is refused rather
+    than guessed."""
+    converted = vocab.convert(qty, said_unit, product)
+    if converted is not None:
+        made = _CONVERSIONS.get()
+        if made is not None:
+            made.append(f"{product.name}: {converted[1]}")
+        return converted[0]
     said = _norm(said_unit).replace(" ", "")
     unit = _norm(product.unit).replace(" ", "")
     if not said or said == unit:
@@ -343,6 +372,7 @@ def _product_named(needle: str, products: list):
     return by_sku[0] if by_sku else _one(needle, products, lambda p: p.name, "product", kind="product")
 
 
+@_shows_conversions
 async def propose_farm_delivery(db, user, args: dict) -> dict:
     await vocab.ready(db)
     from app.models.farm import Farm
@@ -386,6 +416,7 @@ async def propose_farm_delivery(db, user, args: dict) -> dict:
                         "received_by": received_by, "notes": notes}}
 
 
+@_shows_conversions
 async def propose_spoilage(db, user, args: dict) -> dict:
     await vocab.ready(db)
     from app.models.farm import Farm
@@ -489,6 +520,7 @@ SALE_METHODS.update({normalize(k): v for k, v in list(SALE_METHODS.items())})
 MAX_SALE_LINES = 30
 
 
+@_shows_conversions
 async def propose_pos_sale(db, user, args: dict) -> dict:
     await vocab.ready(db)
     """A shop sale typed in chat: products and quantities, the customer (or walk-in), how it was paid."""
@@ -605,6 +637,7 @@ async def propose_pos_sale(db, user, args: dict) -> dict:
                         "discount_percent": discount_pct, "date": day.isoformat(), "total": total}}
 
 
+@_shows_conversions
 async def propose_b2b_sale(db, user, args: dict) -> dict:
     await vocab.ready(db)
     """Goods sold to a B2B client, typed in chat ("١٠ كيلو طماطم للمطبخ"): an invoice at the client's prices."""
@@ -667,6 +700,7 @@ QUOTE_FREQUENCIES = {"once": "once", "one time": "once", "weekly": "weekly", "ev
 QUOTE_FREQUENCIES.update({normalize(k): v for k, v in list(QUOTE_FREQUENCIES.items())})
 
 
+@_shows_conversions
 async def propose_quotation(db, user, args: dict) -> dict:
     await vocab.ready(db)
     """A price offer typed in chat. A known B2B client gets its own discount; an unknown name is a prospect, who
@@ -1357,7 +1391,9 @@ def without_size(text: Any) -> str:
 def _product_out(p) -> dict:
     from app.core.product_types import is_stock_tracked_product
     return {"id": p.id, "name": p.name, "sku": p.sku, "price": float(p.price or 0), "unit": p.unit or "",
-            "stock": float(p.stock or 0), "tracked": bool(is_stock_tracked_product(p)), "pack": product_pack(p)}
+            "stock": float(p.stock or 0), "tracked": bool(is_stock_tracked_product(p)), "pack": product_pack(p),
+            # Local units ("قفص" = 20 kg): the review card converts a written quantity with these.
+            "unit_words": vocab.unit_words_for(p.id)}
 
 
 async def match_invoices(db, invoices: list[dict]) -> list[dict]:

@@ -1144,7 +1144,10 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
 
     names = allowed_tools(user) + allowed_actions(user)
     tools = _tool_schemas(names)
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + LOCAL_WORDS}]
+    from app.services import vocabulary_service as vocab
+    terms = await vocab.terms_block(db)           # the farm's own definitions, fenced as data
+    messages: list[dict] = [{"role": "system",
+                             "content": SYSTEM_PROMPT + "\n\n" + LOCAL_WORDS + ("\n\n" + terms if terms else "")}]
     for turn in (history or [])[-MAX_HISTORY:]:
         if isinstance(turn, dict) and turn.get("role") in ("user", "assistant") and turn.get("content"):
             messages.append({"role": turn["role"], "content": str(turn["content"])[:2000]})

@@ -960,6 +960,8 @@ async def match_harvest(db, draft: dict, choices: dict) -> dict:
         lines.append({**it, "product_written": it["product"], "farm_id": farm["id"] if farm else None,
                       "product": _product_out(product) if product else None, "match": match,
                       "pack": pack_of("1" + it["unit"]) if it.get("unit") else None,
+                      # The written unit as compared, so the card can apply the product's unit words ("قفص").
+                      "unit_key": vocab.normalize(it["unit"]) if it.get("unit") else "",
                       "candidates": [_product_out(p) for _s, p in found if p is not product][:3]})
     missing = [k for k in ("date",) if not draft.get(k)]
     for n, line in enumerate(lines):

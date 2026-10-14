@@ -496,6 +496,13 @@
   function inProductUnits(l) {
     const p = l.product, from = l.pack, to = p && p.pack;
     let qty = l.pQty, cost = l.pCost, note = "";
+    // A local unit of this product ("قفص" of tomatoes = 20 kg) — the sum is always shown.
+    const word = p && l.unitKey && (p.unit_words || []).find(w => w.key === l.unitKey);
+    if (word && qty !== "" && qty !== null && Number(word.qty) > 0) {
+      const total = Math.round(Number(qty) * Number(word.qty) * 1000) / 1000;
+      if (cost !== "" && cost !== null) cost = Number(cost) / Number(word.qty);
+      return { qty: total, cost: cost ?? "", note: `${fmt3(qty)} ${word.word} × ${fmt3(word.qty)} ${p.unit || ""} = ${fmt3(total)} ${p.unit || ""}`.trim() };
+    }
     if (from && to && from.base === to.base && Math.abs(from.amount - to.amount) > 1e-9 && qty !== "" && qty !== null) {
       const f = from.amount / to.amount;
       qty = Math.round(Number(qty) * f * 1000) / 1000;
@@ -699,7 +706,7 @@
       date: d.date || "", received_by: d.received_by || "", notes: d.notes || "", force: false, recorded: false,
       lines: (d.lines || []).map(l => {
         const line = { written: [l.farm, l.product_written, l.qty, l.unit].filter(x => x !== null && x !== undefined && x !== "").join(" · "),
-                       wProduct: l.product_written, unit: l.unit, farm_id: l.farm_id ? String(l.farm_id) : "", product: l.product,
+                       wProduct: l.product_written, unit: l.unit, unitKey: l.unit_key || "", farm_id: l.farm_id ? String(l.farm_id) : "", product: l.product,
                        candidates: l.candidates, match: l.match, pack: l.pack, pQty: l.qty ?? "", pCost: null };
         line.product = l.product;
         return Object.assign(line, inProductUnits(line));
@@ -827,9 +834,12 @@
     const unclear = new Set(d.unclear || []), missing = new Set(d.missing || []);
     const state = {
       date: d.date || "", reason: d.reason || "", recorded: false,
-      lines: (d.lines || []).map(l => ({ written: [l.product_written || "", l.qty, l.unit].filter(x => x !== null && x !== undefined && x !== "").join(" · "),
-                                         farm_id: l.farm_id ? String(l.farm_id) : "", product: l.product, candidates: l.candidates,
-                                         match: l.match, qty: l.qty ?? "" })),
+      lines: (d.lines || []).map(l => {
+        const line = { written: [l.product_written || "", l.qty, l.unit].filter(x => x !== null && x !== undefined && x !== "").join(" · "),
+                       farm_id: l.farm_id ? String(l.farm_id) : "", product: l.product, candidates: l.candidates,
+                       match: l.match, unit: l.unit, unitKey: l.unit_key || "", pack: l.pack, pQty: l.qty ?? "", pCost: null };
+        return Object.assign(line, inProductUnits(line));
+      }),
     };
     const card = h("div", { class: "inv-card" });
     const problems = h("ul", { class: "inv-problems" });
@@ -858,13 +868,15 @@
       const qty = flag(h("input", { type: "number", step: "any", min: "0", value: l.qty, oninput: e => { l.qty = e.target.value; check(); } }), `items.${i}.qty`);
       const unit = data("span", l.product ? l.product.unit : "", "inv-muted");
       const stock = data("div", "", "inv-hint");
+      const conv = h("div", { class: "inv-conv", "data-no-i18n": true, text: l.note || "" });
       const paint = () => { stock.textContent = l.product && l.product.stock !== undefined ? `${fmt3(Number(l.product.stock) || 0)} ${l.product.unit || ""}` : ""; };
       const pick = picker("products", l.product, l.candidates, "— pick a product —", p => {
-        l.product = p; learn.update(p); unit.textContent = p ? p.unit : ""; paint(); check();
+        l.product = p; learn.update(p); Object.assign(l, inProductUnits(l)); qty.value = l.qty; conv.textContent = l.note;
+        unit.textContent = p ? p.unit : ""; paint(); check();
       });
       paint();
       tbody.append(h("tr", null, h("td", { class: "inv-desc" }, data("div", l.written || "—")),
-        h("td", null, pick, stock, learn.el), h("td", null, qty, " ", unit), h("td", null, farm)));
+        h("td", null, pick, stock, conv, learn.el), h("td", null, qty, " ", unit), h("td", null, farm)));
     });
     const table = h("table", { class: "inv-table" },
       h("thead", null, h("tr", null, ["Written in the message", "Product (in stock)", "Qty", "Farm"].map(t => h("th", { text: t })))), tbody);
@@ -913,7 +925,7 @@
       client_id: d.client_match ? String(d.client_match.id) : "", recorded: false,
       lines: (d.lines || []).map(l => {
         const line = { written: [l.product_written || "", l.qty, l.unit].filter(x => x !== null && x !== undefined && x !== "").join(" · "),
-                       product: l.product, candidates: l.candidates, unit: l.unit, pack: l.pack, pQty: l.qty ?? "", pCost: null,
+                       product: l.product, candidates: l.candidates, unit: l.unit, unitKey: l.unit_key || "", pack: l.pack, pQty: l.qty ?? "", pCost: null,
                        price: l.unit_price ?? (l.product ? l.product.price : "") };
         return Object.assign(line, inProductUnits(line));
       }),

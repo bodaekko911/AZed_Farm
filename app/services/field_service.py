@@ -782,7 +782,9 @@ async def submit_text(db, chat: TelegramChat, text: str, sent_at: Optional[int],
     names = await reader._product_names(db)
     from app.services.assistant_service import LOCAL_WORDS
     clients = await reader.b2b_clients(db) if "b2b_sale" in kinds else []
-    system = (TEXT_PROMPT + "\n" + LOCAL_WORDS
+    from app.services import vocabulary_service as vocab
+    terms = await vocab.terms_block(db)           # the farm's own definitions, fenced as data
+    system = (TEXT_PROMPT + "\n" + LOCAL_WORDS + ("\n" + terms if terms else "")
               + "\nFARMS: " + json.dumps([f["name"] for f in choices["farms"]][:60], ensure_ascii=False)
               + "\nCLIENTS: " + json.dumps([c["name"] for c in clients][:100], ensure_ascii=False)
               + "\nPRODUCTS: " + json.dumps(names[:400], ensure_ascii=False))
@@ -927,6 +929,11 @@ def product_qty(line: dict) -> tuple[Optional[float], bool]:
     qty, product = line.get("qty"), line.get("product") or {}
     if qty is None:
         return None, True
+    from app.services import vocabulary_service as vocab
+    key = line.get("unit_key") or (vocab.normalize(line.get("unit")) if line.get("unit") else "")
+    by_word = vocab.unit_word_qty(qty, key, product)        # "3 قفص" of a product whose crate is 20 kg → 60
+    if by_word is not None:
+        return by_word, True
     written, own = line.get("pack"), product.get("pack")
     if written and own and written.get("base") == own.get("base") and own.get("amount"):
         return round(float(qty) * float(written["amount"]) / float(own["amount"]), 3), True
