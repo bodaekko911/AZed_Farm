@@ -85,6 +85,9 @@ class EmployeeUpdate(BaseModel):
     works_with_animals:      Optional[bool]  = None
     is_active:               Optional[bool]  = None
     salary_days_basis:       Optional[str]   = None        # calendar | fixed_30
+    hire_date:               Optional[str]   = None        # YYYY-MM-DD; "" clears it
+    # A later hire date removes the attendance logged before it — only once the user has confirmed that.
+    confirm_attendance_removal: bool = False
 
 class AttendanceCreate(BaseModel):
     employee_id: int
@@ -1092,6 +1095,28 @@ async def edit_employee(emp_id: int, data: EmployeeUpdate, db: AsyncSession = De
     if not e:
         raise HTTPException(status_code=404, detail="Employee not found")
     payload = data.model_dump(exclude_unset=True)
+    confirmed_removal = bool(payload.pop("confirm_attendance_removal", False))
+    old_hire = e.hire_date
+    hire_changed = False
+    removed_days = 0
+    if "hire_date" in payload:
+        new_hire = _parse_optional_iso_date(payload["hire_date"], "hire_date")
+        payload["hire_date"] = new_hire
+        hire_changed = new_hire != old_hire
+        if hire_changed and new_hire is not None:
+            # Days before the hire date weren't worked: a later hire date takes them off attendance — asked first,
+            # because they may have been logged by hand.
+            before = (await db.execute(select(func.count(Attendance.id)).where(
+                Attendance.employee_id == e.id, Attendance.date < new_hire))).scalar() or 0
+            if before and not confirmed_removal:
+                raise HTTPException(status_code=409, detail={
+                    "code": "hire_removes_attendance", "count": int(before),
+                    "message": f"Moving the hire date to {new_hire.isoformat()} removes {before} attendance "
+                               f"day(s) logged before it."})
+            if before:
+                await db.execute(delete(Attendance).where(
+                    Attendance.employee_id == e.id, Attendance.date < new_hire))
+                removed_days = int(before)
     if "farm_id" in payload:
         farm = await _get_active_farm_or_404(db, payload["farm_id"])
         payload["farm_id"] = farm.id if farm else None
@@ -1108,11 +1133,21 @@ async def edit_employee(emp_id: int, data: EmployeeUpdate, db: AsyncSession = De
     if payload.get("is_active") is False:
         from app.services.field_service import deactivate_linked
         await deactivate_linked(db, employee_id=emp_id)      # their Telegram chat stops at once
+    change = ""
+    if hire_changed:
+        change = (f" — hire date {old_hire.isoformat() if old_hire else 'none'} → "
+                  f"{e.hire_date.isoformat() if e.hire_date else 'none'}"
+                  + (f", {removed_days} attendance day(s) before it removed" if removed_days else ""))
     record(db, "HR", "edit_employee",
-           f"Edited employee: {e.name}",
+           f"Edited employee: {e.name}{change}",
            ref_type="employee", ref_id=emp_id)
     await db.commit()
-    return {"ok": True, **_employee_payload(e)}
+    # An earlier hire date: the days from it are logged exactly as for a newly added employee (days already logged
+    # are left as they are).
+    added_days = 0
+    if hire_changed and e.hire_date and e.hire_date < date.today():
+        added_days = await _backfill_attendance(db, e.id, e.hire_date, date.today())
+    return {"ok": True, **_employee_payload(e), "attendance_added": added_days, "attendance_removed": removed_days}
 
 @router.delete("/api/employees/{emp_id}", dependencies=[Depends(require_permission("action_hr_manage_employees"))])
 async def deactivate_employee(emp_id: int, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
@@ -4081,9 +4116,22 @@ async function saveEmployee(){
     let method = editingEmpId ? "PUT" : "POST";
     try{
         let res = await fetch(url,{method,headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-        await readApiResponse(res);
+        if(res.status === 409 && editingEmpId){
+            // A later hire date would remove attendance logged before it: ask first.
+            const info = await res.clone().json().catch(() => null);
+            const d = info && info.detail;
+            if(d && d.code === "hire_removes_attendance"){
+                if(!confirm(d.message + "\\n\\nRemove them and save?")) return;
+                body.confirm_attendance_removal = true;
+                res = await fetch(url,{method,headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+            }
+        }
+        const out = await readApiResponse(res);
         closeEmpModal();
-        showToast(editingEmpId?"Employee updated":"Employee added");
+        let note = editingEmpId?"Employee updated":"Employee added";
+        if(out && out.attendance_added) note += ` — ${out.attendance_added} attendance day(s) logged from the hire date`;
+        if(out && out.attendance_removed) note += ` — ${out.attendance_removed} attendance day(s) before the hire date removed`;
+        showToast(note);
         loadEmployees(); loadSummary();
     }catch(err){
         showToast("Error: " + (err.message || "Could not save employee"));
