@@ -105,6 +105,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        # Pages are never reused from the browser's cache, so Back shows the page as it is now. Only HTML (scripts,
+        # styles and images keep their caching), and setdefault, so a route with its own policy keeps it.
+        if (response.headers.get("content-type") or "").startswith("text/html"):
+            response.headers.setdefault("Cache-Control", "no-store")
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; "

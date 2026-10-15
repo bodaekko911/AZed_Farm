@@ -9,6 +9,12 @@
  * The richer theme.js / auth-guard.js logic continues to handle toggle and
  * cross-tab sync after parse — this file just gets the colors right at t=0.
  */
+// Going Back shows the page as it is now, not as it was. The server marks every page no-store; this covers the
+// browser restoring a page from its back/forward memory anyway.
+window.addEventListener("pageshow", function (e) {
+  if (e.persisted) window.location.reload();     // restored from memory, not fetched: fetch it now
+});
+
 (function () {
   var THEME_KEY = "colorMode";
   var LEGACY_KEYS = ["dashboard:theme", "expenses-theme", "refund-theme"];
