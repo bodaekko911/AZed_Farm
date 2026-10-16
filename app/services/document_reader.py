@@ -61,6 +61,9 @@ KINDS = {
     "b2b_sale": {"label": "B2B sale", "permissions": ("page_b2b", "action_b2b_invoices_create"), "text_only": True},
     "spoilage": {"label": "Spoilage", "permissions": ("page_production", "action_production_log_spoilage"),
                  "text_only": True},
+    # From a worker's text ("سماد ٢٠ كيلو للصوبة ١"): seeds / fertilizer put into a greenhouse or field.
+    "plot_input": {"label": "Seeds / fertilizer", "permissions": ("page_farm", "action_farm_plot_input"),
+                   "text_only": True},
 }
 DOCUMENT_KINDS = tuple(k for k, v in KINDS.items() if not v.get("text_only"))
 
@@ -576,8 +579,8 @@ async def search(db, user, kind: str, q: str) -> list[dict]:
     from app.models.product import Product
     from app.models.supplier import Supplier
     from app.services.assistant_actions import _product_out
-    may_products = "harvest_sheet" in allowed_kinds(user) or all(
-        has_permission(user, p) for p in KINDS["spoilage"]["permissions"])
+    may_products = "harvest_sheet" in allowed_kinds(user) or any(
+        all(has_permission(user, p) for p in KINDS[k]["permissions"]) for k in ("spoilage", "plot_input"))
     if kind == "suppliers" or not may_products:
         need_kind(user, "delivery_note")
     q = (q or "").strip()[:80]
@@ -1103,6 +1106,82 @@ async def record_spoilage_with(db, user, data: dict, evidence: Evidence) -> dict
         out.append(result)
     return {"ok": True, "doc_key": None, "date": day,
             "spoilage": [{"ref_number": r["ref_number"], "product": r["product"], "qty": r["qty"]} for r in out]}
+
+
+# ── Seeds / fertilizer on a greenhouse or field (from the field bot's text) ──
+
+async def farm_plots(db) -> list[dict]:
+    """Active greenhouses and fields, with their farm — the bot's list to match against and the review card's."""
+    from app.models.farm import Farm, FarmPlot
+    rows = (await db.execute(select(FarmPlot.id, FarmPlot.name, FarmPlot.plot_type, Farm.name)
+                             .join(Farm, Farm.id == FarmPlot.farm_id)
+                             .where(FarmPlot.is_active == 1).order_by(Farm.name, FarmPlot.name))).all()
+    return [{"id": i, "name": n, "plot_type": t, "farm_name": f, "label": f"{n} ({f})"} for i, n, t, f in rows]
+
+
+async def plot_input_duplicates(db, plot_id: Optional[int], day: Optional[str], names: list[str]) -> list[str]:
+    """The same item already logged on the same greenhouse / field that day — the same message sent twice."""
+    from app.models.farm import FarmPlot, PlotInput
+    names = [n for n in names if n]
+    if not plot_id or not day or not names:
+        return []
+    rows = (await db.execute(select(PlotInput.item_name, PlotInput.qty, PlotInput.unit, FarmPlot.name)
+                             .join(FarmPlot, FarmPlot.id == PlotInput.plot_id)
+                             .where(PlotInput.plot_id == plot_id, PlotInput.applied_on == date.fromisoformat(day),
+                                    PlotInput.item_name.in_(names)))).all()
+    return [f"{plot} already has {float(qty):g} {unit or ''} of {name} logged on {day}".replace("  ", " ")
+            for name, qty, unit, plot in rows]
+
+
+async def record_plot_input_with(db, user, data: dict, evidence: Evidence) -> dict:
+    """Confirm a reviewed seeds / fertilizer draft: one entry per line through the farm page's own code — taken from
+    inventory (stock out at the chosen storage, or the one holding most of it) or bought directly with its cost.
+    All lines are checked and written together; nothing is kept if one fails."""
+    from app.models.farm import FarmPlot
+    from app.services.plot_service import add_plot_input
+
+    need_kind(user, "plot_input")
+    day = _day(data.get("date"))
+    if not day:
+        raise HTTPException(status_code=400, detail="Enter the date.")
+    if date.fromisoformat(day) > today_local():
+        raise HTTPException(status_code=400, detail="The date is in the future.")
+    pid = int(data["plot_id"]) if str(data.get("plot_id") or "").isdigit() else None
+    plot = (await db.execute(select(FarmPlot).where(FarmPlot.id == pid))).scalar_one_or_none() if pid else None
+    if plot is None:
+        raise HTTPException(status_code=400, detail="Pick the greenhouse or field.")
+    raw = [it for it in (data.get("items") or []) if isinstance(it, dict)][:30]
+    if not raw:
+        raise HTTPException(status_code=400, detail="There are no lines to record.")
+    entries = []
+    for n, it in enumerate(raw, start=1):
+        qty = number(it.get("qty"))
+        if qty is None or qty <= 0:
+            raise HTTPException(status_code=400, detail=f"Line {n}: the quantity must be above 0.")
+        product_id = int(it["product_id"]) if str(it.get("product_id") or "").isdigit() else None
+        location_id = int(it["location_id"]) if str(it.get("location_id") or "").isdigit() else None
+        cost = number(it.get("total_cost"))
+        if cost is not None and cost < 0:
+            raise HTTPException(status_code=400, detail=f"Line {n}: the cost can't be negative.")
+        written = _text(it.get("written"), 300)
+        try:
+            entry = await add_plot_input(
+                db, plot=plot, input_type=str(it.get("input_type") or "other"), qty=round(qty, 4),
+                applied_on=date.fromisoformat(day), user=user, product_id=product_id, location_id=location_id,
+                item_name=_text(it.get("item_name"), 200), unit=_text(it.get("unit"), 30), total_cost=cost,
+                crop=_text(it.get("crop"), 150) or _text(data.get("crop"), 150),
+                note="From the field bot" + (f": {written}" if written else "") if data.get("from_field") else written)
+        except HTTPException as exc:
+            raise HTTPException(status_code=exc.status_code, detail=f"Line {n}: {exc.detail}")
+        entries.append(entry)
+    record(db, "Farm", "create_plot_input",
+           f"{len(entries)} seeds / fertilizer entr{'y' if len(entries) == 1 else 'ies'} on {plot.name} ({day}) "
+           f"from a field draft", user=user, ref_type="farm_plot", ref_id=plot.id)
+    await db.commit()
+    return {"ok": True, "doc_key": None, "date": day, "plot": plot.name,
+            "inputs": [{"id": e.id, "ref_number": f"PI-{e.id}", "item_name": e.item_name, "qty": float(e.qty),
+                        "unit": e.unit or "", "input_type": e.input_type,
+                        "total_cost": float(e.total_cost) if e.total_cost is not None else None} for e in entries]}
 
 
 # ── B2B sales (from the field bot's text, and Ask) ───────────────────────────

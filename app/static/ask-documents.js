@@ -999,11 +999,131 @@
     return card;
   }
 
+  // ── Review seeds / fertilizer a worker reported by text (Field inbox) ──
+  function plotInputCard(d, images, filename, opts) {
+    const missing = new Set(d.missing || []), unclear = new Set(d.unclear || []);
+    const TYPES = [["seed", "Seeds"], ["fertilizer", "Fertilizer"], ["pesticide", "Pesticide"], ["other", "Other"]];
+    const state = {
+      plot_id: d.plot_match ? String(d.plot_match.id) : "", date: d.date || "", crop: d.crop || "", recorded: false,
+      lines: (d.lines || []).map(l => {
+        const line = { written: [l.product_written || "", l.qty, l.unit].filter(x => x !== null && x !== undefined && x !== "").join(" · "),
+                       product: l.product, candidates: l.candidates, match: l.match, unit: l.unit, unitKey: l.unit_key || "",
+                       pack: l.pack, pQty: l.qty ?? "", pCost: null, input_type: l.input_type || "other",
+                       item_name: l.product_written || "", direct_unit: l.unit || "", cost: l.cost ?? "", location_id: "" };
+        return Object.assign(line, l.product ? inProductUnits(line) : { qty: l.qty ?? "", note: "" });
+      }),
+    };
+    const card = h("div", { class: "inv-card" });
+    const problems = h("ul", { class: "inv-problems" });
+    const result = h("div", { class: "act-status" });
+    const recordBtn = h("button", { class: "act-btn act-primary", text: "Record seeds / fertilizer" });
+    function flag(input, path) {
+      if (missing.has(path)) { input.classList.add("doc-missing"); input.title = "Not in the message — enter it"; }
+      else if (unclear.has(path)) { input.classList.add("doc-unclear"); input.title = "Unclear in the message — check it"; }
+      input.addEventListener("input", () => input.classList.remove("doc-missing", "doc-unclear"));
+      input.addEventListener("change", () => input.classList.remove("doc-missing", "doc-unclear"));
+      return input;
+    }
+    const field = (label, input) => h("label", { class: "doc-field" }, h("span", { text: label }), input);
+    const plot = flag(h("select", { onchange: e => { state.plot_id = e.target.value; check(); } },
+      h("option", { value: "", text: "— pick the greenhouse / field —" }),
+      ...(d.plots || []).map(p => h("option", { value: String(p.id), text: p.label, "data-no-i18n": true }))), "plot");
+    plot.value = state.plot_id;
+    const head = h("div", { class: "doc-grid" },
+      field("Greenhouse / field", plot),
+      field("Date", flag(h("input", { type: "date", value: state.date, max: today(), oninput: e => { state.date = e.target.value; check(); } }), "date")),
+      field("Crop", h("input", { type: "text", value: state.crop, maxlength: 150, "data-no-i18n": true,
+        oninput: e => { state.crop = e.target.value; } })));
+    if (d.plot_written && !d.plot_match) head.append(h("div", { class: "inv-hint" }, h("span", { text: "Written in the message:" }), " ", data("strong", d.plot_written)));
+
+    const tbody = h("tbody");
+    const learnLines = [];
+    state.lines.forEach((l, i) => {
+      const learn = remember(d.can_learn, "product", ((d.lines || [])[i] || {}).product_written, l.product);
+      learnLines.push(learn);
+      const type = h("select", { onchange: e => { l.input_type = e.target.value; } },
+        ...TYPES.map(([v, t]) => h("option", { value: v, text: t })));
+      type.value = l.input_type;
+      const qty = flag(h("input", { type: "number", step: "any", min: "0", value: l.qty, oninput: e => { l.qty = e.target.value; check(); } }), `items.${i}.qty`);
+      const unit = data("span", l.product ? l.product.unit : "", "inv-muted");
+      const conv = h("div", { class: "inv-conv", "data-no-i18n": true, text: l.note || "" });
+      const stock = data("div", "", "inv-hint");
+      const name = h("input", { type: "text", value: l.item_name, maxlength: 200, placeholder: "Item name", "data-no-i18n": true,
+        oninput: e => { l.item_name = e.target.value; check(); } });
+      const dUnit = h("input", { type: "text", value: l.direct_unit, maxlength: 30, placeholder: "unit", style: "width:70px", "data-no-i18n": true,
+        oninput: e => { l.direct_unit = e.target.value; } });
+      const direct = h("div", { class: "inv-row" }, name, dUnit);
+      const store = h("select", { onchange: e => { l.location_id = e.target.value; } },
+        h("option", { value: "", text: "Storage with the most" }),
+        ...(d.locations || []).map(x => h("option", { value: String(x.id), text: x.name, "data-no-i18n": true })));
+      const cost = h("input", { type: "number", step: "any", min: "0", value: l.cost, oninput: e => { l.cost = e.target.value; check(); } });
+      const paint = () => {
+        direct.hidden = !!l.product; store.hidden = !l.product; unit.hidden = !l.product;
+        stock.textContent = l.product ? `${fmt3(Number(l.product.stock) || 0)} ${l.product.unit || ""} in stock` : "";
+        cost.placeholder = l.product ? "product cost × qty" : "optional";
+      };
+      const pick = picker("products", l.product, l.candidates, "— bought directly (not from stock) —", p => {
+        l.product = p; learn.update(p);
+        if (p) Object.assign(l, inProductUnits(l)); else { l.qty = l.pQty; l.note = ""; }
+        qty.value = l.qty; conv.textContent = l.note || ""; unit.textContent = p ? p.unit : "";
+        paint(); check();
+      });
+      paint();
+      tbody.append(h("tr", null, h("td", { class: "inv-desc" }, data("div", l.written || "—")), h("td", null, type),
+        h("td", null, pick, direct, stock, conv, learn.el), h("td", null, store),
+        h("td", null, qty, " ", unit), h("td", null, cost)));
+    });
+    const table = h("table", { class: "inv-table" },
+      h("thead", null, h("tr", null, ["Written in the message", "Type", "Item", "Taken from", "Qty", "Cost"].map(t => h("th", { text: t })))), tbody);
+    function check() {
+      const issues = [];
+      if (!state.plot_id) issues.push(h("li", null, h("span", { text: "Pick the greenhouse or field." })));
+      if (!state.date) issues.push(h("li", null, h("span", { text: "Set the date." })));
+      else if (state.date > today()) issues.push(h("li", null, h("span", { text: "The date is in the future." })));
+      state.lines.forEach(l => {
+        if (!l.product && !String(l.item_name || "").trim()) issues.push(h("li", null, h("span", { text: "Pick a product or type the item for:" }), " ", data("strong", l.written || "—")));
+        if (!(num(l.qty) > 0)) issues.push(h("li", null, h("span", { text: "A quantity must be above 0:" }), " ", data("strong", l.written || "—")));
+        if (l.product && num(l.qty) > (Number(l.product.stock) || 0)) issues.push(h("li", null, h("span", { text: "Not that much in stock:" }), " ", data("strong", l.product.name)));
+      });
+      if (!state.lines.length) issues.push(h("li", null, h("span", { text: "No lines were read from the message." })));
+      (d.duplicates || []).forEach(t => issues.push(h("li", { class: "inv-muted" }, data("span", t))));
+      problems.replaceChildren(...issues);
+      const blocking = issues.length - (d.duplicates || []).length;
+      recordBtn.disabled = state.recorded || blocking > 0;
+      return blocking === 0;
+    }
+    recordBtn.onclick = async () => {
+      if (!check()) return;
+      recordBtn.disabled = true; result.replaceChildren(h("span", { text: "Recording…" })); result.className = "act-status";
+      try {
+        const out = await submit(opts, {
+          kind: "plot_input", date: state.date, plot_id: Number(state.plot_id), crop: state.crop,
+          items: state.lines.map(l => ({ input_type: l.input_type, product_id: l.product ? l.product.id : null,
+                                         location_id: l.product ? (Number(l.location_id) || null) : null,
+                                         item_name: l.product ? null : l.item_name, unit: l.product ? null : l.direct_unit,
+                                         qty: num(l.qty), total_cost: num(l.cost), written: l.written })),
+          remember: remembered(learnLines),
+        });
+        state.recorded = true;
+        result.className = "act-status ok";
+        result.replaceChildren("✓ ", h("span", { text: "Recorded" }), " ",
+          data("span", (out.inputs || []).map(x => `${x.ref_number} (${x.item_name} ${fmt3(Number(x.qty) || 0)} ${x.unit || ""})`.trim()).join(", ")));
+        card.classList.add("done"); card.querySelectorAll("input, select, button").forEach(x => { x.disabled = true; });
+      } catch (e) { result.replaceChildren(h("span", { text: e.message })); result.className = "act-status bad"; check(); }
+    };
+    card.append(
+      h("div", { class: "inv-head" }, h("div", { class: "inv-title", text: "Seeds / fertilizer" }),
+        h("span", { class: "inv-muted", text: "From stock: taken out of the chosen storage. Bought directly: recorded with its cost only." })),
+      head, table, problems, h("div", { class: "act-buttons" }, recordBtn), result);
+    check();
+    return card;
+  }
+
   window.AskDocuments = {
     start, prepare, number: num,
     // For the Field inbox: the same review cards, recording through its own endpoint and searching through its own.
     cards: { expense_receipt: expenseCard, delivery_note: deliveryCard, harvest_sheet: harvestCard, spoilage: spoilageCard,
-             b2b_sale: b2bSaleCard },
+             b2b_sale: b2bSaleCard, plot_input: plotInputCard },
     setSearchUrl: url => { searchUrl = url; },
   };
 })();

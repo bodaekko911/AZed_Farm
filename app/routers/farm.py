@@ -6,15 +6,13 @@ from sqlalchemy import func, select
 from typing import Optional, List
 from pydantic import BaseModel, Field
 from datetime import date
-from decimal import Decimal
 
 from app.database import get_async_session
 from app.core.log import record
 from app.core.permissions import get_current_user, require_admin, require_permission
 from app.core.navigation import render_app_header
-from app.core.product_types import is_stock_tracked_product
 from app.models.farm import (
-    PLOT_INPUT_TYPES, PLOT_TYPES, Farm, FarmDelivery, FarmDeliveryItem, FarmPlot, PlotInput, WeatherLog,
+    PLOT_TYPES, Farm, FarmDelivery, FarmDeliveryItem, FarmPlot, PlotInput, WeatherLog,
 )
 from app.models.product import Product
 from app.models.inventory import StockLocation, StockMove
@@ -24,7 +22,7 @@ from app.services.farm_intake_service import (
     delete_carbon_log_for_delivery,
     resync_carbon_log_for_delivery,
 )
-from app.services.location_inventory_service import get_or_create_location_stock, quantize_qty
+from app.services.plot_service import add_plot_input, reverse_plot_input
 
 router = APIRouter(
     prefix="/farm",
@@ -860,74 +858,18 @@ async def list_locations_for_picker(db: AsyncSession = Depends(get_async_session
 @router.post("/api/plot-inputs", dependencies=[Depends(require_permission("action_farm_plot_input"))])
 async def create_plot_input(data: PlotInputIn, db: AsyncSession = Depends(get_async_session),
                             current_user: User = Depends(get_current_user)):
-    plot = (await db.execute(select(FarmPlot).options(selectinload(FarmPlot.farm))
-                             .where(FarmPlot.id == data.plot_id))).scalar_one_or_none()
+    plot = (await db.execute(select(FarmPlot).where(FarmPlot.id == data.plot_id))).scalar_one_or_none()
     if not plot:
         raise HTTPException(status_code=404, detail="Greenhouse / field not found")
-    if not plot.is_active:
-        raise HTTPException(status_code=400, detail="This greenhouse / field is archived")
-    if data.input_type not in PLOT_INPUT_TYPES:
-        raise HTTPException(status_code=400, detail="Type must be seed, fertilizer, pesticide or other")
     applied_on = _parse_date(data.applied_on, "date")
     if not applied_on:
         raise HTTPException(status_code=400, detail="Date is required")
-    qty = Decimal(str(data.qty))
-
-    entry = PlotInput(
-        plot_id=plot.id, input_type=data.input_type, qty=qty, applied_on=applied_on,
-        crop=(data.crop or "").strip() or None, note=(data.note or "").strip() or None,
-        user_id=current_user.id,
-    )
-
-    if data.product_id:
-        product = (await db.execute(select(Product).where(Product.id == data.product_id))).scalar_one_or_none()
-        if not product:
-            raise HTTPException(status_code=404, detail="Product not found")
-        if not is_stock_tracked_product(product):
-            raise HTTPException(status_code=400, detail=f"{product.name} is a service — it has no stock to take from")
-        if not data.location_id:
-            raise HTTPException(status_code=400, detail="Pick the storage it is taken from")
-        location = (await db.execute(select(StockLocation).where(
-            StockLocation.id == data.location_id, StockLocation.is_active.is_(True)))).scalar_one_or_none()
-        if not location:
-            raise HTTPException(status_code=400, detail="Storage not found or inactive")
-        loc_stock = await get_or_create_location_stock(db, location_id=location.id, product_id=product.id)
-        available = Decimal(str(loc_stock.qty or 0))
-        if available < qty:
-            raise HTTPException(status_code=400, detail=(
-                f"Not enough {product.name} at {location.name}: have {float(available):g}, need {float(qty):g}"))
-        qty_before = Decimal(str(product.stock or 0))
-        loc_stock.qty = quantize_qty(available - qty)
-        product.stock = qty_before - qty
-
-        entry.product_id  = product.id
-        entry.location_id = location.id
-        entry.item_name   = product.name
-        entry.unit        = product.unit
-        # Typed cost wins; otherwise value it at the product's cost price.
-        entry.total_cost  = (Decimal(str(data.total_cost)) if data.total_cost is not None
-                             else (Decimal(str(product.cost or 0)) * qty).quantize(Decimal("0.01")))
-        db.add(entry)
-        await db.flush()
-        db.add(StockMove(
-            product_id=product.id, type="out", qty=qty,
-            qty_before=qty_before, qty_after=qty_before - qty,
-            ref_type="plot_input", ref_id=entry.id,
-            note=f"{data.input_type.capitalize()} for {plot.name} ({plot.farm.name}) from {location.name}",
-            user_id=current_user.id,
-        ))
-    else:
-        name = (data.item_name or "").strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="Pick a product from inventory or type the item name")
-        entry.item_name  = name
-        entry.unit       = (data.unit or "").strip() or None
-        entry.total_cost = Decimal(str(data.total_cost)) if data.total_cost is not None else None
-        db.add(entry)
-        await db.flush()
-
+    entry = await add_plot_input(
+        db, plot=plot, input_type=data.input_type, qty=data.qty, applied_on=applied_on, user=current_user,
+        product_id=data.product_id, location_id=data.location_id, item_name=data.item_name, unit=data.unit,
+        total_cost=data.total_cost, crop=data.crop, note=data.note)
     record(db, "Farm", "create_plot_input",
-           f"{data.input_type.capitalize()} on {plot.name}: {float(qty):g} {entry.unit or ''} {entry.item_name}".replace("  ", " "),
+           f"{data.input_type.capitalize()} on {plot.name}: {float(entry.qty):g} {entry.unit or ''} {entry.item_name}".replace("  ", " "),
            user=current_user, ref_type="plot_input", ref_id=entry.id)
     await db.commit()
     return {"id": entry.id}
@@ -937,26 +879,12 @@ async def create_plot_input(data: PlotInputIn, db: AsyncSession = Depends(get_as
 async def delete_plot_input(input_id: int, db: AsyncSession = Depends(get_async_session),
                             current_user: User = Depends(get_current_user)):
     """Delete an entry; one taken from inventory goes back to its storage."""
-    entry = (await db.execute(select(PlotInput).options(selectinload(PlotInput.product))
-                              .where(PlotInput.id == input_id))).scalar_one_or_none()
+    entry = (await db.execute(select(PlotInput).where(PlotInput.id == input_id))).scalar_one_or_none()
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
-    qty = Decimal(str(entry.qty or 0))
-    if entry.product_id and entry.location_id and entry.product is not None:
-        product = entry.product
-        qty_before = Decimal(str(product.stock or 0))
-        product.stock = qty_before + qty
-        loc_stock = await get_or_create_location_stock(db, location_id=entry.location_id, product_id=entry.product_id)
-        loc_stock.qty = quantize_qty(Decimal(str(loc_stock.qty or 0)) + qty)
-        db.add(StockMove(
-            product_id=product.id, type="in", qty=qty,
-            qty_before=qty_before, qty_after=qty_before + qty,
-            ref_type="plot_input_reverse", ref_id=entry.id,
-            note=f"Reversed {entry.input_type} entry #{entry.id}",
-            user_id=current_user.id,
-        ))
+    await reverse_plot_input(db, entry, current_user)
     record(db, "Farm", "delete_plot_input",
-           f"Deleted {entry.input_type} entry #{entry.id} ({float(qty):g} {entry.item_name})",
+           f"Deleted {entry.input_type} entry #{entry.id} ({float(entry.qty):g} {entry.item_name})",
            user=current_user, ref_type="plot_input", ref_id=entry.id)
     await db.delete(entry)
     await db.commit()
