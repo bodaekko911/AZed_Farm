@@ -64,6 +64,9 @@ KINDS = {
     # From a worker's text ("سماد ٢٠ كيلو للصوبة ١"): seeds / fertilizer put into a greenhouse or field.
     "plot_input": {"label": "Seeds / fertilizer", "permissions": ("page_farm", "action_farm_plot_input"),
                    "text_only": True},
+    # From a worker's text ("أكل للسمك ٥ كيلو"): feed given to an animal group — fish, poultry, cattle…
+    "animal_feeding": {"label": "Animal / fish feed",
+                       "permissions": ("page_animals", "action_animal_feeding_create"), "text_only": True},
 }
 DOCUMENT_KINDS = tuple(k for k, v in KINDS.items() if not v.get("text_only"))
 
@@ -580,7 +583,7 @@ async def search(db, user, kind: str, q: str) -> list[dict]:
     from app.models.supplier import Supplier
     from app.services.assistant_actions import _product_out
     may_products = "harvest_sheet" in allowed_kinds(user) or any(
-        all(has_permission(user, p) for p in KINDS[k]["permissions"]) for k in ("spoilage", "plot_input"))
+        all(has_permission(user, p) for p in KINDS[k]["permissions"]) for k in ("spoilage", "plot_input", "animal_feeding"))
     if kind == "suppliers" or not may_products:
         need_kind(user, "delivery_note")
     q = (q or "").strip()[:80]
@@ -1182,6 +1185,101 @@ async def record_plot_input_with(db, user, data: dict, evidence: Evidence) -> di
             "inputs": [{"id": e.id, "ref_number": f"PI-{e.id}", "item_name": e.item_name, "qty": float(e.qty),
                         "unit": e.unit or "", "input_type": e.input_type,
                         "total_cost": float(e.total_cost) if e.total_cost is not None else None} for e in entries]}
+
+
+# ── Feed for an animal group — fish, poultry, cattle (from the field bot's text) ─
+
+async def animal_groups(db) -> list[dict]:
+    """Groups still being fed, with their type — the bot's list to match against and the review card's."""
+    from app.models.animal import AnimalGroup
+    from app.models.farm import Farm
+    rows = (await db.execute(select(AnimalGroup.id, AnimalGroup.name, AnimalGroup.animal_type, Farm.name)
+                             .outerjoin(Farm, Farm.id == AnimalGroup.farm_id)
+                             .where(AnimalGroup.status == "active").order_by(AnimalGroup.name))).all()
+    return [{"id": i, "name": n, "animal_type": t or "other", "farm_name": f,
+             "label": f"{n} ({t or 'other'}{', ' + f if f else ''})"} for i, n, t, f in rows]
+
+
+async def feeding_duplicates(db, group_id: Optional[int], day: Optional[str], product_ids: list[int]) -> list[str]:
+    """The same feed already logged for the same group that day — the same message sent twice."""
+    from app.models.animal import AnimalGroup, FeedingLog
+    from app.models.product import Product
+    product_ids = [p for p in product_ids if p]
+    if not group_id or not day or not product_ids:
+        return []
+    rows = (await db.execute(select(AnimalGroup.name, Product.name, Product.unit, FeedingLog.qty)
+                             .join(AnimalGroup, AnimalGroup.id == FeedingLog.animal_group_id)
+                             .join(Product, Product.id == FeedingLog.product_id)
+                             .where(FeedingLog.animal_group_id == group_id, FeedingLog.feed_date == date.fromisoformat(day),
+                                    FeedingLog.product_id.in_(product_ids)))).all()
+    return [f"{group} was already fed {float(qty):g} {unit or ''} of {product} on {day}".replace("  ", " ")
+            for group, product, unit, qty in rows]
+
+
+async def record_animal_feeding_with(db, user, data: dict, evidence: Evidence) -> dict:
+    """Confirm a reviewed feed draft: one feeding log per line through the Animals page's own code — stock out at the
+    chosen storage, or the one holding the most of that feed. Every line is checked before any is written."""
+    from app.models.animal import AnimalGroup
+    from app.models.product import Product
+    from app.routers.animals import FeedingCreate, create_feeding
+    from app.services.plot_service import fullest_location
+
+    need_kind(user, "animal_feeding")
+    day = _day(data.get("date"))
+    if not day:
+        raise HTTPException(status_code=400, detail="Enter the date.")
+    if date.fromisoformat(day) > today_local():
+        raise HTTPException(status_code=400, detail="The date is in the future.")
+    gid = int(data["group_id"]) if str(data.get("group_id") or "").isdigit() else None
+    group = (await db.execute(select(AnimalGroup).where(AnimalGroup.id == gid))).scalar_one_or_none() if gid else None
+    if group is None or group.status == "archived":
+        raise HTTPException(status_code=400, detail="Pick the animal group.")
+    raw = [it for it in (data.get("items") or []) if isinstance(it, dict)][:30]
+    if not raw:
+        raise HTTPException(status_code=400, detail="There are no lines to record.")
+    lines, needed = [], {}
+    for n, it in enumerate(raw, start=1):
+        pid = int(it["product_id"]) if str(it.get("product_id") or "").isdigit() else None
+        product = (await db.execute(select(Product).where(Product.id == pid))).scalar_one_or_none() if pid else None
+        if product is None:
+            raise HTTPException(status_code=400, detail=f"Line {n}: pick the feed product.")
+        qty = number(it.get("qty"))
+        if qty is None or qty <= 0:
+            raise HTTPException(status_code=400, detail=f"Line {n}: the quantity must be above 0.")
+        qty = round(qty, 4)
+        lid = int(it["location_id"]) if str(it.get("location_id") or "").isdigit() else None
+        if lid is None:
+            # Everything this draft takes of the product, so two lines don't both count on the same stock.
+            location = await fullest_location(db, product.id, Decimal(str(needed.get(product.id, 0) + qty)))
+            if location is None:
+                raise HTTPException(status_code=400, detail=f"Line {n}: no storage holds {qty:g} "
+                                                            f"{product.unit or ''} of {product.name}.")
+            lid = location.id
+        else:
+            # create_feeding saves line by line: check the chosen storage now, so a short line 2 doesn't leave line 1.
+            from app.models.inventory import LocationStock
+            have = (await db.execute(select(LocationStock.qty).where(
+                LocationStock.location_id == lid, LocationStock.product_id == product.id))).scalar()
+            taken = sum(q for p, q, l, _w in lines if p.id == product.id and l == lid)
+            if float(have or 0) + 1e-9 < taken + qty:
+                raise HTTPException(status_code=400, detail=f"Line {n}: not enough {product.name} at that storage "
+                                                            f"(has {float(have or 0):g}).")
+        needed[product.id] = needed.get(product.id, 0) + qty
+        lines.append((product, qty, lid, _text(it.get("written"), 300)))
+    out = []
+    for n, (product, qty, lid, written) in enumerate(lines, start=1):
+        try:
+            result = await create_feeding(FeedingCreate(
+                animal_group_id=group.id, product_id=product.id, location_id=lid, qty=qty,
+                feed_date=date.fromisoformat(day),
+                note=("From the field bot" + (f": {written}" if written else "")) if data.get("from_field") else written),
+                db, current_user=user)
+        except HTTPException as exc:
+            raise HTTPException(status_code=exc.status_code, detail=f"Line {n}: {exc.detail}")
+        out.append(result)
+    return {"ok": True, "doc_key": None, "date": day, "group": group.name,
+            "feedings": [{"id": r["id"], "ref_number": f"FL-{r['id']}", "product": r["product_name"], "qty": r["qty"],
+                          "location": r["location_name"]} for r in out]}
 
 
 # ── B2B sales (from the field bot's text, and Ask) ───────────────────────────

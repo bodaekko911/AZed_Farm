@@ -738,6 +738,7 @@ LEARNABLE = {
     "spoilage": ("product",),
     "b2b_sale": ("b2b_client", "product"),
     "plot_input": ("product",),
+    "animal_feeding": ("product",),
 }
 MAX_LEARN = 60
 

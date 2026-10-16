@@ -1433,6 +1433,7 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
                 <option value="poultry">Poultry</option>
                 <option value="sheep">Sheep</option>
                 <option value="goats">Goats</option>
+                <option value="fish">Fish</option>
                 <option value="other" selected>Other</option>
             </select>
         </div>
@@ -1609,6 +1610,7 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
                     <option value="poultry">Poultry</option>
                     <option value="sheep">Sheep</option>
                     <option value="goats">Goats</option>
+                    <option value="fish">Fish</option>
                     <option value="other" selected>Other</option>
                 </select>
             </div>

@@ -32,7 +32,7 @@ class AnimalGroup(Base):
 
     id             = Column(Integer, primary_key=True, index=True)
     name           = Column(String(150), nullable=False, index=True)
-    animal_type    = Column(String(30), nullable=False, default="other")  # cattle|poultry|sheep|goats|other
+    animal_type    = Column(String(30), nullable=False, default="other")  # cattle|poultry|sheep|goats|fish|other
     headcount      = Column(Integer, nullable=False, default=0)
     male_count     = Column(Integer, nullable=True)    # optional sex breakdown (does not drive headcount)
     female_count   = Column(Integer, nullable=True)    # optional sex breakdown (does not drive headcount)

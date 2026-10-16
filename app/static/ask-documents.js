@@ -1119,11 +1119,110 @@
     return card;
   }
 
+  // ── Review animal / fish feed a worker reported by text (Field inbox) ──
+  function feedingCard(d, images, filename, opts) {
+    const missing = new Set(d.missing || []), unclear = new Set(d.unclear || []);
+    const state = {
+      group_id: d.group_match ? String(d.group_match.id) : "", date: d.date || "", recorded: false,
+      lines: (d.lines || []).map(l => {
+        const line = { written: [l.product_written || "", l.qty, l.unit].filter(x => x !== null && x !== undefined && x !== "").join(" · "),
+                       product: l.product, candidates: l.candidates, match: l.match, unit: l.unit, unitKey: l.unit_key || "",
+                       pack: l.pack, pQty: l.qty ?? "", pCost: null, location_id: "" };
+        return Object.assign(line, inProductUnits(line));
+      }),
+    };
+    const card = h("div", { class: "inv-card" });
+    const problems = h("ul", { class: "inv-problems" });
+    const result = h("div", { class: "act-status" });
+    const recordBtn = h("button", { class: "act-btn act-primary", text: "Record feeding" });
+    function flag(input, path) {
+      if (missing.has(path)) { input.classList.add("doc-missing"); input.title = "Not in the message — enter it"; }
+      else if (unclear.has(path)) { input.classList.add("doc-unclear"); input.title = "Unclear in the message — check it"; }
+      input.addEventListener("input", () => input.classList.remove("doc-missing", "doc-unclear"));
+      input.addEventListener("change", () => input.classList.remove("doc-missing", "doc-unclear"));
+      return input;
+    }
+    const field = (label, input) => h("label", { class: "doc-field" }, h("span", { text: label }), input);
+    const group = flag(h("select", { onchange: e => { state.group_id = e.target.value; check(); } },
+      h("option", { value: "", text: "— pick the animal group —" }),
+      ...(d.groups || []).map(g => h("option", { value: String(g.id), text: g.label, "data-no-i18n": true }))), "group");
+    group.value = state.group_id;
+    const head = h("div", { class: "doc-grid" },
+      field("Animal group", group),
+      field("Date", flag(h("input", { type: "date", value: state.date, max: today(), oninput: e => { state.date = e.target.value; check(); } }), "date")));
+    if (d.group_written && !d.group_match) head.append(h("div", { class: "inv-hint" }, h("span", { text: "Written in the message:" }), " ", data("strong", d.group_written)));
+
+    const tbody = h("tbody");
+    const learnLines = [];
+    state.lines.forEach((l, i) => {
+      const learn = remember(d.can_learn, "product", ((d.lines || [])[i] || {}).product_written, l.product);
+      learnLines.push(learn);
+      const qty = flag(h("input", { type: "number", step: "any", min: "0", value: l.qty, oninput: e => { l.qty = e.target.value; check(); } }), `items.${i}.qty`);
+      const unit = data("span", l.product ? l.product.unit : "", "inv-muted");
+      const conv = h("div", { class: "inv-conv", "data-no-i18n": true, text: l.note || "" });
+      const stock = data("div", "", "inv-hint");
+      const store = h("select", { onchange: e => { l.location_id = e.target.value; } },
+        h("option", { value: "", text: "Storage with the most" }),
+        ...(d.locations || []).map(x => h("option", { value: String(x.id), text: x.name, "data-no-i18n": true })));
+      const paint = () => { stock.textContent = l.product ? `${fmt3(Number(l.product.stock) || 0)} ${l.product.unit || ""} in stock` : ""; };
+      const pick = picker("products", l.product, l.candidates, "— pick the feed —", p => {
+        l.product = p; learn.update(p); Object.assign(l, inProductUnits(l));
+        qty.value = l.qty; conv.textContent = l.note || ""; unit.textContent = p ? p.unit : "";
+        paint(); check();
+      });
+      paint();
+      tbody.append(h("tr", null, h("td", { class: "inv-desc" }, data("div", l.written || "—")),
+        h("td", null, pick, stock, conv, learn.el), h("td", null, store), h("td", null, qty, " ", unit)));
+    });
+    const table = h("table", { class: "inv-table" },
+      h("thead", null, h("tr", null, ["Written in the message", "Feed (in stock)", "Taken from", "Qty"].map(t => h("th", { text: t })))), tbody);
+    function check() {
+      const issues = [];
+      if (!state.group_id) issues.push(h("li", null, h("span", { text: "Pick the animal group." })));
+      if (!state.date) issues.push(h("li", null, h("span", { text: "Set the date." })));
+      else if (state.date > today()) issues.push(h("li", null, h("span", { text: "The date is in the future." })));
+      state.lines.forEach(l => {
+        if (!l.product) issues.push(h("li", null, h("span", { text: "Pick the feed for:" }), " ", data("strong", l.written || "—")));
+        if (!(num(l.qty) > 0)) issues.push(h("li", null, h("span", { text: "A quantity must be above 0:" }), " ", data("strong", l.written || "—")));
+        if (l.product && num(l.qty) > (Number(l.product.stock) || 0)) issues.push(h("li", null, h("span", { text: "Not that much in stock:" }), " ", data("strong", l.product.name)));
+      });
+      if (!state.lines.length) issues.push(h("li", null, h("span", { text: "No lines were read from the message." })));
+      (d.duplicates || []).forEach(t => issues.push(h("li", { class: "inv-muted" }, data("span", t))));
+      problems.replaceChildren(...issues);
+      const blocking = issues.length - (d.duplicates || []).length;
+      recordBtn.disabled = state.recorded || blocking > 0;
+      return blocking === 0;
+    }
+    recordBtn.onclick = async () => {
+      if (!check()) return;
+      recordBtn.disabled = true; result.replaceChildren(h("span", { text: "Recording…" })); result.className = "act-status";
+      try {
+        const out = await submit(opts, {
+          kind: "animal_feeding", date: state.date, group_id: Number(state.group_id),
+          items: state.lines.map(l => ({ product_id: l.product ? l.product.id : null, location_id: Number(l.location_id) || null,
+                                         qty: num(l.qty), written: l.written })),
+          remember: remembered(learnLines),
+        });
+        state.recorded = true;
+        result.className = "act-status ok";
+        result.replaceChildren("✓ ", h("span", { text: "Recorded" }), " ",
+          data("span", (out.feedings || []).map(x => `${x.ref_number} (${x.product} ${fmt3(Number(x.qty) || 0)} — ${x.location})`).join(", ")));
+        card.classList.add("done"); card.querySelectorAll("input, select, button").forEach(x => { x.disabled = true; });
+      } catch (e) { result.replaceChildren(h("span", { text: e.message })); result.className = "act-status bad"; check(); }
+    };
+    card.append(
+      h("div", { class: "inv-head" }, h("div", { class: "inv-title", text: "Animal / fish feed" }),
+        h("span", { class: "inv-muted", text: "Recorded as on the Animals page: a feeding log, and the feed taken out of stock." })),
+      head, table, problems, h("div", { class: "act-buttons" }, recordBtn), result);
+    check();
+    return card;
+  }
+
   window.AskDocuments = {
     start, prepare, number: num,
     // For the Field inbox: the same review cards, recording through its own endpoint and searching through its own.
     cards: { expense_receipt: expenseCard, delivery_note: deliveryCard, harvest_sheet: harvestCard, spoilage: spoilageCard,
-             b2b_sale: b2bSaleCard, plot_input: plotInputCard },
+             b2b_sale: b2bSaleCard, plot_input: plotInputCard, animal_feeding: feedingCard },
     setSearchUrl: url => { searchUrl = url; },
   };
 })();
