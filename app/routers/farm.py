@@ -4,22 +4,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy import func, select
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import date
+from decimal import Decimal
 
 from app.database import get_async_session
 from app.core.log import record
 from app.core.permissions import get_current_user, require_admin, require_permission
 from app.core.navigation import render_app_header
-from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, WeatherLog
+from app.core.product_types import is_stock_tracked_product
+from app.models.farm import (
+    PLOT_INPUT_TYPES, PLOT_TYPES, Farm, FarmDelivery, FarmDeliveryItem, FarmPlot, PlotInput, WeatherLog,
+)
 from app.models.product import Product
-from app.models.inventory import StockMove
+from app.models.inventory import StockLocation, StockMove
 from app.models.user import User
 from app.services.farm_intake_service import (
     create_farm_delivery,
     delete_carbon_log_for_delivery,
     resync_carbon_log_for_delivery,
 )
+from app.services.location_inventory_service import get_or_create_location_stock, quantize_qty
 
 router = APIRouter(
     prefix="/farm",
@@ -33,6 +38,7 @@ class DeliveryItemIn(BaseModel):
     product_id: int
     qty:        float
     notes:      Optional[str] = None
+    plot_id:    Optional[int] = None   # greenhouse / field it was harvested from
 
 class DeliveryCreate(BaseModel):
     farm_id:       int
@@ -266,6 +272,7 @@ async def get_deliveries(farm_id: int = None, skip: int = 0, limit: int = 50, db
         select(FarmDelivery)
         .options(
             selectinload(FarmDelivery.items).selectinload(FarmDeliveryItem.product),
+            selectinload(FarmDelivery.items).selectinload(FarmDeliveryItem.plot),
             selectinload(FarmDelivery.farm),
         )
         .where(*base_where)
@@ -297,6 +304,8 @@ async def get_deliveries(farm_id: int = None, skip: int = 0, limit: int = 50, db
                         "qty":        float(i.qty),
                         "unit":       i.unit or (i.product.unit if i.product else ""),
                         "notes":      i.notes or "",
+                        "plot_id":    i.plot_id,
+                        "plot_name":  i.plot.name if i.plot else None,
                     }
                     for i in d.items
                 ],
@@ -334,6 +343,7 @@ async def create_delivery(data: DeliveryCreate, db: AsyncSession = Depends(get_a
         delivery_date = date.fromisoformat(data.delivery_date)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid delivery date")
+    await _check_item_plots(db, farm.id, {item.plot_id for item in data.items})
 
     try:
         delivery, _stock_moves_created = await create_farm_delivery(
@@ -342,7 +352,7 @@ async def create_delivery(data: DeliveryCreate, db: AsyncSession = Depends(get_a
             delivery_date=delivery_date,
             user_id=current_user.id,
             items=[
-                {"product_id": item.product_id, "qty": item.qty, "notes": item.notes}
+                {"product_id": item.product_id, "qty": item.qty, "notes": item.notes, "plot_id": item.plot_id}
                 for item in data.items
             ],
             received_by=data.received_by,
@@ -375,6 +385,7 @@ async def edit_delivery(delivery_id: int, data: DeliveryCreate, db: AsyncSession
     farm = farm_result.scalar_one_or_none()
     if not farm:
         raise HTTPException(status_code=404, detail="Farm not found")
+    await _check_item_plots(db, farm.id, {item.plot_id for item in data.items})
 
     # Reverse old stock moves
     for item in delivery.items:
@@ -423,6 +434,7 @@ async def edit_delivery(delivery_id: int, data: DeliveryCreate, db: AsyncSession
             qty=item.qty,
             unit=product.unit,
             notes=item.notes,
+            plot_id=item.plot_id,
         ))
         db.add(StockMove(
             product_id=product.id, type="in",
@@ -577,6 +589,380 @@ async def delete_weather_log(log_id: int, db: AsyncSession = Depends(get_async_s
     return {"ok": True}
 
 
+# ── Greenhouses & Fields ───────────────────────────────
+class PlotIn(BaseModel):
+    farm_id:   int
+    name:      str = Field(..., min_length=1, max_length=150)
+    plot_type: str = "greenhouse"
+    area_m2:   Optional[float] = Field(None, ge=0)
+    notes:     Optional[str] = None
+
+
+class PlotInputIn(BaseModel):
+    plot_id:     int
+    input_type:  str = "seed"
+    # From inventory: product + storage (stock is deducted there). Otherwise item_name + cost.
+    product_id:  Optional[int] = None
+    location_id: Optional[int] = None
+    item_name:   Optional[str] = Field(None, max_length=200)
+    qty:         float = Field(..., gt=0)
+    unit:        Optional[str] = Field(None, max_length=30)
+    total_cost:  Optional[float] = Field(None, ge=0)
+    crop:        Optional[str] = Field(None, max_length=150)
+    applied_on:  str
+    note:        Optional[str] = None
+
+
+def _plot_dict(p: FarmPlot) -> dict:
+    return {
+        "id":        p.id,
+        "farm_id":   p.farm_id,
+        "farm_name": p.farm.name if p.farm else "—",
+        "name":      p.name,
+        "plot_type": p.plot_type or "greenhouse",
+        "area_m2":   float(p.area_m2) if p.area_m2 is not None else None,
+        "notes":     p.notes or "",
+        "is_active": bool(p.is_active),
+    }
+
+
+def _plot_input_dict(i: PlotInput) -> dict:
+    return {
+        "id":            i.id,
+        "plot_id":       i.plot_id,
+        "plot_name":     i.plot.name if i.plot else "—",
+        "farm_name":     i.plot.farm.name if i.plot and i.plot.farm else "—",
+        "input_type":    i.input_type,
+        "product_id":    i.product_id,
+        "location_id":   i.location_id,
+        "location_name": i.location.name if i.location else None,
+        "item_name":     i.item_name,
+        "qty":           float(i.qty),
+        "unit":          i.unit or "",
+        "total_cost":    float(i.total_cost) if i.total_cost is not None else None,
+        "crop":          i.crop or "",
+        "applied_on":    str(i.applied_on),
+        "note":          i.note or "",
+        "user_name":     i.user.name if i.user else None,
+    }
+
+
+def _parse_date(value: Optional[str], label: str) -> Optional[date]:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid {label} — use YYYY-MM-DD")
+
+
+async def _check_item_plots(db: AsyncSession, farm_id: int, plot_ids: set[int]) -> None:
+    """Every plot a delivery line is tagged with must be on the delivery's farm."""
+    plot_ids.discard(None)
+    if not plot_ids:
+        return
+    rows = (await db.execute(select(FarmPlot.id, FarmPlot.farm_id).where(FarmPlot.id.in_(plot_ids)))).all()
+    found = {pid: fid for pid, fid in rows}
+    for pid in plot_ids:
+        if pid not in found:
+            raise HTTPException(status_code=404, detail=f"Greenhouse / field not found: {pid}")
+        if found[pid] != farm_id:
+            raise HTTPException(status_code=400, detail="A greenhouse / field on a line belongs to a different farm")
+
+
+@router.get("/api/plots")
+async def list_plots(farm_id: Optional[int] = None, include_archived: bool = False,
+                     db: AsyncSession = Depends(get_async_session)):
+    """Plain list — also feeds the plot picker on the delivery form."""
+    stmt = select(FarmPlot).options(selectinload(FarmPlot.farm))
+    if farm_id:
+        stmt = stmt.where(FarmPlot.farm_id == farm_id)
+    if not include_archived:
+        stmt = stmt.where(FarmPlot.is_active == 1)
+    rows = (await db.execute(stmt.order_by(FarmPlot.farm_id, FarmPlot.name))).scalars().all()
+    return [_plot_dict(p) for p in rows]
+
+
+@router.get("/api/plots/summary", dependencies=[Depends(require_permission("tab_farm_plots"))])
+async def plots_summary(farm_id: Optional[int] = None, include_archived: bool = False,
+                        date_from: Optional[str] = None, date_to: Optional[str] = None,
+                        db: AsyncSession = Depends(get_async_session)):
+    """Per plot: what went in (seeds, fertilizer… with cost) and what came out (harvest per product)."""
+    d_from = _parse_date(date_from, "start date")
+    d_to = _parse_date(date_to, "end date")
+    plots = await list_plots(farm_id=farm_id, include_archived=include_archived, db=db)
+    if not plots:
+        return []
+    ids = [p["id"] for p in plots]
+
+    in_where = [PlotInput.plot_id.in_(ids)]
+    if d_from:
+        in_where.append(PlotInput.applied_on >= d_from)
+    if d_to:
+        in_where.append(PlotInput.applied_on <= d_to)
+    input_rows = (await db.execute(
+        select(PlotInput.plot_id, PlotInput.input_type, PlotInput.item_name, PlotInput.unit,
+               func.sum(PlotInput.qty), func.coalesce(func.sum(PlotInput.total_cost), 0),
+               func.count(PlotInput.id), func.max(PlotInput.applied_on))
+        .where(*in_where)
+        .group_by(PlotInput.plot_id, PlotInput.input_type, PlotInput.item_name, PlotInput.unit)
+    )).all()
+
+    out_where = [FarmDeliveryItem.plot_id.in_(ids)]
+    if d_from:
+        out_where.append(FarmDelivery.delivery_date >= d_from)
+    if d_to:
+        out_where.append(FarmDelivery.delivery_date <= d_to)
+    output_rows = (await db.execute(
+        select(FarmDeliveryItem.plot_id, Product.id, Product.name, Product.unit, Product.price,
+               func.sum(FarmDeliveryItem.qty), func.max(FarmDelivery.delivery_date))
+        .join(FarmDelivery, FarmDelivery.id == FarmDeliveryItem.delivery_id)
+        .join(Product, Product.id == FarmDeliveryItem.product_id)
+        .where(*out_where)
+        .group_by(FarmDeliveryItem.plot_id, Product.id, Product.name, Product.unit, Product.price)
+    )).all()
+
+    by_id = {p["id"]: {**p, "inputs": [], "production": [], "input_cost": 0.0,
+                       "cost_by_type": {}, "production_value": 0.0,
+                       "last_input": None, "last_harvest": None} for p in plots}
+    for plot_id, itype, name, unit, qty, cost, count, last in input_rows:
+        s = by_id[plot_id]
+        s["inputs"].append({"input_type": itype, "item_name": name, "unit": unit or "",
+                            "qty": float(qty or 0), "total_cost": float(cost or 0), "entries": count})
+        s["input_cost"] += float(cost or 0)
+        s["cost_by_type"][itype] = s["cost_by_type"].get(itype, 0.0) + float(cost or 0)
+        s["last_input"] = max(filter(None, [s["last_input"], str(last)]))
+    for plot_id, product_id, name, unit, price, qty, last in output_rows:
+        s = by_id[plot_id]
+        value = float(qty or 0) * float(price or 0)
+        s["production"].append({"product_id": product_id, "product": name, "unit": unit or "",
+                                "qty": float(qty or 0), "value": round(value, 2)})
+        s["production_value"] += value
+        s["last_harvest"] = max(filter(None, [s["last_harvest"], str(last)]))
+    for s in by_id.values():
+        s["inputs"].sort(key=lambda r: (r["input_type"], r["item_name"]))
+        s["production"].sort(key=lambda r: -r["qty"])
+        s["input_cost"] = round(s["input_cost"], 2)
+        s["production_value"] = round(s["production_value"], 2)
+    return list(by_id.values())
+
+
+@router.post("/api/plots", dependencies=[Depends(require_permission("action_farm_plot_manage"))])
+async def create_plot(data: PlotIn, db: AsyncSession = Depends(get_async_session),
+                      current_user: User = Depends(get_current_user)):
+    farm = (await db.execute(select(Farm).where(Farm.id == data.farm_id))).scalar_one_or_none()
+    if not farm:
+        raise HTTPException(status_code=404, detail="Farm not found")
+    if data.plot_type not in PLOT_TYPES:
+        raise HTTPException(status_code=400, detail="Type must be greenhouse or field")
+    name = data.name.strip()
+    clash = (await db.execute(select(FarmPlot).where(
+        FarmPlot.farm_id == farm.id, func.lower(FarmPlot.name) == name.lower()))).scalar_one_or_none()
+    if clash:
+        raise HTTPException(status_code=400, detail=f"{farm.name} already has a greenhouse / field named '{clash.name}'"
+                                                    + (" (archived)" if not clash.is_active else ""))
+    plot = FarmPlot(farm_id=farm.id, name=name, plot_type=data.plot_type,
+                    area_m2=data.area_m2 or None, notes=(data.notes or "").strip() or None, is_active=1)
+    db.add(plot)
+    await db.flush()
+    record(db, "Farm", "create_plot", f"Added {data.plot_type} '{name}' to {farm.name}",
+           user=current_user, ref_type="farm_plot", ref_id=plot.id)
+    await db.commit()
+    return {"id": plot.id, "name": plot.name}
+
+
+@router.put("/api/plots/{plot_id}", dependencies=[Depends(require_permission("action_farm_plot_manage"))])
+async def update_plot(plot_id: int, data: PlotIn, db: AsyncSession = Depends(get_async_session),
+                      current_user: User = Depends(get_current_user)):
+    plot = (await db.execute(select(FarmPlot).where(FarmPlot.id == plot_id))).scalar_one_or_none()
+    if not plot:
+        raise HTTPException(status_code=404, detail="Greenhouse / field not found")
+    if data.plot_type not in PLOT_TYPES:
+        raise HTTPException(status_code=400, detail="Type must be greenhouse or field")
+    if data.farm_id != plot.farm_id:
+        # Harvest lines are tied to their delivery's farm; moving the plot would break that.
+        used = (await db.execute(select(func.count(FarmDeliveryItem.id))
+                                 .where(FarmDeliveryItem.plot_id == plot.id))).scalar() or 0
+        if used:
+            raise HTTPException(status_code=400, detail="This greenhouse / field already has harvests recorded — it can't move to another farm")
+        if not (await db.execute(select(Farm).where(Farm.id == data.farm_id))).scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Farm not found")
+    name = data.name.strip()
+    clash = (await db.execute(select(FarmPlot).where(
+        FarmPlot.farm_id == data.farm_id, func.lower(FarmPlot.name) == name.lower(),
+        FarmPlot.id != plot.id))).scalar_one_or_none()
+    if clash:
+        raise HTTPException(status_code=400, detail=f"That farm already has a greenhouse / field named '{clash.name}'")
+    plot.farm_id   = data.farm_id
+    plot.name      = name
+    plot.plot_type = data.plot_type
+    plot.area_m2   = data.area_m2 or None
+    plot.notes     = (data.notes or "").strip() or None
+    record(db, "Farm", "update_plot", f"Updated greenhouse / field '{name}'",
+           user=current_user, ref_type="farm_plot", ref_id=plot.id)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.delete("/api/plots/{plot_id}", dependencies=[Depends(require_permission("action_farm_plot_manage"))])
+async def archive_plot(plot_id: int, db: AsyncSession = Depends(get_async_session),
+                       current_user: User = Depends(get_current_user)):
+    """Soft delete — its seeds, fertilizer and harvest history stay."""
+    plot = (await db.execute(select(FarmPlot).where(FarmPlot.id == plot_id))).scalar_one_or_none()
+    if not plot:
+        raise HTTPException(status_code=404, detail="Greenhouse / field not found")
+    plot.is_active = 0
+    record(db, "Farm", "archive_plot", f"Archived greenhouse / field '{plot.name}'",
+           user=current_user, ref_type="farm_plot", ref_id=plot.id)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/api/plots/{plot_id}/restore", dependencies=[Depends(require_permission("action_farm_plot_manage"))])
+async def restore_plot(plot_id: int, db: AsyncSession = Depends(get_async_session),
+                       current_user: User = Depends(get_current_user)):
+    plot = (await db.execute(select(FarmPlot).where(FarmPlot.id == plot_id))).scalar_one_or_none()
+    if not plot:
+        raise HTTPException(status_code=404, detail="Greenhouse / field not found")
+    plot.is_active = 1
+    record(db, "Farm", "restore_plot", f"Restored greenhouse / field '{plot.name}'",
+           user=current_user, ref_type="farm_plot", ref_id=plot.id)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.get("/api/plot-inputs", dependencies=[Depends(require_permission("tab_farm_plots"))])
+async def list_plot_inputs(plot_id: Optional[int] = None, farm_id: Optional[int] = None,
+                           input_type: Optional[str] = None, limit: int = 200,
+                           db: AsyncSession = Depends(get_async_session)):
+    stmt = (select(PlotInput)
+            .options(selectinload(PlotInput.plot).selectinload(FarmPlot.farm),
+                     selectinload(PlotInput.location), selectinload(PlotInput.user)))
+    if plot_id:
+        stmt = stmt.where(PlotInput.plot_id == plot_id)
+    if farm_id:
+        stmt = stmt.join(FarmPlot, FarmPlot.id == PlotInput.plot_id).where(FarmPlot.farm_id == farm_id)
+    if input_type:
+        stmt = stmt.where(PlotInput.input_type == input_type)
+    stmt = stmt.order_by(PlotInput.applied_on.desc(), PlotInput.id.desc()).limit(min(max(limit, 1), 1000))
+    return [_plot_input_dict(i) for i in (await db.execute(stmt)).scalars().all()]
+
+
+@router.get("/api/locations")
+async def list_locations_for_picker(db: AsyncSession = Depends(get_async_session)):
+    """Storages for the seeds / fertilizer form — here so the form doesn't need page_inventory."""
+    rows = (await db.execute(
+        select(StockLocation).where(StockLocation.is_active == True).order_by(StockLocation.name)
+    )).scalars().all()
+    return [{"id": loc.id, "name": loc.name} for loc in rows]
+
+
+@router.post("/api/plot-inputs", dependencies=[Depends(require_permission("action_farm_plot_input"))])
+async def create_plot_input(data: PlotInputIn, db: AsyncSession = Depends(get_async_session),
+                            current_user: User = Depends(get_current_user)):
+    plot = (await db.execute(select(FarmPlot).options(selectinload(FarmPlot.farm))
+                             .where(FarmPlot.id == data.plot_id))).scalar_one_or_none()
+    if not plot:
+        raise HTTPException(status_code=404, detail="Greenhouse / field not found")
+    if not plot.is_active:
+        raise HTTPException(status_code=400, detail="This greenhouse / field is archived")
+    if data.input_type not in PLOT_INPUT_TYPES:
+        raise HTTPException(status_code=400, detail="Type must be seed, fertilizer, pesticide or other")
+    applied_on = _parse_date(data.applied_on, "date")
+    if not applied_on:
+        raise HTTPException(status_code=400, detail="Date is required")
+    qty = Decimal(str(data.qty))
+
+    entry = PlotInput(
+        plot_id=plot.id, input_type=data.input_type, qty=qty, applied_on=applied_on,
+        crop=(data.crop or "").strip() or None, note=(data.note or "").strip() or None,
+        user_id=current_user.id,
+    )
+
+    if data.product_id:
+        product = (await db.execute(select(Product).where(Product.id == data.product_id))).scalar_one_or_none()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        if not is_stock_tracked_product(product):
+            raise HTTPException(status_code=400, detail=f"{product.name} is a service — it has no stock to take from")
+        if not data.location_id:
+            raise HTTPException(status_code=400, detail="Pick the storage it is taken from")
+        location = (await db.execute(select(StockLocation).where(
+            StockLocation.id == data.location_id, StockLocation.is_active.is_(True)))).scalar_one_or_none()
+        if not location:
+            raise HTTPException(status_code=400, detail="Storage not found or inactive")
+        loc_stock = await get_or_create_location_stock(db, location_id=location.id, product_id=product.id)
+        available = Decimal(str(loc_stock.qty or 0))
+        if available < qty:
+            raise HTTPException(status_code=400, detail=(
+                f"Not enough {product.name} at {location.name}: have {float(available):g}, need {float(qty):g}"))
+        qty_before = Decimal(str(product.stock or 0))
+        loc_stock.qty = quantize_qty(available - qty)
+        product.stock = qty_before - qty
+
+        entry.product_id  = product.id
+        entry.location_id = location.id
+        entry.item_name   = product.name
+        entry.unit        = product.unit
+        # Typed cost wins; otherwise value it at the product's cost price.
+        entry.total_cost  = (Decimal(str(data.total_cost)) if data.total_cost is not None
+                             else (Decimal(str(product.cost or 0)) * qty).quantize(Decimal("0.01")))
+        db.add(entry)
+        await db.flush()
+        db.add(StockMove(
+            product_id=product.id, type="out", qty=qty,
+            qty_before=qty_before, qty_after=qty_before - qty,
+            ref_type="plot_input", ref_id=entry.id,
+            note=f"{data.input_type.capitalize()} for {plot.name} ({plot.farm.name}) from {location.name}",
+            user_id=current_user.id,
+        ))
+    else:
+        name = (data.item_name or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Pick a product from inventory or type the item name")
+        entry.item_name  = name
+        entry.unit       = (data.unit or "").strip() or None
+        entry.total_cost = Decimal(str(data.total_cost)) if data.total_cost is not None else None
+        db.add(entry)
+        await db.flush()
+
+    record(db, "Farm", "create_plot_input",
+           f"{data.input_type.capitalize()} on {plot.name}: {float(qty):g} {entry.unit or ''} {entry.item_name}".replace("  ", " "),
+           user=current_user, ref_type="plot_input", ref_id=entry.id)
+    await db.commit()
+    return {"id": entry.id}
+
+
+@router.delete("/api/plot-inputs/{input_id}", dependencies=[Depends(require_permission("action_farm_plot_input"))])
+async def delete_plot_input(input_id: int, db: AsyncSession = Depends(get_async_session),
+                            current_user: User = Depends(get_current_user)):
+    """Delete an entry; one taken from inventory goes back to its storage."""
+    entry = (await db.execute(select(PlotInput).options(selectinload(PlotInput.product))
+                              .where(PlotInput.id == input_id))).scalar_one_or_none()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    qty = Decimal(str(entry.qty or 0))
+    if entry.product_id and entry.location_id and entry.product is not None:
+        product = entry.product
+        qty_before = Decimal(str(product.stock or 0))
+        product.stock = qty_before + qty
+        loc_stock = await get_or_create_location_stock(db, location_id=entry.location_id, product_id=entry.product_id)
+        loc_stock.qty = quantize_qty(Decimal(str(loc_stock.qty or 0)) + qty)
+        db.add(StockMove(
+            product_id=product.id, type="in", qty=qty,
+            qty_before=qty_before, qty_after=qty_before + qty,
+            ref_type="plot_input_reverse", ref_id=entry.id,
+            note=f"Reversed {entry.input_type} entry #{entry.id}",
+            user_id=current_user.id,
+        ))
+    record(db, "Farm", "delete_plot_input",
+           f"Deleted {entry.input_type} entry #{entry.id} ({float(qty):g} {entry.item_name})",
+           user=current_user, ref_type="plot_input", ref_id=entry.id)
+    await db.delete(entry)
+    await db.commit()
+    return {"ok": True}
+
+
 # ── UI ─────────────────────────────────────────────────
 @router.get("/", response_class=HTMLResponse)
 def farm_ui(current_user: User = Depends(require_permission("page_farm"))):
@@ -727,7 +1113,7 @@ td.name{color:var(--text);font-weight:600;}
 .farm-opt-icon{font-size:22px;margin-bottom:6px;}
 .farm-opt-name{font-size:13px;font-weight:700;color:var(--text);}
 .farm-opt-loc{font-size:10px;color:var(--muted);margin-top:2px;}
-.item-row{display:grid;grid-template-columns:1.5fr 90px 60px 1fr 30px;gap:8px;align-items:center;margin-bottom:8px;}
+.item-row{display:grid;grid-template-columns:1.4fr 80px 50px 1fr 1fr 30px;gap:8px;align-items:center;margin-bottom:8px;}
 .item-row input,.item-row select{background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;width:100%;}
 .item-row input:focus{border-color:rgba(132,204,22,.4);}
 .unit-label{font-size:11px;color:var(--muted);font-family:var(--mono);text-align:center;}
@@ -753,6 +1139,30 @@ td.name{color:var(--text);font-weight:600;}
 .history-bar-track{flex:1;background:var(--card2);border-radius:4px;height:8px;overflow:hidden;}
 .history-bar-fill{height:100%;border-radius:4px;transition:width .6s ease;}
 .history-bar-val{font-family:var(--mono);font-size:12px;color:var(--green);width:60px;text-align:right;}
+/* GREENHOUSES & FIELDS */
+.plots-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-bottom:18px;}
+.plot-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:18px;display:flex;flex-direction:column;gap:10px;}
+.plot-card.archived{opacity:.55;}
+.plot-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;}
+.plot-name{font-size:16px;font-weight:800;}
+.plot-meta{font-size:11px;color:var(--muted);margin-top:3px;}
+.plot-type{display:inline-flex;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;white-space:nowrap;}
+.plot-type.greenhouse{background:rgba(45,212,191,.1);color:var(--teal);}
+.plot-type.field{background:rgba(132,204,22,.1);color:var(--lime);}
+.plot-line{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:5px 0;border-top:1px solid var(--border);}
+.plot-line span:first-child{color:var(--muted);}
+.plot-line span:last-child{font-family:var(--mono);font-weight:700;text-align:right;}
+.plot-sub{font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-top:4px;}
+.plot-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;}
+.input-type{display:inline-flex;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;}
+.input-type.seed{background:rgba(132,204,22,.1);color:var(--lime);}
+.input-type.fertilizer{background:rgba(251,146,60,.1);color:var(--orange);}
+.input-type.pesticide{background:rgba(255,77,109,.1);color:var(--danger);}
+.input-type.other{background:rgba(136,153,187,.12);color:var(--sub);}
+.src-toggle{display:flex;gap:4px;background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:4px;margin-bottom:14px;}
+.src-toggle button{flex:1;padding:8px;border:none;border-radius:7px;background:transparent;color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:700;cursor:pointer;}
+.src-toggle button.active{background:var(--card);color:var(--text);}
+.item-row select.plot-sel{padding:8px 6px;}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(16px);background:var(--card2);border:1px solid var(--border2);border-radius:var(--r);padding:12px 20px;font-size:13px;font-weight:600;color:var(--text);box-shadow:0 20px 50px rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:999;}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
 ::-webkit-scrollbar{width:4px;}
@@ -792,6 +1202,7 @@ td.name{color:var(--text);font-weight:600;}
             <button class="tab"        id="tab-history"    onclick="switchTab('history')">Farm History</button>
             <button class="tab"        id="tab-weather"    onclick="switchTab('weather')">Weather Log</button>
             <button class="tab"        id="tab-season"     onclick="switchTab('season')">Season Analysis</button>
+            <button class="tab"        id="tab-plots"      onclick="switchTab('plots')">Greenhouses &amp; Fields</button>
         </div>
         <div id="tab-action-area">
             <button class="btn btn-lime" id="btn-add-delivery" onclick="openDeliveryModal()">+ Record Delivery</button>
@@ -961,6 +1372,69 @@ td.name{color:var(--text);font-weight:600;}
         </div>
         <div id="season-empty" style="color:var(--muted);text-align:center;padding:40px;display:none">Select a farm and date range, then click Analyze.</div>
     </div>
+
+    <!-- GREENHOUSES & FIELDS -->
+    <div id="section-plots" style="display:none">
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:14px;">
+            <div class="toolbar">
+                <select class="filter-sel" id="plots-farm-filter" onchange="loadPlots()">
+                    <option value="">All Farms</option>
+                </select>
+                <input class="filter-sel" id="plots-from" type="date" title="From" onchange="loadPlots()">
+                <input class="filter-sel" id="plots-to" type="date" title="To" onchange="loadPlots()">
+                <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--sub);cursor:pointer">
+                    <input type="checkbox" id="plots-archived" onchange="loadPlots()" style="accent-color:var(--lime)"> Show archived
+                </label>
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
+                <button class="btn btn-lime" id="btn-add-plot" onclick="openPlotModal()">+ Add Greenhouse / Field</button>
+                <button class="btn btn-lime" id="btn-add-input" onclick="openInputModal()">+ Log Seeds / Fertilizer</button>
+            </div>
+        </div>
+        <div style="font-size:12px;color:var(--muted);margin:-4px 0 14px">
+            Leave the dates empty for all time. Production comes from deliveries — pick the greenhouse / field on each line when you record a delivery.
+        </div>
+        <div class="plots-grid" id="plots-grid">
+            <div style="color:var(--muted);padding:20px">Loading...</div>
+        </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:10px;">
+            <div style="font-size:14px;font-weight:700">Seeds &amp; Fertilizer Log</div>
+            <div class="toolbar">
+                <select class="filter-sel" id="inputs-plot-filter" onchange="loadPlotInputs()">
+                    <option value="">All greenhouses &amp; fields</option>
+                </select>
+                <select class="filter-sel" id="inputs-type-filter" onchange="loadPlotInputs()">
+                    <option value="">All types</option>
+                    <option value="seed">Seeds</option>
+                    <option value="fertilizer">Fertilizer</option>
+                    <option value="pesticide">Pesticide</option>
+                    <option value="other">Other</option>
+                </select>
+            </div>
+        </div>
+        <div class="table-wrap" style="overflow-x:auto">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Greenhouse / Field</th>
+                        <th>Type</th>
+                        <th>Item</th>
+                        <th style="text-align:right">Qty</th>
+                        <th style="text-align:right">Cost</th>
+                        <th>Crop</th>
+                        <th>Source</th>
+                        <th>Note</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="plot-inputs-body">
+                    <tr><td colspan="10" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
 </div>
 
 <!-- ADD FARM MODAL -->
@@ -1109,10 +1583,11 @@ td.name{color:var(--text);font-weight:600;}
         </div>
 
         <div style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:8px">Products Received</div>
-        <div style="display:grid;grid-template-columns:1.5fr 90px 60px 1fr 30px;gap:8px;margin-bottom:6px;">
+        <div style="display:grid;grid-template-columns:1.4fr 80px 50px 1fr 1fr 30px;gap:8px;margin-bottom:6px;">
             <span style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:1px">Product</span>
             <span style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:1px">Qty</span>
             <span style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:1px">Unit</span>
+            <span style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:1px">Greenhouse / Field</span>
             <span style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:1px">Note</span>
             <span></span>
         </div>
@@ -1127,6 +1602,119 @@ td.name{color:var(--text);font-weight:600;}
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeDeliveryModal()">Cancel</button>
             <button class="btn btn-lime" id="save-btn" onclick="saveDelivery()">✓ Save Delivery & Update Stock</button>
+        </div>
+    </div>
+</div>
+
+<!-- GREENHOUSE / FIELD MODAL -->
+<div class="modal-bg" id="plot-modal">
+    <div class="modal" style="width:500px">
+        <div class="modal-title" id="plot-modal-title">Add Greenhouse / Field</div>
+        <div class="modal-sub">Track the seeds, fertilizer and harvest of one growing area</div>
+        <div class="form-row">
+            <div class="fld">
+                <label>Farm *</label>
+                <select id="pl-farm"></select>
+            </div>
+            <div class="fld">
+                <label>Type *</label>
+                <select id="pl-type">
+                    <option value="greenhouse">Greenhouse</option>
+                    <option value="field">Field</option>
+                </select>
+            </div>
+            <div class="fld">
+                <label>Name *</label>
+                <input id="pl-name" maxlength="150" placeholder="e.g. Greenhouse 1, North Field">
+            </div>
+            <div class="fld">
+                <label>Area (m²)</label>
+                <input id="pl-area" type="number" min="0" step="any" placeholder="optional">
+            </div>
+            <div class="fld span2">
+                <label>Notes</label>
+                <textarea id="pl-notes" placeholder="optional"></textarea>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closePlotModal()">Cancel</button>
+            <button class="btn btn-lime" onclick="savePlot()">✓ Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- SEEDS / FERTILIZER MODAL -->
+<div class="modal-bg" id="input-modal">
+    <div class="modal" style="width:560px">
+        <div class="modal-title">Log Seeds / Fertilizer</div>
+        <div class="modal-sub">What was put into a greenhouse or field</div>
+        <div class="form-row">
+            <div class="fld">
+                <label>Greenhouse / Field *</label>
+                <select id="in-plot"></select>
+            </div>
+            <div class="fld">
+                <label>Type *</label>
+                <select id="in-type">
+                    <option value="seed">Seeds / Seedlings</option>
+                    <option value="fertilizer">Fertilizer</option>
+                    <option value="pesticide">Pesticide</option>
+                    <option value="other">Other</option>
+                </select>
+            </div>
+        </div>
+        <div class="src-toggle">
+            <button type="button" id="in-src-stock" onclick="setInputSource('stock')">From inventory (deducts stock)</button>
+            <button type="button" id="in-src-manual" onclick="setInputSource('manual')">Bought directly / not in stock</button>
+        </div>
+        <div id="in-stock-fields" class="form-row">
+            <div class="fld span2">
+                <label>Product *</label>
+                <div class="prod-search-wrap" id="in-prod-wrap">
+                    <input type="text" class="prod-search-input" id="in-prod-search" placeholder="Search by name or SKU..." autocomplete="off">
+                    <div class="prod-dropdown" id="in-prod-dropdown"></div>
+                </div>
+            </div>
+            <div class="fld span2">
+                <label>Taken from storage *</label>
+                <select id="in-location"></select>
+            </div>
+        </div>
+        <div id="in-manual-fields" class="form-row" style="display:none">
+            <div class="fld">
+                <label>Item *</label>
+                <input id="in-name" maxlength="200" placeholder="e.g. Tomato seeds F1, NPK 20-20-20">
+            </div>
+            <div class="fld">
+                <label>Unit</label>
+                <input id="in-unit" maxlength="30" placeholder="e.g. kg, g, L, pack">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="fld">
+                <label>Quantity *</label>
+                <input id="in-qty" type="number" min="0" step="any" placeholder="0">
+            </div>
+            <div class="fld">
+                <label>Total Cost (EGP)</label>
+                <input id="in-cost" type="number" min="0" step="any" placeholder="optional">
+            </div>
+            <div class="fld">
+                <label>Date *</label>
+                <input id="in-date" type="date">
+            </div>
+            <div class="fld">
+                <label>Crop</label>
+                <input id="in-crop" maxlength="150" placeholder="e.g. Cherry tomato">
+            </div>
+            <div class="fld span2">
+                <label>Note</label>
+                <input id="in-note" placeholder="optional">
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeInputModal()">Cancel</button>
+            <button class="btn btn-lime" onclick="savePlotInput()">✓ Save</button>
         </div>
     </div>
 </div>
@@ -1219,6 +1807,7 @@ function configureFarmPermissions(u){
         {id:"tab-history", permission:"tab_farm_history", section:"history"},
         {id:"tab-weather", permission:"tab_farm_weather", section:"weather"},
         {id:"tab-season", permission:"tab_farm_season", section:"season"},
+        {id:"tab-plots", permission:"tab_farm_plots", section:"plots"},
     ];
     let firstAvailable = null;
     
@@ -1236,6 +1825,8 @@ function configureFarmPermissions(u){
 
     if(!hasPermission("action_farm_delivery_create", u)) document.getElementById("btn-add-delivery").style.display = "none";
     if(!hasPermission("action_farm_weather_log", u)) document.getElementById("btn-add-weather").style.display = "none";
+    if(!hasPermission("action_farm_plot_manage", u)) document.getElementById("btn-add-plot").style.display = "none";
+    if(!hasPermission("action_farm_plot_input", u)) document.getElementById("btn-add-input").style.display = "none";
     if(!hasPermission("action_farm_create", u)) { let b = document.getElementById("btn-add-farm"); if(b) b.style.display = "none"; }
     // Archived farms view is admin-only
     let archBtn = document.getElementById("btn-view-archived");
@@ -1252,6 +1843,7 @@ initUser().then(u => {
 });
   let allProducts     = [];
 let allFarms        = [];
+let allPlots        = [];   // active greenhouses & fields (all farms)
 let selectedFarmId  = null;
 let editingDeliveryId = null;   // null = creating new, number = editing existing
 let deliveryPage    = 0;
@@ -1262,8 +1854,10 @@ async function init(){
     await fetch("/farm/api/seed-farms", {method:"POST"});
     allProducts = await (await fetch("/farm/api/products-list")).json();
     allFarms    = await (await fetch("/farm/api/farms")).json();
+    allPlots    = await (await fetch("/farm/api/plots")).json();
     renderFarmCards();
     fillFarmFilter();
+    fillPlotFarmSelects();
     fillWeatherFarmFilter();
     fillSeasonFarmSelect();
     await loadStats();
@@ -1392,6 +1986,15 @@ function selectFarm(id){
         let el = document.getElementById("farm-opt-"+f.id);
         if(el) el.classList.toggle("selected", f.id===id);
     });
+    document.querySelectorAll("#delivery-items .item-row .plot-sel").forEach(sel => fillPlotPicker(sel, sel.value));
+}
+
+// Greenhouse / field options for one delivery line — only the selected farm's.
+function fillPlotPicker(sel, current){
+    const plots = allPlots.filter(p => p.farm_id === selectedFarmId);
+    sel.innerHTML = `<option value="">${plots.length ? "— not set —" : "— none on this farm —"}</option>` +
+        plots.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("");
+    if(current && plots.some(p => String(p.id) === String(current))) sel.value = current;
 }
 
 /* ── STATS ── */
@@ -1404,13 +2007,14 @@ async function loadStats(){
 
 /* ── TABS ── */
 function switchTab(tab){
-    ["deliveries","history","weather","season"].forEach(t=>{
+    ["deliveries","history","weather","season","plots"].forEach(t=>{
         document.getElementById("section-"+t).style.display = tab===t?"":"none";
         document.getElementById("tab-"+t).classList.toggle("active", tab===t);
     });
     document.getElementById("tab-action-area").style.display = tab==="deliveries"?"":"none";
     if(tab==="history") loadHistory();
     if(tab==="weather") loadWeatherLogs();
+    if(tab==="plots") loadPlots();
 }
 
 /* ── DELIVERIES TABLE ── */
@@ -1467,6 +2071,7 @@ async function loadDeliveries(){
                                 <span class="detail-item-qty">${item.qty.toFixed(2)}</span>
                                 <span class="detail-item-unit"> ${item.unit}</span>
                             </div>
+                            ${item.plot_name?`<div class="detail-item-note" style="font-style:normal;color:var(--teal)">🌱 ${escapeHtml(item.plot_name)}</div>`:""}
                             ${item.notes?`<div class="detail-item-note">${item.notes}</div>`:""}
                         </div>`).join("")}
                 </div>
@@ -1585,6 +2190,7 @@ async function openEditDelivery(id){
         row.querySelectorAll("input")[1].value = item.qty;
         // Set note
         if(row.querySelectorAll("input")[2]) row.querySelectorAll("input")[2].value = item.notes || "";
+        if(item.plot_id) fillPlotPicker(row.querySelector(".plot-sel"), item.plot_id);
     });
 
     document.getElementById("delivery-modal").classList.add("open");
@@ -1610,9 +2216,10 @@ async function saveDelivery(){
         let product_id = parseInt(row.dataset.productId);
         let qty        = parseFloat(row.querySelectorAll("input")[1].value)||0;
         let notes      = row.querySelectorAll("input")[2] ? row.querySelectorAll("input")[2].value.trim()||null : null;
+        let plot_id    = parseInt(row.querySelector(".plot-sel").value) || null;
         if(!product_id){ showToast("Select a product for all rows"); return; }
         if(qty <= 0)   { showToast("Quantity must be greater than 0"); return; }
-        items.push({product_id, qty, notes});
+        items.push({product_id, qty, notes, plot_id});
     }
     if(!items.length){ showToast("Add at least one product"); return; }
 
@@ -1663,10 +2270,12 @@ function addDeliveryItem(){
         </div>
         <input type="number" placeholder="0" min="0.001" step="any">
         <span class="unit-label">—</span>
+        <select class="plot-sel"></select>
         <input type="text" placeholder="e.g. fresh, grade A">
         <button class="rm-btn" onclick="this.closest('.item-row').remove()">×</button>
     `;
 
+    fillPlotPicker(div.querySelector(".plot-sel"));
     let searchInput = div.querySelector(".prod-search-input");
     let dropdown    = div.querySelector(".prod-dropdown");
 
@@ -1753,6 +2362,12 @@ document.getElementById("delivery-modal").addEventListener("click",function(e){
 });
 document.getElementById("weather-modal").addEventListener("click",function(e){
     if(e.target===this) closeWeatherModal();
+});
+document.getElementById("plot-modal").addEventListener("click",function(e){
+    if(e.target===this) closePlotModal();
+});
+document.getElementById("input-modal").addEventListener("click",function(e){
+    if(e.target===this) closeInputModal();
 });
 document.getElementById("add-farm-modal").addEventListener("click",function(e){
     if(e.target===this) closeAddFarmModal();
@@ -2182,6 +2797,289 @@ async function deleteWeatherLog(id, dateStr){
     if(data.detail){ showToast("Error: "+data.detail); return; }
     showToast("Deleted ✓");
     loadWeatherLogs();
+}
+
+/* ── GREENHOUSES & FIELDS ── */
+const PLOT_TYPE_LABEL  = {greenhouse:"🏠 Greenhouse", field:"🌾 Field"};
+const INPUT_TYPE_LABEL = {seed:"Seeds", fertilizer:"Fertilizer", pesticide:"Pesticide", other:"Other"};
+let editingPlotId    = null;
+let inputSource      = "stock";
+let inputProductId   = null;
+let storageLocations = null;
+
+function fmtMoney(n){ return Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmtQty(n){ return Number(n||0).toLocaleString(undefined,{maximumFractionDigits:3}); }
+
+function fillPlotFarmSelects(){
+    const opts = allFarms.map(f=>`<option value="${f.id}">${escapeHtml(f.name)}</option>`).join("");
+    document.getElementById("plots-farm-filter").innerHTML = `<option value="">All Farms</option>` + opts;
+    document.getElementById("pl-farm").innerHTML = opts;
+}
+
+function fillInputPlotSelects(){
+    const label = p => `${escapeHtml(p.name)} — ${escapeHtml(p.farm_name)}`;
+    const filter = document.getElementById("inputs-plot-filter");
+    const keep = filter.value;
+    filter.innerHTML = `<option value="">All greenhouses &amp; fields</option>` +
+        allPlots.map(p=>`<option value="${p.id}">${label(p)}</option>`).join("");
+    filter.value = keep;
+    document.getElementById("in-plot").innerHTML = allPlots.map(p=>`<option value="${p.id}">${label(p)}</option>`).join("");
+}
+
+async function loadPlots(){
+    allPlots = await (await fetch("/farm/api/plots")).json();
+    fillInputPlotSelects();
+    const farmId = document.getElementById("plots-farm-filter").value;
+    const from   = document.getElementById("plots-from").value;
+    const to     = document.getElementById("plots-to").value;
+    let url = "/farm/api/plots/summary?include_archived=" + document.getElementById("plots-archived").checked;
+    if(farmId) url += `&farm_id=${farmId}`;
+    if(from)   url += `&date_from=${from}`;
+    if(to)     url += `&date_to=${to}`;
+    const res  = await fetch(url);
+    const data = await res.json();
+    const grid = document.getElementById("plots-grid");
+    if(!res.ok){ grid.innerHTML = `<div style="color:var(--danger)">${escapeHtml(getErrorMessage(data))}</div>`; return; }
+    grid.innerHTML = data.length ? data.map(renderPlotCard).join("")
+        : `<div style="color:var(--muted);padding:20px">No greenhouses or fields yet.${hasPermission("action_farm_plot_manage") ? " Click <b>+ Add Greenhouse / Field</b>." : ""}</div>`;
+    loadPlotInputs();
+}
+
+function renderPlotCard(p){
+    const line = (label, val, color) => `<div class="plot-line"><span>${label}</span><span style="color:${color||"var(--text)"}">${val}</span></div>`;
+    const costLines = ["seed","fertilizer","pesticide","other"]
+        .filter(t => p.cost_by_type[t] !== undefined)
+        .map(t => line(INPUT_TYPE_LABEL[t] + " cost", fmtMoney(p.cost_by_type[t]), "var(--orange)")).join("");
+    const inputLines = p.inputs.map(i =>
+        line(`<span class="input-type ${i.input_type}" style="margin-right:6px">${INPUT_TYPE_LABEL[i.input_type]||escapeHtml(i.input_type)}</span>${escapeHtml(i.item_name)}`,
+             `${fmtQty(i.qty)} ${escapeHtml(i.unit)}`, "var(--sub)")).join("");
+    const prodLines = p.production.map(r =>
+        line(escapeHtml(r.product), `${fmtQty(r.qty)} ${escapeHtml(r.unit)}`, "var(--green)")).join("");
+    const net = p.production_value - p.input_cost;
+    let actions = "";
+    if(p.is_active && hasPermission("action_farm_plot_input"))
+        actions += `<button class="action-btn" onclick="openInputModal(${p.id})">+ Seeds / Fertilizer</button>`;
+    if(hasPermission("action_farm_plot_manage")){
+        actions += p.is_active
+            ? `<button class="action-btn" onclick="openPlotModal(${p.id})">Edit</button><button class="action-btn danger" onclick="archivePlot(${p.id})">Archive</button>`
+            : `<button class="action-btn" onclick="restorePlot(${p.id})">Restore</button>`;
+    }
+    const dates = [p.last_input ? "Last input " + p.last_input : "", p.last_harvest ? "Last harvest " + p.last_harvest : ""].filter(Boolean).join(" · ");
+    return `
+    <div class="plot-card ${p.is_active ? "" : "archived"}">
+        <div class="plot-head">
+            <div>
+                <div class="plot-name">${escapeHtml(p.name)}</div>
+                <div class="plot-meta">${escapeHtml(p.farm_name)}${p.area_m2 ? ` · ${fmtQty(p.area_m2)} m²` : ""}${p.is_active ? "" : " · archived"}</div>
+            </div>
+            <span class="plot-type ${p.plot_type}">${PLOT_TYPE_LABEL[p.plot_type]||escapeHtml(p.plot_type)}</span>
+        </div>
+        <div>
+            ${costLines}
+            ${line("Total input cost", fmtMoney(p.input_cost), "var(--warn)")}
+            ${line("Production value (list price)", fmtMoney(p.production_value), "var(--blue)")}
+            ${line("Value − inputs", fmtMoney(net), net >= 0 ? "var(--green)" : "var(--danger)")}
+        </div>
+        <div class="plot-sub">Put in</div>
+        <div>${inputLines || `<div style="font-size:12px;color:var(--muted)">Nothing logged yet</div>`}</div>
+        <div class="plot-sub">Harvested</div>
+        <div>${prodLines || `<div style="font-size:12px;color:var(--muted)">No harvest recorded yet</div>`}</div>
+        ${dates ? `<div style="font-size:11px;color:var(--muted)">${dates}</div>` : ""}
+        ${actions ? `<div class="plot-actions">${actions}</div>` : ""}
+    </div>`;
+}
+
+async function loadPlotInputs(){
+    const plotId = document.getElementById("inputs-plot-filter").value;
+    const type   = document.getElementById("inputs-type-filter").value;
+    const farmId = document.getElementById("plots-farm-filter").value;
+    let url = "/farm/api/plot-inputs?limit=200";
+    if(plotId) url += `&plot_id=${plotId}`;
+    else if(farmId) url += `&farm_id=${farmId}`;
+    if(type) url += `&input_type=${type}`;
+    const res  = await fetch(url);
+    const rows = await res.json();
+    const body = document.getElementById("plot-inputs-body");
+    if(!res.ok){ body.innerHTML = `<tr><td colspan="10" style="color:var(--danger);padding:20px">${escapeHtml(getErrorMessage(rows))}</td></tr>`; return; }
+    if(!rows.length){
+        body.innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:40px">No seeds or fertilizer logged yet.</td></tr>`;
+        return;
+    }
+    const canDelete = hasPermission("action_farm_plot_input");
+    body.innerHTML = rows.map(r => `
+        <tr>
+            <td style="font-family:var(--mono);font-size:12px">${r.applied_on}</td>
+            <td class="name">${escapeHtml(r.plot_name)}<div style="font-size:11px;color:var(--muted);font-weight:400">${escapeHtml(r.farm_name)}</div></td>
+            <td><span class="input-type ${r.input_type}">${INPUT_TYPE_LABEL[r.input_type]||escapeHtml(r.input_type)}</span></td>
+            <td>${escapeHtml(r.item_name)}</td>
+            <td style="font-family:var(--mono);text-align:right">${fmtQty(r.qty)} ${escapeHtml(r.unit)}</td>
+            <td style="font-family:var(--mono);text-align:right;color:var(--orange)">${r.total_cost != null ? fmtMoney(r.total_cost) : "—"}</td>
+            <td style="font-size:12px">${escapeHtml(r.crop) || "—"}</td>
+            <td style="font-size:12px;color:var(--muted)">${r.location_name ? "📦 " + escapeHtml(r.location_name) : "Bought directly"}</td>
+            <td style="font-size:12px;color:var(--muted)">${escapeHtml(r.note) || "—"}</td>
+            <td>${canDelete ? `<button class="action-btn danger" onclick="deletePlotInput(${r.id})">Delete</button>` : ""}</td>
+        </tr>`).join("");
+}
+
+/* Greenhouse / field modal */
+async function openPlotModal(id){
+    editingPlotId = id || null;
+    document.getElementById("plot-modal-title").innerText = id ? "Edit Greenhouse / Field" : "Add Greenhouse / Field";
+    let p = null;
+    if(id){
+        const all = await (await fetch("/farm/api/plots?include_archived=true")).json();
+        p = all.find(x => x.id === id);
+    }
+    const farmFilter = document.getElementById("plots-farm-filter").value;
+    document.getElementById("pl-farm").value  = p ? p.farm_id : (farmFilter || (allFarms[0] && allFarms[0].id) || "");
+    document.getElementById("pl-type").value  = p ? p.plot_type : "greenhouse";
+    document.getElementById("pl-name").value  = p ? p.name : "";
+    document.getElementById("pl-area").value  = p && p.area_m2 != null ? p.area_m2 : "";
+    document.getElementById("pl-notes").value = p ? p.notes : "";
+    document.getElementById("plot-modal").classList.add("open");
+    setTimeout(()=>document.getElementById("pl-name").focus(), 100);
+}
+function closePlotModal(){
+    editingPlotId = null;
+    document.getElementById("plot-modal").classList.remove("open");
+}
+async function savePlot(){
+    const area = document.getElementById("pl-area").value;
+    const body = {
+        farm_id:   parseInt(document.getElementById("pl-farm").value),
+        plot_type: document.getElementById("pl-type").value,
+        name:      document.getElementById("pl-name").value.trim(),
+        area_m2:   area !== "" ? parseFloat(area) : null,
+        notes:     document.getElementById("pl-notes").value.trim() || null,
+    };
+    if(!body.farm_id){ showToast("Pick a farm"); return; }
+    if(!body.name){ showToast("Name is required"); return; }
+    const editing = editingPlotId;
+    const url = editing ? `/farm/api/plots/${editing}` : "/farm/api/plots";
+    const res = await fetch(url, {method: editing ? "PUT" : "POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    const data = await res.json();
+    if(!res.ok){ showToast("Error: " + getErrorMessage(data)); return; }
+    closePlotModal();
+    showToast(editing ? "Saved ✓" : `${body.name} added ✓`);
+    loadPlots();
+}
+async function archivePlot(id){
+    const p = allPlots.find(x => x.id === id);
+    if(!confirm(`Archive ${p ? p.name : "this greenhouse / field"}? Its seeds, fertilizer and harvest history are kept.`)) return;
+    const res = await fetch(`/farm/api/plots/${id}`, {method:"DELETE"});
+    const data = await res.json();
+    if(!res.ok){ showToast("Error: " + getErrorMessage(data)); return; }
+    showToast("Archived ✓");
+    loadPlots();
+}
+async function restorePlot(id){
+    const res = await fetch(`/farm/api/plots/${id}/restore`, {method:"POST"});
+    const data = await res.json();
+    if(!res.ok){ showToast("Error: " + getErrorMessage(data)); return; }
+    showToast("Restored ✓");
+    loadPlots();
+}
+
+/* Seeds / fertilizer modal */
+function setInputSource(src){
+    inputSource = src;
+    document.getElementById("in-src-stock").classList.toggle("active", src === "stock");
+    document.getElementById("in-src-manual").classList.toggle("active", src === "manual");
+    document.getElementById("in-stock-fields").style.display  = src === "stock" ? "" : "none";
+    document.getElementById("in-manual-fields").style.display = src === "manual" ? "" : "none";
+    document.getElementById("in-cost").placeholder = src === "stock" ? "empty = product cost × qty" : "optional";
+}
+async function openInputModal(plotId){
+    if(!allPlots.length){ showToast("Add a greenhouse or field first"); return; }
+    if(storageLocations === null){
+        const res = await fetch("/farm/api/locations");
+        storageLocations = res.ok ? await res.json() : [];
+        document.getElementById("in-location").innerHTML =
+            storageLocations.map(l=>`<option value="${l.id}">${escapeHtml(l.name)}</option>`).join("");
+    }
+    fillInputPlotSelects();
+    const filterPlot = document.getElementById("inputs-plot-filter").value;
+    document.getElementById("in-plot").value = plotId || filterPlot || allPlots[0].id;
+    document.getElementById("in-type").value = "seed";
+    inputProductId = null;
+    ["in-prod-search","in-name","in-unit","in-qty","in-cost","in-crop","in-note"].forEach(id => document.getElementById(id).value = "");
+    document.getElementById("in-date").value = new Date().toISOString().split("T")[0];
+    setInputSource("stock");
+    document.getElementById("input-modal").classList.add("open");
+}
+function closeInputModal(){
+    document.getElementById("input-modal").classList.remove("open");
+}
+function showInputProductDropdown(){
+    const input = document.getElementById("in-prod-search");
+    const dd    = document.getElementById("in-prod-dropdown");
+    const q = input.value.toLowerCase();
+    inputProductId = null;
+    const matches = allProducts.filter(p => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q)).slice(0, 10);
+    dd.innerHTML = matches.length ? matches.map(p => `
+        <div class="prod-option" data-id="${p.id}">
+            <div class="prod-option-name">${escapeHtml(p.name)}</div>
+            <div class="prod-option-meta"><span style="font-family:var(--mono)">${escapeHtml(p.sku)}</span> &nbsp;·&nbsp;
+                <span style="color:var(--green)">${fmtQty(p.stock)} ${escapeHtml(p.unit)} in stock</span></div>
+        </div>`).join("")
+        : `<div style="padding:10px 12px;color:var(--muted);font-size:13px">No products found</div>`;
+    dd.querySelectorAll(".prod-option").forEach(opt => opt.addEventListener("click", () => {
+        const p = allProducts.find(x => String(x.id) === opt.dataset.id);
+        inputProductId = p.id;
+        input.value = p.name;
+        dd.style.display = "none";
+        document.getElementById("in-qty").focus();
+    }));
+    dd.style.display = "block";
+}
+document.getElementById("in-prod-search").addEventListener("input", showInputProductDropdown);
+document.getElementById("in-prod-search").addEventListener("focus", showInputProductDropdown);
+document.addEventListener("click", e => {
+    if(!document.getElementById("in-prod-wrap").contains(e.target))
+        document.getElementById("in-prod-dropdown").style.display = "none";
+});
+async function savePlotInput(){
+    const qty  = parseFloat(document.getElementById("in-qty").value);
+    const cost = document.getElementById("in-cost").value;
+    const body = {
+        plot_id:    parseInt(document.getElementById("in-plot").value),
+        input_type: document.getElementById("in-type").value,
+        qty,
+        total_cost: cost !== "" ? parseFloat(cost) : null,
+        applied_on: document.getElementById("in-date").value,
+        crop:       document.getElementById("in-crop").value.trim() || null,
+        note:       document.getElementById("in-note").value.trim() || null,
+    };
+    if(!body.plot_id){ showToast("Pick a greenhouse or field"); return; }
+    if(!(qty > 0)){ showToast("Quantity must be greater than 0"); return; }
+    if(!body.applied_on){ showToast("Date is required"); return; }
+    const fromStock = inputSource === "stock";
+    if(fromStock){
+        if(!inputProductId){ showToast("Pick a product from the list"); return; }
+        body.product_id  = inputProductId;
+        body.location_id = parseInt(document.getElementById("in-location").value) || null;
+        if(!body.location_id){ showToast("Pick the storage it is taken from"); return; }
+    } else {
+        body.item_name = document.getElementById("in-name").value.trim();
+        body.unit      = document.getElementById("in-unit").value.trim() || null;
+        if(!body.item_name){ showToast("Item name is required"); return; }
+    }
+    const res  = await fetch("/farm/api/plot-inputs", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    const data = await res.json();
+    if(!res.ok){ showToast("Error: " + getErrorMessage(data)); return; }
+    closeInputModal();
+    showToast(fromStock ? "Saved ✓ — stock deducted" : "Saved ✓");
+    if(fromStock) allProducts = await (await fetch("/farm/api/products-list")).json();
+    loadPlots();
+}
+async function deletePlotInput(id){
+    if(!confirm("Delete this entry? If it was taken from inventory, the quantity goes back to its storage.")) return;
+    const res  = await fetch(`/farm/api/plot-inputs/${id}`, {method:"DELETE"});
+    const data = await res.json();
+    if(!res.ok){ showToast("Error: " + getErrorMessage(data)); return; }
+    showToast("Deleted ✓");
+    allProducts = await (await fetch("/farm/api/products-list")).json();
+    loadPlots();
 }
 
 /* ── APPLY SEASON COST TO PRODUCT COSTS ── */

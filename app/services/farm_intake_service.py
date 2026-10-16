@@ -148,6 +148,7 @@ async def create_farm_delivery(
                 qty=qty,
                 unit=product.unit,
                 notes=item_notes,
+                plot_id=item.get("plot_id"),
             )
         )
 
