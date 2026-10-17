@@ -38,6 +38,9 @@ class AnimalGroup(Base):
     female_count   = Column(Integer, nullable=True)    # optional sex breakdown (does not drive headcount)
     birth_date     = Column(Date, nullable=True)       # birth / hatch date of the cohort; drives auto age display
     farm_id        = Column(Integer, ForeignKey("farms.id"), nullable=True, index=True)
+    # The greenhouse / field the group feeds (fish in a sandponic system): its feed counts as that bed's input
+    # and in the bed's farm season cost.
+    plot_id        = Column(Integer, ForeignKey("farm_plots.id"), nullable=True, index=True)
     status         = Column(String(20), nullable=False, default="active")  # active|sold|deceased|archived
     notes          = Column(Text, nullable=True)
     purchase_cost  = Column(Numeric(14, 2), nullable=True)   # total paid for the whole group (EGP)
@@ -46,6 +49,7 @@ class AnimalGroup(Base):
     archived_at    = Column(DateTime(timezone=True), nullable=True)
 
     farm     = relationship("Farm")
+    plot     = relationship("FarmPlot")
     feedings = relationship("FeedingLog", back_populates="group", cascade="all, delete-orphan")
     deaths   = relationship("MortalityLog", back_populates="group", cascade="all, delete-orphan")
     intakes  = relationship("AnimalIntakeLog", back_populates="group", cascade="all, delete-orphan")

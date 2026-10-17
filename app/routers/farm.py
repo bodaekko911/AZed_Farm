@@ -706,6 +706,25 @@ async def plots_summary(farm_id: Optional[int] = None, include_archived: bool = 
         .group_by(PlotInput.plot_id, PlotInput.input_type, PlotInput.item_name, PlotInput.unit)
     )).all()
 
+    # Sandponic: feed eaten by animal groups (fish) linked to a plot is that plot's input, at the feed's cost price.
+    from app.models.animal import AnimalGroup, FeedingLog
+    feed_where = [AnimalGroup.plot_id.in_(ids)]
+    if d_from:
+        feed_where.append(FeedingLog.feed_date >= d_from)
+    if d_to:
+        feed_where.append(FeedingLog.feed_date <= d_to)
+    feed_rows = (await db.execute(
+        select(AnimalGroup.plot_id, Product.name, Product.unit, func.sum(FeedingLog.qty),
+               func.coalesce(func.sum(FeedingLog.qty * func.coalesce(Product.cost, 0)), 0),
+               func.count(FeedingLog.id), func.max(FeedingLog.feed_date))
+        .join(AnimalGroup, AnimalGroup.id == FeedingLog.animal_group_id)
+        .join(Product, Product.id == FeedingLog.product_id)
+        .where(*feed_where)
+        .group_by(AnimalGroup.plot_id, Product.name, Product.unit)
+    )).all()
+    input_rows = list(input_rows) + [(pid, "fish_feed", name, unit, qty, cost, count, last)
+                                     for pid, name, unit, qty, cost, count, last in feed_rows]
+
     out_where = [FarmDeliveryItem.plot_id.in_(ids)]
     if d_from:
         out_where.append(FarmDelivery.delivery_date >= d_from)
@@ -1087,6 +1106,7 @@ td.name{color:var(--text);font-weight:600;}
 .input-type.fertilizer{background:rgba(251,146,60,.1);color:var(--orange);}
 .input-type.pesticide{background:rgba(255,77,109,.1);color:var(--danger);}
 .input-type.other{background:rgba(136,153,187,.12);color:var(--sub);}
+.input-type.fish_feed{background:rgba(77,159,255,.1);color:var(--blue);}
 .src-toggle{display:flex;gap:4px;background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:4px;margin-bottom:14px;}
 .src-toggle button{flex:1;padding:8px;border:none;border-radius:7px;background:transparent;color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:700;cursor:pointer;}
 .src-toggle button.active{background:var(--card);color:var(--text);}
@@ -1321,6 +1341,7 @@ td.name{color:var(--text);font-weight:600;}
         </div>
         <div style="font-size:12px;color:var(--muted);margin:-4px 0 14px">
             Leave the dates empty for all time. Production comes from deliveries — pick the greenhouse / field on each line when you record a delivery.
+            Fish feed comes from the Animals feeding log of groups linked to a greenhouse / field (sandponic).
         </div>
         <div class="plots-grid" id="plots-grid">
             <div style="color:var(--muted);padding:20px">Loading...</div>
@@ -2729,7 +2750,7 @@ async function deleteWeatherLog(id, dateStr){
 
 /* ── GREENHOUSES & FIELDS ── */
 const PLOT_TYPE_LABEL  = {greenhouse:"🏠 Greenhouse", field:"🌾 Field"};
-const INPUT_TYPE_LABEL = {seed:"Seeds", fertilizer:"Fertilizer", pesticide:"Pesticide", other:"Other"};
+const INPUT_TYPE_LABEL = {seed:"Seeds", fertilizer:"Fertilizer", pesticide:"Pesticide", fish_feed:"Fish feed", other:"Other"};
 let editingPlotId    = null;
 let inputSource      = "stock";
 let inputProductId   = null;
@@ -2775,7 +2796,7 @@ async function loadPlots(){
 
 function renderPlotCard(p){
     const line = (label, val, color) => `<div class="plot-line"><span>${label}</span><span style="color:${color||"var(--text)"}">${val}</span></div>`;
-    const costLines = ["seed","fertilizer","pesticide","other"]
+    const costLines = ["seed","fertilizer","pesticide","fish_feed","other"]
         .filter(t => p.cost_by_type[t] !== undefined)
         .map(t => line(INPUT_TYPE_LABEL[t] + " cost", fmtMoney(p.cost_by_type[t]), "var(--orange)")).join("");
     const inputLines = p.inputs.map(i =>

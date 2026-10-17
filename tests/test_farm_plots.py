@@ -224,3 +224,43 @@ def test_migration_gives_existing_farm_users_the_new_permissions():
     assert "action_farm_plot_input" not in out and "tab_farm_plots" in out
     assert m._with_plot_permissions("page_pos") == "page_pos"
     assert m._with_plot_permissions(None) is None
+
+
+# ── Sandponic: fish feeding a greenhouse / field ─────────────────────
+
+def test_fish_linked_to_a_bed_put_their_feed_on_its_card_and_in_the_farms_season_cost():
+    async def go():
+        from app.models.animal import FeedingLog
+        from app.routers import animals as animals_router
+        from app.services.expense_service import SANDPONIC_FEED_LABEL, get_cost_allocation
+        db, user = await _setup()
+        bed = await _plot(db, user, farm_id=2, name="SPC bed 1")
+        db.add(Product(id=3, sku="FF", name="Fish Feed", unit="kg", price=Decimal("0"), cost=Decimal("30"),
+                       stock=Decimal("50"), is_active=True, item_type="raw"))
+        await db.commit()
+        # Linking a group to the bed puts it on the bed's farm.
+        group = await animals_router.create_group(animals_router.AnimalGroupIn(
+            name="Tilapia", animal_type="fish", headcount=300, plot_id=bed), db=db, current_user=user)
+        assert (group["plot_id"], group["plot_name"], group["farm_id"]) == (bed, "SPC bed 1", 2)
+        db.add_all([FeedingLog(animal_group_id=group["id"], product_id=3, location_id=1, qty=Decimal("4"),
+                               feed_date=date(2026, 10, 2)),
+                    FeedingLog(animal_group_id=group["id"], product_id=3, location_id=1, qty=Decimal("6"),
+                               feed_date=date(2026, 10, 5))])
+        await db.commit()
+
+        card = {s["id"]: s for s in await farm_router.plots_summary(db=db)}[bed]
+        assert card["cost_by_type"] == {"fish_feed": 300.0} and card["input_cost"] == 300.0
+        assert card["inputs"][0]["item_name"] == "Fish Feed" and card["inputs"][0]["qty"] == 10.0
+
+        season = await get_cost_allocation(db, farm_id="2", date_from="2026-10-01", date_to="2026-10-31")
+        assert season["sandponic_feed_cost"] == 300.0 and season["total_cost"] == 300.0
+        assert {"name": SANDPONIC_FEED_LABEL, "amount": 300.0} in season["cost_by_category"]
+        other = await get_cost_allocation(db, farm_id="1", date_from="2026-10-01", date_to="2026-10-31")
+        assert other["sandponic_feed_cost"] == 0.0                     # only the bed's own farm
+
+        # Unlinking takes it off again.
+        await animals_router.update_group(group["id"], animals_router.AnimalGroupUpdate(plot_id=0),
+                                          db=db, current_user=user)
+        card = {s["id"]: s for s in await farm_router.plots_summary(db=db)}[bed]
+        return card["input_cost"]
+    assert run(go()) == 0.0

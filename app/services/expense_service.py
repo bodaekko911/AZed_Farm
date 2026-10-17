@@ -1378,6 +1378,26 @@ async def _realised_unit_prices(
     return realised
 
 
+SANDPONIC_FEED_LABEL = "Fish feed (sandponic)"
+
+
+async def sandponic_feed_cost_for(db: AsyncSession, farm_ids: list[int], start: date_type, end: date_type) -> float:
+    """Feed eaten by animal groups linked to a greenhouse / field on these farms, at each feed's cost price."""
+    from app.models.animal import FeedingLog
+    from app.models.farm import FarmPlot
+    from app.models.product import Product
+    if not farm_ids:
+        return 0.0
+    total = (await db.execute(
+        select(func.coalesce(func.sum(FeedingLog.qty * func.coalesce(Product.cost, 0)), 0))
+        .join(AnimalGroup, AnimalGroup.id == FeedingLog.animal_group_id)
+        .join(FarmPlot, FarmPlot.id == AnimalGroup.plot_id)
+        .join(Product, Product.id == FeedingLog.product_id)
+        .where(FarmPlot.farm_id.in_(farm_ids), FeedingLog.feed_date >= start, FeedingLog.feed_date <= end)
+    )).scalar()
+    return float(total or 0)
+
+
 async def get_cost_allocation(
     db: AsyncSession,
     *,
@@ -1506,6 +1526,13 @@ async def get_cost_allocation(
             salary_cost += amount
             if expense.farm_id is None:
                 unassigned_salary_cost += amount
+
+    # Sandponic (SPC): fish feeding a greenhouse / field fertilise its crops, so the feed they ate from stock is a
+    # cost of that farm's harvest — at the feed's cost price. It is stock, not an expense, so nothing above has it.
+    sandponic_feed_cost = await sandponic_feed_cost_for(db, selected_farm_ids, start_date, end_date)
+    if sandponic_feed_cost > 0:
+        total_cost += sandponic_feed_cost
+        cost_by_category[SANDPONIC_FEED_LABEL] = cost_by_category.get(SANDPONIC_FEED_LABEL, 0) + sandponic_feed_cost
 
     deliveries_result = await db.execute(
         select(FarmDelivery)
@@ -2014,6 +2041,7 @@ async def get_cost_allocation(
         "imputed_unit_price": round(imputed_unit_price, 4),
         "products_missing_sales": sorted(set(missing_price)),
         "animal_cost_excluded": round(animal_cost_excluded, 2),
+        "sandponic_feed_cost": round(sandponic_feed_cost, 2),
         "stock_purchases_excluded": round(stock_purchases_excluded, 2),
         "projects_not_producing": not_producing,
         "overhead_by_category": overhead_by_category,
