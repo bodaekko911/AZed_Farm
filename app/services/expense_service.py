@@ -1215,6 +1215,72 @@ async def delete_expense_entry(
         raise HTTPException(status_code=404, detail="Expense not found")
 
     reference_number = expense.ref_number
+
+    # An expense booked by HR (or Animals) stands for something done there. Deleting it undoes that too, as the
+    # module's own action would — otherwise the two pages disagree (a salary still "paid" with no expense).
+    loan_id = _marker_id(expense.description, "loan")
+    if loan_id is not None:
+        from app.models.hr import EmployeeLoan
+        loan = (await db.execute(select(EmployeeLoan).where(EmployeeLoan.id == loan_id))).scalar_one_or_none()
+        if loan is not None:
+            _need(current_user, "action_hr_delete_loans", "delete the loan it paid out")
+            # HR's own loan deletion: gives back deductions on unpaid runs, drops repayments, and reverses (deletes)
+            # this very expense.
+            from app.routers.hr import delete_loan_and_reverse
+            given_back, left = await delete_loan_and_reverse(db, loan, current_user)
+            note = f"loan #{loan_id} deleted in HR"
+            if given_back > 0:
+                note += f", {float(given_back):,.2f} given back on unpaid payroll"
+            if left > 0:
+                note += f", {float(left):,.2f} already deducted on paid payroll left as is"
+            record(db, "Expenses", "delete_expense", f"Deleted {reference_number} - {note}",
+                   user=current_user, ref_type="expense", ref_id=expense_id)
+            await db.commit()
+            return {"ok": True, "source_sync": note}
+
+    source_note = ""
+    if getattr(expense, "payroll_id", None):
+        from app.models.hr import Payroll
+        payroll = (await db.execute(select(Payroll).where(Payroll.id == expense.payroll_id))).scalar_one_or_none()
+        if payroll is not None and payroll.paid:
+            _need(current_user, "action_hr_mark_paid", "set the salary it paid back to unpaid")
+            # Back to Pending, so it can be paid again; days off credited by a partial payment go with it (the leave
+            # balance sums payroll rows live).
+            payroll.paid, payroll.paid_at, payroll.paid_amount = False, None, None
+            payroll.days_off_credited = Decimal("0")
+            source_note = f"payroll #{payroll.id} ({payroll.period}) set back to unpaid in HR"
+
+    advance_id = _marker_id(expense.description, "alw_adv")
+    if advance_id is not None:
+        from app.models.hr import EmployeeAllowanceAdvance
+        advance = (await db.execute(select(EmployeeAllowanceAdvance)
+                                    .where(EmployeeAllowanceAdvance.id == advance_id))).scalar_one_or_none()
+        if advance is not None:
+            if advance.status == "deducted":
+                raise HTTPException(status_code=400, detail=(
+                    "This expense is an allowance advance already deducted on a payroll run. Reset that month in "
+                    "HR first, then delete it."))
+            _need(current_user, "action_hr_delete_allowance", "delete the allowance advance it paid out")
+            await db.delete(advance)
+            source_note = f"allowance advance #{advance_id} deleted in HR"
+
+    if getattr(expense, "is_animal_expense", False):
+        # A livestock purchase: undo the intake as the Animals page would (headcount and sex split come off).
+        from app.models.animal import AnimalIntakeLog
+        intake = (await db.execute(select(AnimalIntakeLog).options(selectinload(AnimalIntakeLog.group))
+                                   .where(AnimalIntakeLog.expense_id == expense.id))).scalars().first()
+        if intake is not None:
+            group = intake.group
+            if group is not None:
+                group.headcount = max(0, int(group.headcount or 0) - int(intake.count or 0))
+                if intake.male_count:
+                    group.male_count = max(0, int(group.male_count or 0) - int(intake.male_count))
+                if intake.female_count:
+                    group.female_count = max(0, int(group.female_count or 0) - int(intake.female_count))
+            label = group.name if group is not None else f"group #{intake.animal_group_id}"
+            source_note = f"intake #{intake.id} undone — {int(intake.count or 0)} head removed from {label}"
+            await db.delete(intake)
+
     await _reverse_expense_journal(db, expense)
     # Remove the auto-created carbon log (if any) so emissions stay consistent
     _old_logs = await db.execute(
@@ -1227,13 +1293,29 @@ async def delete_expense_entry(
         db,
         "Expenses",
         "delete_expense",
-        f"Deleted {reference_number} - journal reversed",
+        f"Deleted {reference_number} - journal reversed" + (f"; {source_note}" if source_note else ""),
         user=current_user,
         ref_type="expense",
         ref_id=expense_id,
     )
     await db.commit()
-    return {"ok": True}
+    return {"ok": True, "source_sync": source_note} if source_note else {"ok": True}
+
+
+def _marker_id(description: Optional[str], kind: str) -> Optional[int]:
+    """The record id in an HR marker such as "[loan:12]" or "[alw_adv:3]" on an expense's description."""
+    import re as _re
+    m = _re.search(rf"\[{kind}:(\d+)\]", description or "")
+    return int(m.group(1)) if m else None
+
+
+def _need(user, permission: str, what: str) -> None:
+    """Undoing the HR record behind an expense needs the HR permission for it, not only the expense one."""
+    from app.core.permissions import has_permission
+    if not has_permission(user, permission):
+        raise HTTPException(status_code=403, detail=(
+            f"Deleting this expense would also {what} in HR, which needs the {permission} permission. "
+            f"Ask someone with HR access, or do it from HR."))
 
 
 def _crop_expense_filter():

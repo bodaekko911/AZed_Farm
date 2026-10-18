@@ -1843,7 +1843,7 @@ async function loadExpenses() {
                     <button class="action-btn" onclick="viewReceipt(${rowJson})">View</button>
                     <button class="action-btn" onclick="viewReceipt(${rowJson}, true)">Print</button>
                     ${hasPermission("action_expenses_update") ? `<button class="action-btn" onclick="openEditModal(${rowJson})">Edit</button>` : ""}
-                    ${hasPermission("action_expenses_delete") ? `<button class="action-btn del" onclick="deleteExpense(${Number(e.id) || 0}, ${JSON.stringify(ref).replace(/"/g,'&quot;')})">Delete</button>` : ""}
+                    ${hasPermission("action_expenses_delete") ? `<button class="action-btn del" onclick="deleteExpense(${Number(e.id) || 0}, ${JSON.stringify(ref).replace(/"/g,'&quot;')}, ${JSON.stringify(hrLinkNote(e.description)).replace(/"/g,'&quot;')})">Delete</button>` : ""}
                 </td>
             </tr>
         `;
@@ -2089,12 +2089,21 @@ async function saveExpense() {
     }
 }
 
-async function deleteExpense(id, ref) {
+// What deleting an expense HR booked also does in HR (the server does it; this is only the warning).
+function hrLinkNote(description) {
+    const d = String(description || "");
+    if (/\\[loan:\\d+\\]/.test(d)) return "It also deletes the loan in HR (deductions on unpaid payroll are given back).";
+    if (/\\[alw_adv:\\d+\\]/.test(d)) return "It also deletes the allowance advance in HR.";
+    if (/payroll #\\d+/.test(d)) return "The salary goes back to unpaid (Pending) in HR, so it can be paid again.";
+    return "";
+}
+
+async function deleteExpense(id, ref, hrNote) {
     if (!hasPermission("action_expenses_delete")) {
         showToast("Permission denied: action_expenses_delete", "err");
         return;
     }
-    if (!confirm(`Delete ${ref}? This will reverse the journal entry.`)) return;
+    if (!confirm(`Delete ${ref}? This will reverse the journal entry.` + (hrNote ? `\\n\\n${hrNote}` : ""))) return;
     try {
         const res  = await fetch(`/expenses/api/delete/${id}`, {
             method: "DELETE",

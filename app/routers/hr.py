@@ -1389,17 +1389,10 @@ async def cancel_employee_loan(
     return {"ok": True, "loan_id": loan.id, "status": loan.status}
 
 
-@router.delete("/api/loans/{loan_id}", dependencies=[Depends(require_permission("action_hr_delete_loans"))])
-async def delete_employee_loan(
-    loan_id: int,
-    db: AsyncSession = Depends(get_async_session),
-    current_user: User = Depends(get_current_user),
-):
-    result = await db.execute(select(EmployeeLoan).where(EmployeeLoan.id == loan_id))
-    loan = result.scalar_one_or_none()
-    if not loan:
-        raise HTTPException(status_code=404, detail="Loan not found")
-
+async def delete_loan_and_reverse(db: AsyncSession, loan: EmployeeLoan, current_user: User) -> tuple[Decimal, Decimal]:
+    """Delete a loan the way HR → Loans does — give back its deductions on unpaid payroll runs (paid runs are left
+    as they were), drop its repayments, reverse the expense booked for it — without committing. Also used when the
+    loan's expense is deleted on the Expenses page. Returns (reversed from unpaid runs, left on paid runs)."""
     loan_amount = _money(loan.amount)
 
     # Gather this loan's repayments and total how much each payroll run deducted
@@ -1477,6 +1470,20 @@ async def delete_employee_loan(
     # so deleting a loan doesn't leave labour cost overstated.
     await reverse_loan_advance_expense(db, loan, current_user)
     await db.delete(loan)
+    return reversed_total, skipped_paid
+
+
+@router.delete("/api/loans/{loan_id}", dependencies=[Depends(require_permission("action_hr_delete_loans"))])
+async def delete_employee_loan(
+    loan_id: int,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(EmployeeLoan).where(EmployeeLoan.id == loan_id))
+    loan = result.scalar_one_or_none()
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    reversed_total, skipped_paid = await delete_loan_and_reverse(db, loan, current_user)
     await db.commit()
     return {
         "ok": True,
