@@ -1118,6 +1118,12 @@ nav {
 .customer-tab.active{background:rgba(0,255,157,.10);border-color:rgba(0,255,157,.24);color:var(--green)}
 #customers-tab-panel > * + *,#segments-tab-panel > * + *{margin-top:20px}
 .seg-tabs{display:flex;gap:10px;flex-wrap:wrap}
+.seg-range{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--sub)}
+.seg-range label{display:flex;align-items:center;gap:6px}
+.seg-range input,.seg-range select{background:var(--card);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:7px 10px;font-family:var(--sans);font-size:13px;outline:none}
+.seg-range-btn{background:var(--card);border:1px solid var(--border2);color:var(--sub);border-radius:8px;padding:7px 14px;font-family:var(--sans);font-size:12px;font-weight:600;cursor:pointer}
+.seg-range-btn.primary{background:rgba(0,255,157,.10);border-color:rgba(0,255,157,.24);color:var(--green)}
+.seg-range-note{color:var(--muted);font-size:12px}
 .seg-tab{display:flex;flex-direction:column;gap:4px;background:var(--card);border:1px solid var(--border);border-top:3px solid transparent;border-radius:var(--r);padding:14px 18px;cursor:pointer;transition:all .2s;min-width:130px;flex:1}
 .seg-tab:hover{border-color:var(--border2)}
 .seg-tab.active{border-top-color:var(--seg-color)}
@@ -1392,6 +1398,23 @@ th.sortable.active.desc .sort-arrow { transform: rotate(180deg); }
         <div>
             <div class="page-title">Customer Segments</div>
             <div class="page-sub">Auto-classified by recency and spend - updates live from your invoices</div>
+        </div>
+
+        <div class="seg-range">
+            <label>From <input type="date" id="seg-from"></label>
+            <label>To <input type="date" id="seg-to"></label>
+            <select id="seg-preset" onchange="applySegmentPreset(this.value)">
+                <option value="">Quick range…</option>
+                <option value="all">All time</option>
+                <option value="this_month">This month</option>
+                <option value="last_month">Last month</option>
+                <option value="30">Last 30 days</option>
+                <option value="90">Last 90 days</option>
+                <option value="this_year">This year</option>
+            </select>
+            <button class="seg-range-btn primary" onclick="applySegmentRange()">Apply</button>
+            <button class="seg-range-btn" onclick="clearSegmentRange()">Clear</button>
+            <span class="seg-range-note" id="seg-range-note">All time — recency measured from today</span>
         </div>
 
         <div class="seg-tabs" id="segments-tabs">
@@ -1921,7 +1944,11 @@ async function loadSegments() {
     const tbody = document.getElementById("segments-table-body");
 
     try {
-        const res = await fetch("/customers-mgmt/api/segments");
+        const params = new URLSearchParams();
+        const from = document.getElementById("seg-from").value, to = document.getElementById("seg-to").value;
+        if (from) params.set("date_from", from);
+        if (to) params.set("date_to", to);
+        const res = await fetch("/customers-mgmt/api/segments" + (params.toString() ? "?" + params : ""));
         const text = await res.text();
 
         if (!res.ok) {
@@ -1949,6 +1976,12 @@ async function loadSegments() {
 
         renderSegmentTabs(allSegmentsData);
         renderCustomerSegment(activeSegment);
+        const note = document.getElementById("seg-range-note");
+        if (note) {
+            const f = allSegmentsData.date_from, t = allSegmentsData.date_to;
+            note.textContent = !f && !t ? "All time — recency measured from today"
+                : `Invoices ${f ? "from " + f : "up to"} ${t ? (f ? "to " : "") + t : "to today"} — recency measured from ${allSegmentsData.as_of}`;
+        }
     } catch (err) {
         console.error("Failed to load customer segments", err);
         if (tbody) {
@@ -1961,6 +1994,42 @@ async function loadSegments() {
             tabs.innerHTML = `<div style="color:var(--danger);font-size:13px;padding:20px">Failed to load customer segments</div>`;
         }
     }
+}
+
+function segmentDateStr(d){
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function applySegmentPreset(value){
+    const today = new Date();
+    let from = "", to = "";
+    if (value === "this_month") { from = segmentDateStr(new Date(today.getFullYear(), today.getMonth(), 1)); to = segmentDateStr(today); }
+    else if (value === "last_month") {
+        from = segmentDateStr(new Date(today.getFullYear(), today.getMonth() - 1, 1));
+        to = segmentDateStr(new Date(today.getFullYear(), today.getMonth(), 0));
+    }
+    else if (value === "30" || value === "90") {
+        const start = new Date(today); start.setDate(start.getDate() - Number(value) + 1);
+        from = segmentDateStr(start); to = segmentDateStr(today);
+    }
+    else if (value === "this_year") { from = segmentDateStr(new Date(today.getFullYear(), 0, 1)); to = segmentDateStr(today); }
+    else if (value !== "all") return;
+    document.getElementById("seg-from").value = from;
+    document.getElementById("seg-to").value = to;
+    applySegmentRange();
+}
+
+function applySegmentRange(){
+    const from = document.getElementById("seg-from").value, to = document.getElementById("seg-to").value;
+    if (from && to && from > to) { alert("The start date is after the end date."); return; }
+    loadSegments();
+}
+
+function clearSegmentRange(){
+    document.getElementById("seg-from").value = "";
+    document.getElementById("seg-to").value = "";
+    document.getElementById("seg-preset").value = "";
+    loadSegments();
 }
 
 function renderSegmentTabs(data){
@@ -2133,29 +2202,53 @@ load();
 # ═══════════════════════════════════════════════════════
 
 @router.get("/api/segments")
-async def get_segments(db: AsyncSession = Depends(get_async_session)):
+async def get_segments(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """Customers by segment. With a date range, only the paid invoices and refunds inside it count, and recency is
+    measured from the range's end — the segments as they stood then. Customers added after the range are left out."""
     from datetime import datetime, timezone, timedelta
+    from app.core.time_utils import today_local, utc_bounds
+
+    try:
+        d_from = date.fromisoformat(date_from) if date_from else None
+        d_to = date.fromisoformat(date_to) if date_to else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date — use YYYY-MM-DD")
+    if d_from and d_to and d_from > d_to:
+        raise HTTPException(status_code=400, detail="The start date is after the end date")
+    start_utc = utc_bounds(d_from, d_from)[0] if d_from else None
+    end_utc = utc_bounds(d_to, d_to)[1] if d_to else None
 
     now  = datetime.now(timezone.utc)
+    if end_utc is not None and end_utc < now:
+        now = end_utc                                   # "as of" the end of the range
     d60  = now - timedelta(days=60)
     d180 = now - timedelta(days=180)
+
+    inv_range = [Invoice.created_at >= start_utc] if start_utc else []
+    inv_range += [Invoice.created_at <= end_utc] if end_utc else []
+    ref_range = [RetailRefund.created_at >= start_utc] if start_utc else []
+    ref_range += [RetailRefund.created_at <= end_utc] if end_utc else []
 
     # ── All aggregates in a single SQL round-trip ──────
     last_inv_sq = (
         select(func.max(Invoice.created_at))
-        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid")
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid", *inv_range)
         .correlate(Customer)
         .scalar_subquery()
     )
     first_inv_sq = (
         select(func.min(Invoice.created_at))
-        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid")
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid", *inv_range)
         .correlate(Customer)
         .scalar_subquery()
     )
     ref_total_sq = (
         select(func.coalesce(func.sum(RetailRefund.total), 0))
-        .where(RetailRefund.customer_id == Customer.id)
+        .where(RetailRefund.customer_id == Customer.id, *ref_range)
         .correlate(Customer)
         .scalar_subquery()
     )
@@ -2166,13 +2259,13 @@ async def get_segments(db: AsyncSession = Depends(get_async_session)):
                 0,
             )
         )
-        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid")
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid", *inv_range)
         .correlate(Customer)
         .scalar_subquery()
     )
     inv_count_sq = (
         select(func.count(Invoice.id))
-        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid")
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid", *inv_range)
         .correlate(Customer)
         .scalar_subquery()
     )
@@ -2188,7 +2281,9 @@ async def get_segments(db: AsyncSession = Depends(get_async_session)):
             first_inv_sq.label("first_purchase"),
             net_spent_sq.label("net_spent"),
             inv_count_sq.label("inv_count"),
-        ).order_by(Customer.name)
+        )
+        .where(*([(Customer.created_at <= end_utc) | Customer.created_at.is_(None)] if end_utc else []))
+        .order_by(Customer.name)
     )
     customers_data = rows_result.all()
 
@@ -2261,6 +2356,9 @@ async def get_segments(db: AsyncSession = Depends(get_async_session)):
         "avg_spent":           avg_spent,
         "champion_threshold":  round(champion_threshold, 2),
         "segments":            segments,
+        "date_from":           d_from.isoformat() if d_from else None,
+        "date_to":             d_to.isoformat() if d_to else None,
+        "as_of":               now.astimezone(timezone.utc).date().isoformat() if end_utc else today_local().isoformat(),
     }
 
 

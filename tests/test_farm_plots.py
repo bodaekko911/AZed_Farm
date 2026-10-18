@@ -40,6 +40,7 @@ def run(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+        asyncio.set_event_loop(asyncio.new_event_loop())   # tests that follow expect a current loop
 
 
 async def _setup():
