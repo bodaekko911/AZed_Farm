@@ -397,15 +397,22 @@ async def customer_profile(customer_id: int, db: AsyncSession = Depends(get_asyn
     avg_basket     = gross_spent / total_orders if total_orders else 0.0
     last_purchase  = max((i.created_at for i in paid), default=None)
 
-    # aggregate qty per product across all paid invoices
-    prod_agg = defaultdict(lambda: {"name": "", "sku": "", "qty": 0.0, "revenue": 0.0})
+    # aggregate qty and value per product across all paid invoices — every product, so the page can sort by
+    # either and still show the top ones (cutting to the top 10 by qty here hid the most valuable ones)
+    prod_agg = defaultdict(lambda: {"name": "", "sku": "", "unit": "", "qty": 0.0, "revenue": 0.0})
     for inv in paid:
         for it in inv.items:
             prod_agg[it.product_id]["name"]    = it.name or ""
             prod_agg[it.product_id]["sku"]     = it.sku  or ""
             prod_agg[it.product_id]["qty"]    += float(it.qty)
             prod_agg[it.product_id]["revenue"] += float(it.total)
-    top_products = sorted(prod_agg.values(), key=lambda x: x["qty"], reverse=True)[:10]
+    if prod_agg:
+        from app.models.product import Product
+        units = dict((await db.execute(
+            select(Product.id, Product.unit).where(Product.id.in_(list(prod_agg))))).all())
+        for pid, agg in prod_agg.items():
+            agg["unit"] = units.get(pid) or ""
+    top_products = sorted(prod_agg.values(), key=lambda x: x["qty"], reverse=True)
 
     order_rows = []
     for inv in invoices:
@@ -588,6 +595,11 @@ body{{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:
 .product-bar{{height:100%;border-radius:3px;background:linear-gradient(90deg,var(--green),var(--teal));transition:width .6s ease}}
 .product-qty{{font-family:var(--mono);font-size:12px;color:var(--sub);white-space:nowrap;flex-shrink:0}}
 .product-rev{{font-family:var(--mono);font-size:11px;color:var(--muted);flex-shrink:0;min-width:70px;text-align:right}}
+.product-sort{{display:flex;gap:4px;margin-left:auto;letter-spacing:0;text-transform:none}}
+.product-sort button{{background:var(--card);border:1px solid var(--border);color:var(--sub);font-family:var(--sans);font-size:11px;font-weight:600;padding:4px 10px;border-radius:7px;cursor:pointer}}
+.product-sort button.active{{border-color:var(--green);color:var(--green)}}
+.product-row .on{{color:var(--text);font-weight:600}}
+.product-more{{background:none;border:none;color:var(--sub);font-family:var(--sans);font-size:12px;cursor:pointer;padding:6px 0;text-decoration:underline}}
 
 /* ── Orders table ── */
 .orders-wrap{{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden}}
@@ -674,6 +686,41 @@ async function load(){{
     pc.style.display = "flex";
 }}
 
+let topProducts = [];
+let productSort = "qty";
+let showAllProducts = false;
+
+function setProductSort(by){{
+    productSort = by;
+    renderTopProducts();
+}}
+
+function renderTopProducts(){{
+    const list = document.getElementById("products-list");
+    if (!list) return;
+    document.querySelectorAll(".product-sort button").forEach(b => b.classList.toggle("active", b.dataset.sort === productSort));
+    const key = productSort === "value" ? "revenue" : "qty";
+    const sorted = [...topProducts].sort((a, b) => (Number(b[key]) || 0) - (Number(a[key]) || 0));
+    const shown = showAllProducts ? sorted : sorted.slice(0, 10);
+    const max = Math.max(...shown.map(p => Number(p[key]) || 0), 1);
+    const qtyText = p => `${{Number(p.qty).toLocaleString("en-US",{{maximumFractionDigits:1}})}} ${{esc(p.unit || "units")}}`;
+    list.innerHTML = shown.map((p, i) => `
+        <div class="product-row">
+            <span class="product-rank">#${{i+1}}</span>
+            <div class="product-bar-wrap">
+                <div class="product-name">${{esc(p.name)}}</div>
+                <div class="product-bar-bg">
+                    <div class="product-bar" style="width:${{Math.round((Number(p[key]) || 0) / max * 100)}}%"></div>
+                </div>
+            </div>
+            <span class="product-qty${{key === "qty" ? " on" : ""}}">${{qtyText(p)}}</span>
+            <span class="product-rev${{key === "revenue" ? " on" : ""}}">${{fmt(p.revenue)}}</span>
+        </div>`).join("")
+        + (sorted.length > 10
+            ? `<button type="button" class="product-more" onclick="showAllProducts=!showAllProducts;renderTopProducts()">${{showAllProducts ? "Show top 10" : `Show all ${{sorted.length}} products`}}</button>`
+            : "");
+}}
+
 function render(d){{
     const pc = document.getElementById("profile-content");
     const c  = d.customer;
@@ -754,27 +801,20 @@ function render(d){{
         setTimeout(() => drawSpendChart(d.orders), 0);
     }}
 
-    // ── Top products ──
+    // ── Top products — sorted by value or quantity ──
     if (d.top_products.length) {{
-        const maxQty = d.top_products[0].qty;
+        topProducts = d.top_products;
         pc.innerHTML += `
         <div>
-            <div class="section-title">Most Bought Products</div>
-            <div class="products-list">
-                ${{d.top_products.map((p, i) => `
-                <div class="product-row">
-                    <span class="product-rank">#${{i+1}}</span>
-                    <div class="product-bar-wrap">
-                        <div class="product-name">${{esc(p.name)}}</div>
-                        <div class="product-bar-bg">
-                            <div class="product-bar" style="width:${{Math.round(p.qty/maxQty*100)}}%"></div>
-                        </div>
-                    </div>
-                    <span class="product-qty">${{Number(p.qty).toLocaleString("en-US",{{maximumFractionDigits:1}})}} units</span>
-                    <span class="product-rev">${{fmt(p.revenue)}}</span>
-                </div>`).join("")}}
+            <div class="section-title">Most Bought Products
+                <span class="product-sort">
+                    <button type="button" data-sort="value" onclick="setProductSort('value')">By value</button>
+                    <button type="button" data-sort="qty" onclick="setProductSort('qty')">By QTY</button>
+                </span>
             </div>
+            <div class="products-list" id="products-list"></div>
         </div>`;
+        setTimeout(renderTopProducts, 0);   // after the rest of the page is in place
     }}
 
     // ── Order history ──
