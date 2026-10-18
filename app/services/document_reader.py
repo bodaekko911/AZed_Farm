@@ -64,9 +64,11 @@ KINDS = {
     # From a worker's text ("سماد ٢٠ كيلو للصوبة ١"): seeds / fertilizer put into a greenhouse or field.
     "plot_input": {"label": "Seeds / fertilizer", "permissions": ("page_farm", "action_farm_plot_input"),
                    "text_only": True},
-    # From a worker's text ("أكل للسمك ٥ كيلو"): feed given to an animal group — fish, poultry, cattle…
-    "animal_feeding": {"label": "Animal / fish feed",
+    # From a worker's text ("علف الفراخ ٥ كيلو"): feed given to an animal group — poultry, cattle…
+    "animal_feeding": {"label": "Animal feed",
                        "permissions": ("page_animals", "action_animal_feeding_create"), "text_only": True},
+    # From a worker's text ("أكل للسمك ٥ كيلو"): feed for a fish tank of a sandponic bed (SPC).
+    "fish_feed": {"label": "Fish feed", "permissions": ("page_farm", "action_farm_plot_input"), "text_only": True},
 }
 DOCUMENT_KINDS = tuple(k for k, v in KINDS.items() if not v.get("text_only"))
 
@@ -583,7 +585,7 @@ async def search(db, user, kind: str, q: str) -> list[dict]:
     from app.models.supplier import Supplier
     from app.services.assistant_actions import _product_out
     may_products = "harvest_sheet" in allowed_kinds(user) or any(
-        all(has_permission(user, p) for p in KINDS[k]["permissions"]) for k in ("spoilage", "plot_input", "animal_feeding"))
+        all(has_permission(user, p) for p in KINDS[k]["permissions"]) for k in ("spoilage", "plot_input", "animal_feeding", "fish_feed"))
     if kind == "suppliers" or not may_products:
         need_kind(user, "delivery_note")
     q = (q or "").strip()[:80]
@@ -1187,7 +1189,80 @@ async def record_plot_input_with(db, user, data: dict, evidence: Evidence) -> di
                         "total_cost": float(e.total_cost) if e.total_cost is not None else None} for e in entries]}
 
 
-# ── Feed for an animal group — fish, poultry, cattle (from the field bot's text) ─
+# ── Fish feed for a sandponic bed's fish tank (from the field bot's text) ────
+
+async def fish_tanks(db) -> list[dict]:
+    """Active fish tanks with their bed — the bot's list to match against and the review card's."""
+    from app.models.farm import FarmPlot, FishTank
+    rows = (await db.execute(select(FishTank.id, FishTank.name, FishTank.species, FishTank.fish_count, FarmPlot.name)
+                             .join(FarmPlot, FarmPlot.id == FishTank.plot_id)
+                             .where(FishTank.is_active == 1).order_by(FarmPlot.name, FishTank.name))).all()
+    return [{"id": i, "name": n, "species": sp or "", "fish_count": c or 0, "plot_name": pn,
+             "label": f"{n} ({pn})"} for i, n, sp, c, pn in rows]
+
+
+async def fish_feed_duplicates(db, tank_id: Optional[int], day: Optional[str], product_ids: list[int]) -> list[str]:
+    """The same feed already logged for the same tank that day — the same message sent twice."""
+    from app.models.farm import FishLog, FishTank
+    from app.models.product import Product
+    product_ids = [p for p in product_ids if p]
+    if not tank_id or not day or not product_ids:
+        return []
+    rows = (await db.execute(select(FishTank.name, Product.name, Product.unit, FishLog.qty)
+                             .join(FishTank, FishTank.id == FishLog.tank_id)
+                             .join(Product, Product.id == FishLog.product_id)
+                             .where(FishLog.tank_id == tank_id, FishLog.log_type == "feed",
+                                    FishLog.log_date == date.fromisoformat(day), FishLog.product_id.in_(product_ids)))).all()
+    return [f"{tank} was already fed {float(qty):g} {unit or ''} of {product} on {day}".replace("  ", " ")
+            for tank, product, unit, qty in rows]
+
+
+async def record_fish_feed_with(db, user, data: dict, evidence: Evidence) -> dict:
+    """Confirm a reviewed fish feed draft: one fish-log entry per line through the farm page's own code — feed out of
+    the chosen storage (or the one holding most of it). All lines are written together; nothing is kept if one fails."""
+    from app.models.farm import FishTank
+    from app.services.plot_service import add_fish_log
+
+    need_kind(user, "fish_feed")
+    day = _day(data.get("date"))
+    if not day:
+        raise HTTPException(status_code=400, detail="Enter the date.")
+    if date.fromisoformat(day) > today_local():
+        raise HTTPException(status_code=400, detail="The date is in the future.")
+    tid = int(data["tank_id"]) if str(data.get("tank_id") or "").isdigit() else None
+    tank = (await db.execute(select(FishTank).where(FishTank.id == tid))).scalar_one_or_none() if tid else None
+    if tank is None:
+        raise HTTPException(status_code=400, detail="Pick the fish tank.")
+    raw = [it for it in (data.get("items") or []) if isinstance(it, dict)][:30]
+    if not raw:
+        raise HTTPException(status_code=400, detail="There are no lines to record.")
+    entries = []
+    for n, it in enumerate(raw, start=1):
+        pid = int(it["product_id"]) if str(it.get("product_id") or "").isdigit() else None
+        if pid is None:
+            raise HTTPException(status_code=400, detail=f"Line {n}: pick the feed product.")
+        qty = number(it.get("qty"))
+        if qty is None or qty <= 0:
+            raise HTTPException(status_code=400, detail=f"Line {n}: the quantity must be above 0.")
+        lid = int(it["location_id"]) if str(it.get("location_id") or "").isdigit() else None
+        written = _text(it.get("written"), 300)
+        try:
+            entry = await add_fish_log(
+                db, tank=tank, log_type="feed", log_date=date.fromisoformat(day), user=user, product_id=pid,
+                location_id=lid, qty=round(qty, 4),
+                note=("From the field bot" + (f": {written}" if written else "")) if data.get("from_field") else written)
+        except HTTPException as exc:
+            raise HTTPException(status_code=exc.status_code, detail=f"Line {n}: {exc.detail}")
+        entries.append(entry)
+    record(db, "Farm", "create_fish_log", f"{len(entries)} fish feed entr{'y' if len(entries) == 1 else 'ies'} on "
+           f"{tank.name} ({day}) from a field draft", user=user, ref_type="fish_tank", ref_id=tank.id)
+    await db.commit()
+    return {"ok": True, "doc_key": None, "date": day, "tank": tank.name,
+            "feedings": [{"id": e.id, "ref_number": f"FF-{e.id}", "qty": float(e.qty),
+                          "total_cost": float(e.total_cost) if e.total_cost is not None else None} for e in entries]}
+
+
+# ── Feed for an animal group — poultry, cattle… (from the field bot's text) ──
 
 async def animal_groups(db) -> list[dict]:
     """Groups still being fed, with their type — the bot's list to match against and the review card's."""

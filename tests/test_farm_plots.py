@@ -226,41 +226,91 @@ def test_migration_gives_existing_farm_users_the_new_permissions():
     assert m._with_plot_permissions(None) is None
 
 
-# ── Sandponic: fish feeding a greenhouse / field ─────────────────────
+# ── Sandponic: fish tanks in a bed, apart from the Animals page ──────
 
-def test_fish_linked_to_a_bed_put_their_feed_on_its_card_and_in_the_farms_season_cost():
+async def _tank(db, user, bed, fish=300):
+    out = await farm_router.create_fish_tank(farm_router.FishTankIn(plot_id=bed, name="Tank 1", species="Tilapia",
+                                                                    fish_count=fish), db=db, current_user=user)
+    return out["id"]
+
+
+def _log(tank_id, log_type, **kw):
+    return farm_router.FishLogIn(tank_id=tank_id, log_type=log_type, log_date=kw.pop("log_date", "2026-10-02"), **kw)
+
+
+def test_a_fish_tanks_feed_comes_out_of_stock_and_counts_on_its_bed_and_in_the_farms_season_cost():
     async def go():
-        from app.models.animal import FeedingLog
-        from app.routers import animals as animals_router
         from app.services.expense_service import SANDPONIC_FEED_LABEL, get_cost_allocation
         db, user = await _setup()
         bed = await _plot(db, user, farm_id=2, name="SPC bed 1")
         db.add(Product(id=3, sku="FF", name="Fish Feed", unit="kg", price=Decimal("0"), cost=Decimal("30"),
                        stock=Decimal("50"), is_active=True, item_type="raw"))
+        await db.flush()
+        db.add(LocationStock(location_id=1, product_id=3, qty=Decimal("50")))
         await db.commit()
-        # Linking a group to the bed puts it on the bed's farm.
-        group = await animals_router.create_group(animals_router.AnimalGroupIn(
-            name="Tilapia", animal_type="fish", headcount=300, plot_id=bed), db=db, current_user=user)
-        assert (group["plot_id"], group["plot_name"], group["farm_id"]) == (bed, "SPC bed 1", 2)
-        db.add_all([FeedingLog(animal_group_id=group["id"], product_id=3, location_id=1, qty=Decimal("4"),
-                               feed_date=date(2026, 10, 2)),
-                    FeedingLog(animal_group_id=group["id"], product_id=3, location_id=1, qty=Decimal("6"),
-                               feed_date=date(2026, 10, 5))])
-        await db.commit()
+        tank = await _tank(db, user, bed)
+
+        await farm_router.create_fish_log(_log(tank, "feed", product_id=3, qty=4), db=db, current_user=user)
+        await farm_router.create_fish_log(_log(tank, "feed", product_id=3, location_id=1, qty=6, log_date="2026-10-05"),
+                                          db=db, current_user=user)
+        product = (await db.execute(select(Product).where(Product.id == 3))).scalar_one()
+        await db.refresh(product)
+        assert float(product.stock) == 40.0                                         # out of stock
 
         card = {s["id"]: s for s in await farm_router.plots_summary(db=db)}[bed]
         assert card["cost_by_type"] == {"fish_feed": 300.0} and card["input_cost"] == 300.0
         assert card["inputs"][0]["item_name"] == "Fish Feed" and card["inputs"][0]["qty"] == 10.0
+        assert card["fish_tanks"] == [{"id": tank, "name": "Tank 1", "species": "Tilapia", "fish_count": 300}]
 
         season = await get_cost_allocation(db, farm_id="2", date_from="2026-10-01", date_to="2026-10-31")
         assert season["sandponic_feed_cost"] == 300.0 and season["total_cost"] == 300.0
         assert {"name": SANDPONIC_FEED_LABEL, "amount": 300.0} in season["cost_by_category"]
         other = await get_cost_allocation(db, farm_id="1", date_from="2026-10-01", date_to="2026-10-31")
-        assert other["sandponic_feed_cost"] == 0.0                     # only the bed's own farm
+        assert other["sandponic_feed_cost"] == 0.0                                  # only the bed's own farm
 
-        # Unlinking takes it off again.
-        await animals_router.update_group(group["id"], animals_router.AnimalGroupUpdate(plot_id=0),
-                                          db=db, current_user=user)
+        # Deleting a feed puts it back in its storage.
+        feed = [r for r in await farm_router.list_fish_logs(log_type="feed", db=db) if r["qty"] == 6.0][0]
+        await farm_router.delete_fish_log(feed["id"], db=db, current_user=user)
+        await db.refresh(product)
+        return float(product.stock)
+    assert run(go()) == 46.0
+
+
+def test_deaths_and_harvests_move_the_fish_count_and_cant_go_below_zero():
+    async def go():
+        db, user = await _setup()
+        bed = await _plot(db, user, farm_id=2, name="SPC bed 1")
+        tank = await _tank(db, user, bed, fish=100)
+        await farm_router.create_fish_log(_log(tank, "death", fish_count=5), db=db, current_user=user)
+        out = await farm_router.create_fish_log(_log(tank, "harvest", fish_count=40, weight_kg=18.5),
+                                                db=db, current_user=user)
+        assert out["fish_count"] == 55
+        with pytest.raises(HTTPException):
+            await farm_router.create_fish_log(_log(tank, "death", fish_count=56), db=db, current_user=user)
         card = {s["id"]: s for s in await farm_router.plots_summary(db=db)}[bed]
-        return card["input_cost"]
-    assert run(go()) == 0.0
+        assert card["fish"] == {"stock_in": 100, "death": 5, "harvest": 40, "harvest_kg": 18.5}
+        # The fish first put in can't be taken back while later deaths and harvests depend on them.
+        first = [r for r in await farm_router.list_fish_logs(log_type="stock_in", db=db)][0]
+        with pytest.raises(HTTPException):
+            await farm_router.delete_fish_log(first["id"], db=db, current_user=user)
+        # Deleting the harvest puts the fish back.
+        harvest = (await farm_router.list_fish_logs(log_type="harvest", db=db))[0]
+        await farm_router.delete_fish_log(harvest["id"], db=db, current_user=user)
+        return (await farm_router.list_fish_tanks(db=db))[0]["fish_count"]
+    assert run(go()) == 95
+
+
+def test_fish_need_the_tab_and_the_actions():
+    client, _ = _make_client(_user("page_farm"))
+    assert client.get("/farm/api/fish-logs").status_code == 403
+    assert client.post("/farm/api/fish-tanks", json={"plot_id": 1, "name": "x"}).status_code == 403
+    assert client.post("/farm/api/fish-logs", json={"tank_id": 1, "log_type": "death", "log_date": "2026-10-01",
+                                                    "fish_count": 1}).status_code == 403
+
+
+def test_the_animals_page_has_no_fish():
+    client, _ = _make_client(_user("", role="admin"))
+    html = client.get("/animals/").text
+    assert 'value="fish"' not in html and "gm-plot" not in html
+    farm = client.get("/farm/").text
+    assert 'id="fish-modal"' in farm and 'id="tank-modal"' in farm

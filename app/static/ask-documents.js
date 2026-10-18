@@ -1119,11 +1119,20 @@
     return card;
   }
 
-  // ── Review animal / fish feed a worker reported by text (Field inbox) ──
-  function feedingCard(d, images, filename, opts) {
+  // ── Review feed a worker reported by text (Field inbox): for an animal group, or a sandponic fish tank ──
+  const FEED_TARGETS = {
+    animal_feeding: { list: "groups", match: "group_match", written: "group_written", id: "group_id", path: "group",
+                      label: "Animal group", pick: "— pick the animal group —", missing: "Pick the animal group.",
+                      title: "Animal feed", sub: "Recorded as on the Animals page: a feeding log, and the feed taken out of stock." },
+    fish_feed: { list: "tanks", match: "tank_match", written: "tank_written", id: "tank_id", path: "tank",
+                 label: "Fish tank", pick: "— pick the fish tank —", missing: "Pick the fish tank.",
+                 title: "Fish feed", sub: "Recorded in the fish tank's log (sandponic): the feed taken out of stock, counted as the bed's input." },
+  };
+  const feedCard = kind => function (d, images, filename, opts) {
+    const T = FEED_TARGETS[kind];
     const missing = new Set(d.missing || []), unclear = new Set(d.unclear || []);
     const state = {
-      group_id: d.group_match ? String(d.group_match.id) : "", date: d.date || "", recorded: false,
+      target: d[T.match] ? String(d[T.match].id) : "", date: d.date || "", recorded: false,
       lines: (d.lines || []).map(l => {
         const line = { written: [l.product_written || "", l.qty, l.unit].filter(x => x !== null && x !== undefined && x !== "").join(" · "),
                        product: l.product, candidates: l.candidates, match: l.match, unit: l.unit, unitKey: l.unit_key || "",
@@ -1143,14 +1152,14 @@
       return input;
     }
     const field = (label, input) => h("label", { class: "doc-field" }, h("span", { text: label }), input);
-    const group = flag(h("select", { onchange: e => { state.group_id = e.target.value; check(); } },
-      h("option", { value: "", text: "— pick the animal group —" }),
-      ...(d.groups || []).map(g => h("option", { value: String(g.id), text: g.label, "data-no-i18n": true }))), "group");
-    group.value = state.group_id;
+    const target = flag(h("select", { onchange: e => { state.target = e.target.value; check(); } },
+      h("option", { value: "", text: T.pick }),
+      ...(d[T.list] || []).map(g => h("option", { value: String(g.id), text: g.label, "data-no-i18n": true }))), T.path);
+    target.value = state.target;
     const head = h("div", { class: "doc-grid" },
-      field("Animal group", group),
+      field(T.label, target),
       field("Date", flag(h("input", { type: "date", value: state.date, max: today(), oninput: e => { state.date = e.target.value; check(); } }), "date")));
-    if (d.group_written && !d.group_match) head.append(h("div", { class: "inv-hint" }, h("span", { text: "Written in the message:" }), " ", data("strong", d.group_written)));
+    if (d[T.written] && !d[T.match]) head.append(h("div", { class: "inv-hint" }, h("span", { text: "Written in the message:" }), " ", data("strong", d[T.written])));
 
     const tbody = h("tbody");
     const learnLines = [];
@@ -1178,7 +1187,7 @@
       h("thead", null, h("tr", null, ["Written in the message", "Feed (in stock)", "Taken from", "Qty"].map(t => h("th", { text: t })))), tbody);
     function check() {
       const issues = [];
-      if (!state.group_id) issues.push(h("li", null, h("span", { text: "Pick the animal group." })));
+      if (!state.target) issues.push(h("li", null, h("span", { text: T.missing })));
       if (!state.date) issues.push(h("li", null, h("span", { text: "Set the date." })));
       else if (state.date > today()) issues.push(h("li", null, h("span", { text: "The date is in the future." })));
       state.lines.forEach(l => {
@@ -1198,7 +1207,7 @@
       recordBtn.disabled = true; result.replaceChildren(h("span", { text: "Recording…" })); result.className = "act-status";
       try {
         const out = await submit(opts, {
-          kind: "animal_feeding", date: state.date, group_id: Number(state.group_id),
+          kind, date: state.date, [T.id]: Number(state.target),
           items: state.lines.map(l => ({ product_id: l.product ? l.product.id : null, location_id: Number(l.location_id) || null,
                                          qty: num(l.qty), written: l.written })),
           remember: remembered(learnLines),
@@ -1206,23 +1215,23 @@
         state.recorded = true;
         result.className = "act-status ok";
         result.replaceChildren("✓ ", h("span", { text: "Recorded" }), " ",
-          data("span", (out.feedings || []).map(x => `${x.ref_number} (${x.product} ${fmt3(Number(x.qty) || 0)} — ${x.location})`).join(", ")));
+          data("span", (out.feedings || []).map(x => `${x.ref_number} (${[x.product, fmt3(Number(x.qty) || 0), x.location].filter(Boolean).join(" ")})`).join(", ")));
         card.classList.add("done"); card.querySelectorAll("input, select, button").forEach(x => { x.disabled = true; });
       } catch (e) { result.replaceChildren(h("span", { text: e.message })); result.className = "act-status bad"; check(); }
     };
     card.append(
-      h("div", { class: "inv-head" }, h("div", { class: "inv-title", text: "Animal / fish feed" }),
-        h("span", { class: "inv-muted", text: "Recorded as on the Animals page: a feeding log, and the feed taken out of stock." })),
+      h("div", { class: "inv-head" }, h("div", { class: "inv-title", text: T.title }), h("span", { class: "inv-muted", text: T.sub })),
       head, table, problems, h("div", { class: "act-buttons" }, recordBtn), result);
     check();
     return card;
-  }
+  };
 
   window.AskDocuments = {
     start, prepare, number: num,
     // For the Field inbox: the same review cards, recording through its own endpoint and searching through its own.
     cards: { expense_receipt: expenseCard, delivery_note: deliveryCard, harvest_sheet: harvestCard, spoilage: spoilageCard,
-             b2b_sale: b2bSaleCard, plot_input: plotInputCard, animal_feeding: feedingCard },
+             b2b_sale: b2bSaleCard, plot_input: plotInputCard, animal_feeding: feedCard("animal_feeding"),
+             fish_feed: feedCard("fish_feed") },
     setSearchUrl: url => { searchUrl = url; },
   };
 })();

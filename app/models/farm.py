@@ -128,3 +128,54 @@ class PlotInput(Base):
     product  = relationship("Product")
     location = relationship("StockLocation")
     user     = relationship("User")
+
+
+FISH_LOG_TYPES = ("feed", "stock_in", "death", "harvest")
+
+
+class FishTank(Base):
+    """A fish tank in a sandponic bed (SPC): the fish's waste feeds the bed's crops, so their feed is the bed's input.
+    Kept apart from the Animals module on purpose — fish here are part of the growing system."""
+    __tablename__ = "fish_tanks"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    plot_id    = Column(Integer, ForeignKey("farm_plots.id"), nullable=False, index=True)
+    name       = Column(String(150), nullable=False)
+    species    = Column(String(100), nullable=True)
+    fish_count = Column(Integer, nullable=False, default=0)    # moved by stock_in / death / harvest logs
+    notes      = Column(Text, nullable=True)
+    is_active  = Column(Integer, default=1)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    plot = relationship("FarmPlot")
+    logs = relationship("FishLog", back_populates="tank")
+
+
+class FishLog(Base):
+    """One event in a fish tank.
+
+    feed     — feed from stock (product + storage; stock goes down), valued at the product's cost then
+    stock_in — fish added (count up)
+    death    — fish died (count down)
+    harvest  — fish taken out (count down), with their weight
+    """
+    __tablename__ = "fish_logs"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    tank_id     = Column(Integer, ForeignKey("fish_tanks.id"), nullable=False, index=True)
+    log_type    = Column(String(20), nullable=False)
+    log_date    = Column(Date, nullable=False, index=True)
+    product_id  = Column(Integer, ForeignKey("products.id"), nullable=True, index=True)
+    location_id = Column(Integer, ForeignKey("stock_locations.id"), nullable=True)
+    qty         = Column(Numeric(14, 4), nullable=True)      # feed quantity, in the product's unit
+    total_cost  = Column(Numeric(14, 2), nullable=True)      # feed value at the time
+    fish_count  = Column(Integer, nullable=True)             # fish added / dead / harvested
+    weight_kg   = Column(Numeric(12, 3), nullable=True)      # harvest weight
+    note        = Column(Text, nullable=True)
+    user_id     = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+
+    tank     = relationship("FishTank", back_populates="logs")
+    product  = relationship("Product")
+    location = relationship("StockLocation")
+    user     = relationship("User")

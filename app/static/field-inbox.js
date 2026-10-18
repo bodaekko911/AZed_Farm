@@ -9,13 +9,14 @@
   "use strict";
   const KIND = { expense_receipt: "Expense receipt", delivery_note: "Supplier delivery note",
                  harvest_sheet: "Harvest sheet / delivery", spoilage: "Spoilage", b2b_sale: "B2B sale",
-                 plot_input: "Seeds / fertilizer", animal_feeding: "Animal / fish feed" };
+                 plot_input: "Seeds / fertilizer", animal_feeding: "Animal feed",
+                 fish_feed: "Fish feed" };
   const WARN = { duplicate: "Possible duplicate", totals: "Lines don't add up", new_supplier: "New supplier",
                  unmatched_product: "Product not matched", unmatched_line: "Farm or product not matched",
                  no_category: "No expense category", priced: "Has prices", closest_match: "Product match not certain",
                  unit: "Unit differs", no_client: "No client", no_plot: "No greenhouse / field",
                  not_in_stock: "Not in stock, no cost", low_stock: "Not enough in stock",
-                 no_group: "No animal group" };
+                 no_group: "No animal group", no_tank: "No fish tank" };
 
   function h(tag, attrs, ...kids) {
     const node = document.createElement(tag);

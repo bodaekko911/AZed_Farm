@@ -1382,19 +1382,21 @@ SANDPONIC_FEED_LABEL = "Fish feed (sandponic)"
 
 
 async def sandponic_feed_cost_for(db: AsyncSession, farm_ids: list[int], start: date_type, end: date_type) -> float:
-    """Feed eaten by animal groups linked to a greenhouse / field on these farms, at each feed's cost price."""
-    from app.models.animal import FeedingLog
-    from app.models.farm import FarmPlot
-    from app.models.product import Product
+    """Feed given to the fish tanks of sandponic beds on these farms, at its value when fed."""
+    from app.models.farm import FarmPlot, FishLog, FishTank
     if not farm_ids:
         return 0.0
-    total = (await db.execute(
-        select(func.coalesce(func.sum(FeedingLog.qty * func.coalesce(Product.cost, 0)), 0))
-        .join(AnimalGroup, AnimalGroup.id == FeedingLog.animal_group_id)
-        .join(FarmPlot, FarmPlot.id == AnimalGroup.plot_id)
-        .join(Product, Product.id == FeedingLog.product_id)
-        .where(FarmPlot.farm_id.in_(farm_ids), FeedingLog.feed_date >= start, FeedingLog.feed_date <= end)
-    )).scalar()
+    try:
+        total = (await db.execute(
+            select(func.coalesce(func.sum(FishLog.total_cost), 0))
+            .join(FishTank, FishTank.id == FishLog.tank_id)
+            .join(FarmPlot, FarmPlot.id == FishTank.plot_id)
+            .where(FishLog.log_type == "feed", FarmPlot.farm_id.in_(farm_ids),
+                   FishLog.log_date >= start, FishLog.log_date <= end)
+        )).scalar()
+    except Exception:      # the fish tables not there yet (alembic not run) must not break Season Analysis
+        await db.rollback()
+        return 0.0
     return float(total or 0)
 
 
@@ -1527,8 +1529,8 @@ async def get_cost_allocation(
             if expense.farm_id is None:
                 unassigned_salary_cost += amount
 
-    # Sandponic (SPC): fish feeding a greenhouse / field fertilise its crops, so the feed they ate from stock is a
-    # cost of that farm's harvest — at the feed's cost price. It is stock, not an expense, so nothing above has it.
+    # Sandponic (SPC): the fish in a bed's tanks fertilise its crops, so the feed they ate from stock is a cost of
+    # that farm's harvest — at its value when fed. It is stock, not an expense, so nothing above has it.
     sandponic_feed_cost = await sandponic_feed_cost_for(db, selected_farm_ids, start_date, end_date)
     if sandponic_feed_cost > 0:
         total_cost += sandponic_feed_cost

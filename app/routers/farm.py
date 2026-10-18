@@ -9,10 +9,11 @@ from datetime import date
 
 from app.database import get_async_session
 from app.core.log import record
+from app.core.time_utils import today_local
 from app.core.permissions import get_current_user, require_admin, require_permission
 from app.core.navigation import render_app_header
 from app.models.farm import (
-    PLOT_TYPES, Farm, FarmDelivery, FarmDeliveryItem, FarmPlot, PlotInput, WeatherLog,
+    PLOT_TYPES, Farm, FarmDelivery, FarmDeliveryItem, FarmPlot, FishLog, FishTank, PlotInput, WeatherLog,
 )
 from app.models.product import Product
 from app.models.inventory import StockLocation, StockMove
@@ -22,7 +23,7 @@ from app.services.farm_intake_service import (
     delete_carbon_log_for_delivery,
     resync_carbon_log_for_delivery,
 )
-from app.services.plot_service import add_plot_input, reverse_plot_input
+from app.services.plot_service import add_fish_log, add_plot_input, reverse_fish_log, reverse_plot_input
 
 router = APIRouter(
     prefix="/farm",
@@ -706,24 +707,31 @@ async def plots_summary(farm_id: Optional[int] = None, include_archived: bool = 
         .group_by(PlotInput.plot_id, PlotInput.input_type, PlotInput.item_name, PlotInput.unit)
     )).all()
 
-    # Sandponic: feed eaten by animal groups (fish) linked to a plot is that plot's input, at the feed's cost price.
-    from app.models.animal import AnimalGroup, FeedingLog
-    feed_where = [AnimalGroup.plot_id.in_(ids)]
+    # Sandponic: the feed of a bed's fish tanks is that bed's input, at its value when fed.
+    fish_where = [FishTank.plot_id.in_(ids)]
     if d_from:
-        feed_where.append(FeedingLog.feed_date >= d_from)
+        fish_where.append(FishLog.log_date >= d_from)
     if d_to:
-        feed_where.append(FeedingLog.feed_date <= d_to)
+        fish_where.append(FishLog.log_date <= d_to)
     feed_rows = (await db.execute(
-        select(AnimalGroup.plot_id, Product.name, Product.unit, func.sum(FeedingLog.qty),
-               func.coalesce(func.sum(FeedingLog.qty * func.coalesce(Product.cost, 0)), 0),
-               func.count(FeedingLog.id), func.max(FeedingLog.feed_date))
-        .join(AnimalGroup, AnimalGroup.id == FeedingLog.animal_group_id)
-        .join(Product, Product.id == FeedingLog.product_id)
-        .where(*feed_where)
-        .group_by(AnimalGroup.plot_id, Product.name, Product.unit)
+        select(FishTank.plot_id, Product.name, Product.unit, func.sum(FishLog.qty),
+               func.coalesce(func.sum(FishLog.total_cost), 0), func.count(FishLog.id), func.max(FishLog.log_date))
+        .join(FishTank, FishTank.id == FishLog.tank_id)
+        .join(Product, Product.id == FishLog.product_id)
+        .where(FishLog.log_type == "feed", *fish_where)
+        .group_by(FishTank.plot_id, Product.name, Product.unit)
     )).all()
     input_rows = list(input_rows) + [(pid, "fish_feed", name, unit, qty, cost, count, last)
                                      for pid, name, unit, qty, cost, count, last in feed_rows]
+    fish_moves = (await db.execute(
+        select(FishTank.plot_id, FishLog.log_type, func.coalesce(func.sum(FishLog.fish_count), 0),
+               func.coalesce(func.sum(FishLog.weight_kg), 0))
+        .join(FishTank, FishTank.id == FishLog.tank_id)
+        .where(FishLog.log_type.in_(("death", "harvest", "stock_in")), *fish_where)
+        .group_by(FishTank.plot_id, FishLog.log_type)
+    )).all()
+    tanks = (await db.execute(select(FishTank).where(FishTank.plot_id.in_(ids), FishTank.is_active == 1)
+                              .order_by(FishTank.name))).scalars().all()
 
     out_where = [FarmDeliveryItem.plot_id.in_(ids)]
     if d_from:
@@ -741,7 +749,15 @@ async def plots_summary(farm_id: Optional[int] = None, include_archived: bool = 
 
     by_id = {p["id"]: {**p, "inputs": [], "production": [], "input_cost": 0.0,
                        "cost_by_type": {}, "production_value": 0.0,
-                       "last_input": None, "last_harvest": None} for p in plots}
+                       "last_input": None, "last_harvest": None, "fish_tanks": [],
+                       "fish": {"stock_in": 0, "death": 0, "harvest": 0, "harvest_kg": 0.0}} for p in plots}
+    for t in tanks:
+        by_id[t.plot_id]["fish_tanks"].append({"id": t.id, "name": t.name, "species": t.species or "",
+                                               "fish_count": t.fish_count or 0})
+    for plot_id, kind, count, kg in fish_moves:
+        by_id[plot_id]["fish"][kind] = int(count or 0)
+        if kind == "harvest":
+            by_id[plot_id]["fish"]["harvest_kg"] = round(float(kg or 0), 3)
     for plot_id, itype, name, unit, qty, cost, count, last in input_rows:
         s = by_id[plot_id]
         s["inputs"].append({"input_type": itype, "item_name": name, "unit": unit or "",
@@ -863,6 +879,164 @@ async def list_plot_inputs(plot_id: Optional[int] = None, farm_id: Optional[int]
         stmt = stmt.where(PlotInput.input_type == input_type)
     stmt = stmt.order_by(PlotInput.applied_on.desc(), PlotInput.id.desc()).limit(min(max(limit, 1), 1000))
     return [_plot_input_dict(i) for i in (await db.execute(stmt)).scalars().all()]
+
+
+# ── Fish tanks (sandponic beds) ────────────────────────
+class FishTankIn(BaseModel):
+    plot_id:    int
+    name:       str = Field(..., min_length=1, max_length=150)
+    species:    Optional[str] = Field(None, max_length=100)
+    fish_count: Optional[int] = Field(None, ge=0)     # on create only: the fish in it now (logged as "added")
+    notes:      Optional[str] = None
+
+
+class FishLogIn(BaseModel):
+    tank_id:     int
+    log_type:    str                      # feed | stock_in | death | harvest
+    log_date:    str
+    product_id:  Optional[int] = None     # feed
+    location_id: Optional[int] = None     # feed — empty: the storage holding the most
+    qty:         Optional[float] = Field(None, gt=0)
+    total_cost:  Optional[float] = Field(None, ge=0)
+    fish_count:  Optional[int] = Field(None, gt=0)
+    weight_kg:   Optional[float] = Field(None, ge=0)
+    note:        Optional[str] = None
+
+
+def _tank_dict(t: FishTank) -> dict:
+    return {"id": t.id, "plot_id": t.plot_id, "plot_name": t.plot.name if t.plot else "—",
+            "farm_name": t.plot.farm.name if t.plot and t.plot.farm else "—", "name": t.name,
+            "species": t.species or "", "fish_count": t.fish_count or 0, "notes": t.notes or "",
+            "is_active": bool(t.is_active)}
+
+
+def _fish_log_dict(l: FishLog) -> dict:
+    return {"id": l.id, "tank_id": l.tank_id, "tank_name": l.tank.name if l.tank else "—",
+            "plot_name": l.tank.plot.name if l.tank and l.tank.plot else "—", "log_type": l.log_type,
+            "log_date": str(l.log_date), "product_name": l.product.name if l.product else None,
+            "unit": l.product.unit if l.product else "", "location_name": l.location.name if l.location else None,
+            "qty": float(l.qty) if l.qty is not None else None,
+            "total_cost": float(l.total_cost) if l.total_cost is not None else None,
+            "fish_count": l.fish_count, "weight_kg": float(l.weight_kg) if l.weight_kg is not None else None,
+            "note": l.note or "", "user_name": l.user.name if l.user else None}
+
+
+@router.get("/api/fish-tanks")
+async def list_fish_tanks(plot_id: Optional[int] = None, include_archived: bool = False,
+                          db: AsyncSession = Depends(get_async_session)):
+    stmt = select(FishTank).options(selectinload(FishTank.plot).selectinload(FarmPlot.farm))
+    if plot_id:
+        stmt = stmt.where(FishTank.plot_id == plot_id)
+    if not include_archived:
+        stmt = stmt.where(FishTank.is_active == 1)
+    return [_tank_dict(t) for t in (await db.execute(stmt.order_by(FishTank.name))).scalars().all()]
+
+
+@router.post("/api/fish-tanks", dependencies=[Depends(require_permission("action_farm_plot_manage"))])
+async def create_fish_tank(data: FishTankIn, db: AsyncSession = Depends(get_async_session),
+                           current_user: User = Depends(get_current_user)):
+    plot = (await db.execute(select(FarmPlot).where(FarmPlot.id == data.plot_id))).scalar_one_or_none()
+    if not plot or not plot.is_active:
+        raise HTTPException(status_code=404, detail="Greenhouse / field not found")
+    tank = FishTank(plot_id=plot.id, name=data.name.strip(), species=(data.species or "").strip() or None,
+                    fish_count=0, notes=(data.notes or "").strip() or None, is_active=1)
+    db.add(tank)
+    await db.flush()
+    if data.fish_count:
+        await add_fish_log(db, tank=tank, log_type="stock_in", log_date=today_local(), user=current_user,
+                           fish_count=data.fish_count, note="Fish in the tank when it was added")
+    record(db, "Farm", "create_fish_tank", f"Added fish tank '{tank.name}' to {plot.name}",
+           user=current_user, ref_type="fish_tank", ref_id=tank.id)
+    await db.commit()
+    return {"id": tank.id}
+
+
+@router.put("/api/fish-tanks/{tank_id}", dependencies=[Depends(require_permission("action_farm_plot_manage"))])
+async def update_fish_tank(tank_id: int, data: FishTankIn, db: AsyncSession = Depends(get_async_session),
+                           current_user: User = Depends(get_current_user)):
+    """Name, species, notes and bed. The fish count moves only through the fish log."""
+    tank = (await db.execute(select(FishTank).where(FishTank.id == tank_id))).scalar_one_or_none()
+    if not tank:
+        raise HTTPException(status_code=404, detail="Fish tank not found")
+    if data.plot_id != tank.plot_id:
+        plot = (await db.execute(select(FarmPlot).where(FarmPlot.id == data.plot_id))).scalar_one_or_none()
+        if not plot or not plot.is_active:
+            raise HTTPException(status_code=404, detail="Greenhouse / field not found")
+        tank.plot_id = plot.id
+    tank.name = data.name.strip()
+    tank.species = (data.species or "").strip() or None
+    tank.notes = (data.notes or "").strip() or None
+    record(db, "Farm", "update_fish_tank", f"Updated fish tank '{tank.name}'",
+           user=current_user, ref_type="fish_tank", ref_id=tank.id)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.delete("/api/fish-tanks/{tank_id}", dependencies=[Depends(require_permission("action_farm_plot_manage"))])
+async def archive_fish_tank(tank_id: int, db: AsyncSession = Depends(get_async_session),
+                            current_user: User = Depends(get_current_user)):
+    tank = (await db.execute(select(FishTank).where(FishTank.id == tank_id))).scalar_one_or_none()
+    if not tank:
+        raise HTTPException(status_code=404, detail="Fish tank not found")
+    tank.is_active = 0
+    record(db, "Farm", "archive_fish_tank", f"Archived fish tank '{tank.name}'",
+           user=current_user, ref_type="fish_tank", ref_id=tank.id)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.get("/api/fish-logs", dependencies=[Depends(require_permission("tab_farm_plots"))])
+async def list_fish_logs(tank_id: Optional[int] = None, plot_id: Optional[int] = None, farm_id: Optional[int] = None,
+                         log_type: Optional[str] = None, limit: int = 200,
+                         db: AsyncSession = Depends(get_async_session)):
+    stmt = (select(FishLog).join(FishTank, FishTank.id == FishLog.tank_id)
+            .options(selectinload(FishLog.tank).selectinload(FishTank.plot), selectinload(FishLog.product),
+                     selectinload(FishLog.location), selectinload(FishLog.user)))
+    if tank_id:
+        stmt = stmt.where(FishLog.tank_id == tank_id)
+    if plot_id:
+        stmt = stmt.where(FishTank.plot_id == plot_id)
+    if farm_id:
+        stmt = stmt.join(FarmPlot, FarmPlot.id == FishTank.plot_id).where(FarmPlot.farm_id == farm_id)
+    if log_type:
+        stmt = stmt.where(FishLog.log_type == log_type)
+    stmt = stmt.order_by(FishLog.log_date.desc(), FishLog.id.desc()).limit(min(max(limit, 1), 1000))
+    return [_fish_log_dict(l) for l in (await db.execute(stmt)).scalars().all()]
+
+
+@router.post("/api/fish-logs", dependencies=[Depends(require_permission("action_farm_plot_input"))])
+async def create_fish_log(data: FishLogIn, db: AsyncSession = Depends(get_async_session),
+                          current_user: User = Depends(get_current_user)):
+    tank = (await db.execute(select(FishTank).where(FishTank.id == data.tank_id))).scalar_one_or_none()
+    if not tank:
+        raise HTTPException(status_code=404, detail="Fish tank not found")
+    log_date = _parse_date(data.log_date, "date")
+    if not log_date:
+        raise HTTPException(status_code=400, detail="Date is required")
+    entry = await add_fish_log(db, tank=tank, log_type=data.log_type, log_date=log_date, user=current_user,
+                               product_id=data.product_id, location_id=data.location_id, qty=data.qty,
+                               total_cost=data.total_cost, fish_count=data.fish_count, weight_kg=data.weight_kg,
+                               note=data.note)
+    record(db, "Farm", "create_fish_log", f"Fish {data.log_type} on {tank.name} ({log_date})",
+           user=current_user, ref_type="fish_log", ref_id=entry.id)
+    await db.commit()
+    return {"id": entry.id, "fish_count": tank.fish_count}
+
+
+@router.delete("/api/fish-logs/{log_id}", dependencies=[Depends(require_permission("action_farm_plot_input"))])
+async def delete_fish_log(log_id: int, db: AsyncSession = Depends(get_async_session),
+                          current_user: User = Depends(get_current_user)):
+    """Delete a log: feed goes back to its storage, the tank's fish count moves back."""
+    entry = (await db.execute(select(FishLog).where(FishLog.id == log_id))).scalar_one_or_none()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    tank = (await db.execute(select(FishTank).where(FishTank.id == entry.tank_id))).scalar_one()
+    await reverse_fish_log(db, entry, tank, current_user)
+    record(db, "Farm", "delete_fish_log", f"Deleted fish {entry.log_type} #{entry.id} on {tank.name}",
+           user=current_user, ref_type="fish_log", ref_id=entry.id)
+    await db.delete(entry)
+    await db.commit()
+    return {"ok": True}
 
 
 @router.get("/api/locations")
@@ -1107,6 +1281,15 @@ td.name{color:var(--text);font-weight:600;}
 .input-type.pesticide{background:rgba(255,77,109,.1);color:var(--danger);}
 .input-type.other{background:rgba(136,153,187,.12);color:var(--sub);}
 .input-type.fish_feed{background:rgba(77,159,255,.1);color:var(--blue);}
+.fish-box{background:rgba(77,159,255,.06);border:1px solid rgba(77,159,255,.18);border-radius:9px;padding:8px 10px;display:flex;flex-direction:column;gap:4px;}
+.fish-tank{display:flex;justify-content:space-between;gap:8px;font-size:12px;}
+.fish-tank b{color:var(--text);}
+.fish-tank span:last-child{font-family:var(--mono);color:var(--blue);font-weight:700;}
+.fish-type{display:inline-flex;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;}
+.fish-type.feed{background:rgba(77,159,255,.1);color:var(--blue);}
+.fish-type.stock_in{background:rgba(132,204,22,.1);color:var(--lime);}
+.fish-type.death{background:rgba(255,77,109,.1);color:var(--danger);}
+.fish-type.harvest{background:rgba(45,212,191,.1);color:var(--teal);}
 .src-toggle{display:flex;gap:4px;background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:4px;margin-bottom:14px;}
 .src-toggle button{flex:1;padding:8px;border:none;border-radius:7px;background:transparent;color:var(--muted);font-family:var(--sans);font-size:12px;font-weight:700;cursor:pointer;}
 .src-toggle button.active{background:var(--card);color:var(--text);}
@@ -1383,6 +1566,44 @@ td.name{color:var(--text);font-weight:600;}
                 </tbody>
             </table>
         </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin:22px 0 10px;">
+            <div>
+                <div style="font-size:14px;font-weight:700">🐟 Fish Log (sandponic)</div>
+                <div style="font-size:12px;color:var(--muted);margin-top:2px">Feed from stock, fish added, deaths and harvests of the beds' fish tanks. Fish feed counts as the bed's input and in its farm's season cost.</div>
+            </div>
+            <div class="toolbar">
+                <select class="filter-sel" id="fish-tank-filter" onchange="loadFishLogs()">
+                    <option value="">All fish tanks</option>
+                </select>
+                <select class="filter-sel" id="fish-type-filter" onchange="loadFishLogs()">
+                    <option value="">All types</option>
+                    <option value="feed">Feed</option>
+                    <option value="stock_in">Fish added</option>
+                    <option value="death">Deaths</option>
+                    <option value="harvest">Harvest</option>
+                </select>
+                <button class="btn btn-lime" id="btn-add-fish-log" onclick="openFishLogModal()">+ Fish Log</button>
+            </div>
+        </div>
+        <div class="table-wrap" style="overflow-x:auto">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Fish tank</th>
+                        <th>Type</th>
+                        <th>Details</th>
+                        <th style="text-align:right">Cost</th>
+                        <th>Note</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="fish-logs-body">
+                    <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
@@ -1592,6 +1813,108 @@ td.name{color:var(--text);font-weight:600;}
     </div>
 </div>
 
+<!-- FISH TANK MODAL -->
+<div class="modal-bg" id="tank-modal">
+    <div class="modal" style="width:480px">
+        <div class="modal-title" id="tank-modal-title">Add Fish Tank</div>
+        <div class="modal-sub">A fish tank of a sandponic bed — its fish's waste feeds the bed's crops</div>
+        <div class="form-row">
+            <div class="fld span2">
+                <label>Greenhouse / Field *</label>
+                <select id="tk-plot"></select>
+            </div>
+            <div class="fld">
+                <label>Name *</label>
+                <input id="tk-name" maxlength="150" placeholder="e.g. Tank 1">
+            </div>
+            <div class="fld">
+                <label>Species</label>
+                <input id="tk-species" maxlength="100" placeholder="e.g. Tilapia">
+            </div>
+            <div class="fld" id="tk-count-wrap">
+                <label>Fish in it now</label>
+                <input id="tk-count" type="number" min="0" step="1" placeholder="0">
+            </div>
+            <div class="fld span2">
+                <label>Notes</label>
+                <input id="tk-notes" placeholder="optional">
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeTankModal()">Cancel</button>
+            <button class="btn btn-lime" onclick="saveTank()">✓ Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- FISH LOG MODAL -->
+<div class="modal-bg" id="fish-modal">
+    <div class="modal" style="width:540px">
+        <div class="modal-title">Fish Log</div>
+        <div class="modal-sub">Feed, fish added, deaths or a harvest</div>
+        <div class="form-row">
+            <div class="fld">
+                <label>Fish tank *</label>
+                <select id="fl-tank"></select>
+            </div>
+            <div class="fld">
+                <label>Type *</label>
+                <select id="fl-type" onchange="setFishLogType()">
+                    <option value="feed">Feed (from stock)</option>
+                    <option value="stock_in">Fish added</option>
+                    <option value="death">Deaths</option>
+                    <option value="harvest">Harvest</option>
+                </select>
+            </div>
+        </div>
+        <div id="fl-feed-fields" class="form-row">
+            <div class="fld span2">
+                <label>Feed product *</label>
+                <div class="prod-search-wrap" id="fl-prod-wrap">
+                    <input type="text" class="prod-search-input" id="fl-prod-search" placeholder="Search by name or SKU..." autocomplete="off">
+                    <div class="prod-dropdown" id="fl-prod-dropdown"></div>
+                </div>
+            </div>
+            <div class="fld">
+                <label>Taken from storage</label>
+                <select id="fl-location"></select>
+            </div>
+            <div class="fld">
+                <label>Quantity *</label>
+                <input id="fl-qty" type="number" min="0" step="any" placeholder="0">
+            </div>
+            <div class="fld">
+                <label>Cost (EGP)</label>
+                <input id="fl-cost" type="number" min="0" step="any" placeholder="empty = product cost × qty">
+            </div>
+        </div>
+        <div id="fl-count-fields" class="form-row" style="display:none">
+            <div class="fld">
+                <label>Number of fish *</label>
+                <input id="fl-count" type="number" min="1" step="1" placeholder="0">
+            </div>
+            <div class="fld" id="fl-weight-wrap">
+                <label>Weight (kg)</label>
+                <input id="fl-weight" type="number" min="0" step="any" placeholder="optional">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="fld">
+                <label>Date *</label>
+                <input id="fl-date" type="date">
+            </div>
+            <div class="fld">
+                <label>Note</label>
+                <input id="fl-note" placeholder="optional">
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeFishLogModal()">Cancel</button>
+            <button class="btn btn-lime" onclick="saveFishLog()">✓ Save</button>
+        </div>
+    </div>
+</div>
+
 <!-- SEEDS / FERTILIZER MODAL -->
 <div class="modal-bg" id="input-modal">
     <div class="modal" style="width:560px">
@@ -1776,6 +2099,7 @@ function configureFarmPermissions(u){
     if(!hasPermission("action_farm_weather_log", u)) document.getElementById("btn-add-weather").style.display = "none";
     if(!hasPermission("action_farm_plot_manage", u)) document.getElementById("btn-add-plot").style.display = "none";
     if(!hasPermission("action_farm_plot_input", u)) document.getElementById("btn-add-input").style.display = "none";
+    if(!hasPermission("action_farm_plot_input", u)) document.getElementById("btn-add-fish-log").style.display = "none";
     if(!hasPermission("action_farm_create", u)) { let b = document.getElementById("btn-add-farm"); if(b) b.style.display = "none"; }
     // Archived farms view is admin-only
     let archBtn = document.getElementById("btn-view-archived");
@@ -2315,6 +2639,12 @@ document.getElementById("weather-modal").addEventListener("click",function(e){
 document.getElementById("plot-modal").addEventListener("click",function(e){
     if(e.target===this) closePlotModal();
 });
+document.getElementById("tank-modal").addEventListener("click",function(e){
+    if(e.target===this) closeTankModal();
+});
+document.getElementById("fish-modal").addEventListener("click",function(e){
+    if(e.target===this) closeFishLogModal();
+});
 document.getElementById("input-modal").addEventListener("click",function(e){
     if(e.target===this) closeInputModal();
 });
@@ -2792,6 +3122,7 @@ async function loadPlots(){
     grid.innerHTML = data.length ? data.map(renderPlotCard).join("")
         : `<div style="color:var(--muted);padding:20px">No greenhouses or fields yet.${hasPermission("action_farm_plot_manage") ? " Click <b>+ Add Greenhouse / Field</b>." : ""}</div>`;
     loadPlotInputs();
+    loadFishLogs();
 }
 
 function renderPlotCard(p){
@@ -2814,6 +3145,18 @@ function renderPlotCard(p){
             : `<button class="action-btn" onclick="restorePlot(${p.id})">Restore</button>`;
     }
     const dates = [p.last_input ? "Last input " + p.last_input : "", p.last_harvest ? "Last harvest " + p.last_harvest : ""].filter(Boolean).join(" · ");
+    const f = p.fish || {};
+    const fishMoves = [f.stock_in ? `+${f.stock_in} added` : "", f.death ? `${f.death} died` : "",
+                       f.harvest ? `${f.harvest} harvested${f.harvest_kg ? ` (${fmtQty(f.harvest_kg)} kg)` : ""}` : ""].filter(Boolean).join(" · ");
+    const fishBox = (p.fish_tanks || []).length ? `
+        <div class="fish-box">
+            ${p.fish_tanks.map(t => `<div class="fish-tank"><span>🐟 <b>${escapeHtml(t.name)}</b>${t.species ? " · " + escapeHtml(t.species) : ""}</span><span>${t.fish_count} fish</span></div>`).join("")}
+            ${fishMoves ? `<div style="font-size:11px;color:var(--muted)">${fishMoves}</div>` : ""}
+        </div>` : "";
+    if(p.is_active && (p.fish_tanks || []).length && hasPermission("action_farm_plot_input"))
+        actions += `<button class="action-btn" onclick="openFishLogModal(${p.fish_tanks[0].id})">🐟 Fish log</button>`;
+    if(p.is_active && hasPermission("action_farm_plot_manage"))
+        actions += `<button class="action-btn" onclick="openTankModal(null, ${p.id})">+ Fish tank</button>`;
     return `
     <div class="plot-card ${p.is_active ? "" : "archived"}">
         <div class="plot-head">
@@ -2834,6 +3177,7 @@ function renderPlotCard(p){
         <div class="plot-sub">Harvested</div>
         <div>${prodLines || `<div style="font-size:12px;color:var(--muted)">No harvest recorded yet</div>`}</div>
         ${dates ? `<div style="font-size:11px;color:var(--muted)">${dates}</div>` : ""}
+        ${fishBox}
         ${actions ? `<div class="plot-actions">${actions}</div>` : ""}
     </div>`;
 }
@@ -3021,6 +3365,195 @@ async function savePlotInput(){
     if(fromStock) allProducts = await (await fetch("/farm/api/products-list")).json();
     loadPlots();
 }
+/* ── FISH TANKS (sandponic) ── */
+const FISH_TYPE_LABEL = {feed:"Feed", stock_in:"Fish added", death:"Deaths", harvest:"Harvest"};
+let allTanks = [];
+let editingTankId = null;
+let fishProductId = null;
+
+async function loadTanks(){
+    allTanks = await (await fetch("/farm/api/fish-tanks")).json();
+    const label = t => `${escapeHtml(t.name)} — ${escapeHtml(t.plot_name)}`;
+    const filter = document.getElementById("fish-tank-filter");
+    const keep = filter.value;
+    filter.innerHTML = `<option value="">All fish tanks</option>` + allTanks.map(t => `<option value="${t.id}">${label(t)}</option>`).join("");
+    filter.value = keep;
+    document.getElementById("fl-tank").innerHTML = allTanks.map(t => `<option value="${t.id}">${label(t)} (${t.fish_count} fish)</option>`).join("");
+}
+
+async function loadFishLogs(){
+    await loadTanks();
+    const tankId = document.getElementById("fish-tank-filter").value;
+    const type   = document.getElementById("fish-type-filter").value;
+    const farmId = document.getElementById("plots-farm-filter").value;
+    let url = "/farm/api/fish-logs?limit=200";
+    if(tankId) url += `&tank_id=${tankId}`;
+    else if(farmId) url += `&farm_id=${farmId}`;
+    if(type) url += `&log_type=${type}`;
+    const res  = await fetch(url);
+    const rows = await res.json();
+    const body = document.getElementById("fish-logs-body");
+    if(!res.ok){ body.innerHTML = `<tr><td colspan="7" style="color:var(--danger);padding:20px">${escapeHtml(getErrorMessage(rows))}</td></tr>`; return; }
+    if(!rows.length){
+        body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px">${allTanks.length ? "Nothing logged yet." : "No fish tanks yet — add one from a greenhouse / field card (+ Fish tank)."}</td></tr>`;
+        return;
+    }
+    const canDelete = hasPermission("action_farm_plot_input");
+    body.innerHTML = rows.map(r => {
+        const details = r.log_type === "feed"
+            ? `${escapeHtml(r.product_name || "")}: ${fmtQty(r.qty)} ${escapeHtml(r.unit || "")}${r.location_name ? ` <span style="color:var(--muted)">· 📦 ${escapeHtml(r.location_name)}</span>` : ""}`
+            : `${r.fish_count} fish${r.weight_kg != null ? ` · ${fmtQty(r.weight_kg)} kg` : ""}`;
+        return `
+        <tr>
+            <td style="font-family:var(--mono);font-size:12px">${r.log_date}</td>
+            <td class="name">${escapeHtml(r.tank_name)}<div style="font-size:11px;color:var(--muted);font-weight:400">${escapeHtml(r.plot_name)}</div></td>
+            <td><span class="fish-type ${r.log_type}">${FISH_TYPE_LABEL[r.log_type] || escapeHtml(r.log_type)}</span></td>
+            <td style="font-size:12px">${details}</td>
+            <td style="font-family:var(--mono);text-align:right;color:var(--orange)">${r.total_cost != null ? fmtMoney(r.total_cost) : "—"}</td>
+            <td style="font-size:12px;color:var(--muted)">${escapeHtml(r.note) || "—"}</td>
+            <td>${canDelete ? `<button class="action-btn danger" onclick="deleteFishLog(${r.id})">Delete</button>` : ""}</td>
+        </tr>`;
+    }).join("");
+}
+
+/* Fish tank modal */
+async function openTankModal(id, plotId){
+    editingTankId = id || null;
+    document.getElementById("tank-modal-title").innerText = id ? "Edit Fish Tank" : "Add Fish Tank";
+    document.getElementById("tk-plot").innerHTML = allPlots.map(p => `<option value="${p.id}">${escapeHtml(p.name)} — ${escapeHtml(p.farm_name)}</option>`).join("");
+    const t = id ? allTanks.find(x => x.id === id) : null;
+    document.getElementById("tk-plot").value    = t ? t.plot_id : (plotId || (allPlots[0] && allPlots[0].id) || "");
+    document.getElementById("tk-name").value    = t ? t.name : "";
+    document.getElementById("tk-species").value = t ? t.species : "";
+    document.getElementById("tk-count").value   = "";
+    document.getElementById("tk-notes").value   = t ? t.notes : "";
+    document.getElementById("tk-count-wrap").style.display = id ? "none" : "";   // the count moves through the fish log
+    document.getElementById("tank-modal").classList.add("open");
+    setTimeout(()=>document.getElementById("tk-name").focus(), 100);
+}
+function closeTankModal(){
+    editingTankId = null;
+    document.getElementById("tank-modal").classList.remove("open");
+}
+async function saveTank(){
+    const count = document.getElementById("tk-count").value;
+    const body = {
+        plot_id: parseInt(document.getElementById("tk-plot").value),
+        name:    document.getElementById("tk-name").value.trim(),
+        species: document.getElementById("tk-species").value.trim() || null,
+        notes:   document.getElementById("tk-notes").value.trim() || null,
+        fish_count: count !== "" ? parseInt(count) : null,
+    };
+    if(!body.plot_id){ showToast("Pick a greenhouse or field"); return; }
+    if(!body.name){ showToast("Name is required"); return; }
+    const editing = editingTankId;
+    const res = await fetch(editing ? `/farm/api/fish-tanks/${editing}` : "/farm/api/fish-tanks",
+        {method: editing ? "PUT" : "POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    const data = await res.json();
+    if(!res.ok){ showToast("Error: " + getErrorMessage(data)); return; }
+    closeTankModal();
+    showToast(editing ? "Saved ✓" : `${body.name} added ✓`);
+    loadPlots();
+}
+
+/* Fish log modal */
+function setFishLogType(){
+    const type = document.getElementById("fl-type").value;
+    document.getElementById("fl-feed-fields").style.display  = type === "feed" ? "" : "none";
+    document.getElementById("fl-count-fields").style.display = type === "feed" ? "none" : "";
+    document.getElementById("fl-weight-wrap").style.display  = type === "harvest" ? "" : "none";
+}
+async function openFishLogModal(tankId){
+    await loadTanks();
+    if(!allTanks.length){ showToast("Add a fish tank first (+ Fish tank on a greenhouse / field card)"); return; }
+    if(storageLocations === null){
+        const res = await fetch("/farm/api/locations");
+        storageLocations = res.ok ? await res.json() : [];
+    }
+    document.getElementById("fl-location").innerHTML = `<option value="">Storage with the most</option>` +
+        storageLocations.map(l=>`<option value="${l.id}">${escapeHtml(l.name)}</option>`).join("");
+    const filterTank = document.getElementById("fish-tank-filter").value;
+    document.getElementById("fl-tank").value = tankId || filterTank || allTanks[0].id;
+    document.getElementById("fl-type").value = "feed";
+    fishProductId = null;
+    ["fl-prod-search","fl-qty","fl-cost","fl-count","fl-weight","fl-note"].forEach(id => document.getElementById(id).value = "");
+    document.getElementById("fl-date").value = new Date().toISOString().split("T")[0];
+    setFishLogType();
+    document.getElementById("fish-modal").classList.add("open");
+}
+function closeFishLogModal(){
+    document.getElementById("fish-modal").classList.remove("open");
+}
+function showFishProductDropdown(){
+    const input = document.getElementById("fl-prod-search");
+    const dd    = document.getElementById("fl-prod-dropdown");
+    const q = input.value.toLowerCase();
+    fishProductId = null;
+    const matches = allProducts.filter(p => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q)).slice(0, 10);
+    dd.innerHTML = matches.length ? matches.map(p => `
+        <div class="prod-option" data-id="${p.id}">
+            <div class="prod-option-name">${escapeHtml(p.name)}</div>
+            <div class="prod-option-meta"><span style="font-family:var(--mono)">${escapeHtml(p.sku)}</span> &nbsp;·&nbsp;
+                <span style="color:var(--green)">${fmtQty(p.stock)} ${escapeHtml(p.unit)} in stock</span></div>
+        </div>`).join("")
+        : `<div style="padding:10px 12px;color:var(--muted);font-size:13px">No products found</div>`;
+    dd.querySelectorAll(".prod-option").forEach(opt => opt.addEventListener("click", () => {
+        const p = allProducts.find(x => String(x.id) === opt.dataset.id);
+        fishProductId = p.id;
+        input.value = p.name;
+        dd.style.display = "none";
+        document.getElementById("fl-qty").focus();
+    }));
+    dd.style.display = "block";
+}
+document.getElementById("fl-prod-search").addEventListener("input", showFishProductDropdown);
+document.getElementById("fl-prod-search").addEventListener("focus", showFishProductDropdown);
+document.addEventListener("click", e => {
+    if(!document.getElementById("fl-prod-wrap").contains(e.target))
+        document.getElementById("fl-prod-dropdown").style.display = "none";
+});
+async function saveFishLog(){
+    const type = document.getElementById("fl-type").value;
+    const body = {
+        tank_id:  parseInt(document.getElementById("fl-tank").value),
+        log_type: type,
+        log_date: document.getElementById("fl-date").value,
+        note:     document.getElementById("fl-note").value.trim() || null,
+    };
+    if(!body.tank_id){ showToast("Pick a fish tank"); return; }
+    if(!body.log_date){ showToast("Date is required"); return; }
+    if(type === "feed"){
+        const qty = parseFloat(document.getElementById("fl-qty").value);
+        const cost = document.getElementById("fl-cost").value;
+        if(!fishProductId){ showToast("Pick the feed product from the list"); return; }
+        if(!(qty > 0)){ showToast("Quantity must be greater than 0"); return; }
+        Object.assign(body, {product_id: fishProductId, qty, total_cost: cost !== "" ? parseFloat(cost) : null,
+                             location_id: parseInt(document.getElementById("fl-location").value) || null});
+    } else {
+        const count = parseInt(document.getElementById("fl-count").value);
+        const weight = document.getElementById("fl-weight").value;
+        if(!(count > 0)){ showToast("Number of fish must be greater than 0"); return; }
+        body.fish_count = count;
+        if(type === "harvest" && weight !== "") body.weight_kg = parseFloat(weight);
+    }
+    const res  = await fetch("/farm/api/fish-logs", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    const data = await res.json();
+    if(!res.ok){ showToast("Error: " + getErrorMessage(data)); return; }
+    closeFishLogModal();
+    showToast(type === "feed" ? "Saved ✓ — feed taken from stock" : `Saved ✓ — ${data.fish_count} fish in the tank`);
+    if(type === "feed") allProducts = await (await fetch("/farm/api/products-list")).json();
+    loadPlots();
+}
+async function deleteFishLog(id){
+    if(!confirm("Delete this entry? Feed goes back to its storage; the fish count moves back.")) return;
+    const res  = await fetch(`/farm/api/fish-logs/${id}`, {method:"DELETE"});
+    const data = await res.json();
+    if(!res.ok){ showToast("Error: " + getErrorMessage(data)); return; }
+    showToast("Deleted ✓");
+    allProducts = await (await fetch("/farm/api/products-list")).json();
+    loadPlots();
+}
+
 async function deletePlotInput(id){
     if(!confirm("Delete this entry? If it was taken from inventory, the quantity goes back to its storage.")) return;
     const res  = await fetch(`/farm/api/plot-inputs/${id}`, {method:"DELETE"});

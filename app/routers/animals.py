@@ -32,7 +32,7 @@ from app.core.permissions import has_permission, require_permission
 from app.database import get_async_session
 from app.models.animal import AnimalGroup, FeedingLog, MortalityLog, AnimalIntakeLog
 from app.models.expense import Expense, ExpenseCategory
-from app.models.farm import Farm, FarmPlot
+from app.models.farm import Farm
 from app.models.inventory import StockLocation, StockMove
 from app.models.product import Product
 from app.models.user import User
@@ -63,7 +63,6 @@ class AnimalGroupIn(BaseModel):
     female_count:   Optional[int] = Field(None, ge=0)
     birth_date:     Optional[date_type] = None
     farm_id:        Optional[int] = None
-    plot_id:        Optional[int] = None   # the greenhouse / field it feeds (sandponic)
     notes:          Optional[str] = None
     purchase_cost:  Optional[float] = Field(None, ge=0)
     cost_per_head:  Optional[float] = Field(None, ge=0)
@@ -77,7 +76,6 @@ class AnimalGroupUpdate(BaseModel):
     female_count:   Optional[int] = Field(None, ge=0)
     birth_date:     Optional[date_type] = None
     farm_id:        Optional[int] = None
-    plot_id:        Optional[int] = None   # 0 clears it
     status:         Optional[str] = Field(None, max_length=20)
     notes:          Optional[str] = None
     purchase_cost:  Optional[float] = Field(None, ge=0)
@@ -171,8 +169,6 @@ def _serialize_group(g: AnimalGroup) -> dict:
         "age":          _human_age(g.birth_date),
         "farm_id":      g.farm_id,
         "farm_name":    g.farm.name if g.farm else None,
-        "plot_id":      g.plot_id,
-        "plot_name":    g.plot.name if g.plot_id and g.plot else None,
         "status":       g.status or "active",
         "notes":        g.notes,
         "purchase_cost":          purchase_cost,
@@ -238,13 +234,6 @@ def _serialize_intake(i: AnimalIntakeLog) -> dict:
     }
 
 
-async def _plot_for_group(db: AsyncSession, plot_id: int) -> FarmPlot:
-    plot = (await db.execute(select(FarmPlot).where(FarmPlot.id == plot_id))).scalar_one_or_none()
-    if plot is None or not plot.is_active:
-        raise HTTPException(status_code=400, detail="Greenhouse / field not found")
-    return plot
-
-
 # ── Animal Groups API ────────────────────────────────────────────────
 
 @router.get("/api/groups")
@@ -252,7 +241,7 @@ async def list_groups(
     include_archived: bool = Query(False),
     db: AsyncSession = Depends(get_async_session),
 ):
-    stmt = select(AnimalGroup).options(selectinload(AnimalGroup.farm), selectinload(AnimalGroup.plot))
+    stmt = select(AnimalGroup).options(selectinload(AnimalGroup.farm))
     if not include_archived:
         stmt = stmt.where(AnimalGroup.status != "archived")
     stmt = stmt.order_by(AnimalGroup.name.asc())
@@ -275,7 +264,6 @@ async def create_group(
         farm = (await db.execute(select(Farm).where(Farm.id == data.farm_id))).scalar_one_or_none()
         if farm is None:
             raise HTTPException(status_code=400, detail="Farm not found")
-    plot = await _plot_for_group(db, data.plot_id) if data.plot_id else None
     group = AnimalGroup(
         name=data.name.strip(),
         animal_type=data.animal_type or "other",
@@ -283,8 +271,7 @@ async def create_group(
         male_count=data.male_count,
         female_count=data.female_count,
         birth_date=data.birth_date,
-        farm_id=plot.farm_id if plot else data.farm_id,      # a group feeding a bed is on the bed's farm
-        plot_id=plot.id if plot else None,
+        farm_id=data.farm_id,
         notes=(data.notes or "").strip() or None,
         purchase_cost=(Decimal(str(data.purchase_cost)) if data.purchase_cost is not None else None),
         cost_per_head=(Decimal(str(data.cost_per_head)) if data.cost_per_head is not None else None),
@@ -292,7 +279,7 @@ async def create_group(
     )
     db.add(group)
     await db.flush()
-    await db.refresh(group, attribute_names=["farm", "plot"])
+    await db.refresh(group, attribute_names=["farm"])
     record(db, "Animals", "create_group", f"Created group: {group.name}",
            user=current_user, ref_type="animal_group", ref_id=group.id)
     await db.commit()
@@ -312,7 +299,7 @@ async def update_group(
     group = (
         await db.execute(
             select(AnimalGroup)
-            .options(selectinload(AnimalGroup.farm), selectinload(AnimalGroup.plot))
+            .options(selectinload(AnimalGroup.farm))
             .where(AnimalGroup.id == group_id)
         )
     ).scalar_one_or_none()
@@ -339,12 +326,6 @@ async def update_group(
             if farm is None:
                 raise HTTPException(status_code=400, detail="Farm not found")
             group.farm_id = data.farm_id
-    if data.plot_id is not None:
-        if data.plot_id == 0:
-            group.plot_id = None
-        else:
-            plot = await _plot_for_group(db, data.plot_id)
-            group.plot_id, group.farm_id = plot.id, plot.farm_id
     if data.status is not None:
         if data.status not in {"active", "sold", "deceased", "archived"}:
             raise HTTPException(status_code=400, detail="Invalid status")
@@ -364,7 +345,7 @@ async def update_group(
         )
 
     await db.flush()
-    await db.refresh(group, attribute_names=["farm", "plot"])
+    await db.refresh(group, attribute_names=["farm"])
     record(db, "Animals", "update_group", f"Updated group: {group.name}",
            user=current_user, ref_type="animal_group", ref_id=group.id)
     await db.commit()
@@ -872,17 +853,6 @@ async def list_farms_for_picker(db: AsyncSession = Depends(get_async_session)):
         select(Farm).where(Farm.is_active == 1).order_by(Farm.name.asc())
     )).scalars().all()
     return {"items": [{"id": f.id, "name": f.name} for f in rows]}
-
-
-@router.get("/api/plots")
-async def list_plots_for_picker(db: AsyncSession = Depends(get_async_session)):
-    """Greenhouses and fields for the group form — here so page_animals users don't also need page_farm."""
-    rows = (await db.execute(
-        select(FarmPlot.id, FarmPlot.name, FarmPlot.farm_id, Farm.name)
-        .join(Farm, Farm.id == FarmPlot.farm_id)
-        .where(FarmPlot.is_active == 1).order_by(Farm.name, FarmPlot.name)
-    )).all()
-    return {"items": [{"id": i, "name": n, "farm_id": f, "farm_name": fn} for i, n, f, fn in rows]}
 
 
 @router.get("/api/locations")
@@ -1463,7 +1433,6 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
                 <option value="poultry">Poultry</option>
                 <option value="sheep">Sheep</option>
                 <option value="goats">Goats</option>
-                <option value="fish">Fish</option>
                 <option value="other" selected>Other</option>
             </select>
         </div>
@@ -1497,11 +1466,6 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
         <div class="fld">
             <label>Farm (optional)</label>
             <select id="gm-farm"><option value="">— None —</option></select>
-        </div>
-        <div class="fld">
-            <label>Feeds greenhouse / field (optional)</label>
-            <select id="gm-plot"><option value="">— None —</option></select>
-            <div class="stock-hint">For fish in a sandponic system: their feed counts as this bed's input and in its farm's season cost.</div>
         </div>
         <div class="fld" id="gm-status-wrap" style="display:none">
             <label>Status</label>
@@ -1645,7 +1609,6 @@ tbody tr:hover{{background:rgba(255,255,255,0.02)}}
                     <option value="poultry">Poultry</option>
                     <option value="sheep">Sheep</option>
                     <option value="goats">Goats</option>
-                    <option value="fish">Fish</option>
                     <option value="other" selected>Other</option>
                 </select>
             </div>
@@ -1702,7 +1665,6 @@ let _feedings = [];
 let _deaths = [];
 let _intakes = [];
 let _farms = [];
-let _plots = [];
 let _products = [];
 let _locations = [];
 
@@ -1751,11 +1713,6 @@ async function loadFarmsAndLocations(){{
             fetch("/animals/api/farms"),
             fetch("/animals/api/locations"),
         ]);
-        const pr = await fetch("/animals/api/plots");
-        if (pr.ok) {{
-            const d = await pr.json();
-            _plots = (d && d.items) ? d.items : [];
-        }}
         if (fr.ok) {{
             const d = await fr.json();
             _farms = (d && d.items) ? d.items : [];
@@ -2198,7 +2155,7 @@ function renderGroups(){{
             <td style="font-family:var(--mono)">${{g.headcount||0}}</td>
             <td style="font-family:var(--mono);color:var(--sub)">${{(g.male_count!=null||g.female_count!=null) ? `${{g.male_count!=null?g.male_count:"–"}} / ${{g.female_count!=null?g.female_count:"–"}}` : "—"}}</td>
             <td style="color:var(--sub)">${{esc(g.age||"—")}}</td>
-            <td style="color:var(--sub)">${{esc(g.farm_name||"—")}}${{g.plot_name ? `<div style="font-size:11px;color:var(--muted)">🌱 ${{esc(g.plot_name)}}</div>` : ""}}</td>
+            <td style="color:var(--sub)">${{esc(g.farm_name||"—")}}</td>
             <td><span class="badge ${{g.status}}">${{esc(g.status)}}</span></td>
             <td style="color:var(--sub);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${{esc(g.notes||"")}}">${{esc(g.notes||"—")}}</td>
             <td style="text-align:right">
@@ -2246,8 +2203,6 @@ function openGroupModal(id){{
     const farmSel = document.getElementById("gm-farm");
     farmSel.innerHTML = `<option value="">— None —</option>` +
         _farms.map(f => `<option value="${{f.id}}">${{esc(f.name)}}</option>`).join("");
-    document.getElementById("gm-plot").innerHTML = `<option value="">— None —</option>` +
-        _plots.map(p => `<option value="${{p.id}}">${{esc(p.name)}} — ${{esc(p.farm_name)}}</option>`).join("");
     const statusWrap = document.getElementById("gm-status-wrap");
     if (isEdit) {{
         const g = _groups.find(x => x.id === id);
@@ -2261,7 +2216,6 @@ function openGroupModal(id){{
             document.getElementById("gm-purchase-cost").value = g.purchase_cost != null ? g.purchase_cost : "";
             document.getElementById("gm-cost-per-head").value = g.cost_per_head != null ? g.cost_per_head : "";
             document.getElementById("gm-farm").value = g.farm_id || "";
-            document.getElementById("gm-plot").value = g.plot_id || "";
             document.getElementById("gm-status").value = g.status === "archived" ? "active" : (g.status || "active");
             document.getElementById("gm-notes").value = g.notes || "";
             statusWrap.style.display = "";
@@ -2276,7 +2230,6 @@ function openGroupModal(id){{
         document.getElementById("gm-purchase-cost").value = "";
         document.getElementById("gm-cost-per-head").value = "";
         document.getElementById("gm-farm").value = "";
-        document.getElementById("gm-plot").value = "";
         document.getElementById("gm-notes").value = "";
         statusWrap.style.display = "none";
     }}
@@ -2358,7 +2311,6 @@ async function saveGroup(){{
         female_count: femaleRaw === "" ? null : (parseInt(femaleRaw, 10) || 0),
         birth_date:   birthRaw  === "" ? null : birthRaw,
         farm_id: parseInt(document.getElementById("gm-farm").value, 10) || null,
-        plot_id: parseInt(document.getElementById("gm-plot").value, 10) || (id ? 0 : null),
         notes: document.getElementById("gm-notes").value.trim() || null,
         purchase_cost: purchaseCost,
         cost_per_head: perHeadCost,

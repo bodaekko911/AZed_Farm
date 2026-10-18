@@ -739,6 +739,7 @@ LEARNABLE = {
     "b2b_sale": ("b2b_client", "product"),
     "plot_input": ("product",),
     "animal_feeding": ("product",),
+    "fish_feed": ("product",),
 }
 MAX_LEARN = 60
 

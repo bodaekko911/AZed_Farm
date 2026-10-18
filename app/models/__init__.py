@@ -24,7 +24,7 @@ from app.models.b2b import (
 )
 from app.models.customer import Customer
 from app.models.expense import Expense, ExpenseCategory
-from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, FarmPlot, PlotInput, WeatherLog
+from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem, FarmPlot, FishLog, FishTank, PlotInput, WeatherLog
 from app.models.carbon import CarbonEmissionFactor, CarbonLog, CarbonTarget
 from app.models.hr import (
     Attendance,
@@ -107,6 +107,8 @@ __all__ = [
     "FarmDeliveryItem",
     "FarmPlot",
     "FeedingLog",
+    "FishLog",
+    "FishTank",
     "Invoice",
     "InvoiceItem",
     "Journal",
