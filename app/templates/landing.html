@@ -358,6 +358,8 @@
   .module p { font-size: 14px; line-height: 1.65; color: #505050; margin-bottom: 18px; }
   .module ul { display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #505050; }
   .module { scroll-margin-top: 96px; }
+  .new-tag { display: inline-block; vertical-align: middle; margin-left: 6px; padding: 2px 8px; border-radius: 999px;
+             background: #e7f3ea; color: #1f6b33; font-size: 11px; font-weight: 600; letter-spacing: .2px; }
   /* brief ring on the card you picked from the Modules dropdown */
   .module.is-target { animation: modulePulse 1.9s cubic-bezier(.16,.84,.44,1); }
   @keyframes modulePulse {
@@ -627,6 +629,7 @@
 
       <div class="nav-links">
         <a href="#operations">Operations</a>
+        <a href="#smart">Smart tools</a>
         <div class="nav-dd" id="navModules">
           <a href="#operations" id="navModulesTrigger" aria-haspopup="true" aria-expanded="false" aria-controls="navModulesMenu">Modules
             <svg class="nav-dd-caret" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 6.5L8 10.5L12 6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
@@ -641,6 +644,10 @@
             <a class="nav-dd-item" role="menuitem" href="#mod-animals"><strong>Animals &amp; livestock</strong><span>Lifecycle records, dedicated cost bucket</span></a>
             <a class="nav-dd-item" role="menuitem" href="#mod-pos"><strong>POS &amp; receive intake</strong><span>Checkout counter, batch stock intake</span></a>
             <a class="nav-dd-item" role="menuitem" href="#mod-reports"><strong>Reports, audit &amp; access</strong><span>Permissions, audit trail, exports</span></a>
+            <a class="nav-dd-item" role="menuitem" href="#mod-ask"><strong>Ask, the farm assistant</strong><span>Questions, charts, records on confirm</span></a>
+            <a class="nav-dd-item" role="menuitem" href="#mod-fieldbot"><strong>Telegram field bot</strong><span>Photos, messages and voice from the field</span></a>
+            <a class="nav-dd-item" role="menuitem" href="#mod-automations"><strong>Email alerts</strong><span>Morning brief, alerts, month-end checklist</span></a>
+            <a class="nav-dd-item" role="menuitem" href="#mod-quotations"><strong>Quotations</strong><span>Price offers that become invoices</span></a>
           </div>
         </div>
         <a href="#challenges">Challenges</a>
@@ -662,7 +669,7 @@
             <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M6 0.6l1.5 3.2 3.5.45-2.6 2.4.68 3.45L6 8.45 2.92 10.1l.68-3.45L1 4.25l3.5-.45L6 .6z"></path></svg>
             New
           </span>
-          Now with carbon footprint tracking
+          Now with Ask, the AI farm assistant
         </div>
 
         <h1><span class="h1-line">The ground your farm stands on,</span><span class="h1-line">and the numbers behind it</span></h1>
@@ -675,7 +682,7 @@
           Sign in
           <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
         </a>
-        <a href="#operations" class="btn-lg-light">Explore all modules</a>
+        <a href="#smart" class="btn-lg-light">See what's new</a>
       </div>
     </div>
   </div>
@@ -683,6 +690,7 @@
 
 <div class="mobile-menu" id="mobileMenu">
   <a href="#operations">Operations</a>
+  <a href="#smart">Smart tools</a>
   <div class="mm-group" id="mmModules">
     <button type="button" class="mm-toggle" id="mmModulesToggle" aria-expanded="false" aria-controls="mmModulesSub">
       Modules
@@ -698,6 +706,10 @@
       <a href="#mod-animals">Animals &amp; livestock</a>
       <a href="#mod-pos">POS &amp; receive intake</a>
       <a href="#mod-reports">Reports, audit &amp; access</a>
+      <a href="#mod-ask">Ask, the farm assistant</a>
+      <a href="#mod-fieldbot">Telegram field bot</a>
+      <a href="#mod-automations">Email alerts</a>
+      <a href="#mod-quotations">Quotations</a>
     </div>
   </div>
   <a href="#challenges">Challenges</a>
@@ -806,6 +818,7 @@
         <li>Retail POS-style invoicing</li>
         <li>B2B client pricing and credit limits</li>
         <li>Customer discount configuration</li>
+        <li>Quotations that convert to invoices</li>
         <li>Refunds and credit notes</li>
       </ul>
     </div>
@@ -872,6 +885,86 @@
   </div>
 </section>
 
+<section id="smart" class="sec">
+  <div class="eyebrow" data-reveal="up">Smart tools built in</div>
+  <h2 data-reveal="up" data-reveal-delay="90" class="h2" style="max-width:660px">An assistant that knows your farm, and tools that save hours every week</h2>
+  <p data-reveal="up" data-reveal-delay="170" class="lead" style="margin-bottom:56px">Ask questions in plain Arabic or English, let workers report from the field by Telegram, read paper documents straight into the system, and get the alerts that matter by email. Nothing is ever recorded without a person confirming it.</p>
+
+  <div class="modules">
+    <div class="module" id="mod-ask" data-reveal="up" data-reveal-delay="0">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M4 5h14v9H9l-4 3v-3H4z" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><path d="M8 9h6M8 11.5h4" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
+      <h3>Ask, your farm assistant <span class="new-tag">New</span></h3>
+      <p>Type a question and get the answer from the same figures as your reports, with a table or chart when it helps. It can also prepare routine records for you to confirm.</p>
+      <ul>
+        <li>Sales, profit, costs, stock, payroll, animals and carbon</li>
+        <li>Cost per kilo of each crop this season</li>
+        <li>Records expenses, deliveries, spoilage and sales on confirm</li>
+        <li>Never invents a figure, never acts on its own</li>
+      </ul>
+    </div>
+
+    <div class="module" id="mod-documents" data-reveal="up" data-reveal-delay="70">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="5" y="3" width="12" height="16" rx="2" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></rect><path d="M8 8h6M8 11h6M8 14h3" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><path d="M15 15l3 3" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
+      <h3>Reads your paper documents <span class="new-tag">New</span></h3>
+      <p>Photograph a receipt, a supplier delivery note or a handwritten harvest sheet, or upload a PDF of invoices. The details are read into a review card and the image is kept with the record.</p>
+      <ul>
+        <li>Expense receipts, with a check that lines add up</li>
+        <li>Supplier delivery notes into stock</li>
+        <li>Handwritten harvest sheets, in Arabic or English</li>
+        <li>Unclear values are marked, never guessed</li>
+      </ul>
+    </div>
+
+    <div class="module" id="mod-fieldbot" data-reveal="up" data-reveal-delay="140">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M3 10l16-6-4 15-4-5-4 3 1-5z" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><path d="M11 14l4-6" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
+      <h3>Telegram field bot <span class="new-tag">New</span></h3>
+      <p>Workers send a photo, a short message or a voice note from the field, without logging in. Each one becomes a draft that a manager confirms or rejects, and the worker is told either way.</p>
+      <ul>
+        <li>Harvest, spoilage, receipts and sales from any phone</li>
+        <li>Voice notes turned into text automatically</li>
+        <li>Field inbox for managers, approval from Telegram</li>
+        <li>One-time links, daily limits, per-worker permissions</li>
+      </ul>
+    </div>
+
+    <div class="module" id="mod-automations" data-reveal="up" data-reveal-delay="210">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="5" width="16" height="12" rx="2" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></rect><path d="M3.5 6.5L11 12l7.5-5.5" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><circle cx="17" cy="5" r="2.2" fill="#000"></circle></svg></div>
+      <h3>Email alerts that run on their own <span class="new-tag">New</span></h3>
+      <p>Rules that watch the business for you and send what they find by email, grouped so your inbox stays calm. They only read; they never change anything.</p>
+      <ul>
+        <li>Morning brief: yesterday's sales, what needs attention</li>
+        <li>Sales below cost at the till, and big expenses</li>
+        <li>Month-end close checklist with pass or fail</li>
+        <li>Weekly and monthly brief with charts</li>
+      </ul>
+    </div>
+
+    <div class="module" id="mod-quotations" data-reveal="up" data-reveal-delay="280">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="4" y="3" width="14" height="16" rx="2" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></rect><path d="M8 8h6M8 11h6" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><path d="M8 15l2 1.5 4-3.5" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
+      <h3>Quotations for hotels and restaurants <span class="new-tag">New</span></h3>
+      <p>Prepare price offers for weekly supply, with the client's own prices, delivery days and estimated weekly and monthly value. Accepted offers become invoices in one step.</p>
+      <ul>
+        <li>Margin check on every line, below-cost needs approval</li>
+        <li>Formal printed copy in Arabic or English</li>
+        <li>Emailed straight to the client</li>
+        <li>Prospects become clients when they accept</li>
+      </ul>
+    </div>
+
+    <div class="module" id="mod-languages" data-reveal="up" data-reveal-delay="350">
+      <div class="module-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="11" cy="11" r="7.5" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></circle><path d="M3.5 11h15M11 3.5c2.4 2.3 2.4 12.7 0 15M11 3.5c-2.4 2.3-2.4 12.7 0 15" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
+      <h3>Arabic and English throughout <span class="new-tag">New</span></h3>
+      <p>The assistant, the field bot, quotations and email alerts all work in Arabic or English, and understand the words your team actually uses on the farm.</p>
+      <ul>
+        <li>Arabic questions, Arabic answers</li>
+        <li>Egyptian Arabic farm terms understood</li>
+        <li>Printed quotations and emails in either language</li>
+        <li>Every page of AZed available in Arabic</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
 <section id="solutions" class="sec split mid bg-solutions">
   <div>
     <div class="eyebrow" data-reveal="up">How it solves it</div>
@@ -897,7 +990,7 @@
         <div class="step-num">3</div>
         <div>
           <h4>Alerts before problems become losses</h4>
-          <p>Low stock, reorder thresholds, spoilage anomalies, and overdue payments surface as alerts, so your team acts before the damage is done.</p>
+          <p>Low stock, spoilage anomalies, overdue payments, sales below cost and big expenses surface as alerts, on screen and by email, so your team acts before the damage is done.</p>
         </div>
       </div>
       <div class="step" data-reveal="left">
@@ -966,6 +1059,7 @@
       <div class="ba-row"><div class="ba-role">HR Manager</div><div class="ba-desc">Tracks attendance on paper, calculates payroll in Excel with manual deductions</div></div>
       <div class="ba-row"><div class="ba-role">Sales Team</div><div class="ba-desc">Doesn't know real stock levels, promises delivery dates that can't be met</div></div>
       <div class="ba-row"><div class="ba-role">Owner</div><div class="ba-desc">Gets a financial picture once a month, can't see real-time profitability</div></div>
+      <div class="ba-row"><div class="ba-role">Field Workers</div><div class="ba-desc">Write harvest and spoilage on paper that reaches the office days later, if at all</div></div>
     </div>
 
     <div class="ba-col ba-after" data-reveal="up" data-reveal-delay="120">
@@ -973,8 +1067,9 @@
       <div class="ba-row"><div class="ba-role">Farm Manager</div><div class="ba-desc">Live dashboard shows all farm batches, worker attendance, and alerts in one view</div></div>
       <div class="ba-row"><div class="ba-role">Accountant</div><div class="ba-desc">Every sale, purchase, and payroll auto-posts to the ledger, month-end takes minutes</div></div>
       <div class="ba-row"><div class="ba-role">HR Manager</div><div class="ba-desc">Attendance auto-captured per farm; payroll with loans/deductions calculated in one click</div></div>
-      <div class="ba-row"><div class="ba-role">Sales Team</div><div class="ba-desc">Sees live stock levels, can set B2B client pricing and credit limits instantly</div></div>
-      <div class="ba-row"><div class="ba-role">Owner</div><div class="ba-desc">Real-time revenue, spoilage rates, delivery performance, and carbon footprint, always on</div></div>
+      <div class="ba-row"><div class="ba-role">Sales Team</div><div class="ba-desc">Sees live stock levels, sends hotels a priced quotation in minutes and turns it into an invoice on acceptance</div></div>
+      <div class="ba-row"><div class="ba-role">Owner</div><div class="ba-desc">A morning brief by email, and any question answered by the assistant in seconds, in Arabic or English</div></div>
+      <div class="ba-row"><div class="ba-role">Field Workers</div><div class="ba-desc">Send harvest, spoilage and receipts from their phone by Telegram; nothing gets lost on paper</div></div>
     </div>
   </div>
 </section>
@@ -1051,6 +1146,22 @@
     <div class="faq" data-reveal="up">
       <div class="faq-q"><span>What is the carbon footprint module?</span><span class="faq-sign">+</span></div>
       <p class="faq-a">Each farm can log emission events (fuel use, chemical application, transport) against emission categories. The system tracks your total carbon output over time and compares it against reduction goals you set, giving you a sustainability report ready for stakeholders or certifications.</p>
+    </div>
+    <div class="faq" data-reveal="up">
+      <div class="faq-q"><span>What can the Ask assistant do, and can it change my data?</span><span class="faq-sign">+</span></div>
+      <p class="faq-a">Ask answers questions about sales, profit, costs, stock, payroll, animals, carbon and more, from the same figures as your reports. It can prepare records such as an expense, a farm delivery or a quotation, but nothing is saved until a person presses Confirm, and it only offers what each person's permissions allow.</p>
+    </div>
+    <div class="faq" data-reveal="up">
+      <div class="faq-q"><span>Do field workers need an AZed account?</span><span class="faq-sign">+</span></div>
+      <p class="faq-a">No. Workers are linked to the Telegram field bot with a one-time code from the admin. They send photos, short messages or voice notes, and every submission waits as a draft until a manager confirms it in the Field inbox.</p>
+    </div>
+    <div class="faq" data-reveal="up">
+      <div class="faq-q"><span>Does it work in Arabic?</span><span class="faq-sign">+</span></div>
+      <p class="faq-a">Yes. The assistant, the field bot, email alerts and printed quotations all work in Arabic or English, and the assistant understands everyday farm terms used in Egypt.</p>
+    </div>
+    <div class="faq" data-reveal="up">
+      <div class="faq-q"><span>Can we send price offers to hotels and restaurants?</span><span class="faq-sign">+</span></div>
+      <p class="faq-a">Yes. Quotations use each client's own prices, show delivery days and the estimated weekly and monthly value, and check the margin on every line. They print or email in Arabic or English, and an accepted quotation becomes an invoice in one step.</p>
     </div>
   </div>
 </section>
