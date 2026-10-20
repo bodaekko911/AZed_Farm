@@ -86,13 +86,16 @@ def test_passing_errors_after_the_retries_switch_too():
     assert [c[0] for c in calls] == ["primary.test"] * 3 + ["fallback.test"]
 
 
-def test_a_billing_failure_switches_at_once_and_stays_there_for_a_while():
+def test_a_billing_failure_goes_to_the_fallback_but_the_first_provider_is_asked_again_next_time():
     transport, calls = provider("402")
     assert post(transport).status_code == 200
     assert [c[0] for c in calls] == ["primary.test", "fallback.test"]             # no retries of a refusal
     calls.clear()
     post(transport)
-    assert [c[0] for c in calls] == ["fallback.test"]
+    assert [c[0] for c in calls] == ["primary.test", "fallback.test"]             # no hold after a refusal
+    ok_transport, ok_calls = provider("ok")                                        # account fixed: first provider
+    post(ok_transport)
+    assert [c[0] for c in ok_calls] == ["primary.test"]
 
 
 def test_a_billing_failure_is_returned_when_the_admin_chose_the_first_provider_only():

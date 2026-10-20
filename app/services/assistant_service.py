@@ -1185,7 +1185,9 @@ async def post_completion(client: httpx.AsyncClient, body: dict) -> httpx.Respon
 
     With a fallback provider configured, a request the first provider doesn't answer (a timeout, unreachable, or
     still a passing error after the retries) is sent there instead, with the fallback model; for the next few
-    minutes requests go straight to the fallback rather than waiting on the first provider again."""
+    minutes requests go straight to the fallback rather than waiting on the first provider again. A refusal of the
+    account (billing, key) also goes to the fallback, but without the hold: it comes back at once, so the first
+    provider is asked again on the very next request and is used as soon as its account works again."""
     global _primary_down_until
     mode = await provider_mode()
     fallback = fallback_for(body)
@@ -1201,11 +1203,13 @@ async def post_completion(client: httpx.AsyncClient, body: dict) -> httpx.Respon
             if response.status_code not in RETRYABLE_STATUS | ACCOUNT_STATUS:
                 return response
             if response.status_code in ACCOUNT_STATUS:
-                logger.warning("assistant provider refused the account (%s): %s — switching to the fallback",
+                logger.warning("assistant provider refused the account (%s): %s — this request goes to the fallback",
                                response.status_code, response.text[:200])
+            else:
+                _primary_down_until = time.monotonic() + FALLBACK_HOLD_SECONDS
         except (ProviderUnavailable, httpx.TimeoutException) as exc:
             logger.warning("assistant provider didn't answer (%s) — switching to the fallback", type(exc).__name__)
-        _primary_down_until = time.monotonic() + FALLBACK_HOLD_SECONDS
+            _primary_down_until = time.monotonic() + FALLBACK_HOLD_SECONDS
     logger.info("assistant request sent to the fallback provider (%s)", model)
     return await _attempts(client, base, key, {**body, "model": model}, label="fallback")
 
