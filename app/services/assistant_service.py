@@ -1082,6 +1082,9 @@ def pick_model(question: str) -> tuple[str, str]:
 # (4xx other than 429) is not, and neither is a timeout, so a slow provider can't keep someone waiting for minutes.
 RETRY_DELAYS = (1.0, 2.5)                 # seconds before the 2nd and 3rd attempt
 RETRYABLE_STATUS = {429, 500, 502, 503, 504, 520, 522, 524, 529}
+# The first provider's account can't be used at all — key rejected (401/403) or billing failed (402). Retrying won't
+# help, but the fallback provider has its own account, so these switch to it like an outage does.
+ACCOUNT_STATUS = {401, 402, 403}
 
 
 class ProviderUnavailable(Exception):
@@ -1195,8 +1198,11 @@ async def post_completion(client: httpx.AsyncClient, body: dict) -> httpx.Respon
         try:
             response = await _attempts(client, settings.ASSISTANT_BASE_URL, settings.ASSISTANT_API_KEY or "", body,
                                        timeout=httpx.Timeout(wait, connect=10.0))
-            if response.status_code not in RETRYABLE_STATUS:
+            if response.status_code not in RETRYABLE_STATUS | ACCOUNT_STATUS:
                 return response
+            if response.status_code in ACCOUNT_STATUS:
+                logger.warning("assistant provider refused the account (%s): %s — switching to the fallback",
+                               response.status_code, response.text[:200])
         except (ProviderUnavailable, httpx.TimeoutException) as exc:
             logger.warning("assistant provider didn't answer (%s) — switching to the fallback", type(exc).__name__)
         _primary_down_until = time.monotonic() + FALLBACK_HOLD_SECONDS

@@ -49,6 +49,9 @@ def provider(primary: str):
                 raise httpx.ReadTimeout("no answer", request=request)
             if primary == "500":
                 return httpx.Response(500, json={"error": "unexpected"})
+            if primary == "402":
+                return httpx.Response(402, json={"error": {"code": "insufficient_quota",
+                                                           "message": "Billing verification failed."}})
         return httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}]})
     return httpx.MockTransport(handler), calls
 
@@ -81,6 +84,22 @@ def test_passing_errors_after_the_retries_switch_too():
     transport, calls = provider("500")
     assert post(transport).status_code == 200
     assert [c[0] for c in calls] == ["primary.test"] * 3 + ["fallback.test"]
+
+
+def test_a_billing_failure_switches_at_once_and_stays_there_for_a_while():
+    transport, calls = provider("402")
+    assert post(transport).status_code == 200
+    assert [c[0] for c in calls] == ["primary.test", "fallback.test"]             # no retries of a refusal
+    calls.clear()
+    post(transport)
+    assert [c[0] for c in calls] == ["fallback.test"]
+
+
+def test_a_billing_failure_is_returned_when_the_admin_chose_the_first_provider_only():
+    svc.remember_mode("primary")
+    transport, calls = provider("402")
+    assert post(transport).status_code == 402
+    assert [c[0] for c in calls] == ["primary.test"]
 
 
 def test_images_fall_back_only_to_a_vision_model(monkeypatch):
