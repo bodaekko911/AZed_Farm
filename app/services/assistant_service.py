@@ -769,6 +769,98 @@ def allowed_actions(user) -> list[str]:
     return [name for name, (_d, _p, perms, _f) in ACTIONS.items() if all(has_permission(user, p) for p in perms)]
 
 
+# ── Offering only the tools a question needs ─────────────────────────────────
+# Every round re-sends the tool list, and all of it is ~20,000 characters — most of a round's prompt, and on a
+# free fallback plan (8,000 tokens a minute) enough on its own to hit the limit by the second round. So a question
+# is matched against these topics by keyword (no extra model call) and only the matching tools are offered. When
+# nothing matches, everything is offered as before; when something is left out, MORE_TOOLS lets the model ask for
+# the rest, so a missed keyword costs one round, not a wrong answer.
+
+TOOL_TOPICS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("sale", "sell", "sold", "revenue", "income", "turnover", "مبيع", "بيع", "بعنا", "باع", "ايراد", "إيراد"),
+     ("sales_summary", "sales_trend", "product_profitability", "pos_customers", "propose_pos_sale",
+      "propose_b2b_sale")),
+    (("trend", "best day", "worst day", "daily", "weekly", "monthly", "each month", "by month", "per day",
+      "over time", "اتجاه", "يومي", "باليوم", "احسن يوم", "أحسن يوم", "افضل يوم", "أفضل يوم", "كل شهر", "شهري",
+      "اسبوع", "أسبوع"),
+     ("sales_trend",)),
+    (("profit", "margin", "loss", "p&l", "pnl", "net income", "ربح", "مكسب", "خسار", "خسر", "هامش", "صافي"),
+     ("profit_and_loss", "product_profitability", "season_cost")),
+    (("expense", "spend", "spent", "cost", "bill", "diesel", "fuel", "electric", "rent", "مصروف", "مصاريف", "صرف",
+      "تكلف", "فاتورة", "سولار", "بنزين", "كهربا", "ايجار", "إيجار"),
+     ("expenses", "profit_and_loss", "propose_expense")),
+    (("product", "item", "stock", "inventory", "low", "reorder", "run out", "warehouse", "منتج", "صنف", "اصناف",
+      "أصناف", "مخزن", "مخزون", "ستوك", "فاضل", "خلص", "ناقص"),
+     ("products", "stock", "stock_by_location", "propose_stock_adjustment")),
+    (("location", "transfer", "shop", "store", "branch", "فرع", "محل", "تحويل", "نقل"),
+     ("stock_by_location",)),
+    (("spoil", "waste", "damaged", "rotten", "expired", "هالك", "تالف", "بايظ", "فاسد", "هدر"),
+     ("spoilage", "propose_spoilage")),
+    (("b2b", "client", "owe", "receivable", "debt", "credit", "hotel", "restaurant", "kitchen", "lodge", "consign",
+      "مديون", "عليه", "عليهم", "عميل", "عملاء", "فندق", "مطعم", "المطبخ", "امانة", "أمانة", "دفع", "سدد"),
+     ("b2b_balances", "consignment_stock", "propose_b2b_payment", "propose_b2b_sale")),
+    (("quot", "offer", "proposal", "عرض سعر", "عروض", "عرض"),
+     ("quotations", "propose_quotation")),
+    (("price", "pricing", "priced", "cheap", "expensive", "سعر", "اسعار", "أسعار", "تسعير", "غالي", "رخيص"),
+     ("pricing", "products", "propose_price_change")),
+    (("payroll", "salar", "employee", "staff", "worker", "attendance", "absent", "day off", "days off", "worked",
+      "loan", "advance", "مرتب", "راتب", "موظف", "عامل", "عمال", "حضور", "غياب", "غاب", "اجازة", "إجازة", "أجازة",
+      "سلف", "خصم", "اشتغل"),
+     ("payroll", "employee_balances", "propose_attendance")),
+    (("harvest", "deliver", "picked", "farm", "crop", "season", "حصاد", "جمع", "توريد", "وردنا", "مزرعة", "المزرعة",
+      "محصول", "موسم", "زرع"),
+     ("farm_harvest", "season_cost", "propose_farm_delivery")),
+    (("supplier", "vendor", "purchase", "bought", "payable", "مورد", "اشترينا", "شراء", "مشتريات"),
+     ("suppliers",)),
+    (("production", "batch", "packag", "drying", "dried", "yield", "انتاج", "إنتاج", "تعبئة", "تغليف", "تجفيف",
+      "باتش"),
+     ("production_batches",)),
+    (("animal", "livestock", "cow", "sheep", "goat", "chicken", "poultry", "feed", "died", "death", "حيوان",
+      "مواشي", "بقر", "غنم", "ماعز", "فراخ", "دواجن", "علف", "نفوق", "نفق"),
+     ("livestock",)),
+    (("carbon", "co2", "emission", "footprint", "كربون", "انبعاث", "بصمة"),
+     ("carbon_footprint",)),
+    (("account", "ledger", "cash", "bank", "balance sheet", "حسابات", "خزنة", "خزينة", "بنك", "نقدية", "كاش"),
+     ("account_balances",)),
+    (("changed", "deleted", "edited", "activity", "audit", "حذف", "مسح", "اتعدل", "عدّل"),
+     ("activity_log",)),
+    (("customer", "retail", "b2c", "pos", "زبون", "زباين", "زبائن", "كاشير"),
+     ("pos_customers", "propose_pos_sale")),
+)
+
+# Words that ask for something to be recorded rather than looked up. A number also counts ("sold 2 kg tomatoes",
+# "500 diesel"): the actions of a matched topic are offered only then, so a plain question carries no action forms.
+ACTION_WORDS = ("add", "record", "log ", "register", "create", "enter", "set ", "change", "update", "adjust", "mark",
+                "draft", "سجل", "سجّل", "ضيف", "أضف", "اضف", "ضف", "اعمل", "حط", "عدل", "خلي", "اكتب", "غير")
+
+MORE_TOOLS = "more_tools"
+MORE_TOOLS_SCHEMA = {"type": "function", "function": {
+    "name": MORE_TOOLS,
+    "description": "Only some lookups and actions are offered for this question. Call this (no arguments) when "
+                   "none of them fits; every other one is offered in the next round.",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+}}
+MORE_TOOLS_NOTE = ("Only the lookups and actions that seem relevant are offered. If the one you need isn't, call "
+                   "more_tools first instead of answering without it.")
+
+
+def select_tools(question: str, history: Optional[list], names: list[str]) -> list[str]:
+    """The tools to offer for this question, out of `names` (what the user may use), in their usual order.
+    Everything when nothing matches. Earlier questions count too, so "and last month?" keeps its topic."""
+    from app.services.assistant_actions import ACTIONS
+    earlier = [str(t.get("content") or "") for t in (history or [])[-MAX_HISTORY:]
+               if isinstance(t, dict) and t.get("role") == "user"][-2:]
+    text = " " + " ".join(earlier + [question or ""]).lower() + " "
+    wants_action = any(w in text for w in ACTION_WORDS) or any(ch.isdigit() for ch in (question or ""))
+    picked: set[str] = set()
+    for words, tools in TOOL_TOPICS:
+        if any(w in text for w in words):
+            picked.update(t for t in tools if wants_action or t not in ACTIONS)
+    if not any(name in TOOLS for name in picked & set(names)) and not (wants_action and picked & set(names)):
+        return list(names)
+    return [name for name in names if name in picked]
+
+
 def _tool_schemas(names: list[str]) -> list[dict]:
     from app.services.assistant_actions import ACTIONS
     schemas = []
@@ -1146,11 +1238,18 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
                                                     "tomorrow, or an admin can reset it for you.")
 
     names = allowed_tools(user) + allowed_actions(user)
-    tools = _tool_schemas(names)
+    offered = select_tools(question, history, names)
+    trimmed = len(offered) < len(names)
+
+    def schemas_for(selection: list[str]) -> list[dict]:
+        return _tool_schemas(selection) + ([MORE_TOOLS_SCHEMA] if len(selection) < len(names) else [])
+
+    tools = schemas_for(offered)
     from app.services import vocabulary_service as vocab
     terms = await vocab.terms_block(db)           # the farm's own definitions, fenced as data
     messages: list[dict] = [{"role": "system",
-                             "content": SYSTEM_PROMPT + "\n\n" + LOCAL_WORDS + ("\n\n" + terms if terms else "")}]
+                             "content": SYSTEM_PROMPT + "\n\n" + LOCAL_WORDS + ("\n\n" + terms if terms else "")
+                                        + ("\n\n" + MORE_TOOLS_NOTE if trimmed else "")}]
     for turn in (history or [])[-MAX_HISTORY:]:
         if isinstance(turn, dict) and turn.get("role") in ("user", "assistant") and turn.get("content"):
             messages.append({"role": turn["role"], "content": str(turn["content"])[:2000]})
@@ -1184,6 +1283,13 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
             t0 = time.perf_counter()
             for call in calls:
                 fn = call.get("function") or {}
+                if fn.get("name") == MORE_TOOLS or (fn.get("name") in names and fn.get("name") not in offered):
+                    # Asked for the rest (or used one it wasn't offered): every tool from the next round on.
+                    offered, tools = list(names), _tool_schemas(names)
+                if fn.get("name") == MORE_TOOLS:
+                    messages.append({"role": "tool", "tool_call_id": call.get("id"),
+                                     "content": "Every lookup and action is offered now — call the one you need."})
+                    continue
                 if fn.get("name") in assistant_actions.ACTIONS:
                     # An action is only ever proposed here; the page shows it with Confirm / Cancel.
                     text, card = await assistant_actions.propose(db, user, fn.get("name"), fn.get("arguments"))
@@ -1209,7 +1315,8 @@ async def ask(db: AsyncSession, user, question: str, history: Optional[list] = N
     record(db, "Assistant", "ask",
            f"{question[:300]} | lookups: {', '.join(l['tool'] or '?' for l in lookups) or 'none'} | "
            f"tokens {usage['prompt_tokens']}+{usage['completion_tokens']} | "
-           f"{timing_text(time.perf_counter() - started, model_s, lookup_s)} | model_used {tier}",
+           f"{timing_text(time.perf_counter() - started, model_s, lookup_s)} | model_used {tier} | "
+           f"tools {len(offered)}/{len(names)}",
            user=user)
     await db.commit()
     return {
