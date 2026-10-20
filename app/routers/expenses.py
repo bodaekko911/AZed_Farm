@@ -1083,6 +1083,7 @@ nav {
 .sidebar {
     background: var(--card); border: 1px solid var(--border);
     border-radius: 16px; overflow: hidden; position: sticky; top: 74px;
+    display: flex; flex-direction: column; max-height: calc(100vh - 90px);
 }
 .sidebar-head {
     padding: 14px 16px 12px; border-bottom: 1px solid var(--border);
@@ -1095,7 +1096,8 @@ nav {
     padding: 5px 10px; border-radius: 7px; cursor: pointer; transition: all .15s;
 }
 .add-cat-btn:hover { border-color: var(--amber); color: var(--amber); }
-.cat-list { padding: 8px; }
+.cat-list-all { padding: 8px; border-bottom: 1px solid var(--border); }
+.cat-list { padding: 8px; overflow-y: auto; flex: 1; min-height: 0; }
 .cat-item {
     display: flex; align-items: center; justify-content: space-between;
     padding: 9px 10px; border-radius: 9px; cursor: pointer;
@@ -1139,6 +1141,10 @@ nav {
 .exp-vendor { font-size: 12px; color: var(--sub); }
 .exp-amount { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--text); }
 .exp-date { font-size: 12px; color: var(--sub); }
+.exp-notes {
+    font-size: 12px; color: var(--sub); max-width: 220px; white-space: normal;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 .method-pill {
     display: inline-flex; align-items: center; gap: 5px;
     font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 20px;
@@ -1220,7 +1226,7 @@ nav {
 
 @media (max-width: 900px) {
     .layout { grid-template-columns: 1fr; }
-    .sidebar { position: static; }
+    .sidebar { position: static; max-height: 360px; }
     .stats-row { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 560px) {
@@ -1279,7 +1285,7 @@ nav {
                 <span class="sidebar-title">Categories</span>
                 <button class="add-cat-btn" id="new-category-btn" onclick="openCatModal()">+ New</button>
             </div>
-            <div class="cat-list">
+            <div class="cat-list-all">
                 <div class="cat-item active" id="cat-all" onclick="filterCategory(null)">
                     <div>
                         <div class="cat-item-name">All Expenses</div>
@@ -1287,6 +1293,8 @@ nav {
                     </div>
                     <div class="cat-item-total" id="cat-all-total">—</div>
                 </div>
+            </div>
+            <div class="cat-list">
                 <div id="cat-list-body"></div>
             </div>
         </div>
@@ -1317,12 +1325,13 @@ nav {
                             <th>Date</th>
                             <th>Vendor</th>
                             <th>Method</th>
+                            <th>Notes</th>
                             <th>Amount</th>
                             <th></th>
                         </tr>
                     </thead>
                     <tbody id="exp-tbody">
-                        <tr class="empty-row"><td colspan="8">Loading…</td></tr>
+                        <tr class="empty-row"><td colspan="9">Loading…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1765,7 +1774,7 @@ async function loadExpenses() {
     if (dateTo) params.set("date_to", dateTo);
     const url = `/expenses/api/list${params.toString() ? "?" + params.toString() : ""}`;
     const tbody = document.getElementById("exp-tbody");
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Loading…</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="9">Loading…</td></tr>`;
     try {
         const response = await fetch(url);
         const body = await response.text();
@@ -1774,7 +1783,7 @@ async function loadExpenses() {
             data = body ? JSON.parse(body) : null;
         } catch(parseErr) {
             console.error("Failed to parse expenses JSON", { url, status: response.status, body });
-            tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Could not load expenses (${response.status}): response was not valid JSON.</td></tr>`;
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="9">Could not load expenses (${response.status}): response was not valid JSON.</td></tr>`;
             return;
         }
         if (!response.ok) {
@@ -1786,7 +1795,7 @@ async function loadExpenses() {
                 body,
                 data
             });
-            tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Could not load expenses (${response.status}): ${escapeHtml(String(message))}</td></tr>`;
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="9">Could not load expenses (${response.status}): ${escapeHtml(String(message))}</td></tr>`;
             return;
         }
         console.log("Loading expenses page data: expenses response", {
@@ -1795,7 +1804,7 @@ async function loadExpenses() {
         });
         if (!Array.isArray(data)) {
             console.error("Expenses API returned non-array JSON", { url, status: response.status, data });
-            tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Could not load expenses: API returned an unexpected response shape.</td></tr>`;
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="9">Could not load expenses: API returned an unexpected response shape.</td></tr>`;
             return;
         }
         console.debug("Loaded expenses", {
@@ -1807,7 +1816,7 @@ async function loadExpenses() {
         // A slower, older search must not overwrite a newer one's result.
         if (search !== (document.getElementById("exp-search")?.value || "").trim()) return;
         if (!data.length) {
-            tbody.innerHTML = `<tr class="empty-row"><td colspan="8">${search ? `No expenses match “${escapeHtml(search)}”.` : "No expenses found in this database."}</td></tr>`;
+            tbody.innerHTML = `<tr class="empty-row"><td colspan="9">${search ? `No expenses match “${escapeHtml(search)}”.` : "No expenses found in this database."}</td></tr>`;
             return;
         }
         tbody.innerHTML = data.map(e => {
@@ -1838,6 +1847,7 @@ async function loadExpenses() {
                 <td><div class="exp-date">${escapeHtml(String(expenseDate))}</div></td>
                 <td><div class="exp-vendor">${escapeHtml(String(vendor || "—"))}</div></td>
                 <td><span class="method-pill method-${methodClass}">${escapeHtml(paymentMethod.replace(/_/g, " "))}</span></td>
+                <td><div class="exp-notes" title="${escapeHtml(String(e.description || ""))}">${escapeHtml(String(e.description || "—"))}</div></td>
                 <td><div class="exp-amount">${amountText}</div></td>
                 <td style="display:flex;gap:4px;flex-wrap:wrap">
                     <button class="action-btn" onclick="viewReceipt(${rowJson})">View</button>
@@ -1850,7 +1860,7 @@ async function loadExpenses() {
         }).join("");
     } catch(err) {
         console.error("Failed to load expenses", err);
-        tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Could not load expenses. Check the console for details.</td></tr>`;
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="9">Could not load expenses. Check the console for details.</td></tr>`;
     }
 }
 
