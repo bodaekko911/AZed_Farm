@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.routers.hr as hr
 from app.database import Base
-from app.models.hr import Attendance, Employee, Payroll
+from app.models.hr import Attendance, Employee, EmployeeDaysOffAdjustment, Payroll
 
 
 class AsyncSessionAdapter:
@@ -51,7 +51,8 @@ def make_session():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(
         engine,
-        tables=[Employee.__table__, Attendance.__table__, Payroll.__table__],
+        tables=[Employee.__table__, Attendance.__table__, Payroll.__table__,
+                EmployeeDaysOffAdjustment.__table__],
     )
     return sessionmaker(bind=engine, expire_on_commit=False)()
 

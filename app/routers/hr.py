@@ -24,6 +24,7 @@ from app.models.hr import (
     EmployeeLoanRepayment,
     EmployeePayrollDeduction,
     EmployeeAllowanceAdvance,
+    EmployeeDaysOffAdjustment,
     Payroll,
 )
 from app.models.farm import Farm
@@ -143,6 +144,11 @@ class ManualDeductionCreate(BaseModel):
 class AllowanceAdvanceCreate(BaseModel):
     advance_date: str
     amount: Decimal = Field(gt=0)
+    note: Optional[str] = None
+
+
+class DaysOffCreditUpdate(BaseModel):
+    days_left: Decimal = Field(ge=0)   # the credit the employee should have now
     note: Optional[str] = None
 
 
@@ -537,10 +543,17 @@ async def _employee_vacation_summary(db: AsyncSession, employee: Employee) -> di
     )
     taken = _days(_taken.scalar() or 0)
 
+    _adjusted = await db.execute(
+        select(func.coalesce(func.sum(EmployeeDaysOffAdjustment.days), 0)).where(
+            EmployeeDaysOffAdjustment.employee_id == employee.id
+        )
+    )
+    adjusted = _days(_adjusted.scalar() or 0)
+
     # Floor at zero: an employee can overdraw leave (take more than accrued),
     # but payroll only pays what the balance covers and the remaining balance
     # is never negative — it simply hits zero.
-    left = _days(accrued + credited - taken)
+    left = _days(accrued + credited + adjusted - taken)
     if left < 0:
         left = Decimal("0")
     return {
@@ -548,6 +561,7 @@ async def _employee_vacation_summary(db: AsyncSession, employee: Employee) -> di
         "months_accrued": months,
         "accrued": _as_day_float(accrued),
         "credited_from_payroll": _as_day_float(credited),
+        "adjusted": _as_day_float(adjusted),
         "taken": _as_day_float(taken),
         "days_left": _as_day_float(left),
     }
@@ -597,7 +611,18 @@ async def _vacation_available_as_of(
     )
     taken_before = _days(_taken_before.scalar() or 0)
 
-    available = _days(accrued + credited_before - taken_before)
+    # Manual adjustments count for the month they were entered in and after, so
+    # a correction made today applies to this month's payroll but never
+    # changes an earlier month's re-run.
+    _adjusted = await db.execute(
+        select(func.coalesce(func.sum(EmployeeDaysOffAdjustment.days), 0)).where(
+            EmployeeDaysOffAdjustment.employee_id == employee.id,
+            EmployeeDaysOffAdjustment.adjustment_date <= as_of,
+        )
+    )
+    adjusted = _days(_adjusted.scalar() or 0)
+
+    available = _days(accrued + credited_before + adjusted - taken_before)
     return available if available > 0 else Decimal("0")
 
 
@@ -908,6 +933,7 @@ async def _clear_hr_data(db: AsyncSession, current_user: User) -> dict:
     await db.execute(delete(EmployeePayrollDeduction).execution_options(synchronize_session=False))
     await db.execute(delete(EmployeeLoanRepayment).execution_options(synchronize_session=False))
     await db.execute(delete(EmployeeLoan).execution_options(synchronize_session=False))
+    await db.execute(delete(EmployeeDaysOffAdjustment).execution_options(synchronize_session=False))
 
     await _remove_journal_balances(db, hr_journal_ids)
     if hr_journal_ids:
@@ -1193,6 +1219,40 @@ async def get_vacation_summary(db: AsyncSession = Depends(get_async_session)):
         summary["position"] = emp.position or "—"
         out.append(summary)
     return out
+
+
+@router.post("/api/employees/{employee_id}/days-off-credit", dependencies=[Depends(require_permission("action_hr_manage_employees"))])
+async def set_days_off_credit(
+    employee_id: int,
+    data: DaysOffCreditUpdate,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Set an employee's days-off credit to `days_left` by recording the
+    difference as a dated adjustment (the balance itself stays computed)."""
+    employee = await _get_employee_or_404(db, employee_id)
+    summary = await _employee_vacation_summary(db, employee)
+    target = _days(data.days_left)
+    # Compare against the unfloored balance so the new credit comes out exactly
+    # as entered even when the employee had overdrawn their leave.
+    current_raw = _days(
+        _days(summary["accrued"]) + _days(summary["credited_from_payroll"])
+        + _days(summary["adjusted"]) - _days(summary["taken"])
+    )
+    delta = _days(target - current_raw)
+    if delta != 0:
+        db.add(EmployeeDaysOffAdjustment(
+            employee_id=employee.id,
+            adjustment_date=date.today(),
+            days=delta,
+            note=(data.note or "").strip() or None,
+            created_by_user_id=current_user.id,
+        ))
+        record(db, "HR", "adjust_days_off_credit",
+               f"Days-off credit for {employee.name}: {float(summary['days_left']):.2f} → {float(target):.2f} ({float(delta):+.2f})",
+               user=current_user, ref_type="employee", ref_id=employee.id)
+        await db.commit()
+    return {"ok": True, **(await _employee_vacation_summary(db, employee))}
 
 
 @router.get("/api/employees/{employee_id}/loans", dependencies=[Depends(require_permission("action_hr_view_loans"))])
@@ -3457,13 +3517,15 @@ td.mono { font-family: var(--mono); color: var(--green); }
                 <th style="text-align:center">Allowance / mo</th>
                 <th style="text-align:center">Accrued</th>
                 <th style="text-align:center">From payroll</th>
+                <th style="text-align:center">Adjusted</th>
                 <th style="text-align:center">Taken</th>
                 <th style="text-align:center">Days off credit</th>
+                <th></th>
             </tr></thead>
             <tbody id="daysoff-body"></tbody>
         </table>
         <div style="max-width:1100px;margin:10px auto 0;font-size:11px;color:var(--muted);line-height:1.5">
-            Credit = monthly allowance accrued from hire (carried over) + days off earned by paying salary partially &minus; days taken (attendance marked "Day Off"). The balance never goes below zero: if more days off are taken than available, payroll only pays what the balance covers and the rest is unpaid.
+            Credit = monthly allowance accrued from hire (carried over) + days off earned by paying salary partially + manual adjustments &minus; days taken (attendance marked "Day Off"). The balance never goes below zero: if more days off are taken than available, payroll only pays what the balance covers and the rest is unpaid.
         </div>
     </div>
 </div>
@@ -3613,6 +3675,21 @@ td.mono { font-family: var(--mono); color: var(--green); }
 
         <div class="modal-actions">
             <button class="btn-cancel" onclick="closeLoanDeductionModal()">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- DAYS OFF CREDIT MODAL -->
+<div class="modal-bg" id="daysoff-credit-modal">
+    <div class="modal">
+        <div class="modal-title">Edit Days Off Credit</div>
+        <div class="modal-sub" id="doc-emp" style="color:var(--muted);font-size:13px;margin-bottom:16px"></div>
+        <div class="fld"><label>Days off credit *</label><input id="doc-days" type="number" min="0" step="0.25"></div>
+        <div class="fld"><label>Reason</label><input id="doc-note" placeholder="e.g. opening balance, correction"></div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:16px">The difference is saved as a dated adjustment and applies from this month's payroll on.</div>
+        <div class="modal-actions">
+            <button class="btn-cancel" onclick="closeDaysOffCreditModal()">Cancel</button>
+            <button class="btn btn-blue" onclick="saveDaysOffCredit()">Save</button>
         </div>
     </div>
 </div>
@@ -4451,11 +4528,11 @@ let allowanceAdvanceEmployeeName = "";
 async function loadDaysOffBoard(){
     const body = document.getElementById("daysoff-body");
     if(!body) return;
-    body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">Loading\u2026</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:20px">Loading\u2026</td></tr>`;
     try{
         const rows = await (await fetch("/hr/api/vacation-summary")).json();
         if(!rows.length){
-            body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No employees have a monthly days-off allowance set. Add one in the employee profile (Vacation Days / Month).</td></tr>`;
+            body.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:30px">No employees have a monthly days-off allowance set. Add one in the employee profile (Vacation Days / Month).</td></tr>`;
             return;
         }
         body.innerHTML = rows.map(r=>{
@@ -4467,13 +4544,44 @@ async function loadDaysOffBoard(){
                 <td style="text-align:center;font-family:var(--mono)">${numberValue(r.per_month)}</td>
                 <td style="text-align:center;font-family:var(--mono);color:var(--muted)">${numberValue(r.accrued).toFixed(2)}</td>
                 <td style="text-align:center;font-family:var(--mono);color:var(--muted)">${numberValue(r.credited_from_payroll).toFixed(2)}</td>
+                <td style="text-align:center;font-family:var(--mono);color:var(--muted)">${numberValue(r.adjusted) > 0 ? "+" : ""}${numberValue(r.adjusted).toFixed(2)}</td>
                 <td style="text-align:center;font-family:var(--mono);color:var(--muted)">${numberValue(r.taken).toFixed(2)}</td>
                 <td style="text-align:center;font-family:var(--mono);font-weight:700;color:${color}">${left.toFixed(2)}</td>
+                <td>${hasPermission("action_hr_manage_employees") ? `<button class="action-btn blue" onclick="openDaysOffCreditModal(${numberValue(r.employee_id)}, ${JSON.stringify(String(r.employee || "")).replace(/"/g,'&quot;')}, ${left})">Edit</button>` : ""}</td>
             </tr>`;
         }).join("");
     }catch(err){
-        body.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--danger);padding:20px">Could not load days-off credit</td></tr>`;
+        body.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--danger);padding:20px">Could not load days-off credit</td></tr>`;
     }
+}
+
+let daysOffCreditEmployeeId = null;
+
+function openDaysOffCreditModal(empId, name, current){
+    daysOffCreditEmployeeId = empId;
+    document.getElementById("doc-emp").innerHTML = `${escapeHtml(name)} &nbsp;·&nbsp; Current credit: <b>${numberValue(current).toFixed(2)} days</b>`;
+    document.getElementById("doc-days").value = numberValue(current).toFixed(2);
+    document.getElementById("doc-note").value = "";
+    document.getElementById("daysoff-credit-modal").classList.add("open");
+}
+
+function closeDaysOffCreditModal(){
+    document.getElementById("daysoff-credit-modal").classList.remove("open");
+}
+
+async function saveDaysOffCredit(){
+    const raw = document.getElementById("doc-days").value;
+    const days = parseFloat(raw);
+    if(raw === "" || !Number.isFinite(days) || days < 0){ showToast("Enter a credit of 0 or more days"); return; }
+    const res = await fetch(`/hr/api/employees/${daysOffCreditEmployeeId}/days-off-credit`, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({days_left: days, note: document.getElementById("doc-note").value.trim() || null}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if(!res.ok || data.detail){ showToast("Error: " + (data.detail || res.status)); return; }
+    closeDaysOffCreditModal();
+    showToast(`Days off credit set to ${numberValue(data.days_left).toFixed(2)}`);
+    loadDaysOffBoard();
 }
 
 async function loadAllowanceBoard(){
@@ -5178,7 +5286,7 @@ async function confirmClearHRData(){
 }
 
 /* ── MODAL CLOSE ON BG ── */
-["emp-modal","att-modal","pay-run-modal","edit-pay-modal","loan-deduction-modal","allowance-advance-modal","clear-hr-modal"].forEach(id=>{
+["emp-modal","att-modal","pay-run-modal","edit-pay-modal","loan-deduction-modal","allowance-advance-modal","daysoff-credit-modal","clear-hr-modal"].forEach(id=>{
     document.getElementById(id).addEventListener("click",function(e){
         if(e.target!==this) return;
         if(id === "clear-hr-modal") closeClearHRDataModal();

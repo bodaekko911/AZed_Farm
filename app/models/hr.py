@@ -37,6 +37,7 @@ class Employee(Base):
     loan_repayments = relationship("EmployeeLoanRepayment", back_populates="employee")
     payroll_deductions = relationship("EmployeePayrollDeduction", back_populates="employee")
     allowance_advances = relationship("EmployeeAllowanceAdvance", back_populates="employee")
+    days_off_adjustments = relationship("EmployeeDaysOffAdjustment", back_populates="employee")
     farm       = relationship("Farm", back_populates="employees")
 
 
@@ -161,4 +162,22 @@ class EmployeePayrollDeduction(Base):
 
     employee = relationship("Employee", back_populates="payroll_deductions")
     payroll = relationship("Payroll", back_populates="payroll_deductions")
+    created_by = relationship("User", foreign_keys=[created_by_user_id])
+
+class EmployeeDaysOffAdjustment(Base):
+    """A manual correction to an employee's days-off credit (positive adds days,
+    negative removes them). Counted in the leave balance from `adjustment_date`
+    on, so payroll for earlier months is unaffected.
+    """
+    __tablename__ = "employee_days_off_adjustments"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False, index=True)
+    adjustment_date = Column(Date, nullable=False)
+    days        = Column(Numeric(8, 2), nullable=False)
+    note        = Column(Text, nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+
+    employee   = relationship("Employee", back_populates="days_off_adjustments")
     created_by = relationship("User", foreign_keys=[created_by_user_id])
