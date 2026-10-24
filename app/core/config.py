@@ -94,7 +94,7 @@ class BaseAppSettings(BaseSettings):
     # "Ask" assistant — an OpenAI-format chat completions endpoint. Set these
     # as environment variables (e.g. Railway Variables), never in code.
     ASSISTANT_API_KEY: str | None = None
-    ASSISTANT_BASE_URL: str = "https://codecraftapi.com/v1"
+    ASSISTANT_BASE_URL: str = "https://api.xkiro.com/v1"
     ASSISTANT_MODEL: str | None = None
     ASSISTANT_DAILY_LIMIT: int = 10
     # A cheaper, faster model for simple questions (one lookup, a plain figure, an action). Comparisons, "why",
