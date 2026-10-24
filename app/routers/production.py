@@ -13,6 +13,7 @@ from app.database import get_async_session
 from app.core.permissions import get_current_user, require_permission
 from app.core.log import record as log_record
 from app.core.navigation import render_app_header
+from app.core.time_utils import utc_bounds
 from app.models.product import Product
 from app.models.inventory import StockMove
 from app.models.user import User
@@ -120,6 +121,15 @@ class SpoilageCreate(BaseModel):
     notes:         Optional[str] = None
 
 
+def _parse_date(value: Optional[str], label: str) -> Optional[date_type]:
+    if not value:
+        return None
+    try:
+        return date_type.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid {label} — use YYYY-MM-DD")
+
+
 # ── RECIPE API ─────────────────────────────────────────
 @router.get("/api/recipes")
 async def get_recipes(db: AsyncSession = Depends(get_async_session)):
@@ -131,11 +141,22 @@ async def get_recipes(db: AsyncSession = Depends(get_async_session)):
         )
     )
     recipes = result.scalars().all()
+    # How often each recipe has actually been run — lets the Recipes tab sort
+    # by use and show "used 12× · last 2026-10-20" on each card.
+    usage_rows = await db.execute(
+        select(ProductionBatch.recipe_id, func.count(), func.max(ProductionBatch.created_at))
+        .where(ProductionBatch.recipe_id.is_not(None))
+        .group_by(ProductionBatch.recipe_id)
+    )
+    usage = {rid: (cnt, last) for rid, cnt, last in usage_rows.all()}
     return [
         {
             "id":          r.id,
             "name":        r.name,
             "description": r.description or "",
+            "created_at":  r.created_at.isoformat() if r.created_at else None,
+            "batch_count": usage.get(r.id, (0, None))[0],
+            "last_used":   usage[r.id][1].isoformat() if r.id in usage and usage[r.id][1] else None,
             "inputs":  [{"product_id": i.product_id, "product_name": i.product.name, "qty": float(i.qty), "unit": i.product.unit} for i in r.inputs],
             "outputs": [{"product_id": o.product_id, "product_name": o.product.name, "qty": float(o.qty), "unit": o.product.unit} for o in r.outputs],
         }
@@ -214,6 +235,10 @@ async def get_batches(
     skip: int = 0,
     limit: int = 50,
     batch_type: str = "all",
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    q: Optional[str] = None,
+    recipe_id: Optional[int] = None,
     db: AsyncSession = Depends(get_async_session),
 ):
     kind = (batch_type or "all").strip().lower()
@@ -222,14 +247,35 @@ async def get_batches(
 
     # Packaging runs are numbered PKG-…, processing batches BATCH-… — the
     # prefix is the only thing separating the two lists.
-    type_filter = None
+    conditions = []
     if kind == "packaging":
-        type_filter = ProductionBatch.batch_number.like("PKG%")
+        conditions.append(ProductionBatch.batch_number.like("PKG%"))
     elif kind == "processing":
-        type_filter = or_(
+        conditions.append(or_(
             ProductionBatch.batch_number.is_(None),
             ProductionBatch.batch_number.notlike("PKG%"),
-        )
+        ))
+    # Dates are local calendar days; created_at is stored in UTC.
+    d_from = _parse_date(date_from, "from date")
+    d_to   = _parse_date(date_to, "to date")
+    if d_from:
+        conditions.append(ProductionBatch.created_at >= utc_bounds(d_from, d_from)[0])
+    if d_to:
+        conditions.append(ProductionBatch.created_at <= utc_bounds(d_to, d_to)[1])
+    if recipe_id:
+        conditions.append(ProductionBatch.recipe_id == recipe_id)
+    q = (q or "").strip()
+    if q:
+        like = f"%{q}%"
+        conditions.append(or_(
+            ProductionBatch.batch_number.ilike(like),
+            ProductionBatch.notes.ilike(like),
+            ProductionBatch.recipe.has(Recipe.name.ilike(like)),
+            ProductionBatch.inputs.any(BatchInput.product.has(
+                or_(Product.name.ilike(like), Product.sku.ilike(like)))),
+            ProductionBatch.outputs.any(BatchOutput.product.has(
+                or_(Product.name.ilike(like), Product.sku.ilike(like)))),
+        ))
 
     cnt_stmt = select(func.count()).select_from(ProductionBatch)
     list_stmt = (
@@ -241,9 +287,9 @@ async def get_batches(
         )
         .order_by(ProductionBatch.created_at.desc())
     )
-    if type_filter is not None:
-        cnt_stmt = cnt_stmt.where(type_filter)
-        list_stmt = list_stmt.where(type_filter)
+    if conditions:
+        cnt_stmt = cnt_stmt.where(*conditions)
+        list_stmt = list_stmt.where(*conditions)
 
     cnt_result = await db.execute(cnt_stmt)
     total = cnt_result.scalar()
@@ -605,9 +651,11 @@ async def get_spoilage(
     limit: int = 100,
     date_from: str | None = None,
     date_to: str | None = None,
+    q: str | None = None,
     db: AsyncSession = Depends(get_async_session),
 ):
     from datetime import date as _date, timedelta as _timedelta
+    from app.models.farm import Farm
 
     def _parse(value, fallback):
         try:
@@ -621,10 +669,20 @@ async def get_spoilage(
     if d_from > d_to:
         d_from, d_to = d_to, d_from
 
-    scope = (
+    scope = [
         SpoilageRecord.spoilage_date >= d_from,
         SpoilageRecord.spoilage_date <= d_to,
-    )
+    ]
+    q = (q or "").strip()
+    if q:
+        like = f"%{q}%"
+        scope.append(or_(
+            SpoilageRecord.ref_number.ilike(like),
+            SpoilageRecord.reason.ilike(like),
+            SpoilageRecord.notes.ilike(like),
+            SpoilageRecord.product.has(or_(Product.name.ilike(like), Product.sku.ilike(like))),
+            SpoilageRecord.farm.has(Farm.name.ilike(like)),
+        ))
     cnt_r = await db.execute(
         select(func.count()).select_from(SpoilageRecord).where(*scope)
     )
@@ -853,6 +911,17 @@ nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;gap:8px;pa
 .spl-filter input[type=date]{background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:7px 11px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;}
 .spl-chip{padding:6px 11px;border-radius:8px;border:1px solid var(--border2);background:transparent;color:var(--sub);font-family:var(--sans);font-size:12px;font-weight:700;cursor:pointer;}
 .spl-chip:hover{color:var(--text);border-color:var(--danger);}
+.spl-filter select,.spl-filter input[type=search]{background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:7px 11px;color:var(--text);font-family:var(--sans);font-size:13px;outline:none;}
+.spl-filter input[type=search]{flex:1;min-width:200px;max-width:380px;}
+.spl-filter select:focus,.spl-filter input:focus{border-color:rgba(251,146,60,.4);}
+.spl-filter .flt-count{font-size:11px;color:var(--muted);margin-left:auto;}
+.seg{display:inline-flex;border:1px solid var(--border2);border-radius:8px;overflow:hidden;}
+.seg button{background:transparent;border:none;color:var(--sub);font-family:var(--sans);font-size:12px;font-weight:700;padding:7px 12px;cursor:pointer;}
+.seg button + button{border-left:1px solid var(--border2);}
+.seg button.active{background:rgba(251,146,60,.12);color:var(--orange);}
+.seg button .n{font-family:var(--mono);font-weight:400;color:var(--muted);margin-left:4px;}
+.recipe-usage{font-size:11px;color:var(--muted);padding:0 18px 10px;}
+@media (max-width:600px){.spl-filter input[type=search]{max-width:none;width:100%;}.spl-filter .flt-count{margin-left:0;}}
 table{width:100%;border-collapse:collapse;}
 thead{background:var(--card2);}
 th{text-align:left;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:12px 16px;}
@@ -981,6 +1050,18 @@ td.name{color:var(--text);font-weight:600;}
         </div>
     </div>
 
+    <!-- BATCH FILTERS — shared by All Batches / Processing / Packaging -->
+    <div class="spl-filter" id="batch-filters" style="margin-top:14px">
+        <input type="search" id="bf-search" placeholder="Search batch #, recipe, product, notes..." oninput="onBatchSearch()">
+        <select id="bf-recipe" onchange="applyBatchFilters()"><option value="">All recipes</option></select>
+        <label>From</label><input type="date" id="bf-from" onchange="applyBatchFilters()">
+        <label>To</label><input type="date" id="bf-to" onchange="applyBatchFilters()">
+        <button class="spl-chip" onclick="batchRange('today')">Today</button>
+        <button class="spl-chip" onclick="batchRange(7)">7 days</button>
+        <button class="spl-chip" onclick="batchRange('mtd')">This month</button>
+        <button class="spl-chip" id="bf-clear" onclick="clearBatchFilters()" style="display:none">Clear</button>
+    </div>
+
     <!-- BATCHES -->
     <div id="section-batches">
         <div class="table-wrap">
@@ -1027,6 +1108,22 @@ td.name{color:var(--text);font-weight:600;}
 
     <!-- RECIPES -->
     <div id="section-recipes" style="display:none">
+        <div class="spl-filter" style="margin-top:14px">
+            <input type="search" id="rf-search" placeholder="Search recipe name, description or ingredient..." oninput="renderRecipes()">
+            <div class="seg" id="rf-type">
+                <button data-type="all" class="active" onclick="setRecipeType('all')">All<span class="n" id="rf-n-all"></span></button>
+                <button data-type="processing" onclick="setRecipeType('processing')">Processing<span class="n" id="rf-n-processing"></span></button>
+                <button data-type="packaging" onclick="setRecipeType('packaging')">Packaging<span class="n" id="rf-n-packaging"></span></button>
+            </div>
+            <label>Sort</label>
+            <select id="rf-sort" onchange="renderRecipes()">
+                <option value="name">Name A–Z</option>
+                <option value="used">Most used</option>
+                <option value="recent">Recently used</option>
+                <option value="newest">Newest first</option>
+            </select>
+            <span class="flt-count" id="rf-count"></span>
+        </div>
         <div class="recipes-grid" id="recipes-grid">
             <div class="recipes-empty">Loading...</div>
         </div>
@@ -1038,6 +1135,7 @@ td.name{color:var(--text);font-weight:600;}
             <label>From</label><input type="date" id="spl-from">
             <label>To</label><input type="date" id="spl-to">
             <button class="spl-chip" onclick="loadSpoilage()" style="border-color:var(--danger);color:var(--danger)">Apply</button>
+            <input type="search" id="spl-search" placeholder="Search ref, product, reason, farm, notes..." oninput="onSpoilageSearch()">
             <button class="spl-chip" onclick="spoilageRange(30)">Last 30 days</button>
             <button class="spl-chip" onclick="spoilageRange('mtd')">This month</button>
             <button class="spl-chip" onclick="spoilageRange('ytd')">This year</button>
@@ -1056,6 +1154,19 @@ td.name{color:var(--text);font-weight:600;}
 
     <!-- DRYING -->
     <div id="section-drying" style="display:none">
+        <div class="spl-filter" style="margin-top:14px">
+            <input type="search" id="df-search" placeholder="Search batch #, product, stage, notes..." oninput="renderDryingTable()">
+            <select id="df-status" onchange="renderDryingTable()">
+                <option value="">All statuses</option>
+                <option value="in_progress">In progress</option>
+                <option value="completed">Completed</option>
+                <option value="cancelled">Cancelled</option>
+            </select>
+            <label>Started from</label><input type="date" id="df-from" onchange="renderDryingTable()">
+            <label>To</label><input type="date" id="df-to" onchange="renderDryingTable()">
+            <button class="spl-chip" id="df-clear" onclick="clearDryingFilters()" style="display:none">Clear</button>
+            <span class="flt-count" id="df-count"></span>
+        </div>
         <div class="table-wrap">
             <table>
                 <thead><tr>
@@ -1464,9 +1575,7 @@ async function init(){
     allFarms    = await (await fetch("/production/api/farms-list")).json();
     buildProductDatalist();
     initProductionSearches();
-    splitRecipes();
-    fillSel("batch-recipe-sel", procRecipes);
-    fillSel("pkg-recipe-sel",   pkgRecipes);
+    fillRecipeSelects();
     loadBatches();
 }
 
@@ -1479,7 +1588,17 @@ function fillSel(selId, recipes){
     let sel = document.getElementById(selId);
     if(!sel) return;
     let first = sel.options[0].outerHTML;
-    sel.innerHTML = first + recipes.map(r => `<option value="${r.id}">${r.name}</option>`).join("");
+    let keep  = sel.value;
+    sel.innerHTML = first + recipes.map(r => `<option value="${r.id}">${escapeHtml(r.name)}</option>`).join("");
+    if(recipes.some(r => String(r.id) === keep)) sel.value = keep;
+}
+
+/* Every recipe dropdown on the page, after recipes are (re)loaded. */
+function fillRecipeSelects(){
+    splitRecipes();
+    fillSel("batch-recipe-sel", procRecipes);
+    fillSel("pkg-recipe-sel",   pkgRecipes);
+    fillSel("bf-recipe",        allRecipes);
 }
 
 /* ── TABS ── */
@@ -1497,6 +1616,7 @@ function switchTab(tab){
         document.getElementById("section-"+t).style.display = t===tab ? "" : "none";
         document.getElementById("tab-"+t).classList.toggle("active", t===tab);
     });
+    document.getElementById("batch-filters").style.display  = ["batches","processing","packaging"].includes(tab) ? "" : "none";
     document.getElementById("btn-batch").style.display      = tab==="processing" ? "" : "none";
     document.getElementById("btn-pkg").style.display        = tab==="packaging" ? "" : "none";
     document.getElementById("btn-recipe").style.display     = tab==="recipes"  ? "" : "none";
@@ -2126,14 +2246,79 @@ function batchRowHtml(b, {idPrefix, colspan, withType, withActions}){
     </td></tr>`;
 }
 
+/* ── BATCH FILTERS ── one filter bar drives all three batch lists */
+let batchSearchTimer = null;
+const batchLoadSeq = {};      // per list: ignore responses a newer request superseded
+
+function batchFilterQuery(){
+    let p = new URLSearchParams();
+    let q      = document.getElementById("bf-search").value.trim();
+    let recipe = document.getElementById("bf-recipe").value;
+    let from   = document.getElementById("bf-from").value;
+    let to     = document.getElementById("bf-to").value;
+    if(q)      p.set("q", q);
+    if(recipe) p.set("recipe_id", recipe);
+    if(from)   p.set("date_from", from);
+    if(to)     p.set("date_to", to);
+    document.getElementById("bf-clear").style.display = [...p.keys()].length ? "" : "none";
+    let s = p.toString();
+    return s ? "&"+s : "";
+}
+
+function batchesFiltered(){ return batchFilterQuery() !== ""; }
+
+function applyBatchFilters(){
+    batchPage = 0; procPage = 0;
+    refreshBatchViews();
+}
+
+function onBatchSearch(){
+    clearTimeout(batchSearchTimer);
+    batchSearchTimer = setTimeout(applyBatchFilters, 300);
+}
+
+function clearBatchFilters(){
+    ["bf-search","bf-recipe","bf-from","bf-to"].forEach(id => document.getElementById(id).value = "");
+    applyBatchFilters();
+}
+
+function localISO(d){
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
+function batchRange(kind){
+    let today = new Date(), from = new Date(today);
+    if(kind === 7) from.setDate(today.getDate()-6);
+    if(kind === "mtd") from = new Date(today.getFullYear(), today.getMonth(), 1);
+    document.getElementById("bf-from").value = localISO(from);
+    document.getElementById("bf-to").value   = localISO(today);
+    applyBatchFilters();
+}
+
+/* Fetch one batch list; null if a newer request for the same list overtook it. */
+async function fetchBatchList(key, url){
+    let seq = batchLoadSeq[key] = (batchLoadSeq[key]||0) + 1;
+    let res = await fetch(url + batchFilterQuery());
+    if(seq !== batchLoadSeq[key]) return null;
+    let data = await res.json();
+    if(!res.ok){ showToast("Error: "+(data.detail||"could not load batches")); return null; }
+    return data;
+}
+
+function emptyBatchesRow(colspan, what){
+    let msg = batchesFiltered() ? "No batches match these filters." : `No ${what} yet.`;
+    return `<tr><td colspan="${colspan}" style="text-align:center;color:var(--muted);padding:60px">${msg}</td></tr>`;
+}
+
 /* All Batches - read-only overview of processing runs and packaging runs
    together. Creating / editing happens on the per-type tabs. */
 async function loadBatches(){
-    let data = await (await fetch(`/production/api/batches?skip=${batchPage*pageSize}&limit=${pageSize}`)).json();
+    let data = await fetchBatchList("all", `/production/api/batches?skip=${batchPage*pageSize}&limit=${pageSize}`);
+    if(!data) return;
     totalBatches = data.total;
     setPageInfo("batch-page-info", "prev-btn", "next-btn", batchPage, totalBatches);
     if(!data.batches.length){
-        document.getElementById("batches-body").innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:60px">No batches yet.</td></tr>`;
+        document.getElementById("batches-body").innerHTML = emptyBatchesRow(9, "batches");
         return;
     }
     document.getElementById("batches-body").innerHTML =
@@ -2142,11 +2327,12 @@ async function loadBatches(){
 
 /* Processing - its own list, its own paging, its own New Processing Batch. */
 async function loadProcessingBatches(){
-    let data = await (await fetch(`/production/api/batches?batch_type=processing&skip=${procPage*pageSize}&limit=${pageSize}`)).json();
+    let data = await fetchBatchList("processing", `/production/api/batches?batch_type=processing&skip=${procPage*pageSize}&limit=${pageSize}`);
+    if(!data) return;
     totalProcBatches = data.total;
     setPageInfo("proc-page-info", "proc-prev-btn", "proc-next-btn", procPage, totalProcBatches);
     if(!data.batches.length){
-        document.getElementById("processing-body").innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:60px">No processing batches yet.</td></tr>`;
+        document.getElementById("processing-body").innerHTML = emptyBatchesRow(9, "processing batches");
         return;
     }
     document.getElementById("processing-body").innerHTML =
@@ -2217,10 +2403,11 @@ async function savePkgBatch(){
 }
 
 async function loadPkgBatches(){
-    let data = await (await fetch("/production/api/batches?batch_type=packaging&limit=200")).json();
+    let data = await fetchBatchList("packaging", "/production/api/batches?batch_type=packaging&limit=200");
+    if(!data) return;
     let pkgB = data.batches;
     if(!pkgB.length){
-        document.getElementById("pkg-body").innerHTML=`<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:60px">No packaging runs yet.</td></tr>`;
+        document.getElementById("pkg-body").innerHTML = emptyBatchesRow(7, "packaging runs");
         return;
     }
     document.getElementById("pkg-body").innerHTML = pkgB.map(b => `
@@ -2248,17 +2435,61 @@ async function loadPkgBatches(){
 }
 
 /* ── RECIPES ── */
+let recipeTypeFilter = "all";
+
 async function loadRecipes(){
     allRecipes = await (await fetch("/production/api/recipes")).json();
-    splitRecipes();
+    fillRecipeSelects();
+    renderRecipes();
+}
+
+function setRecipeType(type){
+    recipeTypeFilter = type;
+    document.querySelectorAll("#rf-type button").forEach(b => b.classList.toggle("active", b.dataset.type===type));
+    renderRecipes();
+}
+
+/* Recipes are all loaded up front, so search / type / sort run in the browser. */
+function renderRecipes(){
+    let term = normalizeSearchValue(document.getElementById("rf-search").value);
+    let sort = document.getElementById("rf-sort").value;
+    let matchesTerm = r => !term || normalizeSearchValue([
+        r.name, r.description,
+        ...r.inputs.map(i => i.product_name), ...r.outputs.map(o => o.product_name),
+    ].join(" ")).includes(term);
+    let searched = allRecipes.filter(matchesTerm);
+    document.getElementById("rf-n-all").innerText        = searched.length;
+    document.getElementById("rf-n-processing").innerText = searched.filter(r => !pkgRecipes.includes(r)).length;
+    document.getElementById("rf-n-packaging").innerText  = searched.filter(r => pkgRecipes.includes(r)).length;
+    let shown = searched.filter(r => recipeTypeFilter==="all" || (recipeTypeFilter==="packaging") === pkgRecipes.includes(r));
+    let byName = (a,b) => a.name.localeCompare(b.name);
+    let sorters = {
+        name:   byName,
+        used:   (a,b) => (b.batch_count - a.batch_count) || byName(a,b),
+        recent: (a,b) => (b.last_used||"").localeCompare(a.last_used||"") || byName(a,b),
+        newest: (a,b) => (b.created_at||"").localeCompare(a.created_at||"") || byName(a,b),
+    };
+    shown.sort(sorters[sort] || byName);
+    document.getElementById("rf-count").innerText =
+        shown.length === allRecipes.length ? `${allRecipes.length} recipes` : `Showing ${shown.length} of ${allRecipes.length}`;
+
     if(!allRecipes.length){
-        document.getElementById("recipes-grid").innerHTML=`<div class="recipes-empty">No recipes saved yet.</div>`;
+        document.getElementById("recipes-grid").innerHTML=`<div class="recipes-empty">No recipes saved yet. Use <b>+ Processing Recipe</b> or <b>+ Packaging Recipe</b> to create one.</div>`;
         return;
     }
-    document.getElementById("recipes-grid").innerHTML = allRecipes.map(r => {
+    if(!shown.length){
+        document.getElementById("recipes-grid").innerHTML=`<div class="recipes-empty">No recipes match your search.</div>`;
+        return;
+    }
+    let canManage = hasPermission("action_production_manage_recipes");
+    document.getElementById("recipes-grid").innerHTML = shown.map(r => {
         let isPkg = pkgRecipes.includes(r);
         let desc  = (r.description||"").replace("[PKG]","").trim();
         let outColor = isPkg ? "var(--teal)" : "var(--green)";
+        let usage = r.batch_count
+            ? `Used in ${r.batch_count} ${isPkg?"run":"batch"}${r.batch_count===1?"":isPkg?"s":"es"}${r.last_used?` &middot; last ${r.last_used.slice(0,10)}`:""}
+               &middot; <a href="#" onclick="viewRecipeBatches(${r.id});return false;" style="color:var(--blue)">View</a>`
+            : "Not used yet";
         return `<div class="recipe-card ${isPkg?"packaging":"processing"}">
             <div class="recipe-head">
                 <div style="min-width:0">
@@ -2278,16 +2509,28 @@ async function loadRecipes(){
                     <div class="recipe-items">${r.outputs.map(o=>`<div class="recipe-item"><span class="ri-name">${escapeHtml(o.product_name)}</span><span class="ri-qty" style="color:${outColor}">${o.qty} ${escapeHtml(o.unit||"")}</span></div>`).join("")}</div>
                 </div>
             </div>
+            <div class="recipe-usage">${usage}</div>
             <div class="recipe-actions">
                 ${isPkg
                     ? `<button class="action-btn teal" onclick="quickUsePkg(${r.id})">Use for Packaging</button>`
                     : `<button class="action-btn" onclick="quickUseProc(${r.id})">Use in Batch</button>`}
-                ${hasPermission("action_production_manage_recipes") ? `
+                ${canManage ? `
                 <button class="action-btn" onclick="openEditRecipe(${r.id})">Edit</button>
-                <button class="action-btn danger" onclick="deleteRecipe(${r.id},'${r.name.replace(/'/g,"\\'")}')">Delete</button>` : ""}
+                <button class="action-btn blue" onclick="duplicateRecipe(${r.id})" title="Start a new recipe from this one">Duplicate</button>
+                <button class="action-btn danger" onclick="deleteRecipe(${r.id})">Delete</button>` : ""}
             </div>
         </div>`;
     }).join("");
+}
+
+/* Jump to the batch list this recipe feeds, filtered to it. */
+function viewRecipeBatches(id){
+    let recipe = allRecipes.find(r => r.id === id);
+    if(!recipe) return;
+    ["bf-search","bf-from","bf-to"].forEach(f => document.getElementById(f).value = "");
+    document.getElementById("bf-recipe").value = String(id);
+    batchPage = 0; procPage = 0;
+    switchTab(pkgRecipes.includes(recipe) ? "packaging" : "processing");
 }
 
 /* Packaging and processing recipes share one modal — this sets the labels and
@@ -2323,22 +2566,28 @@ function openRecipeModal(isPkg){
     document.getElementById("recipe-modal").classList.add("open");
 }
 
-function openEditRecipe(id){
+function openEditRecipe(id){ openRecipeFrom(id, false); }
+function duplicateRecipe(id){ openRecipeFrom(id, true); }
+
+/* Edit a recipe in place, or (asCopy) open a new recipe pre-filled from it. */
+function openRecipeFrom(id, asCopy){
     let recipe = allRecipes.find(r => r.id === id);
     if(!recipe){ showToast("Could not load recipe"); return; }
     let isPkg = pkgRecipes.includes(recipe);
-    editingRecipeId   = id;
+    editingRecipeId   = asCopy ? null : id;
     isPackagingRecipe = isPkg;
     applyRecipeModalStyle(isPkg);
-    document.getElementById("recipe-modal-title").innerText = isPkg ? "Edit Packaging Recipe" : "Edit Processing Recipe";
-    document.getElementById("recipe-save-btn").innerText    = "Save Changes";
-    document.getElementById("r-name").value = recipe.name;
+    document.getElementById("recipe-modal-title").innerText =
+        (asCopy ? "Copy of " : "Edit ") + (isPkg ? "Packaging Recipe" : "Processing Recipe");
+    document.getElementById("recipe-save-btn").innerText    = asCopy ? "Save as New Recipe" : "Save Changes";
+    document.getElementById("r-name").value = asCopy ? `${recipe.name} (copy)` : recipe.name;
     // The [PKG] marker is what flags a recipe as packaging; saveRecipe re-adds
     // it, so keep it out of the editable description or it would stack up.
     document.getElementById("r-desc").value = (recipe.description||"").replace("[PKG]","").trim();
     setRow("recipe-inputs",  recipe.inputs.map(i  => ({product_id:i.product_id, qty:i.qty})));
     setRow("recipe-outputs", recipe.outputs.map(o => ({product_id:o.product_id, qty:o.qty})));
     document.getElementById("recipe-modal").classList.add("open");
+    if(asCopy){ let n = document.getElementById("r-name"); setTimeout(()=>{ n.focus(); n.select(); }, 50); }
 }
 
 async function saveRecipe(){
@@ -2361,28 +2610,22 @@ async function saveRecipe(){
     document.getElementById("recipe-modal").classList.remove("open");
     showToast(editingRecipeId ? "Recipe updated!" : "Recipe saved!");
     editingRecipeId = null;
-    allRecipes = await (await fetch("/production/api/recipes")).json();
-    splitRecipes();
-    fillSel("batch-recipe-sel", procRecipes);
-    fillSel("pkg-recipe-sel",   pkgRecipes);
-    if(document.getElementById("section-recipes").style.display!=="none") loadRecipes();
+    await loadRecipes();
 }
 
 function quickUseProc(id){ switchTab("processing"); openBatchModal(); document.getElementById("batch-recipe-sel").value=id; loadRecipeIntoForm(); }
 function quickUsePkg(id)  { switchTab("packaging"); openPkgModal(); setTimeout(()=>{ document.getElementById("pkg-recipe-sel").value=id; },100); }
 
-async function deleteRecipe(id,name){
-    if(!confirm(`Delete recipe "${name}"?`)) return;
+async function deleteRecipe(id){
+    let recipe = allRecipes.find(r => r.id === id);
+    if(!recipe) return;
+    if(!confirm(`Delete recipe "${recipe.name}"?`)) return;
     let res  = await fetch(`/production/api/recipes/${id}`,{method:"DELETE"});
     let data = await res.json();
     // Without this the toast claimed success on a 403/404 and the recipe just
     // reappeared on reload.
     if(data.detail){ showToast("Error: "+data.detail); return; }
     showToast("Recipe deleted");
-    allRecipes = await (await fetch("/production/api/recipes")).json();
-    splitRecipes();
-    fillSel("batch-recipe-sel", procRecipes);
-    fillSel("pkg-recipe-sel",   pkgRecipes);
     loadRecipes();
 }
 
@@ -2487,10 +2730,22 @@ function renderSpoilageStats(s){
         : "";
 }
 
+let spoilageSearchTimer = null;
+let spoilageLoadSeq = 0;
+
+function onSpoilageSearch(){
+    clearTimeout(spoilageSearchTimer);
+    spoilageSearchTimer = setTimeout(loadSpoilage, 300);
+}
+
 async function loadSpoilage(){
     const from = (document.getElementById("spl-from")||{}).value || "";
     const to   = (document.getElementById("spl-to")||{}).value || "";
-    let data = await (await fetch(`/production/api/spoilage?date_from=${from}&date_to=${to}`)).json();
+    const q    = document.getElementById("spl-search").value.trim();
+    let seq  = ++spoilageLoadSeq;
+    let res  = await fetch(`/production/api/spoilage?date_from=${from}&date_to=${to}&q=${encodeURIComponent(q)}`);
+    if(seq !== spoilageLoadSeq) return;
+    let data = await res.json();
     const reasonLabel = {
         mold:"Mold", overripe:"Overripe", damaged:"Damaged",
         pest:"Pest", heat:"Heat damage", water:"Water damage",
@@ -2505,7 +2760,7 @@ async function loadSpoilage(){
     }
     if(!data.records.length){
         document.getElementById("spoilage-body").innerHTML =
-            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:60px">No spoilage recorded in this period.</td></tr>`;
+            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:60px">${q ? "No spoilage matches your search in this period." : "No spoilage recorded in this period."}</td></tr>`;
         return;
     }
     document.getElementById("spoilage-body").innerHTML = data.records.map(r => {
@@ -2786,13 +3041,48 @@ async function submitDryingEdit(){
     } catch(e){ alert("Network error: " + e.message); }
 }
 
+function clearDryingFilters(){
+    ["df-search","df-status","df-from","df-to"].forEach(id => document.getElementById(id).value = "");
+    renderDryingTable();
+}
+
+/* The drying list is loaded whole (latest 100), so it filters in the browser. */
+function filteredDryingBatches(){
+    let term   = normalizeSearchValue(document.getElementById("df-search").value);
+    let status = document.getElementById("df-status").value;
+    let from   = document.getElementById("df-from").value;
+    let to     = document.getElementById("df-to").value;
+    document.getElementById("df-clear").style.display = (term||status||from||to) ? "" : "none";
+    let list = dryingBatches.filter(b => {
+        if(status && b.status !== status) return false;
+        let day = b.started_at ? localISO(new Date(b.started_at)) : "";
+        if(from && (!day || day < from)) return false;
+        if(to   && (!day || day > to))   return false;
+        if(!term) return true;
+        let text = [b.batch_number, b.notes, b.current_stage_label,
+            ...(b.stages||[]).flatMap(s => [s.label, s.notes,
+                ...(s.inputs||[]).map(i => i.product_name), ...(s.outputs||[]).map(o => o.product_name)]),
+        ].join(" ");
+        return normalizeSearchValue(text).includes(term);
+    });
+    document.getElementById("df-count").innerText =
+        list.length === dryingBatches.length ? "" : `Showing ${list.length} of ${dryingBatches.length}`;
+    return list;
+}
+
 function renderDryingTable(){
     if(!dryingBatches.length){
+        filteredDryingBatches();
         document.getElementById("drying-body").innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:60px">No drying batches yet.</td></tr>`;
         return;
     }
+    let shown = filteredDryingBatches();
+    if(!shown.length){
+        document.getElementById("drying-body").innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:60px">No drying batches match these filters.</td></tr>`;
+        return;
+    }
     let html = "";
-    dryingBatches.forEach(b => {
+    shown.forEach(b => {
         const stages = b.stages || [];
         const stage1 = stages[0];
         const latestStage = stages[stages.length - 1];
