@@ -1402,6 +1402,15 @@ td.name{color:var(--text);font-weight:600;}
 
     <!-- HISTORY -->
     <div id="section-history" style="display:none">
+        <div class="toolbar" style="margin-bottom:14px">
+            <select class="filter-sel" id="history-farm-filter" onchange="loadHistory()">
+                <option value="">All Farms</option>
+            </select>
+            <input class="filter-sel" id="history-from" type="date" title="From" onchange="loadHistory()">
+            <input class="filter-sel" id="history-to" type="date" title="To" onchange="loadHistory()">
+            <input class="filter-sel" id="history-search" type="search" placeholder="Search product, delivery #, plot, notes..." style="min-width:240px" oninput="onHistorySearch()">
+            <button class="page-btn" id="history-clear" onclick="clearHistoryFilters()" style="display:none">Clear</button>
+        </div>
         <div id="history-content">
             <div style="color:var(--muted);padding:40px;text-align:center">Loading...</div>
         </div>
@@ -2266,9 +2275,13 @@ function renderFarmCards(){
 }
 
 function fillFarmFilter(){
-    document.getElementById("farm-filter").innerHTML =
-        `<option value="">All Farms</option>` +
+    let opts = `<option value="">All Farms</option>` +
         allFarms.map(f=>`<option value="${f.id}">${f.name}</option>`).join("");
+    document.getElementById("farm-filter").innerHTML = opts;
+    let hist = document.getElementById("history-farm-filter");
+    let keep = hist.value;
+    hist.innerHTML = opts;
+    hist.value = allFarms.some(f=>String(f.id)===keep) ? keep : "";
 }
 
 function filterByFarm(id){
@@ -2426,19 +2439,61 @@ function prevPage(){ if(deliveryPage>0){ deliveryPage--; loadDeliveries(); } }
 function nextPage(){ if((deliveryPage+1)*pageSize<totalDeliveries){ deliveryPage++; loadDeliveries(); } }
 
 /* ── HISTORY ── */
+let historySearchTimer = null;
+let historyLoadSeq = 0;       // ignore responses from requests a newer one has superseded
+
+function onHistorySearch(){
+    clearTimeout(historySearchTimer);
+    historySearchTimer = setTimeout(loadHistory, 300);
+}
+
+function clearHistoryFilters(){
+    ["history-farm-filter","history-from","history-to","history-search"].forEach(id => document.getElementById(id).value = "");
+    loadHistory();
+}
+
 async function loadHistory(){
-    let all = await (await fetch("/farm/api/deliveries?limit=500")).json();
+    let farmId   = document.getElementById("history-farm-filter").value;
+    let dateFrom = document.getElementById("history-from").value;
+    let dateTo   = document.getElementById("history-to").value;
+    let search   = document.getElementById("history-search").value.trim();
+    let filtered = !!(farmId || dateFrom || dateTo || search);
+    document.getElementById("history-clear").style.display = filtered ? "" : "none";
+
+    let url = "/farm/api/deliveries?limit=500";
+    if(farmId)   url += `&farm_id=${farmId}`;
+    if(dateFrom) url += `&date_from=${dateFrom}`;
+    if(dateTo)   url += `&date_to=${dateTo}`;
+    if(search)   url += `&q=${encodeURIComponent(search)}`;
+
+    let seq = ++historyLoadSeq;
+    let res = await fetch(url);
+    if(seq !== historyLoadSeq) return;
+    if(!res.ok){
+        let err = await res.json().catch(()=>({}));
+        showToast(err.detail || "Could not load history");
+        return;
+    }
+    let all = await res.json();
+    // Searching a product name totals just that product; any other match
+    // (delivery #, receiver, notes) totals everything on the matching deliveries.
+    let term = search.toLowerCase();
+    let productHit = !!term && all.deliveries.some(d=>d.items.some(i=>i.product.toLowerCase().includes(term)));
     let byFarm = {};
-    allFarms.forEach(f=>{ byFarm[f.id]={name:f.name, deliveries:[], products:{}}; });
+    allFarms.forEach((f,idx)=>{
+        if(!farmId || String(f.id)===farmId) byFarm[f.id]={name:f.name, idx, deliveries:[], products:{}};
+    });
     all.deliveries.forEach(d=>{
         if(byFarm[d.farm_id]){
             byFarm[d.farm_id].deliveries.push(d);
             d.items.forEach(item=>{
+                if(productHit && !item.product.toLowerCase().includes(term)) return;
                 byFarm[d.farm_id].products[item.product] = (byFarm[d.farm_id].products[item.product]||0) + item.qty;
             });
         }
     });
-    document.getElementById("history-content").innerHTML = Object.values(byFarm).map((farm,fi)=>{
+    document.getElementById("history-content").innerHTML = Object.values(byFarm).map(farm=>{
+        let fi       = farm.idx;
         let products = Object.entries(farm.products).sort((a,b)=>b[1]-a[1]);
         let maxQty   = products.length ? products[0][1] : 1;
         let color    = fi%2===0?"var(--lime)":"var(--teal)";
@@ -2450,7 +2505,7 @@ async function loadHistory(){
                 <span style="font-size:12px;color:var(--muted);font-weight:400">${farm.deliveries.length} deliveries</span>
             </div>
             ${products.length===0
-                ? `<div style="color:var(--muted);font-size:13px">No deliveries recorded yet.</div>`
+                ? `<div style="color:var(--muted);font-size:13px">${filtered ? "No deliveries match these filters." : "No deliveries recorded yet."}</div>`
                 : products.map(([name,qty])=>`
                     <div class="history-bar-row">
                         <div class="history-bar-label">${name}</div>
