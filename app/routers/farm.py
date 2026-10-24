@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from typing import Optional, List
 from pydantic import BaseModel, Field
 from datetime import date
@@ -261,10 +261,31 @@ async def restore_farm(
 
 # ── DELIVERY API ───────────────────────────────────────
 @router.get("/api/deliveries")
-async def get_deliveries(farm_id: int = None, skip: int = 0, limit: int = 50, db: AsyncSession = Depends(get_async_session)):
+async def get_deliveries(farm_id: int = None, skip: int = 0, limit: int = 50,
+                         date_from: Optional[str] = None, date_to: Optional[str] = None,
+                         q: Optional[str] = None, db: AsyncSession = Depends(get_async_session)):
     base_where = []
     if farm_id:
         base_where.append(FarmDelivery.farm_id == farm_id)
+    d_from = _parse_date(date_from, "from date")
+    d_to   = _parse_date(date_to, "to date")
+    if d_from:
+        base_where.append(FarmDelivery.delivery_date >= d_from)
+    if d_to:
+        base_where.append(FarmDelivery.delivery_date <= d_to)
+    q = (q or "").strip()
+    if q:
+        like = f"%{q}%"
+        # a delivery matches on its own text fields or on any line's product / plot
+        base_where.append(or_(
+            FarmDelivery.delivery_number.ilike(like),
+            FarmDelivery.received_by.ilike(like),
+            FarmDelivery.quality_notes.ilike(like),
+            FarmDelivery.notes.ilike(like),
+            FarmDelivery.items.any(FarmDeliveryItem.product.has(
+                or_(Product.name.ilike(like), Product.sku.ilike(like)))),
+            FarmDelivery.items.any(FarmDeliveryItem.plot.has(FarmPlot.name.ilike(like))),
+        ))
     cnt_result = await db.execute(select(func.count()).select_from(FarmDelivery).where(*base_where))
     total = cnt_result.scalar()
     stmt = (
@@ -1343,9 +1364,13 @@ td.name{color:var(--text);font-weight:600;}
     <!-- DELIVERIES -->
     <div id="section-deliveries">
         <div class="toolbar">
-            <select class="filter-sel" id="farm-filter" onchange="loadDeliveries()">
+            <select class="filter-sel" id="farm-filter" onchange="applyDeliveryFilters()">
                 <option value="">All Farms</option>
             </select>
+            <input class="filter-sel" id="deliveries-from" type="date" title="From" onchange="applyDeliveryFilters()">
+            <input class="filter-sel" id="deliveries-to" type="date" title="To" onchange="applyDeliveryFilters()">
+            <input class="filter-sel" id="deliveries-search" type="search" placeholder="Search delivery #, product, plot, notes..." style="min-width:240px" oninput="onDeliverySearch()">
+            <button class="page-btn" id="deliveries-clear" onclick="clearDeliveryFilters()" style="display:none">Clear</button>
         </div>
         <div class="table-wrap">
             <table>
@@ -2291,12 +2316,47 @@ function switchTab(tab){
 }
 
 /* ── DELIVERIES TABLE ── */
-async function loadDeliveries(){
-    let farmId = document.getElementById("farm-filter").value;
-    let url    = `/farm/api/deliveries?skip=${deliveryPage*pageSize}&limit=${pageSize}`;
-    if(farmId) url += `&farm_id=${farmId}`;
+let deliverySearchTimer = null;
+let deliveryLoadSeq = 0;      // ignore responses from requests a newer one has superseded
 
-    let data = await (await fetch(url)).json();
+function applyDeliveryFilters(){
+    deliveryPage = 0;
+    loadDeliveries();
+}
+
+function onDeliverySearch(){
+    clearTimeout(deliverySearchTimer);
+    deliverySearchTimer = setTimeout(applyDeliveryFilters, 300);
+}
+
+function clearDeliveryFilters(){
+    ["farm-filter","deliveries-from","deliveries-to","deliveries-search"].forEach(id => document.getElementById(id).value = "");
+    applyDeliveryFilters();
+}
+
+async function loadDeliveries(){
+    let farmId   = document.getElementById("farm-filter").value;
+    let dateFrom = document.getElementById("deliveries-from").value;
+    let dateTo   = document.getElementById("deliveries-to").value;
+    let search   = document.getElementById("deliveries-search").value.trim();
+    let filtered = !!(farmId || dateFrom || dateTo || search);
+    document.getElementById("deliveries-clear").style.display = filtered ? "" : "none";
+
+    let url    = `/farm/api/deliveries?skip=${deliveryPage*pageSize}&limit=${pageSize}`;
+    if(farmId)   url += `&farm_id=${farmId}`;
+    if(dateFrom) url += `&date_from=${dateFrom}`;
+    if(dateTo)   url += `&date_to=${dateTo}`;
+    if(search)   url += `&q=${encodeURIComponent(search)}`;
+
+    let seq = ++deliveryLoadSeq;
+    let res = await fetch(url);
+    if(seq !== deliveryLoadSeq) return;
+    if(!res.ok){
+        let err = await res.json().catch(()=>({}));
+        showToast(err.detail || "Could not load deliveries");
+        return;
+    }
+    let data = await res.json();
     totalDeliveries = data.total;
 
     document.getElementById("page-info").innerText =
@@ -2307,7 +2367,9 @@ async function loadDeliveries(){
 
     if(!data.deliveries.length){
         document.getElementById("deliveries-body").innerHTML=
-            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:60px">No deliveries yet. Click <b>+ Record Delivery</b>.</td></tr>`;
+            `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:60px">${filtered
+                ? "No deliveries match these filters."
+                : "No deliveries yet. Click <b>+ Record Delivery</b>."}</td></tr>`;
         return;
     }
 
