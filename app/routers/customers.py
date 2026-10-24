@@ -1441,8 +1441,8 @@ th.sortable.active.desc .sort-arrow { transform: rotate(180deg); }
         </div>
 
         <div class="seg-range">
-            <label>From <input type="date" id="seg-from"></label>
-            <label>To <input type="date" id="seg-to"></label>
+            <label>From <input type="date" id="seg-from" onchange="onSegmentDateChange()"></label>
+            <label>To <input type="date" id="seg-to" onchange="onSegmentDateChange()"></label>
             <select id="seg-preset" onchange="applySegmentPreset(this.value)">
                 <option value="">Quick range…</option>
                 <option value="all">All time</option>
@@ -1980,8 +1980,11 @@ function filteredSegmentRows(seg){
     });
 }
 
+let segmentLoadSeq = 0;      // ignore responses a newer request has superseded
+
 async function loadSegments() {
     const tbody = document.getElementById("segments-table-body");
+    const seq = ++segmentLoadSeq;
 
     try {
         const params = new URLSearchParams();
@@ -1990,6 +1993,7 @@ async function loadSegments() {
         if (to) params.set("date_to", to);
         const res = await fetch("/customers-mgmt/api/segments" + (params.toString() ? "?" + params : ""));
         const text = await res.text();
+        if (seq !== segmentLoadSeq) return;
 
         if (!res.ok) {
             throw new Error(`HTTP ${res.status}: ${text}`);
@@ -2061,7 +2065,16 @@ function applySegmentPreset(value){
 
 function applySegmentRange(){
     const from = document.getElementById("seg-from").value, to = document.getElementById("seg-to").value;
-    if (from && to && from > to) { alert("The start date is after the end date."); return; }
+    if (from && to && from > to) { showToast("The start date is after the end date"); return; }
+    loadSegments();
+}
+
+/* Picking a date applies it straight away — no need to press Apply. A
+   half-typed date or a from-after-to pair waits until it makes sense. */
+function onSegmentDateChange(){
+    document.getElementById("seg-preset").value = "";
+    const from = document.getElementById("seg-from").value, to = document.getElementById("seg-to").value;
+    if (from && to && from > to) return;
     loadSegments();
 }
 
@@ -2247,8 +2260,9 @@ async def get_segments(
     date_to: str | None = None,
     db: AsyncSession = Depends(get_async_session),
 ):
-    """Customers by segment. With a date range, only the paid invoices and refunds inside it count, and recency is
-    measured from the range's end — the segments as they stood then. Customers added after the range are left out."""
+    """Customers by segment. With a date range, spend and order counts cover only the paid invoices and refunds
+    inside it, while recency and first purchase use all history up to the range's end — the segments as they
+    stood then. Customers added after the range are left out."""
     from datetime import datetime, timezone, timedelta
     from app.core.time_utils import today_local, utc_bounds
 
@@ -2268,21 +2282,31 @@ async def get_segments(
     d60  = now - timedelta(days=60)
     d180 = now - timedelta(days=180)
 
-    inv_range = [Invoice.created_at >= start_utc] if start_utc else []
-    inv_range += [Invoice.created_at <= end_utc] if end_utc else []
+    # Spend and order counts cover only the range. Recency, first purchase and
+    # the "new customer" order count use the whole history up to the range's
+    # end — otherwise a long-standing customer with one order this month would
+    # look brand new, and the range would empty every segment but New / Lost.
+    inv_until = [Invoice.created_at <= end_utc] if end_utc else []
+    inv_range = ([Invoice.created_at >= start_utc] if start_utc else []) + inv_until
     ref_range = [RetailRefund.created_at >= start_utc] if start_utc else []
     ref_range += [RetailRefund.created_at <= end_utc] if end_utc else []
 
     # ── All aggregates in a single SQL round-trip ──────
     last_inv_sq = (
         select(func.max(Invoice.created_at))
-        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid", *inv_range)
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid", *inv_until)
         .correlate(Customer)
         .scalar_subquery()
     )
     first_inv_sq = (
         select(func.min(Invoice.created_at))
-        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid", *inv_range)
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid", *inv_until)
+        .correlate(Customer)
+        .scalar_subquery()
+    )
+    hist_count_sq = (
+        select(func.count(Invoice.id))
+        .where(Invoice.customer_id == Customer.id, Invoice.status == "paid", *inv_until)
         .correlate(Customer)
         .scalar_subquery()
     )
@@ -2321,6 +2345,7 @@ async def get_segments(
             first_inv_sq.label("first_purchase"),
             net_spent_sq.label("net_spent"),
             inv_count_sq.label("inv_count"),
+            hist_count_sq.label("hist_count"),
         )
         .where(*([(Customer.created_at <= end_utc) | Customer.created_at.is_(None)] if end_utc else []))
         .order_by(Customer.name)
@@ -2347,6 +2372,7 @@ async def get_segments(
         first = r.first_purchase
         spent = float(r.net_spent or 0)
         count = int(r.inv_count or 0)
+        hist_count = int(r.hist_count or 0)
 
         # Normalise timezone
         if last is not None and last.tzinfo is None:
@@ -2358,7 +2384,7 @@ async def get_segments(
 
         if last is None:
             seg = "lost"
-        elif first and first >= d60 and count <= 2:
+        elif first and first >= d60 and hist_count <= 2:
             seg = "new"
         elif last >= d60 and spent >= champion_threshold and champion_threshold > 0:
             seg = "champion"

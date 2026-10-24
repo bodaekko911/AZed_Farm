@@ -1,7 +1,8 @@
 """Customer segments over a date range.
 
-With a range, only the paid invoices and refunds inside it count, recency is measured from the range's end (the
-segments as they stood then), and customers added after the range are left out. Without one, nothing changes.
+With a range, spend and order counts cover only the paid invoices and refunds inside it; recency and first
+purchase use all history up to the range's end (the segments as they stood then), and customers added after the
+range are left out. Without one, nothing changes.
 A real async SQLite database; ``greatest`` (Postgres) is given to it as a plain function.
 """
 import asyncio
@@ -96,6 +97,23 @@ def test_recency_from_the_range_end_makes_old_buyers_at_risk():
             await db.close(); await engine.dispose()
     rows = _by_id(run(go()))
     assert rows[1][0] == "at_risk" and rows[2][0] == "at_risk"     # last bought in March, 61–180 days before 15 July
+
+
+def test_a_recent_range_keeps_returning_customers_out_of_new():
+    """Regression: a range used to restrict first purchase to the range too, so any long-standing customer with
+    one or two orders in it showed up as New and every other segment emptied out."""
+    async def go():
+        engine, db = await _db()
+        try:
+            return await get_segments(date_from="2026-08-01", date_to="2026-08-31", db=db)
+        finally:
+            await db.close(); await engine.dispose()
+    rows = _by_id(run(go()))
+    seg2, basem = rows[2]
+    assert seg2 == "champion"                                       # first bought in March, so not new
+    assert (basem["net_spent"], basem["inv_count"], basem["first_purchase"]) == (900.0, 1, "2026-03-15")
+    seg1, amal = rows[1]
+    assert seg1 == "at_risk" and amal["last_purchase"] == "2026-03-20"   # nothing in August, but not lost yet
 
 
 def test_no_range_is_all_time_as_before():
