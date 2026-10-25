@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\Users\\Abdallah Abo zaid\\Desktop\\HOF Phase 1\\System\\AZed_Farm-main\\.archify\\architecture-azed-farm-20261025-103659\\candidate.json",
+    "sha256": "60542044b5f386dedfc0c144dceeb52626084197091e44f3166227ae68cf5aba",
+    "bytes": 7559
+  },
+  "artifact": {
+    "path": "C:\\Users\\Abdallah Abo zaid\\Desktop\\HOF Phase 1\\System\\AZed_Farm-main\\.archify\\architecture-azed-farm-20261025-103659\\azed-farm.html",
+    "sha256": "9eb130767f0191ef6bcfdd2d7192bb7b9171820df5c69d2da60c928929164aa2",
+    "bytes": 842361
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\Users\\Abdallah Abo zaid\\Desktop\\HOF Phase 1\\System\\AZed_Farm-main\\.archify\\architecture-azed-farm-20261025-103659\\azed-farm.finalize.json",
+    "summaryReceipt": "C:\\Users\\Abdallah Abo zaid\\Desktop\\HOF Phase 1\\System\\AZed_Farm-main\\.archify\\architecture-azed-farm-20261025-103659\\azed-farm.finalize-summary.json",
+    "browserCheckReceipt": "C:\\Users\\Abdallah Abo zaid\\Desktop\\HOF Phase 1\\System\\AZed_Farm-main\\.archify\\architecture-azed-farm-20261025-103659\\azed-farm.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-25T07:37:52.614Z",
+    "source": "network",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 8235,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  }
+}

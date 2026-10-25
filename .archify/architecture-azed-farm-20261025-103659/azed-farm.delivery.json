@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "6927e22b-1d67-4791-a597-61892714f0e1",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "C:\\Users\\Abdallah Abo zaid\\Desktop\\HOF Phase 1\\System\\AZed_Farm-main\\.archify\\architecture-azed-farm-20261025-103659\\candidate.json",
+  "output": "C:\\Users\\Abdallah Abo zaid\\Desktop\\HOF Phase 1\\System\\AZed_Farm-main\\.archify\\architecture-azed-farm-20261025-103659\\azed-farm.html",
+  "specification": {
+    "sha256": "60542044b5f386dedfc0c144dceeb52626084197091e44f3166227ae68cf5aba",
+    "bytes": 7559
+  },
+  "artifact": {
+    "sha256": "9eb130767f0191ef6bcfdd2d7192bb7b9171820df5c69d2da60c928929164aa2",
+    "bytes": 842361
+  }
+}
