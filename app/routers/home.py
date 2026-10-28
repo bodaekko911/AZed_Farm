@@ -221,6 +221,38 @@ body {
 .hero-sub  { font-size: 14px; color: var(--muted); letter-spacing: .3px; }
 .hero-date { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 6px; letter-spacing: .5px; }
 
+.home-search {
+    position: relative; max-width: 460px; margin-top: 24px;
+}
+.home-search input {
+    width: 100%; padding: 12px 44px 12px 40px;
+    background: var(--card); border: 1px solid var(--border2); border-radius: 12px;
+    color: var(--text); font-family: var(--sans); font-size: 14px; outline: none;
+    transition: border-color .2s, box-shadow .2s;
+}
+.home-search input::placeholder { color: var(--muted); }
+.home-search input:focus {
+    border-color: var(--green);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent);
+}
+.home-search input::-webkit-search-cancel-button { display: none; }
+.search-icon {
+    position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+    font-size: 14px; color: var(--muted); pointer-events: none;
+}
+.search-key {
+    position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    border: 1px solid var(--border2); border-radius: 6px; padding: 1px 7px; pointer-events: none;
+}
+.home-search input:focus ~ .search-key { display: none; }
+.search-hidden { display: none !important; }
+.search-empty {
+    display: none; padding: 40px 0; text-align: center;
+    font-size: 14px; color: var(--muted);
+}
+.search-empty.show { display: block; }
+
 .modules-wrap { padding: 0 40px 60px; flex: 1; }
 
 .section-title {
@@ -381,9 +413,16 @@ body {
         <div class="hero-greeting" id="greeting">Good morning, <em>welcome back</em></div>
         <div class="hero-sub">What would you like to work on today?</div>
         <div class="hero-date" id="hero-date"></div>
+        <div class="home-search" role="search">
+            <span class="search-icon">&#128269;</span>
+            <input type="search" id="home-search" placeholder="Search modules — e.g. stock, payroll, invoices"
+                   autocomplete="off" aria-label="Search modules">
+            <span class="search-key">/</span>
+        </div>
     </section>
 
     <main class="modules-wrap">
+        <div class="search-empty" id="search-empty">No module matches your search.</div>
 
         <div class="home-section" data-section="core">
         <div class="section-title">Core Operations</div>
@@ -764,6 +803,52 @@ if(localStorage.getItem("colorMode") === "light"){
 setDateTime();
 setInterval(setDateTime, 30000);
 
+// Module search: filters the cards by name, description and tag. Cards hidden for permissions stay hidden.
+function applySearch(){
+    const words = document.getElementById("home-search").value.toLowerCase().split(/\\s+/).filter(Boolean);
+    let shown = 0;
+    document.querySelectorAll(".home-section").forEach(section => {
+        let inSection = 0;
+        section.querySelectorAll(".module-card").forEach(card => {
+            const text = (card.textContent + " " + card.getAttribute("href")).toLowerCase();
+            const match = words.every(w => text.includes(w));
+            card.classList.toggle("search-hidden", !match);
+            if(match && card.style.display !== "none") inSection++;
+        });
+        section.classList.toggle("search-hidden", !inSection);
+        shown += inSection;
+    });
+    // A gap shows only between two sections that are both on screen.
+    document.querySelectorAll(".home-section-gap").forEach(gap => {
+        const prev = gap.previousElementSibling, next = gap.nextElementSibling;
+        const visible = el => el && el.style.display !== "none" && !el.classList.contains("search-hidden");
+        gap.classList.toggle("search-hidden", !!words.length && !(visible(prev) && visible(next)));
+    });
+    document.getElementById("search-empty").classList.toggle("show", !!words.length && !shown);
+}
+
+const homeSearch = document.getElementById("home-search");
+homeSearch.addEventListener("input", applySearch);
+homeSearch.addEventListener("keydown", e => {
+    if(e.key === "Enter"){
+        // Open the first card still on screen.
+        const first = [...document.querySelectorAll(".module-card")]
+            .find(c => c.style.display !== "none" && !c.classList.contains("search-hidden"));
+        if(first) window.location.href = first.getAttribute("href");
+    } else if(e.key === "Escape"){
+        homeSearch.value = "";
+        applySearch();
+        homeSearch.blur();
+    }
+});
+// "/" jumps to the search box from anywhere on the page.
+document.addEventListener("keydown", e => {
+    if(e.key === "/" && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)){
+        e.preventDefault();
+        homeSearch.focus();
+    }
+});
+
 (async () => {
     const u = await initUser();
     if (!u) return;
@@ -817,6 +902,9 @@ setInterval(setDateTime, 30000);
             gap.style.display = "none";
         }
     });
+
+    // Something may have been typed before the permissions above were applied.
+    if(homeSearch.value) applySearch();
 })();
 </script>
 </body>
