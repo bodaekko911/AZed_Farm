@@ -499,6 +499,18 @@ body {
                 </div>
             </a>
 
+            <a href="/sales-targets/" class="module-card c-blue" data-permission="page_sales_targets">
+                <div class="card-icon">🎯</div>
+                <div class="card-body">
+                    <div class="card-name">Sales Targets</div>
+                    <div class="card-desc">Monthly target with floor (85%) and stretch (120%) against actual sales</div>
+                </div>
+                <div class="card-footer">
+                    <span class="card-tag">Sales</span>
+                    <span class="card-arrow">↗</span>
+                </div>
+            </a>
+
         </div>
         </div>
 
@@ -700,10 +712,10 @@ body {
             </a>
 
             <a href="/budget/" class="module-card c-green" data-permission="page_budget">
-                <div class="card-icon">🎯</div>
+                <div class="card-icon">🧮</div>
                 <div class="card-body">
-                    <div class="card-name">Budget &amp; Targets</div>
-                    <div class="card-desc">Monthly spending budget and sales target against actuals</div>
+                    <div class="card-name">Budget</div>
+                    <div class="card-desc">Monthly spending budget against actual spending</div>
                 </div>
                 <div class="card-footer">
                     <span class="card-tag">Planning</span>

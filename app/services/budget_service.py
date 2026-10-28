@@ -1,8 +1,9 @@
-"""Monthly budget and sales target — what was set, and how the month is going.
+"""Monthly spending budget — and the month helpers the Sales targets page shares.
 
-Sales are counted the way the Sales dashboard counts them, so the two pages agree: paid POS invoices minus retail
-refunds, plus B2B revenue (credits to account 4000 from B2B and consignment journals). Spending is every expense
-dated in the month, as on the Expenses page.
+Both pages keep their numbers on the same ``monthly_plans`` row for the month; each saves only its own fields, and a
+row is removed once nothing on it is set. Sales are counted the way the Sales dashboard counts them, so the pages agree:
+paid POS invoices minus retail refunds, plus B2B revenue (credits to account 4000 from B2B and consignment journals).
+Spending is every expense dated in the month, as on the Expenses page.
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ from app.models.refund import RetailRefund
 
 B2B_REVENUE_REFS = ["b2b", "b2b_invoice", "consignment_payment", "consignment"]   # same as the Sales dashboard
 MAX_AMOUNT = Decimal("999999999999.99")
+PLAN_FIELDS = ("budget", "sales_target", "sales_floor", "sales_stretch")
 
 
 def month_range(year: int, month: int) -> tuple[date, date]:
@@ -45,6 +47,22 @@ def parse_amount(value) -> Optional[Decimal]:
     if amount > MAX_AMOUNT:
         raise HTTPException(status_code=400, detail="Amount is too large")
     return amount.quantize(Decimal("0.01"))
+
+
+def check_year(year: int) -> None:
+    if not 2000 <= year <= 2100:
+        raise HTTPException(status_code=400, detail="Pick a year between 2000 and 2100")
+
+
+def month_items(months: list[dict]) -> dict[int, dict]:
+    """The rows the page sent, by month number."""
+    out = {}
+    for item in months:
+        m = item.get("month")
+        if not isinstance(m, int) or not 1 <= m <= 12:
+            raise HTTPException(status_code=400, detail="Month must be 1–12")
+        out[m] = item
+    return out
 
 
 async def sales_between(db: AsyncSession, start: date, end: date) -> float:
@@ -69,82 +87,79 @@ async def spent_between(db: AsyncSession, start: date, end: date) -> float:
     return float(r.scalar() or 0)
 
 
-def _num(value) -> Optional[float]:
+def num(value) -> Optional[float]:
     return float(value) if value is not None else None
 
 
-async def year_overview(db: AsyncSession, year: int) -> dict:
-    """The 12 months of `year`: what was set and, for months that have started, what actually happened."""
-    today = today_local()
+async def plans_for_year(db: AsyncSession, year: int) -> dict[int, MonthlyPlan]:
     rows = (await db.execute(select(MonthlyPlan).where(MonthlyPlan.month >= date(year, 1, 1),
                                                        MonthlyPlan.month <= date(year, 12, 1)))).scalars().all()
-    plans = {p.month.month: p for p in rows}
+    return {p.month.month: p for p in rows}
+
+
+async def plan_for(db: AsyncSession, month_start: date) -> Optional[MonthlyPlan]:
+    return (await db.execute(select(MonthlyPlan).where(MonthlyPlan.month == month_start))).scalar_one_or_none()
+
+
+async def store_months(db: AsyncSession, year: int, wanted: dict[int, dict], user, module: str, what: str) -> list[int]:
+    """Write `wanted` ({month: {field: value}}) onto the year's rows; only those fields are touched."""
+    existing = await plans_for_year(db, year)
+    changed = []
+    for m, fields in sorted(wanted.items()):
+        plan = existing.get(m)
+        if plan and all(getattr(plan, k) == v for k, v in fields.items()):
+            continue
+        if not plan:
+            if all(v is None for v in fields.values()):
+                continue
+            plan = MonthlyPlan(month=date(year, m, 1))
+            db.add(plan)
+        for k, v in fields.items():
+            setattr(plan, k, v)
+        plan.updated_by_user_id = user.id
+        if all(getattr(plan, k) is None for k in PLAN_FIELDS):
+            await db.delete(plan)
+        changed.append(m)
+    if changed:
+        names = ", ".join(calendar.month_abbr[m] for m in changed)
+        record(db, module, "save_plan", f"Updated {what} for {names} {year}", user=user,
+               ref_type="monthly_plan", ref_id=year)
+        await db.commit()
+    return changed
+
+
+async def year_overview(db: AsyncSession, year: int) -> dict:
+    """The 12 months of `year`: the budget and, for months that have started, what was spent."""
+    today = today_local()
+    plans = await plans_for_year(db, year)
     months = []
     for m in range(1, 13):
         start, end = month_range(year, m)
         plan = plans.get(m)
-        started = start <= today
-        upto = min(end, today)
         months.append({
             "month": m,
-            "budget": _num(plan.budget) if plan else None,
-            "sales_target": _num(plan.sales_target) if plan else None,
+            "budget": num(plan.budget) if plan else None,
             # Months still to come have nothing to compare yet.
-            "sales": await sales_between(db, start, upto) if started else None,
-            "spent": await spent_between(db, start, upto) if started else None,
+            "spent": await spent_between(db, start, min(end, today)) if start <= today else None,
             "current": start <= today <= end,
         })
     return {"year": year, "months": months}
 
 
 async def current_month(db: AsyncSession) -> dict:
-    """This month so far, with how far through the month we are — for the Sales dashboard strip."""
+    """This month's spending so far, with how far through the month we are — for the Sales dashboard strip."""
     today = today_local()
     start, end = month_range(today.year, today.month)
-    plan = (await db.execute(select(MonthlyPlan).where(MonthlyPlan.month == start))).scalar_one_or_none()
+    plan = await plan_for(db, start)
     return {
-        "year": today.year, "month": today.month,
-        "day": today.day, "days_in_month": end.day,
-        "budget": _num(plan.budget) if plan else None,
-        "sales_target": _num(plan.sales_target) if plan else None,
-        "sales": await sales_between(db, start, today),
+        "year": today.year, "month": today.month, "day": today.day, "days_in_month": end.day,
+        "budget": num(plan.budget) if plan else None,
         "spent": await spent_between(db, start, today),
     }
 
 
 async def save_year(db: AsyncSession, year: int, months: list[dict], user) -> dict:
-    """Set the budget and target of the months given; a month left with neither is cleared."""
-    if not 2000 <= year <= 2100:
-        raise HTTPException(status_code=400, detail="Pick a year between 2000 and 2100")
-    wanted: dict[int, tuple[Optional[Decimal], Optional[Decimal]]] = {}
-    for item in months:
-        m = item.get("month")
-        if not isinstance(m, int) or not 1 <= m <= 12:
-            raise HTTPException(status_code=400, detail="Month must be 1–12")
-        wanted[m] = (parse_amount(item.get("budget")), parse_amount(item.get("sales_target")))
-
-    rows = (await db.execute(select(MonthlyPlan).where(MonthlyPlan.month >= date(year, 1, 1),
-                                                       MonthlyPlan.month <= date(year, 12, 1)))).scalars().all()
-    existing = {p.month.month: p for p in rows}
-    changed = []
-    for m, (budget, target) in sorted(wanted.items()):
-        plan = existing.get(m)
-        if plan and (plan.budget, plan.sales_target) == (budget, target):
-            continue
-        if budget is None and target is None:
-            if plan:
-                await db.delete(plan)
-                changed.append(m)
-            continue
-        if not plan:
-            plan = MonthlyPlan(month=date(year, m, 1))
-            db.add(plan)
-        plan.budget, plan.sales_target, plan.updated_by_user_id = budget, target, user.id
-        changed.append(m)
-
-    if changed:
-        names = ", ".join(calendar.month_abbr[m] for m in changed)
-        record(db, "Budget", "save_plan", f"Updated budget / sales target for {names} {year}", user=user,
-               ref_type="monthly_plan", ref_id=year)
-        await db.commit()
-    return {"ok": True, "changed": changed}
+    """Set the budget of the months given; an empty one clears it."""
+    check_year(year)
+    wanted = {m: {"budget": parse_amount(item.get("budget"))} for m, item in month_items(months).items()}
+    return {"ok": True, "changed": await store_months(db, year, wanted, user, "Budget", "budget")}

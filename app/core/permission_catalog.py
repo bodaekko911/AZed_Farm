@@ -26,11 +26,23 @@ PERMISSION_MATRIX = [
     {
         "module": "budget",
         "resource": "monthly_plans",
-        "label": "Budget & Targets",
+        "label": "Budget",
         "icon": "chart",
         "actions": [
-            {"action": "view", "key": "page_budget", "label": "See the monthly budget and sales target against actuals"},
-            {"action": "manage", "key": "action_budget_manage", "label": "Set the monthly budget and sales target"},
+            {"action": "view", "key": "page_budget", "label": "See the monthly spending budget against actual spending"},
+            {"action": "manage", "key": "action_budget_manage", "label": "Set the monthly spending budget"},
+        ],
+    },
+    {
+        "module": "sales_targets",
+        "resource": "monthly_plans",
+        "label": "Sales Targets",
+        "icon": "chart",
+        "actions": [
+            {"action": "view", "key": "page_sales_targets",
+             "label": "See the monthly sales target, floor and stretch against actual sales"},
+            {"action": "manage", "key": "action_sales_targets_manage",
+             "label": "Set the monthly sales target (and its floor and stretch)"},
         ],
     },
     {
@@ -378,6 +390,8 @@ ROLE_DEFINITIONS = {
         "permissions": {
             "page_dashboard",
             "page_budget",
+            "page_sales_targets",
+            "action_sales_targets_manage",
             "page_assistant",
             "page_vocabulary",
             "page_field_inbox",
@@ -509,6 +523,7 @@ ROLE_DEFINITIONS = {
             "action_export_excel",
             "page_budget",
             "action_budget_manage",
+            "page_sales_targets",
             "page_accounting",
             "tab_accounting_pos",
             "tab_accounting_b2b",
@@ -555,6 +570,7 @@ ROLE_DEFINITIONS = {
             "page_dashboard",
             "page_farm_dashboard",
             "page_budget",
+            "page_sales_targets",
             "page_reports",
             "tab_reports_sales",
             "tab_reports_pl",

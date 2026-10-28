@@ -12,6 +12,7 @@ NAV_GROUPS = [
         "items": [
             {"label": "Sales dashboard", "href": "/dashboard", "permission": "page_dashboard"},
             {"label": "Farm dashboard", "href": "/farm-dashboard", "permission": "page_farm_dashboard"},
+            {"label": "Sales targets", "href": "/sales-targets/", "permission": "page_sales_targets"},
             {"label": "POS", "href": "/pos", "permission": "page_pos"},
             {"label": "B2B", "href": "/b2b/", "permission": "page_b2b"},
             {"label": "Reports", "href": "/reports/", "permission": "page_reports"},
@@ -39,7 +40,7 @@ NAV_GROUPS = [
         "items": [
             {"label": "Accounting", "href": "/accounting/", "permission": "page_accounting"},
             {"label": "Expenses", "href": "/expenses/", "permission": "page_expenses"},
-            {"label": "Budget & targets", "href": "/budget/", "permission": "page_budget"},
+            {"label": "Budget", "href": "/budget/", "permission": "page_budget"},
             {"label": "Customers", "href": "/customers-mgmt/", "permission": "page_customers"},
             {"label": "Suppliers", "href": "/suppliers/", "permission": "page_suppliers"},
         ],
