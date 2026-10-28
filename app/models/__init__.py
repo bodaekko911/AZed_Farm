@@ -6,6 +6,7 @@ from app.models.assistant_settings import AssistantSettings
 from app.models.automation import AutomationEvent, AutomationRule, AutomationRun, AutomationSettings
 from app.models.quotation import B2BQuotation, B2BQuotationItem, B2BQuotationSettings
 from app.models.brief import WeeklyBriefSettings
+from app.models.budget import MonthlyPlan
 from app.models.document import DocumentFile, DocumentLink
 from app.models.telegram import FieldDraft, TelegramChat, TelegramChatGuard, TelegramLinkCode, TelegramUpdate
 from app.models.b2b import (
@@ -116,6 +117,7 @@ __all__ = [
     "Journal",
     "JournalEntry",
     "LocationStock",
+    "MonthlyPlan",
     "MortalityLog",
     "Payroll",
     "PlotInput",

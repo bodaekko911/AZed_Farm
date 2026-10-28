@@ -699,6 +699,18 @@ body {
                 </div>
             </a>
 
+            <a href="/budget/" class="module-card c-green" data-permission="page_budget">
+                <div class="card-icon">🎯</div>
+                <div class="card-body">
+                    <div class="card-name">Budget &amp; Targets</div>
+                    <div class="card-desc">Monthly spending budget and sales target against actuals</div>
+                </div>
+                <div class="card-footer">
+                    <span class="card-tag">Planning</span>
+                    <span class="card-arrow">↗</span>
+                </div>
+            </a>
+
             <a href="/users/" class="module-card c-rose" id="card-users" style="display:none">
                 <div class="card-icon">🔐</div>
                 <div class="card-body">

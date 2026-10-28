@@ -24,6 +24,16 @@ PERMISSION_MATRIX = [
         ],
     },
     {
+        "module": "budget",
+        "resource": "monthly_plans",
+        "label": "Budget & Targets",
+        "icon": "chart",
+        "actions": [
+            {"action": "view", "key": "page_budget", "label": "See the monthly budget and sales target against actuals"},
+            {"action": "manage", "key": "action_budget_manage", "label": "Set the monthly budget and sales target"},
+        ],
+    },
+    {
         "module": "assistant",
         "resource": "assistant",
         "label": "Ask (assistant)",
@@ -367,6 +377,7 @@ ROLE_DEFINITIONS = {
         "description": "Operations leadership role with broad day-to-day control. Covers dashboard, reports, POS including refunds, B2B workflows, inventory adjustments, products, imports, production, farm intake, customers, and suppliers. Does not include accounting journals, HR/payroll, or user administration by default.",
         "permissions": {
             "page_dashboard",
+            "page_budget",
             "page_assistant",
             "page_vocabulary",
             "page_field_inbox",
@@ -496,6 +507,8 @@ ROLE_DEFINITIONS = {
             "tab_reports_inventory",
             "tab_reports_transactions",
             "action_export_excel",
+            "page_budget",
+            "action_budget_manage",
             "page_accounting",
             "tab_accounting_pos",
             "tab_accounting_b2b",
@@ -541,6 +554,7 @@ ROLE_DEFINITIONS = {
         "permissions": {
             "page_dashboard",
             "page_farm_dashboard",
+            "page_budget",
             "page_reports",
             "tab_reports_sales",
             "tab_reports_pl",

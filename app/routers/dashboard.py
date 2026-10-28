@@ -489,6 +489,8 @@ def dashboard_ui(current_user: User = Depends(get_current_user)):
     <article class="card number-card" data-card="stock_alerts" aria-live="polite"></article>
   </section>
 
+  <section class="card budget-strip" id="budget-strip" aria-label="This month's target and budget" hidden></section>
+
   <section class="card chart-card" aria-label="Sales over time">
     <div class="panel-head"><h2 id="chart-title">Sales over time</h2></div>
     <div class="chart-wrap"><canvas id="sales-chart" aria-label="Sales over time chart"></canvas></div>
@@ -566,5 +568,6 @@ def dashboard_ui(current_user: User = Depends(get_current_user)):
 </div>
 
 <script src="/static/dashboard.js"></script>
+<script src="/static/budget-strip.js"></script>
 </body>
 </html>"""
