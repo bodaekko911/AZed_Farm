@@ -26,6 +26,8 @@ class Employee(Base):
     works_with_animals = Column(Boolean, nullable=False, default=False, server_default=sql_false())
     is_active   = Column(Boolean, default=True)
     vacation_days_per_month    = Column(Integer, default=0, server_default="0", nullable=False)
+    # 'work_days' deal: the salary pays this many working days a month (e.g. 23 on / 7 off).
+    work_days_per_month        = Column(Integer, default=0, server_default="0", nullable=False)
     food_allowance              = Column(Numeric(12, 2), default=0, server_default="0", nullable=False)
     transportation_allowance    = Column(Numeric(12, 2), default=0, server_default="0", nullable=False)
     attendance_auto_status      = Column(String(20), nullable=False, default="present", server_default="present")

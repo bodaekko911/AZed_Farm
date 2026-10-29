@@ -71,7 +71,8 @@ class EmployeeCreate(BaseModel):
     transportation_allowance: float         = 0
     farm_id:                 Optional[int]  = None
     works_with_animals:      bool           = False
-    salary_days_basis:       str            = "calendar"   # calendar | fixed_30
+    salary_days_basis:       str            = "calendar"   # calendar | fixed_30 | work_days
+    work_days_per_month:     int            = 0            # the working days a 'work_days' salary pays
 
 class EmployeeUpdate(BaseModel):
     name:                    Optional[str]   = None
@@ -85,7 +86,8 @@ class EmployeeUpdate(BaseModel):
     farm_id:                 Optional[int]   = None
     works_with_animals:      Optional[bool]  = None
     is_active:               Optional[bool]  = None
-    salary_days_basis:       Optional[str]   = None        # calendar | fixed_30
+    salary_days_basis:       Optional[str]   = None        # calendar | fixed_30 | work_days
+    work_days_per_month:     Optional[int]   = None
     hire_date:               Optional[str]   = None        # YYYY-MM-DD; "" clears it
     # A later hire date removes the attendance logged before it — only once the user has confirmed that.
     confirm_attendance_removal: bool = False
@@ -350,6 +352,7 @@ def _employee_payload(employee: Employee) -> dict:
         "works_with_animals":         bool(getattr(employee, "works_with_animals", False) or False),
         "vacation_days_per_month":    int(getattr(employee, "vacation_days_per_month", 0) or 0),
         "salary_days_basis":          _salary_basis(employee),
+        "work_days_per_month":        _work_days(employee),
         "food_allowance":             float(getattr(employee, "food_allowance", 0) or 0),
         "transportation_allowance":   float(getattr(employee, "transportation_allowance", 0) or 0),
         "attendance_auto_status":     _normalize_auto_attendance_status(
@@ -360,7 +363,9 @@ def _employee_payload(employee: Employee) -> dict:
 
 SALARY_BASIS_CALENDAR = "calendar"
 SALARY_BASIS_FIXED_30 = "fixed_30"
-SALARY_BASES = {SALARY_BASIS_CALENDAR, SALARY_BASIS_FIXED_30}
+SALARY_BASIS_WORK_DAYS = "work_days"
+SALARY_BASES = {SALARY_BASIS_CALENDAR, SALARY_BASIS_FIXED_30, SALARY_BASIS_WORK_DAYS}
+DEFAULT_WORK_DAYS = 23
 
 
 def _salary_basis(employee: Employee) -> str:
@@ -368,11 +373,21 @@ def _salary_basis(employee: Employee) -> str:
     return basis if basis in SALARY_BASES else SALARY_BASIS_CALENDAR
 
 
+def _work_days(employee: Employee) -> int:
+    """Working days a month the salary pays on a 'work_days' deal (0 on other deals)."""
+    if _salary_basis(employee) != SALARY_BASIS_WORK_DAYS:
+        return 0
+    return max(1, int(getattr(employee, "work_days_per_month", 0) or 0) or DEFAULT_WORK_DAYS)
+
+
 def _rate_divisor(employee: Employee, working_days: int) -> int:
     """Days the monthly salary is divided by to get the daily rate:
-    the real month length for 'calendar' deals, a flat 30 for 'fixed_30'."""
+    the real month length for 'calendar' deals, a flat 30 for 'fixed_30',
+    the deal's working days (e.g. 23) for 'work_days'."""
     if _salary_basis(employee) == SALARY_BASIS_FIXED_30:
         return 30
+    if _salary_basis(employee) == SALARY_BASIS_WORK_DAYS:
+        return _work_days(employee)
     return max(1, int(working_days or 0))
 
 
@@ -454,6 +469,14 @@ def _earned_base(employee: Employee, days_present, working_days: int = 30,
       * Leave taken beyond the available balance is unpaid.
       * A complete month lands on the exact base salary.
 
+    'work_days' (e.g. 15,000 for 23 working days, then 7 days off):
+        Daily rate is base_salary / work days, and every covered day is paid
+        at it — no cap, so a 24th day worked earns one more day's pay. Days off
+        are part of the schedule and never touch the leave balance; only a month
+        with fewer than the deal's working days is topped up from the days-off
+        credit (see `_paid_leave_days_for_period`). Paying just the salary and
+        converting the rest at Mark Paid banks the extra days as credit.
+
     Rounding only the final result keeps a full month exact (e.g. 8000, not
     7999.94 from a pre-rounded daily rate).
     """
@@ -462,6 +485,9 @@ def _earned_base(employee: Employee, days_present, working_days: int = 30,
     covered = _dec(days_present) + _dec(paid_leave_days)
     if covered < 0:
         covered = Decimal("0")
+
+    if _salary_basis(employee) == SALARY_BASIS_WORK_DAYS:
+        return _money(base_salary * covered / _dec(_work_days(employee)))
 
     if _salary_basis(employee) == SALARY_BASIS_FIXED_30:
         elapsed = safe_working_days if days_elapsed is None else max(0, int(days_elapsed))
@@ -531,6 +557,26 @@ def _vacation_months_accrued(employee: Employee, as_of: date | None = None) -> i
     return max(0, months)
 
 
+async def _leave_taken(db: AsyncSession, employee: Employee, before: date | None = None) -> Decimal:
+    """Days drawn from the leave balance (before `before`, if given).
+
+    Usually every Day Off. On a 'work_days' deal the days off are part of the
+    schedule, so only the days payroll paid from the credit to make up a short
+    month count (stored on each run as paid_leave_days)."""
+    if _salary_basis(employee) == SALARY_BASIS_WORK_DAYS:
+        stmt = select(func.coalesce(func.sum(Payroll.paid_leave_days), 0)).where(Payroll.employee_id == employee.id)
+        if before is not None:
+            stmt = stmt.where(Payroll.period < f"{before.year:04d}-{before.month:02d}")
+    else:
+        stmt = select(func.count(Attendance.id)).where(
+            Attendance.employee_id == employee.id,
+            Attendance.status == "absent",   # the "Day Off" option is stored as 'absent'
+        )
+        if before is not None:
+            stmt = stmt.where(Attendance.date < before)
+    return _days((await db.execute(stmt)).scalar() or 0)
+
+
 async def _employee_vacation_summary(db: AsyncSession, employee: Employee) -> dict:
     """Leave balance: monthly allowance accrued from hire (carried over) plus
     days off credited via partial payroll payments, minus days taken (attendance
@@ -546,13 +592,7 @@ async def _employee_vacation_summary(db: AsyncSession, employee: Employee) -> di
     )
     credited = _days(_credited.scalar() or 0)
 
-    _taken = await db.execute(
-        select(func.count(Attendance.id)).where(
-            Attendance.employee_id == employee.id,
-            Attendance.status == "absent",   # the "Day Off" option is stored as 'absent'
-        )
-    )
-    taken = _days(_taken.scalar() or 0)
+    taken = await _leave_taken(db, employee)
 
     _adjusted = await db.execute(
         select(func.coalesce(func.sum(EmployeeDaysOffAdjustment.days), 0)).where(
@@ -594,7 +634,7 @@ async def _vacation_available_as_of(
     then, so historical runs stay correct and stable across re-runs.
     """
     per_month = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
-    if per_month <= 0:
+    if per_month <= 0 and _salary_basis(employee) != SALARY_BASIS_WORK_DAYS:
         return Decimal("0")
 
     from calendar import monthrange
@@ -613,14 +653,7 @@ async def _vacation_available_as_of(
     )
     credited_before = _days(_credited.scalar() or 0)
 
-    _taken_before = await db.execute(
-        select(func.count(Attendance.id)).where(
-            Attendance.employee_id == employee.id,
-            Attendance.status == "absent",      # the "Day Off" option is stored as 'absent'
-            Attendance.date < month_start,      # leave taken in PRIOR months
-        )
-    )
-    taken_before = _days(_taken_before.scalar() or 0)
+    taken_before = await _leave_taken(db, employee, before=month_start)   # leave taken in PRIOR months
 
     # Manual adjustments count for the month they were entered in and after, so
     # a correction made today applies to this month's payroll but never
@@ -707,6 +740,25 @@ async def _paid_leave_days_for_period(
     shows the same figure without writing.
     """
     available = await _vacation_available_as_of(db, employee, year, month)
+
+    if _salary_basis(employee) == SALARY_BASIS_WORK_DAYS:
+        # Days off are scheduled, not leave. Once the month is over, a month
+        # with fewer working days than the deal is topped up from the credit;
+        # the second figure is how many days were short.
+        from calendar import monthrange
+        total_days = monthrange(year, month)[1]
+        hire = getattr(employee, "hire_date", None)
+        complete = days_elapsed is None or days_elapsed >= total_days
+        if not complete or (hire is not None and hire > date(year, month, 1)):
+            return Decimal("0.00"), Decimal("0.00"), available
+        _present = await db.execute(select(func.count(Attendance.id)).where(
+            Attendance.employee_id == employee.id,
+            Attendance.status == "present",
+            func.extract("year",  Attendance.date) == year,
+            func.extract("month", Attendance.date) == month,
+        ))
+        short = _days(max(_work_days(employee) - int(_present.scalar() or 0), 0))
+        return _days(min(short, available)), short, available
 
     _taken = await db.execute(
         select(func.count(Attendance.id)).where(
@@ -1092,6 +1144,13 @@ async def list_farms_for_employee_assignment(db: AsyncSession = Depends(get_asyn
     ]
 
 
+def _check_work_days(value) -> int:
+    days = int(value or 0)
+    if not 0 <= days <= 31:
+        raise HTTPException(status_code=400, detail="Working days per month must be between 1 and 31")
+    return days
+
+
 @router.post("/api/employees", dependencies=[Depends(require_permission("action_hr_manage_employees"))])
 async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
     hire = _parse_optional_iso_date(data.hire_date, "hire_date")
@@ -1102,6 +1161,7 @@ async def add_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_asyn
         hire_date=hire, base_salary=data.base_salary,
         vacation_days_per_month=max(0, int(data.vacation_days_per_month or 0)),
         salary_days_basis=(data.salary_days_basis if data.salary_days_basis in SALARY_BASES else SALARY_BASIS_CALENDAR),
+        work_days_per_month=_check_work_days(data.work_days_per_month),
         food_allowance=max(0, float(data.food_allowance or 0)),
         transportation_allowance=max(0, float(data.transportation_allowance or 0)),
         farm_id=farm.id if farm else None,
@@ -1163,8 +1223,10 @@ async def edit_employee(emp_id: int, data: EmployeeUpdate, db: AsyncSession = De
     if "salary_days_basis" in payload:
         basis = (payload["salary_days_basis"] or "").strip().lower()
         if basis not in SALARY_BASES:
-            raise HTTPException(status_code=400, detail="salary_days_basis must be 'calendar' or 'fixed_30'")
+            raise HTTPException(status_code=400, detail="salary_days_basis must be 'calendar', 'fixed_30' or 'work_days'")
         payload["salary_days_basis"] = basis
+    if "work_days_per_month" in payload:
+        payload["work_days_per_month"] = _check_work_days(payload["work_days_per_month"])
     for k, v in payload.items():
         setattr(e, k, v)
     if payload.get("is_active") is False:
@@ -1217,7 +1279,7 @@ async def get_vacation_summary(db: AsyncSession = Depends(get_async_session)):
         select(Employee)
         .where(
             Employee.is_active == True,
-            Employee.vacation_days_per_month > 0,
+            (Employee.vacation_days_per_month > 0) | (Employee.salary_days_basis == SALARY_BASIS_WORK_DAYS),
         )
         .order_by(Employee.name)
     )
@@ -2287,6 +2349,9 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
             "days_worked": r.days_worked or 0,
             "working_days":r.working_days or 0,
             "paid_leave_days": _as_day_float(r.paid_leave_days or 0),
+            "work_days_per_month": _work_days(r.employee) if r.employee else 0,
+            "extra_pay":   _as_float(max(_money(r.base_salary or 0) - _money(r.employee.base_salary or 0), Decimal("0")))
+                           if r.employee and _work_days(r.employee) else 0.0,
             "leave_pay":   _as_float(_leave_pay(r.employee, r.base_salary or 0, r.paid_leave_days or 0,
                                                 int(r.working_days or 30) or 30)),
             "bonuses":     float(r.bonuses)     if r.bonuses     else 0,
@@ -2371,7 +2436,10 @@ async def _payslip(db: AsyncSession, payroll: Payroll) -> dict:
 
     leave_days = _days(payroll.paid_leave_days or 0)
     leave_pay = _leave_pay(emp, payroll.base_salary or 0, leave_days, working_days)
-    earnings = [{"label": f"Salary for {days_worked} of {working_days} days", "label_ar": "الراتب عن أيام العمل",
+    deal_days = _work_days(emp)
+    salary_label = (f"Salary for {days_worked} days worked ({deal_days}-day month)" if deal_days
+                    else f"Salary for {days_worked} of {working_days} days")
+    earnings = [{"label": salary_label, "label_ar": "الراتب عن أيام العمل",
                  "amount": _money(_money(payroll.base_salary or 0) - leave_pay)}]
     if leave_pay > 0:
         earnings.append({"label": f"Paid leave ({float(leave_days):g} day{'' if leave_days == 1 else 's'})",
@@ -3571,7 +3639,9 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="fld"><label>Salary Basis</label><select id="e-salary-basis" onchange="updateEmpDailyRatePreview()">
                 <option value="calendar">Calendar month (÷ 28–31 days)</option>
                 <option value="fixed_30">Fixed 30 days (÷ 30, absences deduct)</option>
+                <option value="work_days">Working days (e.g. 23 on / 7 off)</option>
             </select></div>
+            <div class="fld" id="e-work-days-fld" style="display:none"><label>Working Days / Month</label><input id="e-work-days" type="number" placeholder="23" min="1" max="31" step="1" oninput="updateEmpDailyRatePreview()"></div>
             <div class="fld"><label>Vacation Days / Month</label><input id="e-vacation" type="number" placeholder="0" min="0" max="20" step="1" oninput="updateEmpDailyRatePreview()"></div>
             <div class="fld"><label>Food Allowance (EGP)</label><input id="e-food" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
             <div class="fld"><label>Transportation Allowance (EGP)</label><input id="e-transport" type="number" placeholder="0.00" min="0" oninput="updateEmpDailyRatePreview()"></div>
@@ -3859,6 +3929,7 @@ let empSearchTimer = null;
 let loanDeductionEmployeeId = null;
 let loanDeductionEmployeeSalary = 0;
 let loanDeductionEmployeeSalaryBasis = "calendar";
+let loanDeductionEmployeeWorkDays = 0;
 let currentEmployeeLoans = [];
 
 function escapeHtml(value) {
@@ -4030,8 +4101,8 @@ async function loadEmployees(){
             <td style="font-size:12px;color:var(--muted)">${displayText(e.hire_date)}</td>
             <td class="mono">${money(salary)}</td>
             <td style="display:flex;gap:6px">
-                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}" data-works-animals="${e.works_with_animals ? "1" : ""}" data-vacation="${numberValue(e.vacation_days_per_month)||0}" data-salary-basis="${e.salary_days_basis||'calendar'}" data-food="${numberValue(e.food_allowance)||0}" data-transport="${numberValue(e.transportation_allowance)||0}" data-hire-date="${escapeHtml(e.hire_date||'')}" data-active="${e.is_active === false ? "0" : "1"}">Edit</button>
-                ${(hasPermission("action_hr_view_loans") || hasPermission("action_hr_view_deductions"))?`<button class="action-btn purple" onclick="openLoanDeductionModalFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-salary="${salary}" data-salary-basis="${e.salary_days_basis||'calendar'}">Loans &amp; Deductions</button>`:""}
+                <button class="action-btn" onclick="openEditEmpFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-position="${escapeHtml(normalizeDashFallback(e.position))}" data-department="${escapeHtml(normalizeDashFallback(e.department))}" data-phone="${escapeHtml(normalizeDashFallback(e.phone))}" data-salary="${salary}" data-farm-id="${e.farm_id || ""}" data-works-animals="${e.works_with_animals ? "1" : ""}" data-vacation="${numberValue(e.vacation_days_per_month)||0}" data-salary-basis="${e.salary_days_basis||'calendar'}" data-work-days="${numberValue(e.work_days_per_month)||0}" data-food="${numberValue(e.food_allowance)||0}" data-transport="${numberValue(e.transportation_allowance)||0}" data-hire-date="${escapeHtml(e.hire_date||'')}" data-active="${e.is_active === false ? "0" : "1"}">Edit</button>
+                ${(hasPermission("action_hr_view_loans") || hasPermission("action_hr_view_deductions"))?`<button class="action-btn purple" onclick="openLoanDeductionModalFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}" data-salary="${salary}" data-salary-basis="${e.salary_days_basis||'calendar'}" data-work-days="${numberValue(e.work_days_per_month)||0}">Loans &amp; Deductions</button>`:""}
                 ${hasPermission("action_hr_run_payroll") ? (e.is_active === false
                     ? `<button class="action-btn green" onclick="reactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Reactivate</button>`
                     : `<button class="action-btn danger" onclick="deactivateEmployeeFromButton(this)" data-id="${id}" data-name="${escapeHtml(normalizeDashFallback(e.name))}">Remove</button>`) : ""}
@@ -4061,6 +4132,8 @@ function openEditEmpFromButton(btn){
         btn.dataset.worksAnimals === "1",
         btn.dataset.active !== "0"
     );
+    document.getElementById("e-work-days").value = numberValue(btn.dataset.workDays) || "";
+    updateEmpDailyRatePreview();
 }
 
 function reactivateEmployeeFromButton(btn){
@@ -4076,7 +4149,7 @@ function openAddEmpModal(){
     document.getElementById("emp-modal-title").innerText = "Add Employee";
     const activeRow = document.getElementById("emp-active-row");
     if(activeRow) activeRow.style.display = "none";
-    ["e-name","e-position","e-department","e-phone","e-salary","e-vacation","e-food","e-transport","e-hire"].forEach(id=>document.getElementById(id).value="");
+    ["e-name","e-position","e-department","e-phone","e-salary","e-vacation","e-work-days","e-food","e-transport","e-hire"].forEach(id=>document.getElementById(id).value="");
     document.getElementById("e-salary-basis").value = "calendar";
     applyHireDateLock(false);
     updateEmpDailyRatePreview();
@@ -4096,7 +4169,7 @@ function openEditEmpModal(id,name,position,department,phone,salary,farmId,vacati
     document.getElementById("e-phone").value      = normalizeDashFallback(phone);
     document.getElementById("e-salary").value     = salary;
     document.getElementById("e-vacation").value   = vacationDays || 0;
-    document.getElementById("e-salary-basis").value = (salaryBasis === "fixed_30") ? "fixed_30" : "calendar";
+    document.getElementById("e-salary-basis").value = ["fixed_30","work_days"].includes(salaryBasis) ? salaryBasis : "calendar";
     document.getElementById("e-food").value       = food || 0;
     document.getElementById("e-transport").value  = transport || 0;
     document.getElementById("e-hire").value       = (hireDate && hireDate !== "—") ? hireDate : "";
@@ -4186,9 +4259,19 @@ function updateEmpDailyRatePreview(){
     if(!preview) return;
     if(!salary && !food && !transport){ preview.innerText = ""; return; }
     const fixed30   = basis === "fixed_30";
-    const paidDays  = 30;
+    const workDays  = basis === "work_days" ? (parseInt(document.getElementById("e-work-days")?.value || 0) || 23) : 0;
+    document.getElementById("e-work-days-fld").style.display = basis === "work_days" ? "" : "none";
+    const paidDays  = workDays || 30;
     const dailyRate = salary / paidDays;
     const totalMonthly = salary + food + transport;
+    if(workDays){
+        preview.innerHTML =
+            `Daily rate: <b>${money(dailyRate)} EGP</b> &nbsp;(${money(salary)} ÷ ${workDays} working days. Days off are part of the schedule and are not deducted. ` +
+            `Each day worked beyond ${workDays} earns ${money(dailyRate)} more — at Mark Paid you can pay just the salary and turn the rest into days-off credit. ` +
+            `A month with fewer than ${workDays} working days is topped up from that credit.)<br>` +
+            `Total monthly: <b>${money(totalMonthly)} EGP</b> &nbsp;(salary ${money(salary)} + food ${money(food)} + transport ${money(transport)})`;
+        return;
+    }
     const basisNote = fixed30
         ? `${money(salary)} ÷ 30 flat — during the month pay accrues per covered day (${money(dailyRate)} each); once the month completes, the full salary is owed and each uncovered day deducts exactly ${money(dailyRate)}, whether the month has 28 or 31 days`
         : `approx — ${money(salary)} ÷ ${paidDays} days; actual payroll divides by each month's real day count (28–31)`;
@@ -4212,6 +4295,7 @@ async function saveEmployee(){
         base_salary:             parseFloat(document.getElementById("e-salary").value)||0,
         vacation_days_per_month: parseInt(document.getElementById("e-vacation").value)||0,
         salary_days_basis:       document.getElementById("e-salary-basis").value || "calendar",
+        work_days_per_month:     parseInt(document.getElementById("e-work-days").value)||0,
         food_allowance:          parseFloat(document.getElementById("e-food").value)||0,
         transportation_allowance: parseFloat(document.getElementById("e-transport").value)||0,
         farm_id:                 farmIdVal,
@@ -4313,6 +4397,8 @@ function openLoanDeductionModalFromButton(btn){
         numberValue(btn.dataset.salary),
         btn.dataset.salaryBasis || "calendar"
     );
+    loanDeductionEmployeeWorkDays = numberValue(btn.dataset.workDays) || 0;
+    updateDayDeductionPreview();
 }
 
 function syncDeductPeriodFromDate(){
@@ -4487,6 +4573,8 @@ function updateDayDeductionPreview(){
     let workingDays = 30;
     if(loanDeductionEmployeeSalaryBasis === "fixed_30"){
         workingDays = 30;
+    } else if(loanDeductionEmployeeSalaryBasis === "work_days"){
+        workingDays = loanDeductionEmployeeWorkDays || 23;
     } else if(period){
         const [yr,mo] = period.split("-").map(Number);
         workingDays = new Date(yr,mo,0).getDate();
@@ -5159,7 +5247,8 @@ function markPaid(id){
     const rec = (window._payrollRecords||[]).find(r=>numberValue(r.id)===numberValue(id));
     const net  = rec ? numberValue(rec.net_salary) : 0;
     const rate = rec ? numberValue(rec.daily_rate) : 0;
-    openPayModal(id, net, rate);
+    const extra = rec ? Math.min(numberValue(rec.extra_pay), net) : 0;
+    openPayModal(id, net, rate, extra > 0 ? {days: numberValue(rec.work_days_per_month), amount: net - extra} : null);
 }
 
 function closePayModal(){
@@ -5167,7 +5256,7 @@ function closePayModal(){
     if(o) o.remove();
 }
 
-function openPayModal(id, net, rate){
+function openPayModal(id, net, rate, dealOnly){
     closePayModal();
     const overlay = document.createElement("div");
     overlay.id = "pay-modal-overlay";
@@ -5176,6 +5265,7 @@ function openPayModal(id, net, rate){
       <div style="background:var(--card2,#fff);color:var(--text,#111);padding:20px;border-radius:12px;width:min(92vw,360px);box-shadow:0 12px 40px rgba(0,0,0,.35)">
         <div style="font-weight:700;font-size:16px;margin-bottom:10px">Pay salary</div>
         <div style="font-size:13px;color:var(--muted,#888);margin-bottom:10px">Net owed: <b>${money(net)} EGP</b></div>
+        ${dealOnly ? `<button id="pay-deal-only" style="width:100%;padding:8px;margin-bottom:10px;border-radius:8px;border:1px solid var(--border,#ccc);background:none;color:inherit;cursor:pointer;font-size:13px">Pay ${dealOnly.days} days only (${money(dealOnly.amount)}) — rest to days-off credit</button>` : ""}
         <label style="font-size:13px;display:block;margin-bottom:4px">Cash amount to pay</label>
         <input id="pay-amount-input" type="number" step="0.01" min="0" max="${net}" value="${net}" style="width:100%;padding:8px;border:1px solid var(--border,#ccc);border-radius:8px;margin-bottom:10px;background:transparent;color:inherit">
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:6px;cursor:pointer">
@@ -5204,6 +5294,11 @@ function openPayModal(id, net, rate){
     }
     amt.addEventListener("input", refresh);
     tog.addEventListener("change", refresh);
+    if(dealOnly) document.getElementById("pay-deal-only").onclick = function(){
+        amt.value = dealOnly.amount.toFixed(2);
+        tog.checked = true;
+        refresh();
+    };
     refresh();
     document.getElementById("pay-confirm-btn").onclick = function(){ confirmPay(id, net); };
 }
