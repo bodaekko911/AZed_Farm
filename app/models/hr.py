@@ -79,7 +79,9 @@ class Payroll(Base):
     days_off_credited = Column(Numeric(8, 2), default=0, server_default="0", nullable=False)
     days_worked  = Column(Integer, nullable=True)
     working_days = Column(Integer, nullable=True)
-    paid_at      = Column(DateTime(timezone=True), nullable=True)
+    # Days off this month paid from the leave balance (part of base_salary, shown as its own line).
+    paid_leave_days = Column(Numeric(8, 2), default=0, server_default="0", nullable=False)
+    paid_at     = Column(DateTime(timezone=True), nullable=True)
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
     employee = relationship("Employee", back_populates="payrolls")

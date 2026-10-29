@@ -491,6 +491,17 @@ def _earned_base(employee: Employee, days_present, working_days: int = 30,
     return _money(base_salary * paid / _dec(safe_working_days))
 
 
+def _leave_pay(employee: Employee, earned_base, paid_leave_days, working_days: int = 30) -> Decimal:
+    """The part of `earned_base` that pays for days off drawn from the leave
+    balance: paid_leave_days × the daily rate, never more than earned_base.
+    The rest of earned_base is pay for the days worked."""
+    days = _dec(paid_leave_days)
+    if days <= 0 or employee is None:
+        return Decimal("0")
+    divisor = _dec(_rate_divisor(employee, max(1, int(working_days or 0))))
+    return _money(min(_money(employee.base_salary) * days / divisor, _dec(earned_base)))
+
+
 async def _loan_repaid_amounts(db: AsyncSession, loan_ids: list[int]) -> dict[int, Decimal]:
     if not loan_ids:
         return {}
@@ -1931,6 +1942,8 @@ async def _payroll_preview_for_employee(
     # salary. Allowance (food) is prorated by attendance separately.
     earned_base  = _earned_base(employee, days_present, working_days, paid_leave_days,
                                 days_elapsed=days_elapsed, month_start=date(year, month, 1))
+    leave_pay    = _leave_pay(employee, earned_base, paid_leave_days, working_days)
+    unpaid_leave_days = _days(max(taken_leave_month - paid_leave_days, Decimal("0")))
     earned_total = _money(earned_base + earned_allowance)
 
     pending_day_days = Decimal("0")
@@ -1957,6 +1970,9 @@ async def _payroll_preview_for_employee(
         "vacation_paid_days": _as_day_float(paid_leave_days),
         "vacation_taken_month": _as_day_float(taken_leave_month),
         "vacation_available": _as_day_float(vacation_available),
+        "vacation_unpaid_days": _as_day_float(unpaid_leave_days),
+        "worked_pay": _as_float(earned_base - leave_pay),
+        "leave_pay": _as_float(leave_pay),
         "working_days": working_days,
         "days_elapsed": days_elapsed,
         "days_present": days_present,
@@ -2270,6 +2286,9 @@ async def get_payroll(period: str = None, db: AsyncSession = Depends(get_async_s
             "base_salary": float(r.base_salary) if r.base_salary else 0,
             "days_worked": r.days_worked or 0,
             "working_days":r.working_days or 0,
+            "paid_leave_days": _as_day_float(r.paid_leave_days or 0),
+            "leave_pay":   _as_float(_leave_pay(r.employee, r.base_salary or 0, r.paid_leave_days or 0,
+                                                int(r.working_days or 30) or 30)),
             "bonuses":     float(r.bonuses)     if r.bonuses     else 0,
             "allowance":   _as_float(allowance),
             "deductions":  float(r.deductions)  if r.deductions  else 0,
@@ -2350,8 +2369,13 @@ async def _payslip(db: AsyncSession, payroll: Payroll) -> dict:
     allowance = await _earned_allowance_for_payroll(db, payroll)
     advance_recovered = _money(earned_food + transport - allowance)
 
+    leave_days = _days(payroll.paid_leave_days or 0)
+    leave_pay = _leave_pay(emp, payroll.base_salary or 0, leave_days, working_days)
     earnings = [{"label": f"Salary for {days_worked} of {working_days} days", "label_ar": "الراتب عن أيام العمل",
-                 "amount": _money(payroll.base_salary or 0)}]
+                 "amount": _money(_money(payroll.base_salary or 0) - leave_pay)}]
+    if leave_pay > 0:
+        earnings.append({"label": f"Paid leave ({float(leave_days):g} day{'' if leave_days == 1 else 's'})",
+                         "label_ar": f"إجازة مدفوعة ({float(leave_days):g} يوم)", "amount": leave_pay})
     if earned_food > 0:
         earnings.append({"label": "Food allowance", "label_ar": "بدل طعام", "amount": earned_food})
     if transport > 0:
@@ -2413,6 +2437,7 @@ async def _payslip(db: AsyncSession, payroll: Payroll) -> dict:
         "period_ar": f"{_AR_MONTHS[month - 1]} {year}",
         "days_worked": days_worked,
         "working_days": working_days,
+        "paid_leave_days": float(leave_days),
         "daily_rate": _as_float(_paid_days_and_rate(emp, working_days)[1]),
         "earnings": [{**e, "amount": _as_float(e["amount"])} for e in earnings],
         "deductions": [{**d, "amount": _as_float(d["amount"])} for d in deductions],
@@ -2898,6 +2923,7 @@ async def run_payroll(data: PayrollRun, db: AsyncSession = Depends(get_async_ses
             payroll.bonuses = bonus_amount
             payroll.days_worked = days_present
             payroll.working_days = working_days
+            payroll.paid_leave_days = paid_leave_days
             payroll.day_deduction_days = _days(existing_day_days + pending_day_days)
             payroll.day_deductions = _money(existing_day_deductions + pending_day_amount)
             payroll.manual_deductions = _money(existing_manual_deductions + pending_manual_amount)
@@ -3476,7 +3502,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             </div>
             <div class="table-wrap">
                 <table>
-                    <thead><tr><th>Employee</th><th>Base Salary</th><th>Bonus</th><th>Day Ded.</th><th>Manual Ded.</th><th>Loan Deducted</th><th>Net Preview</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Employee</th><th>Salary</th><th>Bonus</th><th>Day Ded.</th><th>Manual Ded.</th><th>Loan Deducted</th><th>Net Preview</th><th>Status</th></tr></thead>
                     <tbody id="preview-body"></tbody>
                 </table>
             </div>
@@ -4914,19 +4940,23 @@ async function loadPayrollPreview(){
         const loanBal = (e.outstanding_loan_balance !== null && e.outstanding_loan_balance !== undefined) ? numberValue(e.outstanding_loan_balance) : 0;
         const dayDed  = numberValue(e.pending_day_deductions);
         const manDed  = numberValue(e.pending_manual_deductions);
-        const base    = numberValue(e.base_salary);
+        // What the run will pay: salary for the days worked + paid leave (days off drawn
+        // from the balance) + the earned allowance. Days off beyond the balance are unpaid.
+        const base    = numberValue(e.earned);
         const net     = base - dayDed - manDed - loanBal;
         const paidLeave = numberValue(e.vacation_paid_days)||0;
-        const takenLeave= numberValue(e.vacation_taken_month)||0;
+        const unpaidLeave = numberValue(e.vacation_unpaid_days)||0;
         const leaveBal  = (e.vacation_available!==null&&e.vacation_available!==undefined) ? numberValue(e.vacation_available) : null;
-        const vacInfo   = e.vacation_days > 0
-            ? ` · ${paidLeave} paid leave${takenLeave > paidLeave ? ` of ${takenLeave} taken` : ""}${leaveBal!==null ? ` · ${leaveBal}d balance` : ""}`
-            : "";
-        const allowances = (numberValue(e.food_allowance)||0) + (numberValue(e.transportation_allowance)||0);
+        const vacInfo   = leaveBal!==null && e.vacation_days > 0 ? ` · ${leaveBal}d leave balance` : "";
+        const allowance = numberValue(e.total_allowance)||0;
+        const lines = [`${numberValue(e.days_present)}d worked ${money(e.worked_pay)}`];
+        if(paidLeave > 0) lines.push(`<span style="color:var(--green)">+ ${paidLeave}d paid leave ${money(e.leave_pay)}</span>`);
+        if(allowance > 0) lines.push(`+ allowance ${money(allowance)}`);
+        if(unpaidLeave > 0) lines.push(`<span style="color:var(--danger)">${unpaidLeave}d off unpaid — no leave balance left</span>`);
         return `
         <tr>
-            <td class="name">${displayText(e.employee)}<br><span style="font-size:11px;color:var(--muted)">${displayText(e.position)} · ${numberValue(e.days_present)} present / ${numberValue(e.paid_days||30)} paid days${vacInfo}</span></td>
-            <td style="font-family:var(--mono)" title="Daily rate: ${money(e.daily_rate)} EGP&#10;Food: ${money(e.food_allowance||0)}&#10;Transport: ${money(e.transportation_allowance||0)}">${money(base)}<br><span style="font-size:10px;color:var(--muted)">${money(e.daily_rate)}/day${allowances>0?" + "+money(allowances)+" allow.":""}</span></td>
+            <td class="name">${displayText(e.employee)}<br><span style="font-size:11px;color:var(--muted)">${displayText(e.position)} · ${numberValue(e.days_present)} present / ${numberValue(e.working_days)} days${vacInfo}</span></td>
+            <td style="font-family:var(--mono)" title="Monthly salary: ${money(e.base_salary)} EGP&#10;Daily rate: ${money(e.daily_rate)} EGP&#10;Food: ${money(e.food_allowance||0)}&#10;Transport: ${money(e.transportation_allowance||0)}">${money(base)}<br><span style="font-size:10px;color:var(--muted);line-height:1.5">${lines.join("<br>")}</span></td>
             <td><input class="pay-bonus-input" data-emp-id="${numberValue(e.employee_id)}" type="number" min="0" step="0.01" value="0" style="width:86px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:6px" oninput="updatePayrollPreviewNet(this)"></td>
             <td style="font-family:var(--mono);color:var(--danger)" data-day-ded="${dayDed}">${numberValue(e.pending_day_deduction_days)}d / ${money(dayDed)}</td>
             <td style="font-family:var(--mono);color:var(--danger)" data-manual-ded="${manDed}">${money(manDed)}</td>
@@ -5036,8 +5066,8 @@ async function loadPayrollRecords(){
         <tr>
             <td class="name">${displayText(r.employee)}</td>
             <td style="font-family:var(--mono);font-size:12px;color:var(--muted)">${displayText(r.period)}</td>
-            <td style="font-family:var(--mono)">${money(r.base_salary)}</td>
-            <td style="font-family:var(--mono);color:var(--sub)">${r.days_worked ? numberValue(r.days_worked) : "-"} / ${r.working_days ? numberValue(r.working_days) : "-"}</td>
+            <td style="font-family:var(--mono)">${money(r.base_salary)}${numberValue(r.leave_pay)>0?`<br><span style="font-size:10px;color:var(--green)">incl. paid leave ${money(r.leave_pay)}</span>`:""}</td>
+            <td style="font-family:var(--mono);color:var(--sub)">${r.days_worked ? numberValue(r.days_worked) : "-"} / ${r.working_days ? numberValue(r.working_days) : "-"}${numberValue(r.paid_leave_days)>0?`<br><span style="font-size:10px;color:var(--green)">+${numberValue(r.paid_leave_days)}d paid leave</span>`:""}</td>
             <td style="font-family:var(--mono);color:var(--green)">+${money(r.bonuses)}</td>
             <td style="font-family:var(--mono);color:var(--green)">+${money(r.allowance)}</td>
             <td style="font-family:var(--mono);color:var(--danger)">-${money(r.loan_deductions)}</td>

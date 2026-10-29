@@ -59,7 +59,7 @@ table.lines tr.sum td { font-weight: 700; background: #f4f4f4; }
             <td class="k">Position / <span class="ar">الوظيفة</span></td><td class="v">{{ s.position or "—" }}</td></tr>
         <tr><td class="k">Farm / <span class="ar">المزرعة</span></td><td class="v">{{ s.farm or "—" }}</td>
             <td class="k">Department / <span class="ar">القسم</span></td><td class="v">{{ s.department or "—" }}</td></tr>
-        <tr><td class="k">Days worked / <span class="ar">أيام العمل</span></td><td class="v">{{ s.days_worked }} / {{ s.working_days }}</td>
+        <tr><td class="k">Days worked / <span class="ar">أيام العمل</span></td><td class="v">{{ s.days_worked }} / {{ s.working_days }}{% if s.paid_leave_days %} + {{ "{:g}".format(s.paid_leave_days) }} paid leave{% endif %}</td>
             <td class="k">Daily rate / <span class="ar">أجر اليوم</span></td><td class="v">{{ "{:,.2f}".format(s.daily_rate) }}</td></tr>
     </table>
 
