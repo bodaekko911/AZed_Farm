@@ -182,3 +182,13 @@ def test_a_short_month_is_topped_up_from_the_credit(monkeypatch):
         september = run_month(session, "2026-09")
         assert (september.base_salary, september.paid_leave_days) == (Decimal("15000.00"), Decimal("1.00"))
         assert asyncio.run(hr._employee_vacation_summary(AsyncSessionAdapter(session), emp))["days_left"] == 0
+
+
+def test_a_monthly_leave_allowance_left_on_the_profile_does_not_pile_up_as_credit():
+    """Days off are the schedule on this deal, so an old 'Vacation Days / Month' must not accrue credit."""
+    with make_session() as session:
+        emp = work_days_worker(session, {9: 23})
+        emp.vacation_days_per_month = 7
+        session.commit()
+        summary = asyncio.run(hr._employee_vacation_summary(AsyncSessionAdapter(session), emp))
+        assert (summary["accrued"], summary["days_left"]) == (0, 0)

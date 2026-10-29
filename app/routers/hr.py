@@ -557,6 +557,15 @@ def _vacation_months_accrued(employee: Employee, as_of: date | None = None) -> i
     return max(0, months)
 
 
+def _leave_per_month(employee: Employee) -> int:
+    """Leave days accrued each month. None on a 'work_days' deal: its days off
+    are the schedule, and its credit comes only from extra days converted at
+    Mark Paid (plus manual adjustments)."""
+    if _salary_basis(employee) == SALARY_BASIS_WORK_DAYS:
+        return 0
+    return max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
+
+
 async def _leave_taken(db: AsyncSession, employee: Employee, before: date | None = None) -> Decimal:
     """Days drawn from the leave balance (before `before`, if given).
 
@@ -581,7 +590,7 @@ async def _employee_vacation_summary(db: AsyncSession, employee: Employee) -> di
     """Leave balance: monthly allowance accrued from hire (carried over) plus
     days off credited via partial payroll payments, minus days taken (attendance
     marked 'Day Off', stored as status 'absent')."""
-    per_month = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
+    per_month = _leave_per_month(employee)
     months = _vacation_months_accrued(employee)
     accrued = _days(per_month * months)
 
@@ -633,7 +642,7 @@ async def _vacation_available_as_of(
     for a past month only spends the leave that had actually been banked by
     then, so historical runs stay correct and stable across re-runs.
     """
-    per_month = max(0, int(getattr(employee, "vacation_days_per_month", 0) or 0))
+    per_month = _leave_per_month(employee)
     if per_month <= 0 and _salary_basis(employee) != SALARY_BASIS_WORK_DAYS:
         return Decimal("0")
 
