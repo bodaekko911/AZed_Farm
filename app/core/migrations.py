@@ -88,8 +88,9 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
             "WHERE status IN ('late', 'leave')"
         ),
     },
-    # Per-employee salary basis: 'calendar' (rate = salary / days in month) or
-    # 'fixed_30' (rate = salary / 30; deduction-based monthly deal).
+    # Per-employee salary basis: 'calendar' (rate = salary / days in month),
+    # 'fixed_30' (rate = salary / 30; deduction-based monthly deal) or
+    # 'work_days' (rate = salary / the deal's working days, e.g. 23).
     {
         "table": "employees",
         "column": "salary_days_basis",
@@ -97,8 +98,21 @@ _RUNTIME_SCHEMA_PATCHES: tuple[dict[str, str], ...] = (
         "backfill": (
             "UPDATE employees SET salary_days_basis = 'calendar' "
             "WHERE salary_days_basis IS NULL "
-            "OR salary_days_basis NOT IN ('calendar', 'fixed_30')"
+            "OR salary_days_basis NOT IN ('calendar', 'fixed_30', 'work_days')"
         ),
+    },
+    # ── Working-days salary deal + paid leave per run (added 2026-10-29) ──
+    {
+        "table": "employees",
+        "column": "work_days_per_month",
+        "definition": "INTEGER NOT NULL DEFAULT 0",
+        "backfill": "SELECT 1",
+    },
+    {
+        "table": "payroll",
+        "column": "paid_leave_days",
+        "definition": "NUMERIC(8, 2) NOT NULL DEFAULT 0",
+        "backfill": "SELECT 1",
     },
     # An earlier build wrote loan status 'active', which the check constraint
     # ck_employee_loans_status (open/paid/cancelled) rejects — leaving such
