@@ -118,9 +118,9 @@
   }
 
   function showForm(id, accountCode) {
-    ["transfer-form", "opening-form"].forEach(f => { $(f).hidden = f !== id; });
+    ["movement-form", "transfer-form", "opening-form"].forEach(f => { $(f).hidden = f !== id; });
     if (id === "opening-form" && accountCode) $("o-account").value = accountCode;
-    const dateInput = id === "transfer-form" ? $("t-date") : $("o-date");
+    const dateInput = $({ "movement-form": "m-date", "transfer-form": "t-date", "opening-form": "o-date" }[id]);
     if (!dateInput.value) dateInput.value = iso(today);
     $(id).scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
@@ -139,6 +139,10 @@
     });
   }
 
+  bindForm("movement-form", "m-status", "/api/movements", () => ({
+    kind: $("m-kind").value, account_code: $("m-account").value, amount: Number($("m-amount").value),
+    on_date: $("m-date").value || null, note: $("m-note").value || null,
+  }));
   bindForm("transfer-form", "t-status", "/api/transfers", () => ({
     from_code: $("t-from").value, to_code: $("t-to").value, amount: Number($("t-amount").value),
     on_date: $("t-date").value || null, note: $("t-note").value || null,
@@ -150,6 +154,7 @@
   // Picking one side of a transfer flips the other, since there are only two accounts.
   $("t-from").addEventListener("change", () => { $("t-to").value = $("t-from").value === "1000" ? "1010" : "1000"; });
   $("t-to").addEventListener("change", () => { $("t-from").value = $("t-to").value === "1000" ? "1010" : "1000"; });
+  $("open-movement").addEventListener("click", () => showForm("movement-form"));
   $("open-transfer").addEventListener("click", () => showForm("transfer-form"));
   $("open-opening").addEventListener("click", () => showForm("opening-form"));
   document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", () => { $(b.dataset.close).hidden = true; }));

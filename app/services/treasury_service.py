@@ -4,8 +4,9 @@ Money already moves through the journal: a POS sale debits a money account, an e
 supplier payment credits one. This module decides WHICH money account a payment method uses (cash → the cash box,
 anything else → the bank), and reads the journal back as balances, money in / money out and a statement.
 
-The only movements posted here are the ones no other page owns: the opening balance of an account and transfers
-between the cash box and the bank.
+The only movements posted here are the ones no other page owns: the opening balance of an account, transfers
+between the cash box and the bank, and money in / out that isn't a sale or an expense (the owner putting money in or
+taking it out, a loan received or repaid). Those never touch revenue or expenses, so the P&L is unchanged.
 
 Each account's opening balance is its fresh start: Treasury reads nothing on that account from before it, so older
 history stays in the books but not in these numbers. An account with no opening balance yet shows all its history. Both are ordinary journals (``treasury_opening`` / ``treasury_transfer``), so the
@@ -41,7 +42,17 @@ OWNER_PAID = "owner_paid"
 
 OPENING_REF = "treasury_opening"
 TRANSFER_REF = "treasury_transfer"
-MANUAL_REFS = (OPENING_REF, TRANSFER_REF)
+MOVEMENT_REF = "treasury_movement"
+MANUAL_REFS = (OPENING_REF, TRANSFER_REF, MOVEMENT_REF)
+
+# Money in / out recorded on the Treasury page: kind → (direction, other account code, its name, its type, label).
+# Only balance-sheet movements: income and expenses belong on the pages the P&L reads (sales, Expenses).
+MOVEMENT_KINDS = {
+    "owner_capital":    ("in",  EQUITY_CODE, "Owner Equity",   "equity",    "Owner capital"),
+    "loan_received":    ("in",  "2300",      "Loans Payable",  "liability", "Loan received"),
+    "owner_withdrawal": ("out", "3200",      "Owner Drawings", "equity",    "Owner withdrawal"),
+    "loan_repayment":   ("out", "2300",      "Loans Payable",  "liability", "Loan repayment"),
+}
 
 _MONEY = Decimal("0.01")
 MAX_AMOUNT = Decimal("999999999999.99")
@@ -87,6 +98,9 @@ def source_of(ref_type: Optional[str], description: Optional[str]) -> str:
         return "Opening balance"
     if ref == TRANSFER_REF:
         return "Transfers"
+    if ref == MOVEMENT_REF:
+        return next((kind[4] for kind in MOVEMENT_KINDS.values() if desc.startswith(kind[4].lower())),
+                    "Other money in / out")
     if ref in ("manual", "journal"):
         return "Manual journals"
     return (ref.replace("_", " ").capitalize() or "Other")
@@ -408,14 +422,42 @@ async def transfer(db: AsyncSession, *, from_code: str, to_code: str, amount, on
     return {"ok": True, "journal_id": journal.id}
 
 
+async def record_movement(db: AsyncSession, *, account_code: str, kind: str, amount, on: Optional[date],
+                          note: Optional[str], user: User) -> dict:
+    """Money into or out of the bank or the cash box that no other page records: the owner adding capital or
+    withdrawing, a loan received or repaid."""
+    if account_code not in MONEY_ACCOUNTS:
+        raise HTTPException(status_code=400, detail="Unknown money account.")
+    if kind not in MOVEMENT_KINDS:
+        raise HTTPException(status_code=400, detail="Unknown type of money in / out.")
+    direction, other_code, other_name, other_type, label = MOVEMENT_KINDS[kind]
+    value = _amount(amount)
+    if value <= 0:
+        raise HTTPException(status_code=400, detail="The amount must be greater than 0.")
+    money = (await ensure_money_accounts(db))[account_code]
+    other = await _ensure_account(db, other_code, other_name, other_type)
+    description = f"{label} - {money.name}"
+    if (note or "").strip():
+        description += f" - {note.strip()}"
+    zero = Decimal("0")
+    legs = [(money, value, zero), (other, zero, value)] if direction == "in" else \
+           [(other, value, zero), (money, zero, value)]
+    journal = await _post(db, ref_type=MOVEMENT_REF, description=description,
+                          created_at=_journal_time(on), user=user, legs=legs)
+    record(db, "Treasury", f"money_{direction}", f"{description} - {float(value):,.2f}",
+           user=user, ref_type="journal", ref_id=journal.id)
+    await db.commit()
+    return {"ok": True, "journal_id": journal.id}
+
+
 async def delete_movement(db: AsyncSession, journal_id: int, user: User) -> dict:
-    """Remove an opening balance or a transfer entered here. Sales, expenses, loans and the rest are corrected on
+    """Remove an opening balance, a transfer or a money in / out entered here. Sales, expenses, loans and the rest are corrected on
     their own pages, which know what else to undo."""
     journal = (await db.execute(select(Journal).where(Journal.id == journal_id))).scalar_one_or_none()
     if journal is None:
         raise HTTPException(status_code=404, detail="Movement not found.")
     if journal.ref_type not in MANUAL_REFS:
-        raise HTTPException(status_code=400, detail="Only opening balances and transfers can be deleted here. "
+        raise HTTPException(status_code=400, detail="Only movements entered on this page can be deleted here. "
                                                     "Correct other movements on the page they came from.")
     entries = (await db.execute(select(JournalEntry).where(JournalEntry.journal_id == journal_id))).scalars().all()
     for entry in entries:

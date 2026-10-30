@@ -194,6 +194,22 @@ def test_loan_paid_from_the_bank_shows_as_employee_loans():
     assert bank["money_out"] == 2000.0 and bank["closing"] == -2000.0
 
 
+def test_loan_paid_by_the_owner_stays_out_of_treasury():
+    async def go(db):
+        employee = await db.get(Employee, 1)
+        loan = EmployeeLoan(id=8, employee_id=1, loan_date=today_local(), amount=Decimal("900"), status="open")
+        db.add(loan)
+        await db.flush()
+        await expense_service.create_loan_advance_expense(db, loan, employee, USER, payment_method="owner_paid")
+        await db.commit()
+        return await balances(db), await svc.summary(db)
+
+    after, summary = scenario(go)
+    assert after["1000"] == 0.0 and after["1010"] == 0.0
+    assert after["3000"] == -900.0
+    assert summary["by_source"] == []
+
+
 # ── opening balance, transfers, statement ────────────────────────────────
 
 def test_opening_balance_and_transfer():
@@ -262,6 +278,36 @@ def test_opening_balance_is_a_fresh_start():
     assert after["total"]["closing"] == 1950.0
     assert [l["source"] for l in cash_lines["lines"]] == ["Opening balance", "Expenses"]
     assert cash_lines["opening"] == 0.0
+
+
+def test_money_in_and_out_types():
+    async def go(db):
+        await svc.record_movement(db, account_code="1010", kind="owner_capital", amount=50000, on=None,
+                                  note="Greenhouse", user=USER)
+        await svc.record_movement(db, account_code="1010", kind="loan_received", amount=20000, on=None, note=None, user=USER)
+        await svc.record_movement(db, account_code="1000", kind="owner_withdrawal", amount=1500, on=None, note=None, user=USER)
+        repaid = await svc.record_movement(db, account_code="1010", kind="loan_repayment", amount=5000, on=None,
+                                           note=None, user=USER)
+        with pytest.raises(HTTPException) as bad_kind:
+            await svc.record_movement(db, account_code="1010", kind="salary", amount=5, on=None, note=None, user=USER)
+        with pytest.raises(HTTPException) as bad_amount:
+            await svc.record_movement(db, account_code="1010", kind="owner_capital", amount=0, on=None, note=None, user=USER)
+        summary = await svc.summary(db)
+        statement = await svc.statement(db, "all")
+        await svc.delete_movement(db, repaid["journal_id"], USER)
+        return summary, statement, await balances(db), bad_kind.value, bad_amount.value
+
+    summary, statement, after, bad_kind, bad_amount = scenario(go)
+    sources = {s["source"]: (s["money_in"], s["money_out"]) for s in summary["by_source"]}
+    assert sources == {"Owner capital": (50000.0, 0.0), "Loan received": (20000.0, 0.0),
+                       "Owner withdrawal": (0.0, 1500.0), "Loan repayment": (0.0, 5000.0)}
+    assert summary["total"]["closing"] == 63500.0
+    assert all(l["manual"] for l in statement["lines"])
+    # After deleting the repayment: the bank holds capital + loan, the loan is owed in full.
+    assert after["1010"] == 70000.0 and after["1000"] == -1500.0
+    assert after["3000"] == -50000.0 and after["3200"] == 1500.0 and after["2300"] == -20000.0
+    assert "4000" not in after or after["4000"] == 0.0       # nothing reached revenue
+    assert bad_kind.status_code == 400 and bad_amount.status_code == 400
 
 
 def test_only_manual_movements_can_be_deleted():

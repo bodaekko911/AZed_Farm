@@ -122,7 +122,7 @@ class EmployeeLoanCreate(BaseModel):
     loan_date: str
     amount: Decimal = Field(gt=0)
     description: Optional[str] = None
-    payment_method: str = Field("cash", pattern="^(cash|bank_transfer)$")   # cash box or bank
+    payment_method: str = Field("cash", pattern="^(cash|bank_transfer|owner_paid)$")   # cash box, bank, or the owner
 
 
 class LoanRepaymentCreate(BaseModel):
@@ -148,7 +148,7 @@ class AllowanceAdvanceCreate(BaseModel):
     advance_date: str
     amount: Decimal = Field(gt=0)
     note: Optional[str] = None
-    payment_method: str = Field("cash", pattern="^(cash|bank_transfer)$")   # cash box or bank
+    payment_method: str = Field("cash", pattern="^(cash|bank_transfer|owner_paid)$")   # cash box, bank, or the owner
 
 
 class DaysOffCreditUpdate(BaseModel):
@@ -3742,7 +3742,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
                 <div class="form-row" id="loan-create-form">
                     <div class="fld"><label>Date</label><input id="loan-date" type="date"></div>
                     <div class="fld"><label>Amount (EGP)</label><input id="loan-amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
-                    <div class="fld"><label>Paid from</label><select id="loan-method"><option value="cash">Cash box</option><option value="bank_transfer">Bank</option></select></div>
+                    <div class="fld"><label>Paid from</label><select id="loan-method"><option value="cash">Cash box</option><option value="bank_transfer">Bank</option><option value="owner_paid">Paid by owner (not from treasury)</option></select></div>
                     <div class="fld span2"><label>Note</label><input id="loan-description" placeholder="Salary advance, personal loan…"></div>
                     <div class="fld span2"><button class="btn btn-green" onclick="saveEmployeeLoan()">+ Add Loan</button></div>
                 </div>
@@ -3812,7 +3812,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="form-row">
                 <div class="fld"><label>Date</label><input id="adv-date" type="date"></div>
                 <div class="fld"><label>Amount (EGP)</label><input id="adv-amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
-                <div class="fld"><label>Paid from</label><select id="adv-method"><option value="cash">Cash box</option><option value="bank_transfer">Bank</option></select></div>
+                <div class="fld"><label>Paid from</label><select id="adv-method"><option value="cash">Cash box</option><option value="bank_transfer">Bank</option><option value="owner_paid">Paid by owner (not from treasury)</option></select></div>
                 <div class="fld span2"><label>Note</label><input id="adv-note" placeholder="e.g. advance on food allowance"></div>
                 <div class="fld span2"><button class="btn btn-blue" onclick="saveAllowanceAdvance()">+ Give Advance</button></div>
             </div>
@@ -5285,7 +5285,7 @@ function openPayModal(id, net, rate, dealOnly){
         <input id="pay-amount-input" type="number" step="0.01" min="0" max="${net}" value="${net}" style="width:100%;padding:8px;border:1px solid var(--border,#ccc);border-radius:8px;margin-bottom:10px;background:transparent;color:inherit">
         <label style="font-size:13px;display:block;margin-bottom:4px">Paid from</label>
         <select id="pay-method-input" style="width:100%;padding:8px;border:1px solid var(--border,#ccc);border-radius:8px;margin-bottom:10px;background:transparent;color:inherit">
-          <option value="cash">Cash box</option><option value="bank_transfer">Bank</option>
+          <option value="cash">Cash box</option><option value="bank_transfer">Bank</option><option value="owner_paid">Paid by owner (not from treasury)</option>
         </select>
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:6px;cursor:pointer">
           <input id="pay-convert-toggle" type="checkbox"> Convert remaining to paid days off

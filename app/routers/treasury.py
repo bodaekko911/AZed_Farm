@@ -28,6 +28,14 @@ class OpeningBalanceIn(BaseModel):
     note: Optional[str] = Field(None, max_length=200)
 
 
+class MovementIn(BaseModel):
+    account_code: str
+    kind: str
+    amount: float
+    on_date: Optional[date] = None
+    note: Optional[str] = Field(None, max_length=200)
+
+
 class TransferIn(BaseModel):
     from_code: str
     to_code: str
@@ -62,6 +70,14 @@ async def transfer(data: TransferIn, db: AsyncSession = Depends(get_async_sessio
                    user: User = Depends(get_current_user)):
     return await treasury_service.transfer(
         db, from_code=data.from_code, to_code=data.to_code, amount=data.amount, on=data.on_date, note=data.note,
+        user=user)
+
+
+@router.post("/api/movements", dependencies=[Depends(require_permission("action_treasury_manage"))])
+async def record_movement(data: MovementIn, db: AsyncSession = Depends(get_async_session),
+                          user: User = Depends(get_current_user)):
+    return await treasury_service.record_movement(
+        db, account_code=data.account_code, kind=data.kind, amount=data.amount, on=data.on_date, note=data.note,
         user=user)
 
 
@@ -105,9 +121,35 @@ def page(current_user: User = Depends(get_current_user)):
     <div class="cards" id="cards"></div>
 
     <div class="actions" id="manage" hidden>
+        <button class="btn" id="open-movement">Record money in / out</button>
         <button class="btn" id="open-transfer">Move money between cash box and bank</button>
         <button class="btn" id="open-opening">Set an opening balance</button>
     </div>
+
+    <form class="card form" id="movement-form" hidden>
+        <div class="form-title">Money in / out</div>
+        <div class="card-note">For money that isn't a sale or an expense. Sales are recorded at POS / B2B, and
+            expenses (bank fees included) on the Expenses page, so they reach the P&amp;L.</div>
+        <div class="grid">
+            <label>Type<select id="m-kind">
+                <optgroup label="Money in">
+                    <option value="owner_capital">Owner puts money in (capital)</option>
+                    <option value="loan_received">Loan received</option>
+                </optgroup>
+                <optgroup label="Money out">
+                    <option value="owner_withdrawal">Owner takes money out (withdrawal)</option>
+                    <option value="loan_repayment">Loan repayment</option>
+                </optgroup>
+            </select></label>
+            <label>Account<select id="m-account"><option value="1010">Bank</option><option value="1000">Cash box</option></select></label>
+            <label>Amount (EGP)<input id="m-amount" type="number" min="0.01" step="0.01" required></label>
+            <label>Date<input id="m-date" type="date"></label>
+            <label class="wide">Note<input id="m-note" maxlength="200" placeholder="e.g. Capital for the new greenhouse"></label>
+        </div>
+        <div class="actions"><span class="status" id="m-status"></span>
+            <button type="button" class="btn" data-close="movement-form">Cancel</button>
+            <button class="btn primary">Save</button></div>
+    </form>
 
     <form class="card form" id="transfer-form" hidden>
         <div class="form-title">Move money</div>
