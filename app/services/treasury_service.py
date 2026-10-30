@@ -5,7 +5,10 @@ supplier payment credits one. This module decides WHICH money account a payment 
 anything else → the bank), and reads the journal back as balances, money in / money out and a statement.
 
 The only movements posted here are the ones no other page owns: the opening balance of an account and transfers
-between the cash box and the bank. Both are ordinary journals (``treasury_opening`` / ``treasury_transfer``), so the
+between the cash box and the bank.
+
+Each account's opening balance is its fresh start: Treasury reads nothing on that account from before it, so older
+history stays in the books but not in these numbers. An account with no opening balance yet shows all its history. Both are ordinary journals (``treasury_opening`` / ``treasury_transfer``), so the
 trial balance and P&L see them like everything else; neither touches revenue or expenses.
 """
 from __future__ import annotations
@@ -155,21 +158,48 @@ def _codes_for(account: Optional[str]) -> tuple[str, ...]:
     return (account,)
 
 
-async def _balances_before(db: AsyncSession, codes: tuple[str, ...], before_utc: datetime) -> dict[str, float]:
+async def _starts(db: AsyncSession) -> dict[str, tuple[datetime, int]]:
+    """When each money account's tracking starts: the moment of its opening balance (and its journal id, to break
+    a tie with a movement stamped at the same instant)."""
     rows = (await db.execute(
-        select(Account.code, JournalEntry.debit, JournalEntry.credit)
+        select(Account.code, Journal.created_at, Journal.id)
+        .join(JournalEntry, JournalEntry.journal_id == Journal.id)
+        .join(Account, JournalEntry.account_id == Account.id)
+        .where(Journal.ref_type == OPENING_REF, Account.code.in_(MONEY_ACCOUNT_CODES))
+    )).all()
+    return {code: (at, jid) for code, at, jid in rows}
+
+
+def _tracked(code: str, created_at: Optional[datetime], journal_id: int,
+             starts: dict[str, tuple[datetime, int]]) -> bool:
+    """Whether Treasury counts this line: it is on or after its account's fresh start. Compared here rather than in
+    SQL because SQLite keeps database-stamped and app-stamped times in different text forms."""
+    if code not in starts:
+        return True
+    at, start_id = starts[code]
+    if created_at is None or at is None:
+        return journal_id >= start_id
+    return (created_at, journal_id) >= (at, start_id)
+
+
+async def _balances_before(db: AsyncSession, codes: tuple[str, ...], before_utc: datetime,
+                           starts: dict[str, tuple[datetime, int]]) -> dict[str, float]:
+    rows = (await db.execute(
+        select(Account.code, Journal.created_at, Journal.id, JournalEntry.debit, JournalEntry.credit)
         .join(JournalEntry, JournalEntry.account_id == Account.id)
         .join(Journal, JournalEntry.journal_id == Journal.id)
         .where(Account.code.in_(codes), Journal.created_at < before_utc)
     )).all()
     out = {code: 0.0 for code in codes}
-    for code, debit, credit in rows:
-        out[code] += float(debit or 0) - float(credit or 0)
+    for code, created_at, jid, debit, credit in rows:
+        if _tracked(code, created_at, jid, starts):
+            out[code] += float(debit or 0) - float(credit or 0)
     return {code: round(v, 2) for code, v in out.items()}
 
 
-async def _period_lines(db: AsyncSession, codes: tuple[str, ...], start_utc: datetime, end_utc: datetime) -> list:
-    return (await db.execute(
+async def _period_lines(db: AsyncSession, codes: tuple[str, ...], start_utc: datetime, end_utc: datetime,
+                        starts: dict[str, tuple[datetime, int]]) -> list:
+    rows = (await db.execute(
         select(
             Journal.id, Journal.created_at, Journal.ref_type, Journal.description,
             Account.code, JournalEntry.debit, JournalEntry.credit,
@@ -179,6 +209,7 @@ async def _period_lines(db: AsyncSession, codes: tuple[str, ...], start_utc: dat
         .where(Account.code.in_(codes), Journal.created_at >= start_utc, Journal.created_at <= end_utc)
         .order_by(Journal.created_at, Journal.id, JournalEntry.id)
     )).all()
+    return [r for r in rows if _tracked(r.code, r.created_at, r.id, starts)]
 
 
 async def summary(db: AsyncSession, from_date: Optional[date] = None, to_date: Optional[date] = None) -> dict:
@@ -189,8 +220,9 @@ async def summary(db: AsyncSession, from_date: Optional[date] = None, to_date: O
     from_date, to_date = _period(from_date, to_date)
     start_utc, end_utc = utc_bounds(from_date, to_date)
     accounts = await ensure_money_accounts(db)
-    opening = await _balances_before(db, MONEY_ACCOUNT_CODES, start_utc)
-    lines = await _period_lines(db, MONEY_ACCOUNT_CODES, start_utc, end_utc)
+    starts = await _starts(db)
+    opening = await _balances_before(db, MONEY_ACCOUNT_CODES, start_utc, starts)
+    lines = await _period_lines(db, MONEY_ACCOUNT_CODES, start_utc, end_utc, starts)
 
     per = {code: {"in": 0.0, "out": 0.0} for code in MONEY_ACCOUNT_CODES}
     by_source: dict[str, dict[str, float]] = {}
@@ -226,7 +258,8 @@ async def summary(db: AsyncSession, from_date: Optional[date] = None, to_date: O
             "closing": _num(total_opening + total_in - total_out),
         },
         "by_source": sources,
-        "has_opening": {code: await _has_opening(db, code) for code in MONEY_ACCOUNT_CODES},
+        "has_opening": {code: code in starts for code in MONEY_ACCOUNT_CODES},
+        "starts": {code: to_app_tz(at).date().isoformat() for code, (at, _jid) in starts.items() if at},
     }
 
 
@@ -239,10 +272,12 @@ async def statement(
     from_date, to_date = _period(from_date, to_date)
     start_utc, end_utc = utc_bounds(from_date, to_date)
     accounts = await ensure_money_accounts(db)
-    opening = sum((await _balances_before(db, codes, start_utc)).values())
+    starts = await _starts(db)
+    opening = sum((await _balances_before(db, codes, start_utc, starts)).values())
     balance = opening
     lines = []
-    for jid, created_at, ref_type, description, code, debit, credit in await _period_lines(db, codes, start_utc, end_utc):
+    for jid, created_at, ref_type, description, code, debit, credit in \
+            await _period_lines(db, codes, start_utc, end_utc, starts):
         money_in, money_out = float(debit or 0), float(credit or 0)
         balance += money_in - money_out
         lines.append({
@@ -274,15 +309,15 @@ def _amount(value) -> Decimal:
     return amount
 
 
-def _journal_time(on: Optional[date]) -> Optional[datetime]:
-    """When a movement dated ``on`` is stamped: midday (app time) for a past day; None for today, so the database
-    stamps it like every other journal and the statement keeps the order things happened in."""
+def _journal_time(on: Optional[date], at: time = time(12, 0)) -> Optional[datetime]:
+    """When a movement dated ``on`` is stamped: ``at`` (app time, midday by default) for a past day; None for today,
+    so the database stamps it like every other journal and the statement keeps the order things happened in."""
     on = on or today_local()
     if on > today_local():
         raise HTTPException(status_code=400, detail="The date can't be in the future.")
     if on == today_local():
         return None
-    return datetime.combine(on, time(12, 0), tzinfo=app_tz()).astimezone(timezone.utc)
+    return datetime.combine(on, at, tzinfo=app_tz()).astimezone(timezone.utc)
 
 
 async def _post(db: AsyncSession, *, ref_type: str, description: str, created_at: Optional[datetime],
@@ -310,13 +345,13 @@ async def _has_opening(db: AsyncSession, code: str) -> bool:
 
 async def set_opening_balance(db: AsyncSession, *, account_code: str, amount, on: Optional[date],
                               note: Optional[str], user: User) -> dict:
-    """The real balance an account held on the day tracking starts. Booked against Owner Equity, so it is not
-    income. A negative amount is an overdrawn account. One per account; delete it to enter a different one."""
+    """The real balance an account held when tracking starts; Treasury counts nothing on the account from before
+    it. Booked against Owner Equity, so it is not income. Zero starts an empty account; a negative amount is an
+    overdrawn one. A past date means the start of that day, today means now. One per account; delete it to enter
+    a different one."""
     if account_code not in MONEY_ACCOUNTS:
         raise HTTPException(status_code=400, detail="Unknown money account.")
     value = _amount(amount)
-    if value == 0:
-        raise HTTPException(status_code=400, detail="The opening balance can't be zero.")
     if await _has_opening(db, account_code):
         raise HTTPException(status_code=400, detail="This account already has an opening balance. "
                                                     "Delete it from the statement first to enter a new one.")
@@ -327,10 +362,10 @@ async def set_opening_balance(db: AsyncSession, *, account_code: str, amount, on
     if (note or "").strip():
         description += f" - {note.strip()}"
     zero = Decimal("0")
-    legs = [(money, value, zero), (equity, zero, value)] if value > 0 else \
+    legs = [(money, value, zero), (equity, zero, value)] if value >= 0 else \
            [(equity, -value, zero), (money, zero, -value)]
     journal = await _post(db, ref_type=OPENING_REF, description=description,
-                          created_at=_journal_time(on), user=user, legs=legs)
+                          created_at=_journal_time(on, time(0, 0)), user=user, legs=legs)
     record(db, "Treasury", "opening_balance", f"{money.name} opening balance {float(value):,.2f}",
            user=user, ref_type="journal", ref_id=journal.id)
     await db.commit()

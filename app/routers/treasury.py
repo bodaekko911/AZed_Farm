@@ -124,9 +124,10 @@ def page(current_user: User = Depends(get_current_user)):
 
     <form class="card form" id="opening-form" hidden>
         <div class="form-title">Opening balance</div>
-        <div class="card-note">The real balance on the day you start tracking — from the bank statement, or by counting
-            the cash box. It is recorded against owner equity, so it is not counted as income. Use a negative amount for
-            an overdrawn account.</div>
+        <div class="card-note">The real balance when you start tracking — from the bank statement, or by counting
+            the cash box. This is the account's fresh start: Treasury ignores everything on it from before this date
+            (a past date means the start of that day). It is recorded against owner equity, so it is not counted as
+            income. Enter 0 for an empty account, or a negative amount for an overdrawn one.</div>
         <div class="grid">
             <label>Account<select id="o-account"><option value="1010">Bank</option><option value="1000">Cash box</option></select></label>
             <label>Balance (EGP)<input id="o-amount" type="number" step="0.01" required></label>

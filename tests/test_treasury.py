@@ -6,11 +6,12 @@
 * a loan paid from the bank shows on the bank as "Employee loans";
 * the opening balance is booked against equity, once per account; a transfer moves money between the two without
   changing the organization's total; both can be deleted, other movements can't;
+* an account's opening balance is its fresh start: nothing on it from before counts, zero is allowed;
 * the statement runs a balance; the page is behind page_treasury and the menu shows it.
 A real async SQLite database.
 """
 import asyncio
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -208,6 +209,42 @@ def test_opening_balance_and_transfer():
     ]
     assert both["closing"] == 9600.0
     assert [l["manual"] for l in both["lines"]] == [True, True, True, False]
+
+
+def test_opening_balance_is_a_fresh_start():
+    async def go(db):
+        today = today_local()
+        # Old cash history from before Treasury: a sale 10 days ago, and an expense this morning.
+        old = Journal(ref_type="invoice", description="Old sale", user_id=1,
+                      created_at=datetime.combine(today - timedelta(days=10), time(9, 0)))
+        db.add(old)
+        await db.flush()
+        cash = (await db.execute(select(Account).where(Account.code == "1000"))).scalar_one()
+        db.add(JournalEntry(journal_id=old.id, account_id=cash.id, debit=Decimal("500"), credit=Decimal("0")))
+        cash.balance = Decimal("500")
+        await db.commit()
+        await add_expense(db, 120, "cash")
+        before = await svc.summary(db, today - timedelta(days=30), today)
+        # The cash box was counted empty today; the bank started three days ago with 2,000.
+        await svc.set_opening_balance(db, account_code="1000", amount=0, on=None, note="Counted", user=USER)
+        await svc.set_opening_balance(db, account_code="1010", amount=2000, on=today - timedelta(days=3),
+                                      note=None, user=USER)
+        await add_expense(db, 50, "cash")
+        after = await svc.summary(db, today - timedelta(days=30), today)
+        return before, after, await svc.statement(db, "1000", today - timedelta(days=30), today)
+
+    before, after, cash_lines = scenario(go)
+    old_cash = next(a for a in before["accounts"] if a["code"] == "1000")
+    assert old_cash["closing"] == 380.0                    # no opening yet: all history shows
+    cash = next(a for a in after["accounts"] if a["code"] == "1000")
+    bank = next(a for a in after["accounts"] if a["code"] == "1010")
+    assert (cash["money_in"], cash["money_out"], cash["closing"]) == (0.0, 50.0, -50.0)
+    assert bank["closing"] == 2000.0
+    assert after["has_opening"] == {"1000": True, "1010": True}
+    assert after["starts"]["1010"] == (today_local() - timedelta(days=3)).isoformat()
+    assert after["total"]["closing"] == 1950.0
+    assert [l["source"] for l in cash_lines["lines"]] == ["Opening balance", "Expenses"]
+    assert cash_lines["opening"] == 0.0
 
 
 def test_only_manual_movements_can_be_deleted():

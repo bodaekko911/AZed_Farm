@@ -27,7 +27,7 @@
   }
   const period = () => `from_date=${$("from").value}&to_date=${$("to").value}`;
 
-  function accountCard(a, hasOpening) {
+  function accountCard(a, hasOpening, start) {
     const card = h("div", { class: "card" },
       h("div", { class: "card-label" }, ACCOUNT_LABEL[a.code] || a.name),
       h("div", { class: "card-big" + (a.closing < 0 ? " bad" : "") }, money(a.closing)),
@@ -35,9 +35,12 @@
         h("span", { class: "ok" }, "+ ", num(fmt(a.money_in))),
         h("span", { class: "bad" }, "− ", num(fmt(a.money_out)))),
       h("div", { class: "card-note" }, "Started the period at ", money(a.opening)));
-    if (!hasOpening && canManage) {
-      card.append(h("div", { class: "card-note" }, "No opening balance yet — ",
-        h("button", { type: "button", onclick: () => showForm("opening-form", a.code) }, "set one"), "."));
+    if (hasOpening) {
+      card.append(h("div", { class: "card-note" }, "Counting from ", num(start || ""), "."));
+    } else if (canManage) {
+      card.append(h("div", { class: "card-note" }, "Showing all past history — ",
+        h("button", { type: "button", onclick: () => showForm("opening-form", a.code) }, "set an opening balance"),
+        " to start fresh."));
     }
     return card;
   }
@@ -45,7 +48,7 @@
   function drawSummary(data) {
     const cards = $("cards");
     cards.replaceChildren(
-      ...data.accounts.map(a => accountCard(a, data.has_opening[a.code])),
+      ...data.accounts.map(a => accountCard(a, data.has_opening[a.code], (data.starts || {})[a.code])),
       h("div", { class: "card total" },
         h("div", { class: "card-label" }, "Total money"),
         h("div", { class: "card-big" + (data.total.closing < 0 ? " bad" : "") }, money(data.total.closing)),
