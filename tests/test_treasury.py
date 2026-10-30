@@ -11,6 +11,7 @@
 A real async SQLite database.
 """
 import asyncio
+import io
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -326,3 +327,39 @@ def test_page_renders_with_its_scripts():
     assert response.status_code == 200
     assert "<title>Treasury" in response.text
     assert "/static/plans.js" in response.text and "/static/treasury.js" in response.text
+
+
+# ── Reports page: Treasury tab ────────────────────────────────────────────
+
+def test_treasury_report_and_its_excel_export():
+    from openpyxl import load_workbook
+    from app.routers import reports
+
+    async def go(db):
+        await svc.set_opening_balance(db, account_code="1010", amount=3000, on=None, note=None, user=USER)
+        await add_expense(db, 200, "bank_transfer")
+        today = today_local().isoformat()
+        data = await reports.treasury_report(date_from=today, date_to=today, db=db)
+        response = await reports.export_treasury(date_from=today, date_to=today, db=db)
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        return data, body
+
+    data, body = scenario(go)
+    bank = next(a for a in data["accounts"] if a["code"] == "1010")
+    assert (bank["money_in"], bank["money_out"], bank["closing"]) == (3000.0, 200.0, 2800.0)
+    assert [l["source"] for l in data["lines"]] == ["Opening balance", "Expenses"]
+    wb = load_workbook(io.BytesIO(body))
+    assert wb.sheetnames == ["Balances", "By Source", "Statement"]
+
+
+def test_treasury_report_tab_permission_and_page():
+    assert "tab_reports_treasury" in KNOWN_PERMISSIONS
+    assert "tab_reports_treasury" in get_role_permissions("accountant")
+    assert "tab_reports_treasury" in get_role_permissions("viewer")
+    assert "tab_reports_treasury" not in get_role_permissions("cashier")
+
+    response = _client(_user("page_reports,tab_reports_sales")).get("/reports/api/treasury")
+    assert response.json()["detail"] == "Permission denied: tab_reports_treasury"
+    page = _client(_user("page_reports,tab_reports_treasury")).get("/reports/")
+    assert page.status_code == 200
+    assert 'id="section-treasury"' in page.text and "switchTab('treasury')" in page.text

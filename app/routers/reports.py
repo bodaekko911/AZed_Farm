@@ -43,6 +43,7 @@ from app.models.hr import (
 )
 from app.models.user import User
 from app.services.expense_service import SALARY_CATEGORY_NAME
+from app.services import treasury_service
 from app.services.treasury_service import MONEY_ACCOUNT_CODES
 from app.services.product_profitability import ProfitabilityLedger
 from app.services.production_costing import cost_batch
@@ -1869,6 +1870,45 @@ async def export_spoilage(date_from: str = None, date_to: str = None, db: AsyncS
     )
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename=spoilage_{date.today()}.xlsx"})
+
+
+# ── TREASURY ───────────────────────────────────────────
+async def _build_treasury_report(db, *, d_from, d_to):
+    """The bank and the cash box for the period: balances, money in / out by source and every movement."""
+    summary = await treasury_service.summary(db, d_from, d_to)
+    statement = await treasury_service.statement(db, "all", d_from, d_to)
+    return {**summary, "lines": statement["lines"]}
+
+
+@router.get("/api/treasury")
+async def treasury_report(date_from: Optional[str] = None, date_to: Optional[str] = None, db: AsyncSession = Depends(get_async_session), _=Depends(require_permission("tab_reports_treasury"))):
+    d_from, d_to = _plain_date_range(date_from, date_to)
+    return await _build_treasury_report(db, d_from=d_from, d_to=d_to)
+
+@router.get("/export/treasury", dependencies=[Depends(require_permission("action_export_excel")), Depends(require_permission("tab_reports_treasury"))])
+async def export_treasury(date_from: str = None, date_to: str = None, db: AsyncSession = Depends(get_async_session)):
+    d_from, d_to = _plain_date_range(date_from, date_to)
+    data = await _build_treasury_report(db, d_from=d_from, d_to=d_to)
+    period = ("Date Range", f"{d_from.isoformat()} to {d_to.isoformat()}")
+    accounts = [[a["name"], a["opening"], a["money_in"], a["money_out"], a["closing"]] for a in data["accounts"]]
+    accounts.append(["Total (excluding transfers)", data["total"]["opening"], data["total"]["money_in"],
+                     data["total"]["money_out"], data["total"]["closing"]])
+    money = {"Opening": "money", "Money In": "money", "Money Out": "money", "Closing": "money"}
+    wb = build_report_workbook([
+        dict(sheet_name="Balances", report_title="Treasury Report", headers=["Account", "Opening", "Money In", "Money Out", "Closing"],
+             rows=accounts, metadata=[period], column_formats=money, total_row_indices=[len(accounts) - 1]),
+        dict(sheet_name="By Source", report_title="Treasury - Money In and Out by Source",
+             headers=["Source", "Money In", "Money Out", "Net"], metadata=[period],
+             rows=[[s["source"], s["money_in"], s["money_out"], round(s["money_in"] - s["money_out"], 2)] for s in data["by_source"]],
+             column_formats={"Money In": "money", "Money Out": "money", "Net": "money"}),
+        dict(sheet_name="Statement", report_title="Treasury - Statement",
+             headers=["Date", "Account", "Source", "Description", "Money In", "Money Out", "Balance"], metadata=[period],
+             rows=[[l["date"], l["account_name"], l["source"], l["description"], l["money_in"], l["money_out"], l["balance"]] for l in data["lines"]],
+             column_formats={"Date": "date", "Money In": "money", "Money Out": "money", "Balance": "money"},
+             wrap_columns={"Description"}),
+    ])
+    return StreamingResponse(workbook_to_buffer(wb), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=treasury_{date.today()}.xlsx"})
 
 
 # ── PRODUCTION ─────────────────────────────────────────
@@ -4993,6 +5033,7 @@ td.mono{font-family:var(--mono);}
         <button class="tab"        onclick="switchTab('utilities')">💧 Utilities</button>
         <button class="tab"        onclick="switchTab('carbon')">🌍 Carbon Footprint</button>
         <button class="tab"        onclick="switchTab('pl')">💰 P&amp;L</button>
+        <button class="tab"        onclick="switchTab('treasury')">🏦 Treasury</button>
         <button class="tab"        onclick="switchTab('profitability')">💹 Profitability</button>
         <button class="tab"        onclick="switchTab('animals')">🐄 Animals</button>
     </div>
@@ -5507,6 +5548,42 @@ td.mono{font-family:var(--mono);}
         <div id="pl-content"></div>
     </div>
 
+    <!-- ──────────── TREASURY ──────────── -->
+    <div id="section-treasury" class="section">
+        <div class="print-header">
+            <div style="display:flex;align-items:center;gap:14px">
+                <img src="/static/Logo.png" style="height:120px;object-fit:contain">
+                <div>
+                    <div style="font-size:16px;font-weight:900;color:#2a7a2a">Habiba Organic Farm</div>
+                    <div style="font-size:11px;color:#666;margin-top:2px">Commercial registry: 126278 &nbsp;|&nbsp; Tax ID: 560042604</div>
+                </div>
+            </div>
+            <div style="text-align:right">
+                <div style="font-size:18px;font-weight:800;color:#2a7a2a">Treasury Report</div>
+                <div style="font-size:12px;color:#666;margin-top:4px" id="ph-trs-dates"></div>
+            </div>
+        </div>
+        <div class="filter-bar no-print">
+            <label>From</label><input type="date" id="trs-from">
+            <label>To</label>  <input type="date" id="trs-to">
+            <div class="filter-sep"></div>
+            <button class="btn btn-lime"  onclick="loadTreasury()">Apply</button>
+            <button class="btn btn-excel" onclick="exportSection('treasury')">⬇ Excel</button>
+            <button class="btn btn-print" onclick="window.print()">🖨 Print</button>
+        </div>
+        <div class="stats-row" id="trs-cards"></div>
+        <div class="table-wrap">
+            <div class="table-title">Money In and Out by Source <span style="font-weight:500;color:var(--muted);font-size:12px">— transfers between the cash box and the bank are left out</span></div>
+            <table><thead><tr><th>Source</th><th style="text-align:right">Money In</th><th style="text-align:right">Money Out</th><th style="text-align:right">Net</th></tr></thead>
+            <tbody id="trs-sources"></tbody></table>
+        </div>
+        <div class="table-wrap">
+            <div class="table-title">Statement — Bank and Cash Box</div>
+            <table><thead><tr><th>Date</th><th>Account</th><th>Source</th><th>Description</th><th style="text-align:right">Money In</th><th style="text-align:right">Money Out</th><th style="text-align:right">Balance</th></tr></thead>
+            <tbody id="trs-body"></tbody></table>
+        </div>
+    </div>
+
     <!-- ──────────── PRODUCT PROFITABILITY ──────────── -->
     <div id="section-profitability" class="section">
         <div class="print-header">
@@ -5639,7 +5716,7 @@ function switchTab(tab){
     const section = document.getElementById("section-"+tab);
     if(!section) return;
     section.classList.add("active");
-    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, utilities:loadUtilities, carbon:loadCarbon, pl:loadPL, profitability:loadProfitability, animals:loadAnimals};
+    const loaders = {sales:loadSales, transactions:loadTransactions, b2b:loadB2B, inventory:loadInventory, farm:loadFarm, spoilage:loadSpoilage, production:loadProduction, hr:loadHR, utilities:loadUtilities, carbon:loadCarbon, pl:loadPL, treasury:loadTreasury, profitability:loadProfitability, animals:loadAnimals};
     if(loaders[tab]){
         loaders[tab]();
     } else {
@@ -5659,7 +5736,7 @@ function showToast(msg){
     clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove("show"),3000);
 }
 
-const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","hr","utilities","carbon","pl","profitability","animals"];
+const REPORT_TAB_ORDER = ["sales","transactions","b2b","inventory","farm","spoilage","production","hr","utilities","carbon","pl","treasury","profitability","animals"];
 const REPORT_TAB_PERMISSIONS = {
     sales: "tab_reports_sales",
     transactions: "tab_reports_transactions",
@@ -5672,6 +5749,7 @@ const REPORT_TAB_PERMISSIONS = {
     utilities: "tab_reports_utilities",
     carbon: "tab_reports_carbon",
     pl: "tab_reports_pl",
+    treasury: "tab_reports_treasury",
     profitability: "tab_reports_profitability",
     animals: "tab_reports_animals",
 };
@@ -5882,6 +5960,7 @@ async function exportSection(tab){
         utilities:  ()=>{ let r=getRange("util-from","util-to"); return `/reports/export/utilities?date_from=${r.from}&date_to=${r.to}`; },
         carbon:     ()=>{ let r=getRange("carbon-from","carbon-to"); return `/reports/export/carbon?date_from=${r.from}&date_to=${r.to}`; },
         pl:           ()=>{ let r=getRange("pl-from","pl-to"); let f=document.getElementById("pl-farm").value; return `/reports/export/pl?date_from=${r.from}&date_to=${r.to}${f?"&farm="+encodeURIComponent(f):""}`; },
+        treasury:     ()=>{ let r=getRange("trs-from","trs-to"); return `/reports/export/treasury?date_from=${r.from}&date_to=${r.to}`; },
         profitability:()=>{ let r=getRange("prof-from","prof-to"); return `/reports/export/profitability?date_from=${r.from}&date_to=${r.to}`; },
         animals:      ()=>{ let r=getRange("animals-from","animals-to"); return `/reports/export/animals?date_from=${r.from}&date_to=${r.to}`; },
         transactions: ()=>{ let r=getRange("tx-from","tx-to"); let s=document.getElementById("tx-source").value; return `/reports/export/transactions?date_from=${r.from}&date_to=${r.to}${s?"&source="+s:""}`; },
@@ -6438,6 +6517,48 @@ async function loadSpoilage(){
             <td style="font-size:12px;color:var(--muted)">${r.notes}</td>
           </tr>`).join("")
         : `<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:30px">No spoilage in this period</td></tr>`;
+}
+
+/* ── TREASURY ── */
+async function loadTreasury(){
+    let r = getRange("trs-from","trs-to");
+    let data = await fetchReportJson(`/reports/api/treasury?date_from=${r.from}&date_to=${r.to}`);
+    const trsMoney = v => Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});
+    const label = {"1000":"Cash Box", "1010":"Bank"};
+    const card = (title, a, note, cls) => `<div class="stat-card ${cls}"><div class="stat-label">${title}</div>
+        <div class="stat-value" style="color:${a.closing < 0 ? "var(--danger)" : ""}">${trsMoney(a.closing)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:5px">
+            <span style="color:var(--green)">+ ${trsMoney(a.money_in)}</span> &nbsp; <span style="color:var(--danger)">− ${trsMoney(a.money_out)}</span>
+            <br>Started at ${trsMoney(a.opening)} EGP${note ? " · " + note : ""}</div></div>`;
+    document.getElementById("trs-cards").innerHTML =
+        data.accounts.map(a => card(label[a.code] || a.name, a,
+            data.has_opening[a.code] ? `counting from ${(data.starts||{})[a.code] || ""}` : "no opening balance yet",
+            a.code === "1010" ? "sc-teal" : "sc-orange")).join("")
+        + card("Total Money", data.total, "", "sc-green");
+    setPrintDates("ph-trs-dates", r.from, r.to);
+    document.getElementById("trs-sources").innerHTML = data.by_source.length
+        ? data.by_source.map(s => `<tr>
+            <td class="name">${s.source}</td>
+            <td class="mono" style="text-align:right;color:var(--green)">${trsMoney(s.money_in)}</td>
+            <td class="mono" style="text-align:right;color:var(--danger)">${trsMoney(s.money_out)}</td>
+            <td class="mono" style="text-align:right">${trsMoney(s.money_in - s.money_out)}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:30px">No money moved in this period</td></tr>`;
+    const opening = data.total.opening;
+    document.getElementById("trs-body").innerHTML =
+        `<tr><td class="mono" style="font-size:12px">${data.from}</td><td colspan="5" style="color:var(--muted)">Balance at the start</td>
+            <td class="mono" style="text-align:right;font-weight:700">${trsMoney(opening)}</td></tr>`
+        + (data.lines.length
+        ? data.lines.map(l => `<tr>
+            <td class="mono" style="font-size:12px">${l.date || ""}</td>
+            <td style="font-size:12px">${label[l.account_code] || l.account_name}</td>
+            <td style="font-size:12px">${l.source}</td>
+            <td style="font-size:12px;color:var(--muted)">${l.description}</td>
+            <td class="mono" style="text-align:right;color:var(--green)">${l.money_in ? trsMoney(l.money_in) : ""}</td>
+            <td class="mono" style="text-align:right;color:var(--danger)">${l.money_out ? trsMoney(l.money_out) : ""}</td>
+            <td class="mono" style="text-align:right">${trsMoney(l.balance)}</td>
+          </tr>`).join("")
+        : `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px">No movements in this period</td></tr>`);
 }
 
 /* ── PRODUCTION ── */
@@ -7228,6 +7349,7 @@ const __rawReportLoaders = {
     utilities: loadUtilities,
     carbon: loadCarbon,
     pl: loadPL,
+    treasury: loadTreasury,
     profitability: loadProfitability,
 };
 
@@ -7242,6 +7364,7 @@ loadHR = () => runReportLoader("hr", __rawReportLoaders.hr);
 loadUtilities = () => runReportLoader("utilities", __rawReportLoaders.utilities);
 loadCarbon = () => runReportLoader("carbon", __rawReportLoaders.carbon);
 loadPL = () => runReportLoader("pl", __rawReportLoaders.pl);
+loadTreasury = () => runReportLoader("treasury", __rawReportLoaders.treasury);
 loadProfitability = () => runReportLoader("profitability", __rawReportLoaders.profitability);
 
 function togglePLDetail(id){
@@ -7267,6 +7390,7 @@ function togglePLDetail(id){
     setEl("util-from",  m); setEl("util-to",   t);
     setEl("carbon-from",m); setEl("carbon-to", t);
     setEl("pl-from",    y); setEl("pl-to",     t);
+    setEl("trs-from",   m); setEl("trs-to",    t);
     setEl("prof-from",  m); setEl("prof-to",   t);
     setEl("animals-from", m); setEl("animals-to", t);
     const invMode = document.getElementById("inv-mode");
