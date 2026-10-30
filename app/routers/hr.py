@@ -122,6 +122,7 @@ class EmployeeLoanCreate(BaseModel):
     loan_date: str
     amount: Decimal = Field(gt=0)
     description: Optional[str] = None
+    payment_method: str = Field("cash", pattern="^(cash|bank_transfer)$")   # cash box or bank
 
 
 class LoanRepaymentCreate(BaseModel):
@@ -147,6 +148,7 @@ class AllowanceAdvanceCreate(BaseModel):
     advance_date: str
     amount: Decimal = Field(gt=0)
     note: Optional[str] = None
+    payment_method: str = Field("cash", pattern="^(cash|bank_transfer)$")   # cash box or bank
 
 
 class DaysOffCreditUpdate(BaseModel):
@@ -1375,7 +1377,7 @@ async def create_employee_loan(
     # Book the loan as a Salaries & Wages expense (cash advanced against salary).
     # Safe vs payroll because payroll books NET salary (repayments already
     # deducted), so this does not double-count over the loan's life.
-    await create_loan_advance_expense(db, loan, employee, current_user)
+    await create_loan_advance_expense(db, loan, employee, current_user, payment_method=data.payment_method)
     record(
         db,
         "HR",
@@ -1675,7 +1677,7 @@ async def create_allowance_advance(
     # Salaries & Wages expense (recovered from the next payroll's allowance,
     # so labour cost isn't double-counted).
     from app.services.expense_service import create_allowance_advance_expense
-    await create_allowance_advance_expense(db, advance, employee, current_user)
+    await create_allowance_advance_expense(db, advance, employee, current_user, payment_method=data.payment_method)
     record(db, "HR", "create_allowance_advance",
            f"Allowance advance for {employee.name}: {amount:.2f}",
            user=current_user, ref_type="allowance_advance", ref_id=advance.id)
@@ -2662,7 +2664,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
     try:
         # 1) Paid runs → delete their salary expenses (journal + carbon unwound).
         step = "unwinding paid salary expenses"
-        from app.routers.expenses import _reverse_expense_journal
+        from app.services.expense_service import _reverse_expense_journal
         from app.models.expense import Expense
         from app.models.carbon import CarbonLog
         from app.models.accounting import Journal, JournalEntry
@@ -2724,7 +2726,7 @@ async def reset_payroll_period(data: PayrollResetPeriod, db: AsyncSession = Depe
         #     the "Salaries & Wages" expense booked when it was created. Loans
         #     dated in other months are left alone (they only reopened above).
         step = "deleting period-dated loans"
-        from app.routers.expenses import _reverse_expense_journal as _rev_journal
+        from app.services.expense_service import _reverse_expense_journal as _rev_journal
         from app.models.expense import Expense as _ExpLoan
         from app.models.accounting import Journal as _Jrnl, JournalEntry as _JrnlE
         _pl = await db.execute(
@@ -3740,6 +3742,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
                 <div class="form-row" id="loan-create-form">
                     <div class="fld"><label>Date</label><input id="loan-date" type="date"></div>
                     <div class="fld"><label>Amount (EGP)</label><input id="loan-amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
+                    <div class="fld"><label>Paid from</label><select id="loan-method"><option value="cash">Cash box</option><option value="bank_transfer">Bank</option></select></div>
                     <div class="fld span2"><label>Note</label><input id="loan-description" placeholder="Salary advance, personal loan…"></div>
                     <div class="fld span2"><button class="btn btn-green" onclick="saveEmployeeLoan()">+ Add Loan</button></div>
                 </div>
@@ -3809,6 +3812,7 @@ td.mono { font-family: var(--mono); color: var(--green); }
             <div class="form-row">
                 <div class="fld"><label>Date</label><input id="adv-date" type="date"></div>
                 <div class="fld"><label>Amount (EGP)</label><input id="adv-amount" type="number" min="0" step="0.01" placeholder="0.00"></div>
+                <div class="fld"><label>Paid from</label><select id="adv-method"><option value="cash">Cash box</option><option value="bank_transfer">Bank</option></select></div>
                 <div class="fld span2"><label>Note</label><input id="adv-note" placeholder="e.g. advance on food allowance"></div>
                 <div class="fld span2"><button class="btn btn-blue" onclick="saveAllowanceAdvance()">+ Give Advance</button></div>
             </div>
@@ -4531,6 +4535,7 @@ async function saveEmployeeLoan(){
         loan_date: document.getElementById("loan-date").value,
         amount: amt,
         description: document.getElementById("loan-description").value.trim()||null,
+        payment_method: document.getElementById("loan-method").value,
     };
     try{
         const res = await fetch(`/hr/api/employees/${loanDeductionEmployeeId}/loans`,{
@@ -4788,6 +4793,7 @@ async function saveAllowanceAdvance(){
         advance_date: document.getElementById("adv-date").value,
         amount: amt,
         note: document.getElementById("adv-note").value.trim()||null,
+        payment_method: document.getElementById("adv-method").value,
     };
     try {
         const res = await fetch(`/hr/api/employees/${allowanceAdvanceEmployeeId}/allowance-advances`, {
@@ -5275,8 +5281,12 @@ function openPayModal(id, net, rate, dealOnly){
         <div style="font-weight:700;font-size:16px;margin-bottom:10px">Pay salary</div>
         <div style="font-size:13px;color:var(--muted,#888);margin-bottom:10px">Net owed: <b>${money(net)} EGP</b></div>
         ${dealOnly ? `<button id="pay-deal-only" style="width:100%;padding:8px;margin-bottom:10px;border-radius:8px;border:1px solid var(--border,#ccc);background:none;color:inherit;cursor:pointer;font-size:13px">Pay ${dealOnly.days} days only (${money(dealOnly.amount)}) — rest to days-off credit</button>` : ""}
-        <label style="font-size:13px;display:block;margin-bottom:4px">Cash amount to pay</label>
+        <label style="font-size:13px;display:block;margin-bottom:4px">Amount to pay</label>
         <input id="pay-amount-input" type="number" step="0.01" min="0" max="${net}" value="${net}" style="width:100%;padding:8px;border:1px solid var(--border,#ccc);border-radius:8px;margin-bottom:10px;background:transparent;color:inherit">
+        <label style="font-size:13px;display:block;margin-bottom:4px">Paid from</label>
+        <select id="pay-method-input" style="width:100%;padding:8px;border:1px solid var(--border,#ccc);border-radius:8px;margin-bottom:10px;background:transparent;color:inherit">
+          <option value="cash">Cash box</option><option value="bank_transfer">Bank</option>
+        </select>
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:6px;cursor:pointer">
           <input id="pay-convert-toggle" type="checkbox"> Convert remaining to paid days off
         </label>
@@ -5320,7 +5330,7 @@ async function confirmPay(id, net){
         const res = await fetch(`/hr/api/payroll/${id}/pay`,{
             method:"PATCH",
             headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({payment_method:"cash", paid_amount:amt, convert_remainder_to_days_off:convert})
+            body:JSON.stringify({payment_method:document.getElementById("pay-method-input").value, paid_amount:amt, convert_remainder_to_days_off:convert})
         });
         const data = await res.json();
         if(data.detail){ showToast("Error: "+data.detail); return; }

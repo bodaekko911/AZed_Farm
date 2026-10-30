@@ -22,6 +22,7 @@ from app.schemas.expense import (
     ExpenseCreate,
     ExpenseUpdate,
 )
+from app.services.treasury_service import MONEY_ACCOUNTS, credited_money_code, money_account_code
 
 SALARY_CATEGORY_NAME = "Salaries & Wages"
 SALARY_ACCOUNT_CODE = "5006"
@@ -34,7 +35,7 @@ def _clean_text(value: Optional[str]) -> Optional[str]:
 
 
 def _payment_account_code(payment_method: str) -> str:
-    return "1000" if payment_method in {"cash", "card"} else "1200"
+    return money_account_code(payment_method)
 
 
 def _parse_filter_date(value: Optional[str]) -> Optional[date_type]:
@@ -116,7 +117,7 @@ async def _post_expense_journal(
         (_payment_account_code(payment_method), 0, amount),
     ]
     for account_code, debit, credit in entries:
-        account = await _get_or_create_account(db, account_code)
+        account = await _get_or_create_account(db, account_code, account_name=MONEY_ACCOUNTS.get(account_code))
         db.add(
             JournalEntry(
                 journal_id=journal.id,
@@ -142,8 +143,10 @@ async def _reverse_expense_journal(db: AsyncSession, expense: Expense) -> None:
     db.add(journal)
     await db.flush()
 
+    # Put the money back where the original journal took it from (older bank payments sit in 1200).
+    money_code = await credited_money_code(db, expense.journal_id, _payment_account_code(expense.payment_method))
     entries = [
-        (_payment_account_code(expense.payment_method), float(expense.amount), 0),
+        (money_code, float(expense.amount), 0),
         (expense.category.account_code, 0, float(expense.amount)),
     ]
     for account_code, debit, credit in entries:

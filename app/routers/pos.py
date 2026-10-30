@@ -22,6 +22,7 @@ from app.services.barcode_service import find_product_by_barcode, normalize_barc
 from app.services.location_inventory_service import sync_product_stock_to_default_location
 from app.services.pos_service import create_invoice, post_journal
 from app.services.sale_cost import cost_snapshot
+from app.services.treasury_service import money_account_code
 
 
 def _fmt_unit_price(value: float) -> str:
@@ -458,7 +459,7 @@ async def collect_payment(
                       description=f"Payment collected - {invoice.invoice_number}")
     db.add(journal); await db.flush()
 
-    for code, debit, credit in [("1000", total, 0), ("1100", 0, total)]:
+    for code, debit, credit in [(money_account_code(payment_method), total, 0), ("1100", 0, total)]:
         _r = await db.execute(select(Account).where(Account.code == code))
         acc = _r.scalar_one_or_none()
         if acc:

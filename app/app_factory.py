@@ -871,9 +871,11 @@ async def seed_chart_of_accounts() -> None:
 
     CORE_ACCOUNTS = [
         ("1000", "Cash",              "asset"),
+        ("1010", "Bank",              "asset"),
         ("1100", "Accounts Receivable", "asset"),
         ("2000", "Accounts Payable",  "liability"),
         ("2200", "Deferred Revenue",  "liability"),
+        ("3000", "Owner Equity",      "equity"),
         ("4000", "Revenue",           "revenue"),
         ("5000", "Cost of Goods Sold","expense"),
         ("6000", "Expenses",          "expense"),

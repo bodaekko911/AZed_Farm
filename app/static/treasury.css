@@ -1,0 +1,27 @@
+/* Treasury page — on top of plans.css (cards, tables, buttons). */
+.period{display:flex;align-items:center;gap:6px;color:var(--muted)}
+.period input,.form input,.form select{background:var(--card);border:1px solid var(--border2);border-radius:8px;color:var(--text);
+      padding:7px 9px;font-family:var(--sans);font-size:13px;color-scheme:dark}
+body.light .period input,body.light .form input,body.light .form select{color-scheme:light}
+.period input:focus,.form input:focus,.form select:focus{outline:none;border-color:var(--lime)}
+.cards{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.card.total{border-color:var(--border2)}
+.flow{display:flex;gap:14px;font-family:var(--mono);font-size:12.5px;margin-top:8px;flex-wrap:wrap}
+.card-note button{background:none;border:none;color:var(--blue);font:inherit;cursor:pointer;padding:0;text-decoration:underline}
+.form{margin:0 0 18px}
+.form-title{font-weight:600;margin-bottom:8px}
+.form .card-note{margin:0 0 12px}
+.form .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.form label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--sub)}
+.form label.wide{grid-column:1/-1}
+.form .actions{margin-top:14px}
+.section-title{font-family:'Outfit',sans-serif;font-size:17px;font-weight:600;margin:26px 0 10px}
+.section-head{display:flex;justify-content:space-between;align-items:flex-end;gap:10px;flex-wrap:wrap}
+.tabs{display:flex;gap:4px;background:var(--card);border:1px solid var(--border);border-radius:9px;padding:3px;margin-bottom:10px}
+.tabs button{background:none;border:none;color:var(--sub);padding:6px 12px;border-radius:7px;font-family:var(--sans);font-size:12.5px;cursor:pointer}
+.tabs button.on{background:var(--card2);color:var(--text)}
+table.statement td:nth-child(2){white-space:normal;min-width:220px;max-width:360px}
+tr.opening td{color:var(--sub);font-style:italic}
+.del{background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:0 4px}
+.del:hover{color:var(--danger)}
+@media (max-width:600px){.period{width:100%}.period input{flex:1;min-width:0}}

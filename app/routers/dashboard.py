@@ -21,6 +21,7 @@ from app.models.production import ProductionBatch
 from app.models.refund import RetailRefund
 from app.models.user import User
 from app.services.expense_service import get_summary as get_expense_summary
+from app.services.treasury_service import MONEY_ACCOUNT_CODES
 
 router = APIRouter(
     tags=["Sales Dashboard"],
@@ -124,17 +125,14 @@ async def dashboard_data(db: AsyncSession = Depends(get_async_session)):
             r = await db.execute(select(func.count(B2BClient.id)).where(B2BClient.is_active == True))
             b2b_clients = int(r.scalar() or 0)
 
-            # Cash actually collected: debit on account 1000 for b2b payment journals
+            # Cash actually collected: debits on the money accounts (cash box + bank) for b2b payment journals
             async def _jcash(utc_s, utc_e) -> float:
-                cash_acc = await db.execute(select(Account).where(Account.code == "1000"))
-                ca = cash_acc.scalar_one_or_none()
-                if not ca:
-                    return 0.0
                 r = await db.execute(
                     select(func.sum(JournalEntry.debit))
                     .join(Journal, JournalEntry.journal_id == Journal.id)
+                    .join(Account, JournalEntry.account_id == Account.id)
                     .where(
-                        JournalEntry.account_id == ca.id,
+                        Account.code.in_(MONEY_ACCOUNT_CODES),
                         Journal.created_at >= utc_s,
                         Journal.created_at <= utc_e,
                         Journal.ref_type.in_(["b2b_payment", "consignment_payment", "consignment_client_payment", "b2b_collection"]),

@@ -39,8 +39,9 @@ class FakeSession:
 
 def test_payment_account_code_mapping() -> None:
     assert expense_service._payment_account_code("cash") == "1000"
-    assert expense_service._payment_account_code("card") == "1000"
-    assert expense_service._payment_account_code("bank_transfer") == "1200"
+    # Cards and transfers come out of the bank (1010), not 1200 Inventory.
+    assert expense_service._payment_account_code("card") == "1010"
+    assert expense_service._payment_account_code("bank_transfer") == "1010"
 
 
 def test_create_expense_entry_rejects_invalid_date() -> None:

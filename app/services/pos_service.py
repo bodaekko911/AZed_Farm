@@ -17,6 +17,7 @@ from app.core.log import record
 from app.core.permissions import has_permission
 from app.core.product_types import is_stock_tracked_product
 from app.services.sale_cost import cost_snapshot
+from app.services.treasury_service import money_account_code
 
 
 async def post_journal(
@@ -192,7 +193,7 @@ async def create_invoice(db: AsyncSession, data: InvoiceCreate, user_id: int, us
                 ))
 
         if not is_settle_later:
-            acc_code = "1000"
+            acc_code = money_account_code(payment_method)   # cash box, or the bank for Visa
             await post_journal(db, f"Sale - {invoice.invoice_number}", [
                 (acc_code, round(total, 2), 0),
                 ("4000", 0, round(total, 2)),

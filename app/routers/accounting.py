@@ -31,6 +31,7 @@ from app.services.b2b_shared import (
 )
 from app.schemas.invoice import B2BPaymentRequest, ConsignmentSaleItemIn
 from app.services.sale_cost import cost_snapshot
+from app.services.treasury_service import money_account_code
 from decimal import Decimal
 
 router = APIRouter(
@@ -117,6 +118,7 @@ async def seed_accounts(db: AsyncSession = Depends(get_async_session), _: User =
     defaults = [
         # Assets
         ("1000", "Cash",                  "asset"),
+        ("1010", "Bank",                  "asset"),
         ("1100", "Accounts Receivable",   "asset"),
         ("1200", "Inventory",             "asset"),
         ("1300", "Prepaid Expenses",      "asset"),
@@ -753,7 +755,7 @@ async def collect_b2b_payment(
     )
     db.add(journal); await db.flush()
     for code, debit, credit in [
-        ("1000", amount, 0),
+        (money_account_code(data.payment_method), amount, 0),
         ("1100", 0, amount),
         ("2200", amount, 0),
         ("4000", 0, amount),
@@ -778,6 +780,7 @@ async def _record_consignment_client_payment(
     month_label: str,
     current_user: User,
     sold_items: Optional[List["ConsignmentSaleItemIn"]] = None,
+    payment_method: str = "cash",
 ):
     # When sold items are supplied, the amount is the reconciled total of the
     # items the client reported sold, net of the client's agreed discount — the
@@ -883,7 +886,7 @@ async def _record_consignment_client_payment(
     db.add(journal)
     await db.flush()
     for code, debit, credit in [
-        ("1000", amount, 0),
+        (money_account_code(payment_method), amount, 0),
         ("1100", 0, amount),
         ("2200", amount, 0),
         ("4000", 0, amount),
@@ -972,6 +975,7 @@ async def accounting_client_consignment_payment(
         month_label=month_label,
         current_user=current_user,
         sold_items=data.items,
+        payment_method=data.payment_method,
     )
     await db.commit()
     return payload
@@ -1005,6 +1009,7 @@ async def accounting_consignment_payment(
         month_label=(data.month_label or "").strip(),
         current_user=current_user,
         sold_items=data.items,
+        payment_method=data.payment_method,
     )
     await db.commit()
     return payload
@@ -1587,6 +1592,13 @@ td.cr { font-family:var(--mono); color:var(--blue); }
             <input id="collect-amount" type="number" placeholder="0.00" min="0.01" step="any"
                 style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%">
         </div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">
+            <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Received into *</label>
+            <select id="collect-method" style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%">
+                <option value="cash">Cash box</option>
+                <option value="bank_transfer">Bank</option>
+            </select>
+        </div>
         <div style="display:flex;gap:10px;justify-content:flex-end">
             <button onclick="document.getElementById('collect-modal').classList.remove('open')" style="background:transparent;border:1px solid var(--border2);color:var(--sub);padding:10px 18px;border-radius:var(--r);font-family:var(--sans);font-size:13px;font-weight:700;cursor:pointer;">Cancel</button>
             <button onclick="saveCollect()" style="background:linear-gradient(135deg,#00ff9d,#00d4ff);border:none;color:#021a10;padding:12px 28px;border-radius:var(--r);font-family:var(--sans);font-size:14px;font-weight:800;cursor:pointer;letter-spacing:.3px;box-shadow:0 4px 20px rgba(0,255,157,.3);">✓ Confirm Payment</button>
@@ -1638,6 +1650,13 @@ td.cr { font-family:var(--mono); color:var(--blue); }
                 <div id="cons-amount-display" class="mono" style="font-size:22px;font-weight:900;color:var(--teal)">0.00 EGP</div>
             </div>
             <input id="cons-amount" type="hidden" value="0">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px">
+            <label style="font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Received into *</label>
+            <select id="cons-method" style="background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;color:var(--text);font-family:var(--sans);font-size:14px;outline:none;width:100%">
+                <option value="cash">Cash box</option>
+                <option value="bank_transfer">Bank</option>
+            </select>
         </div>
         <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">
             <button onclick="document.getElementById('cons-modal').classList.remove('open')"
@@ -2746,7 +2765,7 @@ async function saveCollect(){
     if(amount<=0){ showToast("Enter a valid amount"); return; }
     let res  = await fetch(`/accounting/api/b2b-invoices/${collectInvoiceId}/collect`,{
         method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({amount}),
+        body:JSON.stringify({amount, payment_method:document.getElementById("collect-method").value}),
     });
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }
@@ -2958,7 +2977,7 @@ async function saveConsPayment(){
     if(amount<=0){ showToast("Amount must be greater than 0"); return; }
     let res    = await fetch(`/accounting/api/b2b-clients/${consClientId}/consignment-payment`,{
         method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({amount, month_label:month||null, items}),
+        body:JSON.stringify({amount, month_label:month||null, items, payment_method:document.getElementById("cons-method").value}),
     });
     let data = await res.json();
     if(data.detail){ showToast("Error: "+data.detail); return; }

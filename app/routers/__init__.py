@@ -31,6 +31,7 @@ from app.routers import (
     sales_targets,
     suppliers,
     telegram,
+    treasury,
     users,
     vocabulary,
 )
@@ -78,6 +79,7 @@ _base_routers = (
     refunds.router,
     expenses_refactored.router,
     budget.router,
+    treasury.router,
     sales_targets.router,
     audit_log.router,
     assistant.router,

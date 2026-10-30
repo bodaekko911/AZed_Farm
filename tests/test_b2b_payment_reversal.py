@@ -66,7 +66,7 @@ def run(coro):
 
 
 USER = SimpleNamespace(id=1, name="Admin", role="admin")
-ACCOUNTS = [("1000", "Cash", "asset"), ("1100", "AR", "asset"),
+ACCOUNTS = [("1000", "Cash", "asset"), ("1010", "Bank", "asset"), ("1100", "AR", "asset"),
             ("2200", "Deferred Revenue", "liability"), ("4000", "Sales", "revenue")]
 
 
@@ -211,7 +211,7 @@ def test_partial_reversals_can_be_repeated_until_nothing_is_left():
 
     assert float(invoice.amount_paid) == 0.0
     assert invoice.status == "unpaid"
-    assert after == {"1000": 0.0, "1100": 0.0, "2200": 0.0, "4000": 0.0}
+    assert after == {"1000": 0.0, "1010": 0.0, "1100": 0.0, "2200": 0.0, "4000": 0.0}
 
 
 def test_reversing_the_whole_balance_of_a_partial_payment():

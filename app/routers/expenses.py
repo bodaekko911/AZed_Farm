@@ -22,6 +22,7 @@ from app.models.farm import Farm, FarmDelivery, FarmDeliveryItem
 from app.models.hr import EmployeeLoan, Payroll
 from app.models.product import Product
 from app.models.user import User
+from app.services import expense_service
 
 router = APIRouter(
     prefix="/expenses",
@@ -128,67 +129,20 @@ async def _post_expense_journal(
     payment_method: str,
     user_id: Optional[int],
 ) -> Journal:
-    # Cash/card → account 1000 (Cash); bank transfer → account 1200 (Bank)
-    credit_code = "1000" if payment_method in ("cash", "card") else "1200"
-
-    journal = Journal(
-        ref_type="expense",
+    # The service decides which money account (cash box / bank) the payment method uses.
+    return await expense_service._post_expense_journal(
+        db,
         description=description,
+        amount=amount,
+        expense_account_code=expense_account_code,
+        payment_method=payment_method,
         user_id=user_id,
     )
-    db.add(journal)
-    await db.flush()
-
-    for code, debit, credit in [
-        (expense_account_code, amount, 0),   # Debit expense account
-        (credit_code,          0, amount),   # Credit cash / bank
-    ]:
-        _r = await db.execute(select(Account).where(Account.code == code))
-        acc = _r.scalar_one_or_none()
-        if not acc:
-            # Auto-create the account if it doesn't exist yet
-            type_name = "expense" if code.startswith("5") else "asset"
-            acc = Account(code=code, name=f"Account {code}", type=type_name, balance=0)
-            db.add(acc)
-            await db.flush()
-        db.add(JournalEntry(
-            journal_id=journal.id,
-            account_id=acc.id,
-            debit=debit,
-            credit=credit,
-        ))
-        acc.balance += Decimal(str(debit)) - Decimal(str(credit))
-
-    return journal
 
 
 async def _reverse_expense_journal(db: AsyncSession, expense: Expense) -> None:
     """Post a reversal journal entry for a deleted expense."""
-    cat = expense.category
-    if not cat:
-        return
-    credit_code = "1000" if expense.payment_method in ("cash", "card") else "1200"
-    journal = Journal(
-        ref_type="expense_reversal",
-        description=f"Reversal — {expense.ref_number}",
-        user_id=expense.user_id,
-    )
-    db.add(journal)
-    await db.flush()
-    for code, debit, credit in [
-        (credit_code,          float(expense.amount), 0),   # Debit cash back
-        (cat.account_code,     0, float(expense.amount)),   # Credit expense account
-    ]:
-        _r = await db.execute(select(Account).where(Account.code == code))
-        acc = _r.scalar_one_or_none()
-        if acc:
-            db.add(JournalEntry(
-                journal_id=journal.id,
-                account_id=acc.id,
-                debit=debit,
-                credit=credit,
-            ))
-            acc.balance += Decimal(str(debit)) - Decimal(str(credit))
+    await expense_service._reverse_expense_journal(db, expense)
 
 
 # ── Category API ─────────────────────────────────────────────────────────────

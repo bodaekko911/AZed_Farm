@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.b2b import B2BInvoice, Consignment
 from app.models.accounting import Account, Journal, JournalEntry
+from app.services.treasury_service import MONEY_ACCOUNTS
 
 
 async def post_journal(
@@ -34,6 +35,11 @@ async def post_journal(
     for code, debit, credit in entries:
         _r = await db.execute(select(Account).where(Account.code == code))
         acc = _r.scalar_one_or_none()
+        if acc is None and code in MONEY_ACCOUNTS:
+            # Never drop the money leg of a payment: create the cash box / bank account on first use.
+            acc = Account(code=code, name=MONEY_ACCOUNTS[code], type="asset", balance=Decimal("0"))
+            db.add(acc)
+            await db.flush()
         if acc:
             db.add(JournalEntry(
                 journal_id=journal.id, account_id=acc.id,

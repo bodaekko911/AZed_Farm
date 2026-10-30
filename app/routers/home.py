@@ -711,6 +711,18 @@ body {
                 </div>
             </a>
 
+            <a href="/treasury/" class="module-card c-blue" data-permission="page_treasury">
+                <div class="card-icon">🏦</div>
+                <div class="card-body">
+                    <div class="card-name">Treasury</div>
+                    <div class="card-desc">Bank and cash box: money in, money out and balances</div>
+                </div>
+                <div class="card-footer">
+                    <span class="card-tag">Finance</span>
+                    <span class="card-arrow">↗</span>
+                </div>
+            </a>
+
             <a href="/budget/" class="module-card c-green" data-permission="page_budget">
                 <div class="card-icon">🧮</div>
                 <div class="card-body">

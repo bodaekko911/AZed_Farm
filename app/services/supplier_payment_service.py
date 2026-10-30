@@ -23,11 +23,10 @@ from app.core.log import record
 from app.models.accounting import Account, Journal, JournalEntry
 from app.models.supplier import Supplier, SupplierPayment
 from app.models.user import User
+from app.services.treasury_service import MONEY_ACCOUNTS, money_account_code
 
 _MONEY = Decimal("0.01")
 
-CASH_ACCOUNT_CODE = "1000"
-CASH_ACCOUNT_NAME = "Cash"
 AP_ACCOUNT_CODE   = "2000"
 AP_ACCOUNT_NAME   = "Accounts Payable"
 
@@ -96,7 +95,8 @@ async def record_supplier_payment(
     await db.flush()
 
     ap_acc   = await _ensure_account(db, AP_ACCOUNT_CODE,   AP_ACCOUNT_NAME,   "liability")
-    cash_acc = await _ensure_account(db, CASH_ACCOUNT_CODE, CASH_ACCOUNT_NAME, "asset")
+    money_code = money_account_code(payment_method)   # cash box, or the bank for transfers / cards
+    cash_acc = await _ensure_account(db, money_code, MONEY_ACCOUNTS[money_code], "asset")
     amount_f = float(amount_dec)
 
     db.add(JournalEntry(journal_id=journal.id, account_id=ap_acc.id,   debit=amount_f, credit=0))

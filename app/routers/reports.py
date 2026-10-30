@@ -43,6 +43,7 @@ from app.models.hr import (
 )
 from app.models.user import User
 from app.services.expense_service import SALARY_CATEGORY_NAME
+from app.services.treasury_service import MONEY_ACCOUNT_CODES
 from app.services.product_profitability import ProfitabilityLedger
 from app.services.production_costing import cost_batch
 from app.services.spoilage_summary import spoilage_summary
@@ -499,7 +500,7 @@ async def _load_b2b_client_payment_records(
         amount = 0.0
         has_cash_debit = False
         for entry in journal.entries:
-            if entry.account and entry.account.code == "1000" and _num(entry.debit) > 0:
+            if entry.account and entry.account.code in MONEY_ACCOUNT_CODES and _num(entry.debit) > 0:
                 amount = _num(entry.debit)
                 has_cash_debit = True
                 break

@@ -658,7 +658,7 @@ async def _build_numbers(db: AsyncSession, rng: dict[str, Any], user: User, erro
                 FROM journal_entries je
                 JOIN journals j ON je.journal_id = j.id
                 JOIN accounts a ON je.account_id = a.id
-                WHERE a.code = '1000'
+                WHERE a.code IN ('1000', '1010')
                   AND je.debit > 0
                   AND j.created_at >= :utc_s
                   AND j.created_at <= :utc_e

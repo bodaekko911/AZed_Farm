@@ -71,7 +71,7 @@ class InvoiceCreate(BaseModel):
 
 class PaymentRecord(BaseModel):
     amount: float
-    method: str = "transfer"
+    method: str = "cash"   # cash → cash box; transfer / bank_transfer → bank
 
 class PaymentReversal(BaseModel):
     # Omit amount to reverse the whole payment; supply one to reverse part of it.
@@ -100,6 +100,14 @@ from app.services.b2b_shared import (
     next_cons_number  as _next_cons_number,
     get_b2b_client_top_products as _get_b2b_client_top_products,
 )
+from app.services.treasury_service import (
+    MONEY_ACCOUNT_CODES,
+    latest_received_money_code,
+    money_account_code,
+)
+
+# Journals that put a B2B invoice's payment into a money account (ref_id = the invoice).
+B2B_PAYMENT_REFS = ("b2b_collection", "b2b_payment", "consignment_payment")
 
 async def _next_refund_number(db: AsyncSession) -> str:
     _r = await db.execute(select(func.max(B2BRefund.id)))
@@ -210,7 +218,7 @@ async def _load_client_payment_activity(
 
         amount = 0.0
         for entry in journal.entries:
-            if entry.account and entry.account.code == "1000" and float(entry.debit or 0) > 0:
+            if entry.account and entry.account.code in MONEY_ACCOUNT_CODES and float(entry.debit or 0) > 0:
                 amount = float(entry.debit or 0)
                 break
         if amount <= 0:
@@ -768,17 +776,18 @@ async def record_payment(invoice_id: int, data: PaymentRecord, db: AsyncSession 
     client = invoice.client
     client.outstanding = Decimal(str(max(0, float(client.outstanding) - amount)))
 
+    money_code = money_account_code(data.method)
     if invoice.invoice_type == "cash":
         # Revenue already recognised at creation (Dr AR / Cr Revenue)
         # Now just collect cash: Dr Cash / Cr AR
         await _post_journal(db, f"Cash collected - {invoice.invoice_number}", "b2b_collection", [
-            ("1000", amount, 0),
+            (money_code, amount, 0),
             ("1100", 0, amount),
         ], user_id=current_user.id, ref_id=invoice.id)
     else:
         # full_payment / consignment: Dr Cash / Cr AR, Dr Deferred Revenue / Cr Revenue
         await _post_journal(db, f"Payment received - {invoice.invoice_number}", "b2b_payment", [
-            ("1000", amount, 0),
+            (money_code, amount, 0),
             ("1100", 0, amount),
             ("2200", amount, 0),
             ("4000", 0, amount),
@@ -851,13 +860,15 @@ async def reverse_payment(
     if reason:
         description += f" - {reason}"
 
-    # Mirror image of the legs record_payment posted for this invoice type.
+    # Mirror image of the legs record_payment posted for this invoice type, out of the money account the
+    # latest payment went into.
+    money_code = await latest_received_money_code(db, B2B_PAYMENT_REFS, invoice.id)
     if invoice.invoice_type == "cash":
-        entries = [("1100", amount, 0), ("1000", 0, amount)]
+        entries = [("1100", amount, 0), (money_code, 0, amount)]
         ref_type = "b2b_collection_reversal"
     else:
         entries = [
-            ("1100", amount, 0), ("1000", 0, amount),
+            ("1100", amount, 0), (money_code, 0, amount),
             ("4000", amount, 0), ("2200", 0, amount),
         ]
         ref_type = "b2b_payment_reversal"
@@ -1002,6 +1013,7 @@ class ConsignmentPayment(BaseModel):
     amount:      float
     month_label: Optional[str] = None
     notes:       Optional[str] = None
+    method:      str = "cash"
 
 @router.post("/api/invoices/{invoice_id}/consignment-payment", dependencies=[Depends(require_action("b2b", "invoices", "approve"))])
 async def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: AsyncSession = Depends(get_async_session), current_user: User = Depends(get_current_user)):
@@ -1037,7 +1049,7 @@ async def consignment_payment(invoice_id: int, data: ConsignmentPayment, db: Asy
         note += f" - {data.month_label}"
 
     await _post_journal(db, note, "consignment_payment", [
-        ("1000", amount, 0),
+        (money_account_code(data.method), amount, 0),
         ("1100", 0, amount),
         ("2200", amount, 0),
         ("4000", 0, amount),
