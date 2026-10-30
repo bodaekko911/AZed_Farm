@@ -92,7 +92,8 @@ def page(current_user: User = Depends(get_current_user)):
         <div>
             <div class="title">Treasury</div>
             <div class="sub">The bank account and the cash box: what came in, what went out, and what is left.
-                Cash payments use the cash box; bank transfers, cards and Visa use the bank.</div>
+                Cash payments use the cash box; bank transfers, cards and Visa use the bank.
+                Expenses marked "Paid by owner" don't come out of either.</div>
         </div>
         <div class="period">
             <input type="date" id="from" aria-label="From">

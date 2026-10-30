@@ -35,6 +35,10 @@ MONEY_ACCOUNT_CODES = tuple(MONEY_ACCOUNTS)
 # Payment methods that move money through the bank. Everything else (cash, or no method) is the cash box.
 BANK_METHODS = {"bank", "bank_transfer", "transfer", "card", "visa", "instapay", "cheque", "check"}
 
+# An expense the owner paid personally: it is still an expense, but the money never left the bank or the cash box,
+# so it is booked against Owner Equity (the owner put that money into the business) and Treasury doesn't see it.
+OWNER_PAID = "owner_paid"
+
 OPENING_REF = "treasury_opening"
 TRANSFER_REF = "treasury_transfer"
 MANUAL_REFS = (OPENING_REF, TRANSFER_REF)
@@ -46,6 +50,13 @@ MAX_AMOUNT = Decimal("999999999999.99")
 def money_account_code(payment_method: Optional[str]) -> str:
     """The money account a payment method moves: the bank for transfers/cards, the cash box otherwise."""
     return BANK_CODE if (payment_method or "").strip().lower() in BANK_METHODS else CASH_CODE
+
+
+def payment_account_code(payment_method: Optional[str]) -> str:
+    """The account a payment comes out of: Owner Equity when the owner paid it, otherwise the bank or the cash box."""
+    if (payment_method or "").strip().lower() == OWNER_PAID:
+        return EQUITY_CODE
+    return money_account_code(payment_method)
 
 
 def source_of(ref_type: Optional[str], description: Optional[str]) -> str:

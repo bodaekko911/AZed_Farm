@@ -1105,6 +1105,7 @@ nav {
     text-transform: uppercase; letter-spacing: .5px;
 }
 .method-cash     { background: rgba(0,255,157,.08); color: var(--green); border: 1px solid rgba(0,255,157,.2); }
+.method-owner_paid { background: rgba(167,139,250,.08); color: #a78bfa; border: 1px solid rgba(167,139,250,.2); }
 .method-card     { background: rgba(77,159,255,.08); color: var(--blue);  border: 1px solid rgba(77,159,255,.2); }
 .method-bank_transfer { background: rgba(255,181,71,.08); color: var(--amber); border: 1px solid rgba(255,181,71,.2); }
 .action-btn {
@@ -1334,6 +1335,7 @@ nav {
                     <option value="cash">💵 Cash</option>
                     <option value="bank_transfer">🏦 Bank Transfer</option>
                     <option value="card">💳 Card</option>
+                    <option value="owner_paid">👤 Paid by owner (not from treasury)</option>
                 </select>
             </div>
         </div>

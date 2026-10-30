@@ -159,6 +159,22 @@ def test_reversing_an_old_expense_returns_money_to_the_account_it_came_from():
     assert after["5001"] == 0.0
 
 
+def test_expense_paid_by_the_owner_stays_out_of_treasury():
+    async def go(db):
+        expense = await add_expense(db, 300, "owner_paid")
+        mid = await balances(db)
+        summary = await svc.summary(db)
+        await expense_service.delete_expense_entry(db, expense.id, USER)
+        return mid, summary, await balances(db)
+
+    mid, summary, after = scenario(go)
+    assert mid["5001"] == 300.0                  # still an expense in the P&L
+    assert mid["3000"] == -300.0                 # the owner put that money in
+    assert mid["1000"] == 0.0 and mid["1010"] == 0.0
+    assert summary["total"]["money_out"] == 0.0 and summary["by_source"] == []
+    assert after["3000"] == 0.0 and after["5001"] == 0.0
+
+
 def test_loan_paid_from_the_bank_shows_as_employee_loans():
     async def go(db):
         employee = await db.get(Employee, 1)

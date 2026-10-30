@@ -22,7 +22,9 @@ from app.schemas.expense import (
     ExpenseCreate,
     ExpenseUpdate,
 )
-from app.services.treasury_service import MONEY_ACCOUNTS, credited_money_code, money_account_code
+from app.services.treasury_service import (
+    EQUITY_CODE, MONEY_ACCOUNTS, OWNER_PAID, credited_money_code, payment_account_code,
+)
 
 SALARY_CATEGORY_NAME = "Salaries & Wages"
 SALARY_ACCOUNT_CODE = "5006"
@@ -35,7 +37,7 @@ def _clean_text(value: Optional[str]) -> Optional[str]:
 
 
 def _payment_account_code(payment_method: str) -> str:
-    return money_account_code(payment_method)
+    return payment_account_code(payment_method)
 
 
 def _parse_filter_date(value: Optional[str]) -> Optional[date_type]:
@@ -91,7 +93,7 @@ async def _get_or_create_account(
     account = Account(
         code=account_code,
         name=account_name or f"Account {account_code}",
-        type="expense" if account_code.startswith("5") else "asset",
+        type="expense" if account_code.startswith("5") else "equity" if account_code.startswith("3") else "asset",
         balance=0,
     )
     db.add(account)
@@ -117,7 +119,10 @@ async def _post_expense_journal(
         (_payment_account_code(payment_method), 0, amount),
     ]
     for account_code, debit, credit in entries:
-        account = await _get_or_create_account(db, account_code, account_name=MONEY_ACCOUNTS.get(account_code))
+        account = await _get_or_create_account(
+            db, account_code,
+            account_name="Owner Equity" if account_code == EQUITY_CODE else MONEY_ACCOUNTS.get(account_code),
+        )
         db.add(
             JournalEntry(
                 journal_id=journal.id,
@@ -711,7 +716,7 @@ async def create_payroll_expense(
     paid_date: Optional[date_type] = None,
     amount_override: Optional[float] = None,
 ) -> Expense:
-    if payment_method not in {"cash", "bank_transfer", "card"}:
+    if payment_method not in {"cash", "bank_transfer", "card", OWNER_PAID}:
         raise HTTPException(status_code=400, detail="Invalid payment method")
 
     # For a partial payment the recorded expense is the cash actually paid out,
